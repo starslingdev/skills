@@ -4456,6 +4456,14 @@ def _detect_opt61(
 
         for matched, reason in dict.fromkeys(reasons):
             facts: dict[str, Any] = {"static_cache_lint": True}
+            family_text = "\n".join(
+                [blob, cache_path_text, *(str(_uses(step)) for step in cache_steps)]
+            ).casefold()
+            family = next((name for name in (
+                "ccache", "sccache", "staticcheck", "golangci")
+                if name in family_text), None)
+            if family:
+                facts["cache_family"] = family
             if deleted is not None and matched == deleted.group(0) and deletion_unread:
                 facts["cache_path_consumed"] = False
             hits.append(Hit(
@@ -4504,7 +4512,7 @@ def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
                           f"its intended later scope: {reason}; confirm the miss in its own build log "
                           "before crediting a saving"),
                 match_text=match.group(0).strip(),
-                facts={"static_cache_lint": True},
+                facts={"static_cache_lint": True, "cache_family": "buildkit"},
             ))
             break
     return hits
@@ -4553,7 +4561,7 @@ def _detect_opt4_ephemeral_mounts(
                           "crediting a saving"),
                 match_text=matched,
                 snippet=f"{dockerfile.relative_to(root)}: {matched}",
-                facts={"static_cache_lint": True},
+                facts={"static_cache_lint": True, "cache_family": "buildkit"},
             )))
     return out
 
@@ -4589,7 +4597,8 @@ def _detect_opt62(doc: dict, raw: str) -> list[Hit]:
                              if go_clean else "on a self-hosted (persistent) runner destroys build artifacts")
                           + f" (`{m.group(0).strip()}`) before each run, defeating reuse"),
                 match_text=job_name,
-                facts=({"static_cache_lint": True} if go_clean else {}),
+                facts=({"static_cache_lint": True, "cache_family": "go"}
+                       if go_clean else {}),
             ))
     return hits
 

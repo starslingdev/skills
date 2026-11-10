@@ -6420,6 +6420,19 @@ def _apply_cache_sizing_guard(
     wf_docs: dict[str, dict[str, Any]],
 ) -> None:
     """Admit a cache saving only after budget, invalidation and net-cost checks."""
+    old_guard = finding.get("cache_sizing_guard")
+    if isinstance(old_guard, dict):
+        old_checks = old_guard.get("checks") if isinstance(old_guard.get("checks"), dict) else {}
+        old_details = "; ".join(
+            str(value.get("detail") or "") for value in old_checks.values()
+            if isinstance(value, dict) and value.get("status") != "passed"
+        )
+        if old_guard.get("status") == "passed":
+            old_details = "all three cache sizing checks passed"
+        old_suffix = f" Cache sizing guard: {old_details}."
+        evidence = str(finding.get("evidence") or "")
+        if old_details and evidence.endswith(old_suffix):
+            finding["evidence"] = evidence[:-len(old_suffix)]
     real_edit_shas = {
         str(run.get("head_sha") or "")
         for run in sampled_runs
@@ -6702,7 +6715,8 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
-    if f.get("static_cache_lint"):
+    if (f.get("static_cache_lint")
+            and not isinstance(f.get("cache_log_confirmation"), dict)):
         f["wall_clock_p50_s"] = None
         f["runner_min_saving"] = None
         f["tier"] = 2
@@ -24360,6 +24374,23 @@ _CACHE_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _cache_keywords_for_finding(finding: dict[str, Any]) -> tuple[str, ...]:
+    """Scope a static compiler-cache lint to the cache family it predicts."""
+    pattern = str(finding.get("pattern") or "")
+    keywords = _CACHE_KEYWORDS.get(pattern, ())
+    if not finding.get("static_cache_lint") or pattern != "OPT61":
+        return keywords
+    explicit = str(finding.get("cache_family") or "").strip().lower()
+    if explicit:
+        return (explicit,)
+    evidence = " ".join(str(finding.get(key) or "")
+                        for key in ("evidence", "subject", "evidence_snippet")).lower()
+    compiler_families = tuple(
+        family for family in ("ccache", "sccache", "staticcheck", "golangci")
+        if family in evidence)
+    return compiler_families or keywords
+
+
 def _clean_log_line(line: str) -> str:
     return _TS_PREFIX_RE.sub("", line).strip()[:160]
 
@@ -24369,6 +24400,20 @@ def _cache_status_from_log(log: str, keywords: tuple[str, ...] = ()) -> tuple[st
     the finding is about). Prefer a MISS line (the problem); else a HIT line;
     else ('unknown', '') — which for a 'not cached at all' finding is itself
     the proof (no cache line ⇒ the work ran full)."""
+    if keywords == ("buildkit",):
+        first_hit = ""
+        for raw_line in log.splitlines():
+            if re.search(
+                    r"(?:error|failed|not found).*(?:importing )?cache|"
+                    r"(?:importing )?cache.*(?:error|failed|not found)|\bcache miss\b",
+                    raw_line, re.I):
+                return "miss", _clean_log_line(raw_line)
+            if not first_hit and re.search(
+                    r"\bCACHED\b|imported cache manifest|cache import complete",
+                    raw_line, re.I):
+                first_hit = _clean_log_line(raw_line)
+        return ("hit", first_hit) if first_hit else ("unknown", "")
+
     def _relevant(line: str) -> bool:
         return not keywords or any(k.lower() in line.lower() for k in keywords)
     first_hit = ""
@@ -24417,7 +24462,7 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
         sel = []
         for f in findings:
             pat = f.get("pattern")
-            if pat not in _CACHE_FAMILY:
+            if pat not in _CACHE_FAMILY and not f.get("static_cache_lint"):
                 continue
             jobs = f.get("affected_jobs") or []
             if not jobs:
@@ -24426,7 +24471,7 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
                 jobs_per_run_by_wf.get(f.get("workflow_file", ""), []), jobs[0])
             if not instances:
                 continue
-            sel.append((f, _CACHE_KEYWORDS.get(pat, ()), instances[:cap]))
+            sel.append((f, _cache_keywords_for_finding(f), instances[:cap]))
         return sel
 
     targets = _targets()
@@ -24484,6 +24529,13 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
         if not rows:
             continue
         sampled = len(rows)
+        if f.get("static_cache_lint") and miss_n:
+            f["cache_log_confirmation"] = {
+                "misses": miss_n,
+                "hits": hit_n,
+                "unreadable": unknown_n,
+                "sampled_runs": sampled,
+            }
         noun = f"{keywords[0]} cache" if keywords else "cache"   # "pnpm cache"
         the_cache = f"the {noun}"                                  # "the pnpm cache"
         if miss_n and hit_n:
@@ -32342,6 +32394,22 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     logs_fetched: int | None = None
     if with_logs:
         _attach_cache_log_evidence(client, repo, findings, jobs_per_run_by_wf)
+        # Static cache lints start uncredited because workflow shape alone cannot
+        # prove cost. A sampled miss supplies the missing runtime evidence, so run
+        # the same sizing and three-part cache guard used by other cache findings.
+        # A guard that remains failed or unmeasured still removes the credit.
+        for _finding in findings:
+            if not (_finding.get("static_cache_lint")
+                    and isinstance(_finding.get("cache_log_confirmation"), dict)):
+                continue
+            _wf_path = str(_finding.get("workflow_file") or "")
+            _size_finding(
+                _finding, crit_by_wf.get(_wf_path, {}), vol_by_wf.get(_wf_path))
+            if _finding in _cache_candidates:
+                _apply_cache_sizing_guard(
+                    _finding, usage_bytes=_cache_usage, changed=_changed_files,
+                    sampled_runs=sampled_runs_by_wf.get(_wf_path, []),
+                    wf_docs=_wf_docs)
         tiers.append("job-logs")
         # Capture the long-pole jobs' raw logs into a local data bundle so the
         # report / fix-agent can read the step's internal timing without

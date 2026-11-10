@@ -64,6 +64,16 @@ class FixtureClient:
         repo = self.recorded["repo"]
         if endpoint == f"repos/{repo}":
             return {"default_branch": self.recorded.get("default_branch", "main")}
+        if endpoint == f"repos/{repo}/actions/cache/usage":
+            value = self.recorded.get("cache_usage_bytes")
+            return ({"active_caches_size_in_bytes": value}
+                    if isinstance(value, int) else None)
+        match = re.match(
+            rf"repos/{re.escape(repo)}/pulls/(\d+)/files\?", endpoint)
+        if match:
+            rows = self.recorded.get("changed_files", {}).get(match.group(1))
+            return ([{"filename": name} for name in rows]
+                    if isinstance(rows, list) else None)
         if endpoint.startswith(f"repos/{repo}/actions/workflows?"):
             return {"workflows": [
                 {"id": row["id"], "path": row["path"],
@@ -505,6 +515,13 @@ def test_named_fixtures_exercise_their_defining_interactions(
         row.get("pattern") == "OPT4"
         and "cache-dance" in (row.get("affected_jobs") or [])
         for row in cache_rows)
+    static_cache_rows = [row for row in cache_rows if row.get("static_cache_lint")]
+    assert static_cache_rows
+    assert all(not row.get("cache_log_confirmation") for row in static_cache_rows)
+    assert all(
+        not float(row.get("wall_clock_p50_s") or 0)
+        and not float(row.get("runner_min_saving") or 0)
+        for row in static_cache_rows)
     external = docs["external-required-gate"]["pr_critical_path"]
     assert external["gate_kind"] == "pr_floor_fallback"
     assert external["provenance"] == "pr_floor_fallback"
@@ -582,6 +599,80 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert all(
         any(row.get("node") == "gate" for row in fact.get("job_projections") or [])
         for fact in path_facts if fact.get("partial") is not True)
+
+
+@pytest.mark.parametrize(("cache_key", "credited"), [
+    ("ccache-linux", True),
+    ("pnpm-linux", False),
+])
+def test_static_cache_lint_with_measured_miss_can_be_credited(
+        monkeypatch, tmp_path, cache_key, credited):
+    fixture = tmp_path / "inputs" / "cache-lint-confirmed"
+    fixture.parent.mkdir()
+    shutil.copytree(FIXTURE_ROOT / "cache-lints", fixture)
+    responses = fixture / "responses.json"
+    recorded = json.loads(responses.read_text(encoding="utf-8"))
+    recorded["repo"] = "fixture/cache-lint-confirmed"
+    recorded["required_checks"] = ["build"]
+    recorded["cache_usage_bytes"] = 0
+    recorded["changed_files"] = {
+        "1": ["src/a.cc"], "2": ["src/b.cc"], "3": ["src/c.cc"]}
+    for number, workflow_run in enumerate(recorded["workflows"][0]["runs"], 1):
+        workflow_run["pull_requests"] = [{"number": number}]
+        sha = workflow_run["head_sha"]
+        recorded["checks"][sha] = [{
+            "name": "build",
+            "started_at": workflow_run["run_started_at"],
+            "completed_at": workflow_run["updated_at"],
+        }]
+        jobs = recorded["jobs"][str(workflow_run["id"])]
+        build = next(job for job in jobs if job["name"] == "build")
+        recorded["jobs"][str(workflow_run["id"])] = [build]
+        day = build["started_at"][:10]
+        install_end = "01:02" if number == 1 else "00:12"
+        build["steps"] = [
+            {"name": "Restore compiler cache",
+             "started_at": f"{day}T00:00:00Z", "completed_at": f"{day}T00:00:02Z"},
+            {"name": "Install dependencies",
+             "started_at": f"{day}T00:00:02Z", "completed_at": f"{day}T00:{install_end}Z"},
+            {"name": "Build",
+             "started_at": f"{day}T00:{install_end}Z", "completed_at": f"{day}T00:01:58Z"},
+            {"name": "Post Restore compiler cache",
+             "started_at": f"{day}T00:01:58Z", "completed_at": f"{day}T00:02:00Z"},
+        ]
+    miss = (f"Cache not found for input keys: {cache_key}-old\n"
+            "Cache size: 50 MB\nCache restored in 2s\nCache saved in 2s")
+    hit = (f"Cache restored from key: {cache_key}-stable\n"
+           "Cache size: 50 MB\nCache restored in 2s\nCache saved in 2s")
+    recorded["logs"] = {"1101": miss, "1201": hit, "1301": hit}
+    responses.write_text(json.dumps(recorded, indent=2) + "\n", encoding="utf-8")
+    workflow = fixture / "workflows" / "ci.yml"
+    workflow.write_text(workflow.read_text(encoding="utf-8").replace(
+        "      - uses: hendrikmuhs/ccache-action@v1\n",
+        "      - uses: actions/cache@v4\n"
+        "        with:\n"
+        "          path: ~/.cache/ccache\n"
+        "          key: ccache-${{ hashFiles('go.sum') }}\n"
+        "          restore-keys: unrelated-family-\n"
+        "      - uses: hendrikmuhs/ccache-action@v1\n"), encoding="utf-8")
+    (fixture / "expected.json").write_text("{}\n", encoding="utf-8")
+
+    doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    confirmed = [row for row in doc["findings"]
+                 if row.get("static_cache_lint")
+                 and row.get("pattern") == "OPT61"
+                 and "size limit" in str(row.get("evidence") or "")
+                 and row.get("cache_log_confirmation", {}).get("misses")]
+    if credited:
+        assert confirmed
+        assert any(
+            float(row.get("wall_clock_p50_s") or 0) > 0
+            or float(row.get("runner_min_saving") or 0) > 0
+            for row in confirmed), json.dumps(confirmed, indent=2)
+    else:
+        assert not confirmed
 
     red = json.loads(
         (FIXTURE_ROOT / "red-default-branch" / "responses.json").read_text())

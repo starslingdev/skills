@@ -482,6 +482,15 @@ def test_cache_status_extracts_verbatim_miss_line():
     assert line == "Cache not found for input keys: Linux-pnpm-abc123"
 
 
+def test_cache_status_scopes_static_compiler_and_buildkit_misses():
+    assert _cache_status_from_log(
+        "Cache not found for input keys: pnpm-linux", ("ccache",)) == ("unknown", "")
+    status, line = _cache_status_from_log(
+        "#12 ERROR importing cache manifest from gha: not found", ("buildkit",))
+    assert status == "miss"
+    assert line == "#12 ERROR importing cache manifest from gha: not found"
+
+
 def test_attach_cache_log_evidence_quotes_the_real_miss(tmp_path: Path):
     findings = [{
         "id": "f1", "pattern": "OPT5", "affected_jobs": ["build"],
