@@ -89,8 +89,12 @@ jobs:
 
 
 def repeated_setup_matrix(*, shard_legs: int = 8, axis: str = "shard",
-                          artifact_handoff: bool = False) -> str:
+                          artifact_handoff: bool = False,
+                          exclude_shards: tuple[int, ...] = ()) -> str:
     values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    exclusions = ("\n        exclude:" + "".join(
+        f"\n          - {axis}: {value}" for value in exclude_shards)
+        if exclude_shards else "")
     handoff = """
       - uses: actions/download-artifact@v4
         with: {name: app}
@@ -113,7 +117,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        {axis}: [{values}]
+        {axis}: [{values}]{exclusions}
     steps:
       - uses: actions/checkout@v4
       - run: npm ci
@@ -195,6 +199,21 @@ def test_shard_matrix_leg_growth_warns_with_repeated_setup(
     rendered = summary.read_text(encoding="utf-8")
     assert "### New warnings" in rendered
     assert "OPT14 job shards: 8 -> 16 legs" in rendered
+
+
+def test_removing_matrix_exclusions_warns_on_effective_shard_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        repeated_setup_matrix(
+            shard_legs=16, exclude_shards=tuple(range(9, 17))),
+        repeated_setup_matrix(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
 
 
 @pytest.mark.parametrize("merge_text", [
