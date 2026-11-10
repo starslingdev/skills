@@ -10017,6 +10017,14 @@ def _detect_opt25_shard_imbalance(
     suffix_base = _detect_common_suffix_matrices(jobs_per_run)
     by_base: dict[str, dict[str, list[tuple[float, str]]]] = {}
     base_sharded: dict[str, bool] = {}
+    excluded_by_base: dict[str, int] = {}
+
+    def _is_preparation_step(name: str) -> bool:
+        return bool(_re.search(
+            r"(?i)^(?:set up|setup(?:\s|$)|complete|post |checkout|restore|"
+            r"save cache|install (?:dependencies|deps|packages)(?:\s|$))",
+            name.strip()))
+
     for run_jobs in jobs_per_run:
         for j in run_jobs:
             name = str(j.get("name", ""))
@@ -10030,6 +10038,17 @@ def _detect_opt25_shard_imbalance(
                 sharded = False  # prefix varies → distinct packages, not shards
             else:
                 continue  # neither convention matched → not a matrix job
+            steps = [step for step in j.get("steps") or [] if isinstance(step, dict)]
+            work_steps = [
+                step for step in steps
+                if not _is_preparation_step(str(step.get("name") or ""))]
+            active_work_steps = [
+                step for step in work_steps
+                if str(step.get("conclusion") or "").lower() != "skipped"]
+            if (str(j.get("conclusion") or "").lower() == "skipped"
+                    or (work_steps and not active_work_steps)):
+                excluded_by_base[base] = excluded_by_base.get(base, 0) + 1
+                continue
             d, url = _job_dur_url(j)
             if d is None or d <= 0:
                 continue
@@ -10189,6 +10208,7 @@ def _detect_opt25_shard_imbalance(
             out[-1]["measured_signal"] = summary
         if next_step is not None:
             out[-1]["next_step"] = next_step
+        out[-1]["legs_excluded_no_work"] = excluded_by_base.get(base, 0)
     return out
 
 
