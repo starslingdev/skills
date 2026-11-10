@@ -5,3 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - run: pnpm vitest run --reporter=verbose
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - run: python3 -m pytest -v -s tests/test_accounts.py
