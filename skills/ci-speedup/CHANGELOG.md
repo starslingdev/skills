@@ -1283,6 +1283,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-09** — Exclude matrix legs that skipped all work, or never ran their siblings' divided-work step, from shard-imbalance comparisons. Findings stamp how many no-work leg samples were excluded, and fewer than two working legs stay silent.
 - **2026-11-09** — Keep post-fix verification from rerunning default-branch workflows, compare cache-sensitive results with baseline facts from the same push lane, and label repeated attempts of one commit as no-change reruns.
 
 - **2026-11-09** — Match the `repos/<owner>/<repo>/statuses/` path in `_STATUS_POST_RE` with disjoint branches. The catch-all character class no longer overlaps the `${{ ... }}` branch, so a long run of `${{` fragments with no `/statuses/` fails in linear time instead of backtracking (CodeQL `py/redos`). Both repeats are bounded at 200 units, so a file of repeated `repos/` prefixes scans in linear time too. Every realistic call still matches at the same span; only a `${{` left open at `/statuses/`, which GitHub rejects anyway, or a path over 200 units, no longer counts.
