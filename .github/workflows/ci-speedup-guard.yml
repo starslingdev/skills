@@ -1,0 +1,100 @@
+# ci-speedup-guard compares the pull request test-merge tree with that merge
+# commit's first parent. Add merge_group only after its base/merge semantics and
+# the verdict predicate below have been implemented and tested for that event.
+name: CI speedup guard
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    name: ci-speedup-guard (self-hosted)
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: starsling-ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: merge
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install PyYAML==6.0.3
+      - name: Materialize the merge commit's first parent
+        run: |
+          git -C merge worktree add --detach ../base HEAD^1
+          echo "merge first parent: $(git -C merge rev-parse HEAD^1)"
+          echo "event base SHA:     ${{ github.event.pull_request.base.sha }}"
+      - name: Compare static CI configuration patterns
+        run: |
+          guard=base/.github/scripts/ci_speedup_guard.py
+          if [ ! -f "$guard" ]; then guard=merge/.github/scripts/ci_speedup_guard.py; fi
+          if [ ! -f "$guard" ]; then
+            echo "::error::ci-speedup-guard operational failure: guard missing from base and merge trees"
+            exit 2
+          fi
+          python3 "$guard" --base base --merge merge \
+            --default-branch "${{ github.event.repository.default_branch }}" \
+            --summary "$GITHUB_STEP_SUMMARY"
+        env:
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+  scan-fork:
+    name: ci-speedup-guard (fork)
+    if: github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: merge
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install PyYAML==6.0.3
+      - name: Materialize the merge commit's first parent
+        run: |
+          git -C merge worktree add --detach ../base HEAD^1
+          echo "merge first parent: $(git -C merge rev-parse HEAD^1)"
+          echo "event base SHA:     ${{ github.event.pull_request.base.sha }}"
+      - name: Compare static CI configuration patterns
+        run: |
+          guard=base/.github/scripts/ci_speedup_guard.py
+          if [ ! -f "$guard" ]; then guard=merge/.github/scripts/ci_speedup_guard.py; fi
+          if [ ! -f "$guard" ]; then
+            echo "::error::ci-speedup-guard operational failure: guard missing from base and merge trees"
+            exit 2
+          fi
+          python3 "$guard" --base base --merge merge \
+            --default-branch "${{ github.event.repository.default_branch }}" \
+            --summary "$GITHUB_STEP_SUMMARY"
+        env:
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+
+  verdict:
+    name: ci-speedup-guard
+    needs: [scan, scan-fork]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require exactly one passing scan
+        env:
+          SELF_HOSTED: ${{ needs.scan.result }}
+          FORK: ${{ needs.scan-fork.result }}
+        run: |
+          set -euo pipefail
+          if [ "$SELF_HOSTED" = success ] && [ "$FORK" = skipped ]; then exit 0; fi
+          if [ "$SELF_HOSTED" = skipped ] && [ "$FORK" = success ]; then exit 0; fi
+          echo "::error::ci-speedup-guard has no passing scan (self-hosted=$SELF_HOSTED, fork=$FORK)"
+          exit 1
