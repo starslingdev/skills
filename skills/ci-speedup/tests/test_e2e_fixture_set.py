@@ -418,6 +418,12 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "OPT89" in {
         row.get("pattern") for row in docs["emulated-container"]["findings"]}
     image_doc = docs["multiarch-image"]
+    image_opt72 = [
+        row for row in image_doc["findings"]
+        if row.get("pattern") == "OPT72" and "image" in (row.get("affected_jobs") or [])
+    ]
+    assert not any(float(row.get("wall_clock_p50_s") or 0.0) > 0 for row in image_opt72)
+    assert "prefer warming the cache" not in reports["multiarch-image"].lower()
     assert any(
         pole.get("job") == "image"
         for pole in image_doc["pr_critical_path"]["poles"])
@@ -718,7 +724,7 @@ def test_no_inspect_foreign_compile_runs_through_collection(
         return ("docker buildx build --platform linux/amd64,linux/arm64 .\n"
                 + log[first_layer:])
 
-    _doc, report, facts = _run_multiarch_log_variant(
+    doc, report, facts = _run_multiarch_log_variant(
         "multiarch-no-inspect", monkeypatch, tmp_path, remove_builder_inspect,
         preserve_no_inspect=True)
     leaf = next(
@@ -727,6 +733,9 @@ def test_no_inspect_foreign_compile_runs_through_collection(
 
     assert leaf["magnitude"] is None
     assert leaf["builder_topology_unconfirmed"] is True
+    opt72 = [row for row in doc["findings"] if row.get("pattern") == "OPT72"]
+    assert not any(float(row.get("wall_clock_p50_s") or 0.0) > 0 for row in opt72)
+    assert "prefer warming the cache" not in report.lower()
     assert "docker buildx inspect --bootstrap" in report
     assert "does not establish whether that work ran under emulation" in report
     assert "building a foreign architecture under emulation instead" not in report
