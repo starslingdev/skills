@@ -303,27 +303,31 @@ jobs:
 
 
 def test_opt9_follows_one_make_recipe_and_reads_jest_config(tmp_path: Path):
-    finding = _finding(_write_jest_make_project(tmp_path), "OPT9")
-    assert finding is not None
-    evidence = finding["evidence"]
-    assert "cache directory is not persisted" in evidence
+    result = _write_jest_make_project(tmp_path)
+    cache = _finding(result, "OPT9")
+    assert cache is not None
+    assert "cache directory is not persisted" in cache["evidence"]
+    concurrency = _finding(result, "OPT88")
+    assert concurrency is not None
+    evidence = concurrency["evidence"]
     assert "maxWorkers" in evidence and "OPT88" in evidence
     assert "coverage provider" in evidence
     assert "no provider-switch saving is credited" in evidence
 
 
 def test_opt9_jest_notes_have_independent_negative_controls(tmp_path: Path):
-    persisted = _finding(_write_jest_make_project(tmp_path, persist=True), "OPT9")
+    persisted_scan = _write_jest_make_project(tmp_path, persist=True)
+    assert _finding(persisted_scan, "OPT9") is None
+    persisted = _finding(persisted_scan, "OPT88")
     assert persisted is not None
-    assert "cache directory is not persisted" not in persisted["evidence"]
+    assert "maxWorkers" in persisted["evidence"]
+    assert "coverage provider" in persisted["evidence"]
+    assert "no provider-switch saving is credited" in persisted["evidence"]
 
-    trailing_slash = _finding(
-        _write_jest_make_project(
-            tmp_path, persist=True, cache_path="frontend/.cache/jest/"),
-        "OPT9",
-    )
-    assert trailing_slash is not None
-    assert "cache directory is not persisted" not in trailing_slash["evidence"]
+    trailing_slash_scan = _write_jest_make_project(
+        tmp_path, persist=True, cache_path="frontend/.cache/jest/")
+    assert _finding(trailing_slash_scan, "OPT9") is None
+    assert _finding(trailing_slash_scan, "OPT88") is not None
 
     full_workers = _finding(
         _write_jest_make_project(tmp_path, max_workers='"100%"'), "OPT9")
@@ -337,16 +341,16 @@ def test_opt9_jest_notes_have_independent_negative_controls(tmp_path: Path):
 
 
 def test_opt9_jest_cache_paths_are_ordered_and_compared_by_containment(tmp_path: Path):
-    parent = _finding(_write_jest_make_project(
-        tmp_path / "parent", persist=True, cache_path="frontend/.cache"), "OPT9")
-    assert parent is not None
-    assert "cache directory is not persisted" not in parent["evidence"]
+    parent = _write_jest_make_project(
+        tmp_path / "parent", persist=True, cache_path="frontend/.cache")
+    assert _finding(parent, "OPT9") is None
+    assert _finding(parent, "OPT88") is not None
 
-    workspace = _finding(_write_jest_make_project(
+    workspace = _write_jest_make_project(
         tmp_path / "workspace", persist=True,
-        cache_path="${{ github.workspace }}/frontend/.cache/jest"), "OPT9")
-    assert workspace is not None
-    assert "cache directory is not persisted" not in workspace["evidence"]
+        cache_path="${{ github.workspace }}/frontend/.cache/jest")
+    assert _finding(workspace, "OPT9") is None
+    assert _finding(workspace, "OPT88") is not None
 
     for name, options in (
         ("unrelated", {"cache_path": "backup/frontend/.cache/jest"}),
@@ -373,7 +377,7 @@ def test_opt9_jest_disabled_comments_provider_and_root_dir(tmp_path: Path):
         assert "result caching is disabled" in finding["evidence"]
 
     babel = _finding(_write_jest_make_project(
-        tmp_path / "babel", provider='"babel"'), "OPT9")
+        tmp_path / "babel", provider='"babel"'), "OPT88")
     assert babel is not None and "coverage provider is `babel`" in babel["evidence"]
 
     comments = _finding(_write_jest_make_project(
@@ -412,7 +416,7 @@ jobs:
     (frontend / "Makefile").write_text("test:\n\tnpx jest\n")
     (frontend / "jest.config.js").write_text(
         "module.exports = { maxWorkers: '50%' };\n")
-    finding = _finding(_scan(project), "OPT9")
+    finding = _finding(_scan(project), "OPT88")
     assert finding is not None and "OPT88" in finding["evidence"]
 
     nested = tmp_path / "nested"
@@ -442,7 +446,7 @@ jobs:
 """)
     (parent / "frontend/jest.config.js").write_text(
         "module.exports = { maxWorkers: '50%' };\n")
-    finding = _finding(_scan(parent), "OPT9")
+    finding = _finding(_scan(parent), "OPT88")
     assert finding is not None and "OPT88" in finding["evidence"]
 
     echoed = tmp_path / "echoed"

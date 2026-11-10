@@ -3165,20 +3165,20 @@ def _opt9_cache_action_paths(job: dict, step: dict) -> list[str]:
     return [path.strip() for path in paths if path.strip()]
 
 
-def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
+def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> dict[str, list[str]]:
     root = Path(_OPT102_ROOT or ".").resolve()
     working = _script_working_directory(job, step, doc)
     base = (root / working).resolve()
     try:
         base.relative_to(root)
     except (OSError, ValueError):
-        return []
+        return {}
     command = _run(step)
     recipe = _opt9_make_recipe(base, command)
     expanded = recipe[0] if recipe is not None else command
     base = recipe[1] if recipe is not None else base
     if not _OPT9_JEST_COMMAND_RE.search(expanded):
-        return []
+        return {}
     cd = re.search(r"(?:^|[;&|])\s*cd\s+([^\s;&|]+)\s*&&", expanded)
     if cd is not None:
         candidate = (base / cd.group(1).strip("'\"")).resolve()
@@ -3186,9 +3186,9 @@ def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
             if os.path.commonpath([str(root), str(candidate)]) == str(root):
                 base = candidate
             else:
-                return []
+                return {}
         except ValueError:
-            return []
+            return {}
     paths, truncated, _manifests = _vitest_config_files(
         root, lambda name: bool(_OPT9_JEST_CONFIG_RE.match(name)))
     config: Path | None = None
@@ -3196,7 +3196,7 @@ def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
     while True:
         here = [path for path in paths if path.parent == cursor]
         if len(here) > 1:
-            return []
+            return {}
         if here:
             config = here[0]
             break
@@ -3211,28 +3211,29 @@ def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
             break
         cursor = parent
     if truncated or config is None:
-        return []
+        return {}
     try:
         text = _read_config_text(config)
     except OSError:
-        return []
+        return {}
     if text is None:
-        return []
+        return {}
     text = _tal_strip_js_comments(text)
-    notes: list[str] = []
+    concurrency_notes: list[str] = []
     max_workers = re.search(
         r"\bmaxWorkers\s*:\s*(['\"]?)(\d+(?:\.\d+)?)(%)?\1", text)
     if max_workers is not None and (
             max_workers.group(3) == "%" and float(max_workers.group(2)) < 100
             or max_workers.group(3) is None):
-        notes.append(
+        concurrency_notes.append(
             f"Jest maxWorkers is {max_workers.group(2)}{max_workers.group(3) or ''}; "
             "OPT88 says to measure this CPU-bound worker cap on the actual runner "
             "before changing it, with no saving credited")
     provider = re.search(
         r"\bcoverageProvider\s*:\s*(['\"])(v8|babel)\1", text, re.I)
+    coverage_notes: list[str] = []
     if provider is not None:
-        notes.append(
+        coverage_notes.append(
             f"Jest coverage provider is `{provider.group(2).lower()}`; compare providers "
             "on the same commit, re-baseline thresholds, and verify the consumer; "
             "no provider-switch saving is credited without matched measurements")
@@ -3258,16 +3259,21 @@ def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
     ]
     persisted = bool(expected and any(
         cached == expected or cached in expected.parents for cached in cached_paths))
+    cache_notes: list[str] = []
     if disabled:
-        notes.append(
+        cache_notes.append(
             "Jest result caching is disabled; remove `--no-cache`/`cache: false` "
             "before persisting an explicit cacheDirectory")
     elif not persisted:
-        notes.append(
+        cache_notes.append(
             f"Jest cache directory is not persisted across runners (`{configured}`); "
             "keep Jest's default cache enabled and persist a small explicit cacheDirectory "
             "with a rolling primary key and stable restore prefix")
-    return notes
+    return {
+        "cache": cache_notes,
+        "concurrency": concurrency_notes,
+        "coverage": coverage_notes,
+    }
 
 
 def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
@@ -3296,16 +3302,42 @@ def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
                             match_text=f"{job_name}#{tool}",
                         ))
             jest_notes = _opt9_jest_notes(doc, job, s)
-            if jest_notes and "jest" not in flagged:
+            cache_notes = jest_notes.get("cache", [])
+            if cache_notes and "jest" not in flagged:
                 flagged.add("jest")
                 hits.append(Hit(
                     line=_line_of_in_job(raw, job_name, _run(s).splitlines()[0].strip()),
                     affected_jobs=[job_name],
-                    evidence=f"job `{job_name}`: " + "; ".join(jest_notes),
+                    evidence=f"job `{job_name}`: " + "; ".join(cache_notes),
                     match_text=f"{job_name}#jest",
-                    facts={"jest_static_notes": jest_notes,
+                    facts={"jest_static_notes": cache_notes,
                            "static_cache_lint": True},
                 ))
+    return hits
+
+
+def _detect_opt88(doc: dict, raw: str) -> list[Hit]:
+    """Route Jest worker-cap advice away from the cache detector."""
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        for step in _steps(job):
+            notes = _opt9_jest_notes(doc, job, step)
+            concurrency = notes.get("concurrency", [])
+            if not concurrency:
+                continue
+            coverage = notes.get("coverage", [])
+            command = _run(step)
+            hits.append(Hit(
+                line=_line_of_in_job(raw, job_name, command.splitlines()[0].strip()),
+                affected_jobs=[job_name],
+                evidence=f"job `{job_name}`: " + "; ".join(concurrency + coverage),
+                match_text=f"{job_name}#jest-max-workers",
+                facts={"jest_concurrency_notes": concurrency,
+                       "jest_coverage_notes": coverage},
+            ))
+            break
     return hits
 
 
@@ -5184,6 +5216,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT61": _detect_opt61,
     "OPT62": _detect_opt62,
     "OPT63": _detect_opt63,
+    "OPT88": _detect_opt88,
     "OPT89": _detect_opt89,
     "OPT102": _detect_opt102,
 }
