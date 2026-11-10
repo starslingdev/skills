@@ -305,6 +305,22 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-09** — A crafted workflow line can no longer freeze the scan. The
+  install-command matcher (dependency install scripts in a job that holds
+  secrets) offered two readings of the same text in four places: an
+  assignment value whose bare form also matched quotes (including a quoted
+  value with spaces, `A=" A="`, spanning two assignments), a wrapper option read
+  as `-`+`-a` or `--`+`a`, a wrapper option value that could also be the next
+  wrapper word, assignment or numeric operand, and a yarn option value that
+  could also be the next option or a quoted string. Inside a repeat, a line of
+  a short repeated unit backtracked exponentially (twenty units took about a
+  second; twenty-eight did not finish in ten). Each piece now has one parse
+  and the repeats are bounded (64 prefixes, 16 options per wrapper, 32 yarn
+  options), so the same lines finish in milliseconds. Matches are unchanged on
+  realistic lines, empty values (`FOO= npm ci`) included; one contrived shape,
+  a wrapper option value with an unclosed quote, now matches the install after
+  the quoted string instead of inside it.
+
 - **2026-10-28** — Required summary checks no longer certify upstream jobs
   with a step allowed to fail. Literal `false` keeps the existing proof; other
   `continue-on-error` values, including expressions and values inside parallel
