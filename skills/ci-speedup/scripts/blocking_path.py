@@ -3230,6 +3230,12 @@ def _parse_log(text: str,
     def _cargo_package_selected(name: str, selectors: set[str]) -> bool:
         return any(fnmatch.fnmatchcase(name, selector) for selector in selectors)
 
+    def _cargo_builds_test_harness(context: tuple[str, ...]) -> bool:
+        return ("subcommand=test" in context
+                or any(axis in {"--tests", "--benches", "--all-targets"}
+                       or axis.startswith(("--test=", "--bench="))
+                       for axis in context))
+
     def _cargo_group(group: tuple[str, list[str]]) -> dict[str, Any] | None:
         command, group_lines = group
         context = _cargo_command_context(command)
@@ -3277,11 +3283,13 @@ def _parse_log(text: str,
             continue
         for earlier in compiled[:later_index]:
             earlier_selected = earlier["selected_packages"] or set()
-            later_crates = {
-                key for key in later["crates"]
-                if (not _cargo_package_selected(key[0], later["selected_packages"])
-                    or _cargo_package_selected(key[0], earlier_selected))
-            }
+            later_crates = set(later["crates"])
+            if _cargo_builds_test_harness(later["context"]):
+                later_crates = {
+                    key for key in later_crates
+                    if (not _cargo_package_selected(key[0], later["selected_packages"])
+                        or _cargo_package_selected(key[0], earlier_selected))
+                }
             repeated = sorted(set(earlier["crates"]) & later_crates)
             if (not repeated or not later_crates <= set(earlier["crates"])
                     or earlier["profile"] != later["profile"]

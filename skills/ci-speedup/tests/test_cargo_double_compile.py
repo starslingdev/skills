@@ -68,6 +68,14 @@ def test_later_selected_crate_is_its_own_test_harness_not_a_repeat() -> None:
     assert bp._parse_log(f"{first}\n{later}") is None
 
 
+def test_later_selected_crate_in_build_command_is_a_repeat() -> None:
+    first = _step("cargo build --lib -p app", "core", "release", 181)
+    later = _step("cargo build --lib -p core", "core", "release", 175)
+    leaf = bp._parse_log(f"{first}\n{later}")
+    assert leaf is not None
+    assert leaf["fix_key"] == "cargo-double-compile"
+
+
 def test_shared_dependency_rebuilt_beside_selected_crate_is_a_repeat() -> None:
     first = _step("cargo test -p app", "shared", "test", 181)
     later = "\n".join((
