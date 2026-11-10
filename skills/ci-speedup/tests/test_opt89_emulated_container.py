@@ -390,6 +390,24 @@ jobs:
     assert len(hits) == 1
 
 
+def test_docker_env_file_keeps_container_variables_unknown(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: container env file boundary
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: >-
+          docker run --platform linux/arm64 --env-file build.env image
+          sh -c 'make $MAKE_TARGET'
+        env:
+          MAKE_TARGET: all
+""")
+
+    assert hits == []
+
+
 @pytest.mark.parametrize("payload", [
     'sh -c "make $MAKE_TARGET"',
     "make $MAKE_TARGET",

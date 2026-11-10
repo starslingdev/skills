@@ -2740,12 +2740,18 @@ def _opt89_docker_env(command: str, host_env: dict[str, str]) -> dict[str, str]:
 
 
 def _opt89_resolve_docker_payload_env(
-    payload: str, host_env: dict[str, str], container_env: dict[str, str],
+    payload: str, host_env: dict[str, str], container_env: dict[str, str], *,
+    env_file: bool = False,
 ) -> str:
     """Resolve container variables without importing the step environment."""
     def value(name: str, original: str) -> str:
         if name in container_env:
             return container_env[name]
+        # An env file is read by Docker at runtime.  Its names and values are
+        # unavailable here, so an otherwise unresolved container variable must
+        # stay opaque even when a same-named host variable exists.
+        if env_file:
+            return original
         if name in host_env:
             return ""
         return original
@@ -2998,7 +3004,9 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                         payload, _opt89_docker_env(expanded, host_env),
                         docker_options=False)
                     command = _opt89_resolve_docker_payload_env(
-                        payload, host_env, container_env)
+                        payload, host_env, container_env,
+                        env_file=bool(re.search(
+                            r"(?:^|\s)--env-file(?:=|\s+)", expanded)))
                     marker = "docker run"
                     occurrence = docker_occurrence
                     mechanism = "QEMU-backed docker run"
