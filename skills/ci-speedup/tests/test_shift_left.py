@@ -56,7 +56,19 @@ def test_one_percent_per_merge_creep_is_flagged():
     report = SHIFT.analyze_l3(history)
     creep = next(item for item in report["observations"] if item["kind"] == "creep")
     assert creep["change_percent"] > 10
-    assert creep["attribution"]["pr_number"] >= 210
+    assert creep["attribution"]["pr_number"] == 204
+
+
+def test_three_run_spike_followed_by_recovery_is_not_a_step_change():
+    values = FIXTURES["spike_then_recovery_l3"]["durations"]
+    report = SHIFT.analyze_l3([record(value, pr=index) for index, value in enumerate(values)])
+    assert "step_change" not in kinds(report)
+
+
+def test_single_jump_and_multi_step_shapes_are_not_mislabeled_as_creep():
+    for name in ("single_jump_l3", "multi_step_l3"):
+        values = FIXTURES[name]["durations"]
+        assert SHIFT._creep([record(value) for value in values], 15) is None
 
 
 def test_renamed_job_is_reported_as_rename_not_slowdown():
@@ -132,13 +144,107 @@ def test_main_collection_requests_and_filters_push_runs_only():
 
         def get(self, endpoint):
             self.endpoints.append(endpoint)
-            return {"workflow_runs": []}
+            if "/actions/workflows?" in endpoint:
+                return {"total_count": 1, "workflows": [
+                    {"id": 1, "state": "active", "path": ".github/workflows/ci.yml"}
+                ]}
+            return {"total_count": 0, "workflow_runs": []}
 
     client = Client()
-    main, pull_request = SHIFT.collect_history(
+    main, pull_request, coverage = SHIFT.collect_history(
         "owner/repo", "main", pr_number=None, max_runs=8, client=client)
     assert main == [] and pull_request == []
-    assert "event=push" in client.endpoints[0]
+    assert coverage["partial_workflows"] == {}
+    assert any("event=push" in endpoint for endpoint in client.endpoints)
+
+
+def test_collector_fetches_and_reports_failed_and_cancelled_pr_jobs():
+    class Client:
+        calls = 0
+        budget = 64
+
+        def get(self, endpoint):
+            self.calls += 1
+            if endpoint.endswith("/pulls/7"):
+                return {"head": {"sha": "head"}}
+            if "head_sha=head" in endpoint:
+                return {"total_count": 1, "workflow_runs": [{
+                    "id": 10, "workflow_id": 1, "status": "completed",
+                    "conclusion": "failure", "event": "pull_request", "head_sha": "head"
+                }]}
+            if "/actions/runs/10/jobs" in endpoint:
+                return {"total_count": 2, "jobs": [
+                    {"name": "test", "status": "completed", "conclusion": "failure",
+                     "labels": ["linux"], "steps": [{"name": "test"}]},
+                    {"name": "lint", "status": "completed", "conclusion": "cancelled",
+                     "labels": ["linux"], "steps": [{"name": "lint"}]},
+                ]}
+            if "/actions/workflows/1/runs" in endpoint:
+                return {"total_count": 0, "workflow_runs": []}
+            raise AssertionError(endpoint)
+
+    main, current, _ = SHIFT.collect_history(
+        "owner/repo", "main", pr_number=7, max_runs=8, client=Client())
+    assert main == []
+    assert [row["conclusion"] for row in current] == ["failure", "cancelled"]
+    report = SHIFT.analyze_l2(main, current)
+    assert [row["kind"] for row in report["observations"]] == ["excluded", "excluded"]
+
+
+def test_l2_collection_fills_each_pr_identity_from_its_workflow_history():
+    class Client:
+        calls = 0
+        budget = 64
+
+        def get(self, endpoint):
+            self.calls += 1
+            if endpoint.endswith("/pulls/7"):
+                return {"head": {"sha": "head"}}
+            if "head_sha=head" in endpoint:
+                return {"total_count": 1, "workflow_runs": [{
+                    "id": 10, "workflow_id": 1, "status": "completed",
+                    "conclusion": "success", "event": "pull_request", "head_sha": "head"
+                }]}
+            if "/actions/runs/10/jobs" in endpoint:
+                return {"total_count": 1, "jobs": [timed_job("test", 120)]}
+            if "/actions/workflows/1/runs" in endpoint:
+                runs = [{"id": 100 + index, "workflow_id": 1, "status": "completed",
+                         "conclusion": "success", "event": "push", "head_branch": "main"}
+                        for index in range(10)]
+                return {"total_count": len(runs), "workflow_runs": runs}
+            if "/actions/runs/" in endpoint and "/jobs" in endpoint:
+                return {"total_count": 1, "jobs": [timed_job("test", 100)]}
+            raise AssertionError(endpoint)
+
+    main, current, coverage = SHIFT.collect_history(
+        "owner/repo", "main", pr_number=7, max_runs=8, client=Client())
+    assert len([row for row in main if SHIFT._eligible(row)]) == 8
+    assert len([row for row in current if SHIFT._eligible(row)]) == 1
+    assert coverage["partial_workflows"] == {}
+
+
+def timed_job(name, duration):
+    return {"name": name, "status": "completed", "conclusion": "success",
+            "labels": ["linux"], "steps": [{"name": "test"}],
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_at": f"2026-01-01T00:{duration // 60:02d}:{duration % 60:02d}Z"}
+
+
+def test_pagination_cap_is_explicit_and_partial_invalidates_clean_evidence():
+    class Client:
+        def get(self, endpoint):
+            return {"total_count": 300, "workflow_runs": [
+                {"id": index} for index in range(100)
+            ]}
+
+    rows, partial = SHIFT._paginate(
+        Client(), "repos/owner/repo/actions/runs?event=push", "workflow_runs", max_pages=2)
+    assert len(rows) == 200 and partial is True
+    report = {"jobs": [{"workflow": "ci.yml", "workflow_id": "1", "job": "test",
+                        "evidence": "threshold_not_exceeded"}], "observations": []}
+    SHIFT._apply_coverage(report, {"partial_workflows": {"1": "page cap"}})
+    assert report["jobs"][0]["evidence"] == "partial"
+    assert report["observations"][0]["kind"] == "partial"
 
 
 def test_attribution_distinguishes_zero_one_and_multiple_merged_prs():
@@ -165,3 +271,32 @@ def test_attribution_distinguishes_zero_one_and_multiple_merged_prs():
     assert attrs[0]["candidates"] == []
     assert attrs[1]["pr_number"] == 7
     assert attrs[2]["candidates"] == [8, 9] and attrs[2]["pr_number"] is None
+
+
+def test_attribution_failure_preserves_detection_evidence():
+    class Client:
+        def get(self, endpoint):
+            raise SHIFT.CollectionError("budget exhausted")
+
+    report = {"observations": [{"kind": "step_change", "change_percent": 20,
+        "attribution": {"sha": "abc", "pr_number": None}}]}
+    SHIFT._fill_attribution("owner/repo", report, Client())
+    assert report["observations"][0]["kind"] == "step_change"
+    assert report["observations"][0]["change_percent"] == 20
+    assert report["observations"][0]["attribution"]["status"] == "partial"
+
+
+def test_exact_rename_keeps_metadata_and_continues_timing_comparison():
+    history = [record(100, job="old") for _ in range(8)]
+    report = SHIFT.analyze_l2(history, [record(130, job="new")])
+    assert kinds(report) == ["renamed_job", "slowdown"]
+    assert report["jobs"][0]["renamed_from"] == "old"
+    assert report["jobs"][0]["evidence"] == "slowdown"
+
+
+def test_markdown_is_bounded_advisory_and_never_claims_no_slowdown():
+    result = {"status": "measured", "l3": SHIFT.analyze_l3([])}
+    rendered = SHIFT.render_markdown(result, max_bytes=1024)
+    assert len(rendered.encode()) <= 1024
+    assert "Advisory timing evidence" in rendered
+    assert "no slowdown" not in rendered.lower()
