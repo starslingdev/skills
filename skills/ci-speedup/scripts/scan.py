@@ -4450,6 +4450,11 @@ def _detect_opt61(
                     continue
                 resolved = _resolved_cache_env_path(raw_path.strip(), doc, job, cache_step)
                 if resolved is None:
+                    # Preserve the literal suffix for family checks such as
+                    # `${{ env.CACHE_ROOT }}/ccache`.  A value written through
+                    # GITHUB_ENV is unavailable to the static YAML parser, but
+                    # the suffix still proves which cache the action saves.
+                    cache_paths.append(raw_path.strip().casefold())
                     unknown_env_cache_names.update(
                         name.casefold()
                         for name in _CACHE_ENV_PATH_RE.findall(raw_path))
@@ -4501,6 +4506,7 @@ def _detect_opt61(
         # Cache-action step env affects only the action input and must not be
         # mistaken for the compiler process's directory.
         run_overrides: dict[str, list[str]] = {}
+        run_step_overrides: list[set[str]] = []
         assignment_re = re.compile(
             r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
             r"\s*=\s*([^\s;&]+)", re.IGNORECASE)
@@ -4508,21 +4514,30 @@ def _detect_opt61(
             run = _run(step)
             if not run.strip():
                 continue
+            overridden: set[str] = set()
             step_env = step.get("env")
             if isinstance(step_env, dict):
                 for name, value in step_env.items():
                     folded = str(name).casefold()
                     if folded in cache_dir_names and str(value).strip():
                         run_overrides.setdefault(folded, []).append(str(value).strip())
+                        overridden.add(folded)
             for match in assignment_re.finditer(run):
-                run_overrides.setdefault(match.group(1).casefold(), []).append(
-                    match.group(2))
+                folded = match.group(1).casefold()
+                run_overrides.setdefault(folded, []).append(match.group(2))
+                overridden.add(folded)
+            run_step_overrides.append(overridden)
         declared_dirs: list[tuple[str, str]] = []
         for name in cache_dir_names:
             values = run_overrides.get(name)
             if values:
                 declared_dirs.extend((name, value) for value in dict.fromkeys(values))
-            elif base_env.get(name):
+            # A step-local override replaces the inherited directory for that
+            # step only.  Keep the workflow/job value when another run step
+            # still inherits it.
+            if (base_env.get(name)
+                    and (not values or any(name not in names
+                                           for names in run_step_overrides))):
                 declared_dirs.append((name, base_env[name]))
         declared_compiler_dirs = [
             value for name, value in declared_dirs

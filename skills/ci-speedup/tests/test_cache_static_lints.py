@@ -328,6 +328,26 @@ jobs:
     assert "OPT61" not in _patterns(rows)
 
 
+def test_opt61_keeps_an_unknown_cache_path_suffix_silent(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - run: echo "CACHE_ROOT=/mnt/cache" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CACHE_ROOT }}/ccache
+          key: ccache-v1
+      - run: cmake --build build
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
 def test_opt61_unknown_unrelated_path_does_not_hide_a_literal_mismatch(
         tmp_path) -> None:
     rows = _scan_workflow(tmp_path, """name: CI
@@ -442,6 +462,29 @@ jobs:
 """)
 
     assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_applies_a_run_step_override_only_to_that_step(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /step/ccache
+          key: ccache-v1
+      - run: cmake --build first
+        env:
+          CCACHE_DIR: /step/ccache
+      - run: cmake --build second
+""")
+
+    assert "OPT61" in _patterns(rows)
 
 
 def test_opt61_splits_a_multiline_env_cache_path(tmp_path) -> None:
