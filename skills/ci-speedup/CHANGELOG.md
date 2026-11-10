@@ -1286,6 +1286,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-10** — Compare repeated aggregate guard findings by their affected jobs, so an unchanged workflow with multiple same-pattern groups stays quiet while a real expansion names only newly covered jobs.
 - **2026-11-09** — Recognize Playwright's documented camel-case `shardIndex`/`shardTotal` matrix when those dimensions feed `--shard=`, and keep the path-partitioned monorepo fixture focused on package and runtime routing.
 
 - **2026-11-09** — Follow one Make target into Jest configuration and surface uncredited worker-cap, persisted-cache, and coverage-provider checks. Jest's default-enabled cache is no longer misreported as missing merely because `--cache` is absent.
