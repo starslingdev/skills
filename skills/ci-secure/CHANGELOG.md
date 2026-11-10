@@ -308,7 +308,8 @@ entries are dated (UTC). Format loosely follows
 - **2026-11-09** — A crafted workflow line can no longer freeze the scan. The
   install-command matcher (dependency install scripts in a job that holds
   secrets) offered two readings of the same text in four places: an
-  assignment value whose bare form also matched quotes, a wrapper option read
+  assignment value whose bare form also matched quotes (including a quoted
+  value with spaces, `A=" A="`, spanning two assignments), a wrapper option read
   as `-`+`-a` or `--`+`a`, a wrapper option value that could also be the next
   wrapper word, assignment or numeric operand, and a yarn option value that
   could also be the next option or a quoted string. Inside a repeat, a line of

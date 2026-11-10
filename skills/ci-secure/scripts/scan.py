@@ -2272,10 +2272,10 @@ _CMD_WRAPPERS = (
 # the order they are tried in, stays what it was; `test_cmd_prefix_redos.py`
 # pins the agreement with the old form and the linear time.
 #
-# A bare run that is exactly one quoted string (`""`, `'a'`) is left to the
-# quoted branch, which reads the same characters.
+# A bare run that opens a quoted string the quoted branch can read to its
+# end (`""`, `'a'`, `" A="`, spaces included) is left to the quoted branch.
 _NOT_ONE_QUOTED_WORD = (
-    r"(?!\"[^\"\s;&|]*\"(?![^\s;&|]))(?!'[^'\s;&|]*'(?![^\s;&|]))"
+    r"(?!\"[^\"]*\"(?![^\s;&|]))(?!'[^']*'(?![^\s;&|]))"
 )
 _CMD_WRAPPER_ALT = "|".join(re.escape(w) for w in _CMD_WRAPPERS)
 # A wrapper option's value, minus the tokens the rest of the prefix already

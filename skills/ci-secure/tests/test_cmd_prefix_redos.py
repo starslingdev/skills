@@ -88,6 +88,7 @@ def _same(text: str) -> None:
 _ADVERSARIAL = {
     "assignment-double-quote": ("; ", '_="" ', "!"),
     "assignment-single-quote": ("; ", "_='' ", "!"),
+    "assignment-quote-spans-next-assignment": ("; ", 'A=" ', "!"),
     "wrapper-double-dash-option": ("; sudo", " --a", " !"),
     "wrapper-value-is-next-wrapper": ("; ", "sudo -x ", "!"),
     "wrapper-value-is-negation": ("; ", "nice -n ! ", "x"),
