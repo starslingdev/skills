@@ -126,7 +126,7 @@ def advance_verification(
 
     initial = saved.get("initial") if same_binding else None
     if not isinstance(initial, dict):
-        initial = client.completed_cohort(repo, head)
+        initial = client.completed_cohort(repo, head, branch)
     if initial is None:
         return {"status": "waiting-for-first-cohort", "head_sha": head,
                 "verdict": None}
@@ -171,7 +171,9 @@ def advance_verification(
     if not isinstance(before, list) or not before:
         context["samples"] = samples
         persist()
+        emit(f"Verification baseline for the {baseline_lane} lane is unavailable.")
         return {"status": "baseline-unavailable", "head_sha": head,
+                "baseline_lane": baseline_lane,
                 "sample_count": len(samples), "verdict": None,
                 "discarded_moved_head": moved}
 
@@ -488,14 +490,19 @@ class GhVerificationClient:
             "run_attempt_ids": run_attempt_ids,
             "lane": lane,
             "lane_runs_30d": lane_runs,
+            "head_branch": (str(runs[0].get("head_branch") or "")
+                            if len({str(row.get("head_branch") or "")
+                                    for row in runs}) == 1 else ""),
         }
 
-    def completed_cohort(self, repo: str, head: str) -> dict[str, Any] | None:
+    def completed_cohort(self, repo: str, head: str,
+                         branch: str) -> dict[str, Any] | None:
         all_rows = self._paged_rows(
             f"repos/{repo}/actions/runs?head_sha={quote(head)}&per_page=100",
             "workflow_runs")
         rows = [row for row in all_rows or []
                 if str(row.get("head_sha") or "") == head
+                if str(row.get("head_branch") or "") == branch
                 if int(row.get("run_attempt") or 1) == 1]
         if not rows:
             return None
@@ -527,6 +534,8 @@ class GhVerificationClient:
             if match
         }
         selected_ids = {int(row.get("id") or 0) for row in selected}
+        branch_run_ids = {int(row.get("id") or 0) for row in rows}
+        expected_run_ids &= branch_run_ids
         if expected_run_ids and not expected_run_ids.issubset(selected_ids):
             return None
         expected = [self._workflow_identity(row) for row in selected]
@@ -540,7 +549,19 @@ class GhVerificationClient:
         if not members:
             return None
         if trigger:
+            info = self._api(f"repos/{repo}")
+            default_branch = (str(info.get("default_branch") or "")
+                              if isinstance(info, dict) else "")
+            cohort_branch = str(cohort.get("head_branch") or "")
+            if not default_branch or not cohort_branch or cohort_branch == default_branch:
+                return None
             for member in members:
+                run = self._api(
+                    f"repos/{repo}/actions/runs/{int(member['run_id'])}")
+                if (not isinstance(run, dict)
+                        or str(run.get("head_branch") or "") != cohort_branch
+                        or str(run.get("head_branch") or "") == default_branch):
+                    return None
                 if self._api(
                         f"repos/{repo}/actions/runs/{int(member['run_id'])}/rerun",
                         method="POST") is None:

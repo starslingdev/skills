@@ -49,7 +49,7 @@ class FakeClient:
         self.events.append("head")
         return self.head
 
-    def completed_cohort(self, repo, head):
+    def completed_cohort(self, repo, head, branch=None):
         self.events.append("initial")
         return copy.deepcopy(self.initial) if self.initial and head == self.head else None
 
@@ -375,6 +375,7 @@ def _api_run(run_id, workflow_id, event="pull_request", head="fix", attempt=1):
     return {
         "id": run_id, "workflow_id": workflow_id, "name": f"wf-{workflow_id}",
         "event": event, "head_sha": head, "run_attempt": attempt,
+        "head_branch": "fix" if event != "push" else "main",
         "status": "completed", "conclusion": "success",
         "created_at": "2026-11-08T00:00:00Z",
     }
@@ -405,11 +406,52 @@ def test_real_adapter_keeps_all_events_and_uses_independent_check_run_set():
         "event=pull_request": {"total_count": 40},
         "event=workflow_run": {"total_count": 5},
     })
-    cohort = client.completed_cohort("o/r", "fix")
+    cohort = client.completed_cohort("o/r", "fix", "fix")
     assert cohort is not None
     assert set(cohort["workflows"]) == {"1:pull_request", "2:workflow_run"}
     assert cohort["lane_runs_30d"] == 45
     assert all(job["workload_identity"] for job in cohort["jobs"])
+
+
+def test_same_sha_on_topic_and_default_branch_reruns_only_the_topic_run():
+    topic = _api_run(10, 1, "pull_request", "shared")
+    topic["head_branch"] = "fix"
+    default = _api_run(30, 3, "push", "shared")
+    client = AdapterFixture({
+        "actions/runs?head_sha=shared": {"workflow_runs": [topic, default]},
+        "check-runs": {"check_runs": [
+            {"details_url": "https://github.com/o/r/actions/runs/10/job/1"},
+            {"details_url": "https://github.com/o/r/actions/runs/30/job/3"},
+        ]},
+        "runs/10/attempts/1/jobs": {"jobs": [_api_job(1)]},
+        "actions/runs/10": topic,
+        "event=pull_request": {"total_count": 40},
+        "repos/o/r": {"default_branch": "main"},
+    })
+
+    cohort = client.completed_cohort("o/r", "shared", "fix")
+    assert cohort is not None
+    assert cohort["run_attempt_ids"] == [{"run_id": 10, "attempt": 1}]
+
+    assert client.rerun_cohort("o/r", cohort) is None
+    assert client.posts == ["repos/o/r/actions/runs/10/rerun"]
+
+
+def test_missing_push_baseline_names_the_lane_and_status(tmp_path):
+    client = FakeClient(pushes=[])
+    baseline = tmp_path / "base.json"
+    baseline.write_text("{}")
+    emitted = []
+
+    result = advance_verification(
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        context_path=tmp_path / "verify.json",
+        changed_files=[".github/workflows/ci.yml"], cache_sensitive=True,
+        environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=emitted.append)
+
+    assert result["status"] == "baseline-unavailable"
+    assert result["baseline_lane"] == "push"
+    assert emitted == ["Verification baseline for the push lane is unavailable."]
 
 
 def test_real_adapter_paginates_large_job_matrices():
