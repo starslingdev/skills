@@ -3,14 +3,42 @@ from __future__ import annotations
 import copy
 import importlib.util
 import json
+import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 from before_after import (GhVerificationClient, _baseline_from_findings, _cache_class,
                           advance_verification, compare_push_cohorts)
+
+
+def test_verification_log_fetch_allows_and_strips_terminal_escapes(monkeypatch):
+    def fake_run(command, **_kwargs):
+        assert "--allow-escape-sequences" in command
+        return SimpleNamespace(
+            returncode=0, stdout="\x1b[31mCache restored from key: node-v1\x1b[0m",
+            stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    assert GhVerificationClient._text("repos/o/r/actions/jobs/1/logs") == (
+        "Cache restored from key: node-v1")
+
+
+def test_verification_log_fetch_records_timeout_as_unreadable(monkeypatch):
+    def fake_run(command, **_kwargs):
+        raise subprocess.TimeoutExpired(command, 90)
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    client = GhVerificationClient(poll_s=0, timeout_s=0.01, settle_s=0)
+    sample = client._job_logs("o/r", [{"id": 1}])
+
+    assert sample["log_api_calls"] == 1
+    assert sample["log_jobs_unreadable"] == 1
 
 
 def _job(sha: str, attempt: int, end: int = 20):
@@ -600,6 +628,23 @@ def test_real_adapter_caps_and_counts_job_log_calls():
     assert cohort["log_jobs_omitted"] == 2
 
 
+def test_real_adapter_bounds_total_retained_log_text():
+    client = AdapterFixture({"actions/jobs/": "x" * 60_000})
+    sample = client._job_logs("o/r", [_api_job(job_id) for job_id in range(1, 4)])
+
+    assert sum(len(log) for log in sample["logs"]) == 100_000
+    assert sample["log_api_calls"] == 2
+    assert sample["log_jobs_omitted"] == 1
+    assert sample["log_jobs_truncated"] == 1
+
+
+def test_real_adapter_discloses_jobs_without_readable_ids():
+    sample = AdapterFixture({})._job_logs("o/r", [{"id": None}])
+
+    assert sample["log_api_calls"] == 0
+    assert sample["log_jobs_unreadable"] == 1
+
+
 def test_actions_cache_hit_and_miss_lines_drive_cache_classification():
     assert _cache_class({
         "position": 2,
@@ -609,11 +654,23 @@ def test_actions_cache_hit_and_miss_lines_drive_cache_classification():
         "position": 1,
         "logs": ["Cache restored from key: node-v1"],
     })[0] == "warm"
+    assert _cache_class({
+        "position": 2,
+        "logs": [],
+        "log_api_calls": 1,
+        "log_jobs_unreadable": 1,
+    }) == ("unknown", "1 job log unreadable")
+    assert _cache_class({
+        "position": 2,
+        "logs": ["Cache restored from key: node-v1"],
+        "log_api_calls": 1,
+        "log_jobs_truncated": 1,
+    }) == ("unknown", "1 job log truncated by cap")
 
 
 def test_collected_baseline_and_real_adapter_use_the_same_work_identity():
     job = {
-        "name": "test", "workflow_file": ".github/workflows/ci.yml",
+        "id": 77, "name": "test", "workflow_file": ".github/workflows/ci.yml",
         "created_at": "2026-11-08T00:00:00Z",
         "started_at": "2026-11-08T00:00:02Z",
         "completed_at": "2026-11-08T00:00:30Z",
@@ -624,13 +681,17 @@ def test_collected_baseline_and_real_adapter_use_the_same_work_identity():
     doc = {
         "per_workflow_monthly_volume": {".github/workflows/ci.yml": 40},
         "pr_critical_path": {"commit_wall_clock": {"facts": [
-            {"sha": "base-1", "event": "pull_request", "jobs": [job],
-             "logs": ["Cache restored from key: node-v1"]},
+            {"sha": "base-1", "event": "pull_request", "jobs": [job]},
             {"sha": "base-2", "event": "pull_request", "jobs": [job]},
         ]}},
     }
-    before = _baseline_from_findings(doc)
+    client = AdapterFixture({
+        "actions/jobs/77/logs": "Cache restored from key: node-v1",
+    })
+    before = _baseline_from_findings(doc, client=client, repo="o/r")
     assert before[0]["logs"] == ["Cache restored from key: node-v1"]
+    assert before[0]["log_api_calls"] == 1
+    assert client.text_gets == ["repos/o/r/actions/jobs/77/logs"] * 2
     after_job = copy.deepcopy(job)
     after_job.update({
         "workflow": ".github/workflows/ci.yml:pull_request",
@@ -643,7 +704,8 @@ def test_collected_baseline_and_real_adapter_use_the_same_work_identity():
         "position": n, "conclusion": "success",
         "workflows": [".github/workflows/ci.yml:pull_request"],
         "expected_workflows": [".github/workflows/ci.yml:pull_request"],
-        "jobs": [after_job], "logs": [], "lane": "pull_request",
+        "jobs": [after_job],
+        "logs": ["Cache restored from key: node-v1"], "lane": "pull_request",
         "lane_runs_30d": 40,
     } for n in (1, 2)]
     result = compare_push_cohorts(
