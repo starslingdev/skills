@@ -25,6 +25,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Added
 
+- **2026-11-10** — Add OPT103 and the `lighthouse-serial-audits` log leaf for jobs whose time is Lighthouse CI audits run one after another. The leaf reads lhci's own `Running Lighthouse N time(s) on <url>` and `Done running Lighthouse!` lines, counts passes x URLs x runs over completed passes, and reports the share of audits beyond the first per URL. It fires at 20 or more audits with at least two per distinct URL, credits no saving, and hands off three dials: runs per URL, the URL list, and passes on separate runners. Step names carrying `lighthouse` or `lhci` now classify as `scan`, and OPT83 holds back two Lighthouse CI steps in one tree because they share one report folder. Catalog: 97 → 98 entries.
+
 - **2026-11-09** — Add resumable post-fix verification after an authorized push. It binds samples to the exact remote head, counts the completed automatic cohort first, discloses rerun cost before spending, reuses saved results, invalidates moved-head samples, and waits for three distinct pushes when cache changes make reruns unrepresentative.
 - **2026-11-09** — Add a conservative, read-only before/after engine for complete push cohorts. It binds fresh samples to one exact head and attempt, reports warm and cold timing separately, and withholds attribution when work, runners, triggered workflows, cache replay, or CI-only scope are not comparable.
 - **2026-11-09** — Detect repeated per-invocation process startup from timestamped, strictly serial pytest, Cargo test-binary, and structured verification boundaries. OPT85 reports the measured startup share and modeled repeated-startup saving, while retries, overlaps, progress output, and untimestamped logs fail closed.

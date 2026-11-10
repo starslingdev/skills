@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 97-pattern
-catalog — 86 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100–OPT102) plus 11 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 98-pattern
+catalog — 87 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100–OPT103) plus 11 **structural /
 critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85 and OPT87, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -2819,7 +2819,7 @@ calculator. Until one qualifies, the measured observations remain data-only.
 
 ## 11. The structural / critical-path track
 
-The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96–OPT98 and OPT100–OPT102) is mostly **declarative** -
+The hygiene/data-driven catalog (OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96–OPT98 and OPT100–OPT103) is mostly **declarative** -
 static findings are locally-checkable YAML defects, while measured Tier-2 rows
 come from run history. Its blind spot: on real repos the merge is
 gated by a check that is *working as intended* and simply slow, with no
@@ -3268,8 +3268,8 @@ closed. The pole is held back when any of these holds:
   allowed to fail changes what a failing parallel child does to the job);
 - the steps share tool state: `services:` containers, two Docker-driving
   steps, or two candidates in one tree running the same Cargo, Maven, Gradle,
-  .NET, sbt, Swift, Mix or Xcode build, or both running a recognised coverage
-  tool;
+  .NET, sbt, Swift, Mix or Xcode build, both running a recognised coverage
+  tool, or both running Lighthouse CI (one `.lighthouseci/` report folder);
 - a Docker / Podman / Compose command or container action sits in any step up
   to the last candidate, or a background step runs before the first;
 - the job holds a malformed `parallel:` group (`job_has_an_unreadable_parallel_group`,
@@ -3828,6 +3828,7 @@ agent prompt in `_PROMPTS`; it is **not** a prescribed fix):
 | `install-lifecycle-build` | a root `prepare`/`postinstall` lifecycle script runs a build DURING `<pm> install` — "work runs during install", not a cache miss | build wall run inside install (**seconds**) |
 | `buildx-no-cache` | `docker buildx` imports no cache → every layer cold | slowest cold layer's share of the cold-build wall (%) |
 | `playwright-parallel` | specs run as sequential invocations | **none** — the finding is the *sequencing*, shown by the timeline itself |
+| `lighthouse-serial-audits` | Lighthouse CI audits every URL `numberOfRuns` times per collect pass, one after another (OPT103). Counts completed passes only, and fires at 20 or more audits with at least two per distinct URL | audits beyond the first per URL, as a share of all audits (%) |
 
 A detector with `magnitude: None` is **categorical only**: the cause is structural
 (visible in the timeline / config), so there's no scalar to validate and no
@@ -3946,6 +3947,11 @@ unmeasurable from step timing alone, so any partial ceiling would be invented; t
 the generic dominant-step wall, which IS measured. So a crowned leaf always has `category ==
 dominant_category`, and the pole's `dominant_p50_s` it claims is fully backed by measured time in
 that category.
+
+`lighthouse-serial-audits` is the second leaf with a dominant-step token. A Lighthouse
+step bins `scan` (the classifier reads `lighthouse` and `lhci` in the step name), or `test`
+when its name also says so. It shares both bins with unrelated steps, so the leaf crowns a
+pole only when the dominant step names `lighthouse` or `lhci`.
 
 Every pole whose leaf survives demotion emits a per-pole `<!-- ci-speedup:leaf-crown fix_key=… -->`
 machine marker. `verify_report.check_detector_leaf_agrees_with_dominant_category` re-derives the
@@ -4126,7 +4132,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
-  the 97-pattern catalog, one file per pattern (frontmatter + body); the source
+  the 98-pattern catalog, one file per pattern (frontmatter + body); the source
   of truth for detection and the report's TL;DR / pattern background. The
   single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
   is compiled from `references/patterns/` by

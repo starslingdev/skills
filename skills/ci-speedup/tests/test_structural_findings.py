@@ -928,6 +928,9 @@ def test_step_category_classifier_spans_ecosystems():
         # the broad `\bbuild\b` must not steal it. But `mvn package` stays a build
         # (Maven's package phase is the build), so the artifact pre-entry is narrow.
         "Upload build artifacts": "package", "mvn package": "build",
+        # A Lighthouse CI run is an audit: payload, binned `scan` by the tool's name.
+        "Lighthouse CI": "scan", "Run lhci autorun": "scan",
+        "Lighthouse audit (desktop)": "scan", "lighthouse": "scan",
     }
     for name, want in cases.items():
         assert cr._step_category(name) == want, (name, want)
@@ -944,6 +947,7 @@ def test_combined_payload_and_build_step_classifies_as_payload_not_build():
     assert cr._step_category("Run Checks/Lint/Test/Build") == "test"
     assert cr._step_category("Run Checks / Lint / Test / Build") == "test"
     assert cr._step_category("Lint and Build") == "scan"
+    assert cr._step_category("Build and run Lighthouse") == "scan"
     assert cr._step_category("Build and test") == "test"
     # A PURE build step (no payload token) still classifies as `build`, so the
     # genuine OPT70/OPT72 build levers are untouched.

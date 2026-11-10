@@ -477,7 +477,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
             "external-required-gate", "heavy-runner-queue", "minority-tail",
             "multiarch-image", "path-partitioned-monorepo", "pr-light-matrix", "vendored-libs",
             "vitest-isolated-serial", "cargo-double-compile", "per-test-startup",
-            "jest-make-hop", "sharded-floor"):
+            "jest-make-hop", "sharded-floor", "lighthouse-passes"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -547,6 +547,20 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "vendored-lib-build" in fixture_facts(
         docs["vendored-libs"], [])["leaves"]
     assert "vendored libraries built from source" in reports["vendored-libs"]
+    lighthouse = docs["lighthouse-passes"]
+    assert "lighthouse-serial-audits" in fixture_facts(lighthouse, [])["leaves"]
+    lighthouse_pole = next(
+        pole for pole in lighthouse["pr_critical_path"]["poles"]
+        if pole.get("job") == "gate")
+    assert lighthouse_pole["dominant_category"] == "scan"
+    assert ("<!-- ci-speedup:leaf-crown fix_key=lighthouse-serial-audits -->"
+            in reports["lighthouse-passes"])
+    assert "Lighthouse CI runs 40 full page audits" in reports["lighthouse-passes"]
+    # The two passes share one report folder, so the side-by-side lever is held back.
+    assert "OPT83" not in {
+        row.get("pattern") for row in lighthouse["findings"]}
+    assert [row["gate"] for row in lighthouse["opt83_withheld_candidates"]] == [
+        "siblings_share_tool_state"]
     assert "test-isolated-serial" in fixture_facts(
         docs["vitest-isolated-serial"], [])["leaves"]
     assert "describe.concurrent" in reports["vitest-isolated-serial"]

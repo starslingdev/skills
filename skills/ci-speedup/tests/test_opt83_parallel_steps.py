@@ -588,6 +588,9 @@ def test_a_runtime_expression_anywhere_on_a_step_is_held_back(extra):
     ("cargo clippy --all-targets", "cargo test"),            # one target/ and its lock
     ("./mvnw -q verify -DskipTests", "./mvnw -q test"),        # one target/
     ("pytest --cov=app tests/unit", "pytest --cov=app tests/api"),  # one .coverage
+    # one .lighthouseci/ report folder, cleared when each collect starts
+    ("npx lhci autorun --config=lighthouserc.mobile.json",
+     "npx @lhci/cli@0.15.x autorun --config=lighthouserc.desktop.json"),
 ])
 def test_two_steps_of_one_tool_in_one_tree_are_held_back(a, b):
     y = _BASE_YAML.replace("run: npx biome check .", f"run: {a}").replace(

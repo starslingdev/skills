@@ -92,6 +92,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT59 — Runtime-Only Env Vars in Turbo globalEnv (MEDIUM, static) — runtime-only vars in globalEnv
 - OPT60 — Turbo CI Configuration Missing (LOW, static) — turbo CI settings missing
 - OPT82 — Lint Builds the Whole Type Graph (MEDIUM, data-driven) — type-aware ESLint on a slow lint job
+- OPT103 — Lighthouse CI Audits Every URL N Times Per Pass, One After Another (MEDIUM, data-driven) — passes x URLs x runs, audited one after another
 ## Category 12 — Build Caching (language-agnostic)
 - OPT61 — Missing Dependency Caching (HIGH, static) — compiled-language deps uncached
 - OPT62 — Build Artifacts Destroyed Before Every Run (HIGH, static) — rm -rf of build dirs every run

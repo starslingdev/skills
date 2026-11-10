@@ -1728,6 +1728,151 @@ _ANDROID_CONNECTED_WALL_FLOOR_S = 120.0
 # unit-test build isn't worth forking).
 _GRADLE_TEST_WALL_FLOOR_S = 300.0
 
+# Lighthouse CI's collect phase (`lhci autorun` / `lhci collect`, also what the Lighthouse
+# CI actions drive) audits every configured URL `numberOfRuns` times. It prints one
+# `Running Lighthouse N time(s) on <url>` line per URL, `Run #k...done.` per run, and one
+# `Done running Lighthouse!` per completed pass. The runs are awaited one at a time, and a
+# job with one pass per device preset pays the whole product again per pass. Only a finding
+# when the audit count is a material gate (lhci's default, 3 runs over a couple of URLs, is
+# a smoke audit) AND it is a multiplier over the distinct URLs: at least two audits per URL,
+# from repeat runs or repeat passes. One run over many URLs is a different lever (the URL
+# list) and stays silent here.
+_LHCI_AUDITS_FLOOR = 20
+_LHCI_MIN_AUDITS_PER_URL = 2
+# Every repeat is bounded and every branch starts on a different character, so each line
+# has one parse (linear time).
+_LHCI_RUNNING_RE = re.compile(
+    r"^[ \t]{0,8}Running Lighthouse (\d{1,4}) time\(s\) on (\S{1,2048})")
+_LHCI_PASS_DONE_RE = re.compile(r"^[ \t]{0,8}Done running Lighthouse!")
+_LHCI_ASSERT_RE = re.compile(
+    r"^[ \t]{0,8}Checking assertions against \d{1,6} URL\(s\), \d{1,7} total run\(s\)")
+# The lhci invocation itself: `lhci autorun`, `npx @lhci/cli@0.15.x collect`. The flag tail
+# after the match names the pass.
+_LHCI_CMD_RE = re.compile(
+    r"(?:\blhci|@lhci/cli(?:@[\w.\-]{1,40})?)[ \t]{1,8}(?:autorun|collect)\b")
+_LHCI_PASS_NAME_RE = re.compile(
+    r"--(?:config|collect\.settings\.preset|settings\.preset)[= ]([^\s;&|]{1,200})")
+_LHCI_CONFIG_EXT_RE = re.compile(r"\.(?:json|js|cjs|mjs|yml|yaml)$")
+
+
+def _lhci_pass_tag(flag_value: str) -> str:
+    """The part of an lhci `--config=` or preset value that tells one pass from another,
+    short enough for a drill row label: the basename without the conventional
+    `lighthouserc.` prefix and config extension (`lighthouserc.mobile.json` -> `mobile`,
+    `config/lhci.desktop.cjs` -> `lhci.desktop`, a `desktop` preset -> `desktop`). Empty
+    when nothing distinguishing is left (a bare `lighthouserc.json`)."""
+    tag = flag_value.strip("'\"").rsplit("/", 1)[-1].lstrip(".")
+    tag = _LHCI_CONFIG_EXT_RE.sub("", tag)
+    if tag.startswith("lighthouserc"):
+        tag = tag[len("lighthouserc"):].lstrip(".")
+    return tag
+
+
+def _lhci_section_commands(lines: list[str], start: int, end: int) -> list[str]:
+    """The distinct lhci invocations echoed inside one step section, in log order. A
+    single-line `run:` prints its command twice (the `##[group]Run` header, then the echo),
+    so a command equal to the one on the line before it is the same invocation."""
+    out: list[str] = []
+    prev_line, prev_cmd = -2, ""
+    for i in range(start, min(end, len(lines))):
+        line = lines[i]
+        cmd = line[len("##[group]Run "):] if line.startswith("##[group]Run ") else line
+        cmd = cmd.strip()
+        if not _LHCI_CMD_RE.search(cmd):
+            continue
+        if not (i == prev_line + 1 and cmd == prev_cmd):
+            out.append(cmd)
+        prev_line, prev_cmd = i, cmd
+    return out
+
+
+def _lighthouse_audit_leaf(lines: list[str]) -> dict[str, Any] | None:
+    """The `lighthouse-serial-audits` leaf (OPT103), or None. A pass is the block of
+    `Running Lighthouse` lines closed by `Done running Lighthouse!`. A block with no closing
+    marker (a cancelled or crashed collect) is not counted. The magnitude is the share of
+    audits beyond the first per distinct URL: the repeat runs and repeat passes."""
+    passes: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+    for i, line in enumerate(lines):
+        if "Lighthouse" not in line:
+            continue
+        running = _LHCI_RUNNING_RE.match(line)
+        if running:
+            if cur is None:
+                cur = {"urls": [], "start": i}
+            cur["urls"].append((running.group(2), int(running.group(1)), i))
+        elif _LHCI_PASS_DONE_RE.match(line):
+            if cur is not None:
+                cur["end"] = i
+                passes.append(cur)
+            cur = None
+    total = sum(n for p in passes for _url, n, _i in p["urls"])
+    urls = {url for p in passes for url, _n, _i in p["urls"]}
+    if (not passes or total < _LHCI_AUDITS_FLOOR
+            or total < _LHCI_MIN_AUDITS_PER_URL * len(urls)):
+        return None
+    # Name each pass from the config or preset flag of its own lhci command. The mapping is
+    # positional inside one step section, and is used only when that section echoes exactly
+    # one lhci command per pass; anything else leaves the passes untagged.
+    sections = [(s, e) for _cmd, s, e in _log_step_sections(lines)]
+    tags: dict[int, str] = {}
+    for s, e in sections:
+        inside = [k for k, p in enumerate(passes) if s <= p["start"] < e]
+        commands = _lhci_section_commands(lines, s, e)
+        if not inside or len(commands) != len(inside):
+            continue
+        for k, cmd in zip(inside, commands):
+            named = _LHCI_PASS_NAME_RE.search(cmd)
+            if named:
+                tags[k] = _lhci_pass_tag(named.group(1))
+    rows: list[tuple[str, float | None, str | None]] = []
+    for k, p in enumerate(passes):
+        audits = sum(n for _url, n, _i in p["urls"])
+        counts = sorted({n for _url, n, _i in p["urls"]})
+        runs_txt = str(counts[0]) if len(counts) == 1 else f"{counts[0]}-{counts[-1]}"
+        label = f"pass {k + 1}: {len(p['urls'])} URLs x {runs_txt} runs"
+        if tags.get(k):
+            label += f" ({tags[k]})"
+        rows.append((label, float(audits), str(audits)))
+    n_pass, n_url = len(passes), len(urls)
+    runs_all = sorted({n for p in passes for _url, n, _i in p["urls"]})
+    uniform = (len(runs_all) == 1
+               and all(len(p["urls"]) == n_url for p in passes)
+               and n_pass * n_url * runs_all[0] == total)
+    if uniform:
+        shape = f"{n_pass} collect pass(es) x {n_url} URL(s) x {runs_all[0]} run(s) per URL"
+    else:
+        shape = f"{n_pass} collect pass(es) over {n_url} distinct URL(s)"
+    repeat = total - n_url
+    # Evidence for the first two passes: the pass's first `Running Lighthouse` line, then
+    # lhci's own assert total for it, which states the audit count in the tool's words.
+    evidence: list[str] = []
+    for k, p in enumerate(passes[:2]):
+        evidence.append(lines[p["urls"][0][2]].strip())
+        nxt = passes[k + 1]["start"] if k + 1 < len(passes) else len(lines)
+        evidence += [lines[q].strip() for q in range(p["end"], nxt)
+                     if _LHCI_ASSERT_RE.match(lines[q])][:1]
+    evidence += [line.strip() for line in lines
+                 if not line.startswith("##[group]") and _LHCI_CMD_RE.search(line)][:1]
+    return {
+        "fix_key": "lighthouse-serial-audits",
+        "unit_label": f"Lighthouse CI runs {total} full page audits in this job, one "
+                      f"after another - {shape}",
+        "magnitude": {"label": "audits beyond the first per URL (repeat runs and repeat "
+                               "passes), as a share of all Lighthouse audits",
+                      "value": round(100 * repeat / total, 2), "unit": "%"},
+        "deeper": [
+            # The passes run in sequence, so each bar is a pass's share of the summed
+            # audit count the job pays for.
+            {"rows": rows,
+             "blocker_note": f"{total} full page audits ({shape}), one after another - "
+                             f"{repeat} re-audit an already-audited URL - BIGGEST LEVER",
+             "pct_of": "sum"},
+        ],
+        "evidence": evidence,
+        "search": ["Running Lighthouse", "Done running Lighthouse!", "numberOfRuns"],
+    }
+
 # An `eslint` invocation at a COMMAND position (detector G). Every alternative is a
 # REQUIRED, LINE-ANCHORED command marker (not `.search()`-anywhere) so prose / tool output
 # can't false-fire: a shell echo (`$`/`>`), a GHA `[command]` line, or a line-start JS
@@ -3524,6 +3669,14 @@ def _parse_log(text: str,
             "evidence": ev,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
+
+    # --- K2: Lighthouse CI audits every URL N times per pass, one after another ----
+    # Stays ahead of the dependency-cache observation below: a cache line elsewhere in
+    # the job must not hide the audit count. `_offcategory_leaf` keeps it off a pole whose
+    # dominant step is not the Lighthouse step.
+    lighthouse_leaf = _lighthouse_audit_leaf(lines)
+    if lighthouse_leaf is not None:
+        return lighthouse_leaf
     dependency_state = _cache_state_of_log(text, "dependency-cache")
     vendored_build_leaf = _vendored_lib_build_leaf(text)
     dependency_hit_leaf = None
@@ -4779,6 +4932,60 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "independent tests land on different runners, each with an isolated "
                    "fixture; keep a full-suite fallback, confirm pass/fail parity, and "
                    "re-measure the step.",
+    },
+    # OPT103 - see references/patterns/opt103-*.md. Routed by the `lighthouse-serial-audits`
+    # log leaf. The three dials are the owner's; nothing here prescribes one. Not in
+    # `_JOB_EXPANDING_LEAVES`: its first line asks to fill the job's idle cores, and two
+    # Lighthouse audits must never share a runner.
+    "lighthouse-serial-audits": {
+        "cause": "The step runs Lighthouse CI's collect phase as full page audits, one "
+                 "after another. For every configured URL it runs Lighthouse `numberOfRuns` "
+                 "times, each run a complete page load plus the audit, and lhci waits for "
+                 "one run before it starts the next (its `Run #k...done.` lines appear in "
+                 "order). A job with several collect passes, one per device preset or "
+                 "config file, repeats that for each pass, so the audit count is passes x "
+                 "URLs x runs. The log shows the audits themselves, with no retry, stall or "
+                 "download, and most of them audit a page the job has already audited.",
+        "look": "`{wf}` - every `lhci autorun` / `lhci collect` step (or Lighthouse CI "
+                "action) and the `lighthouserc*` config it loads: `ci.collect.numberOfRuns` "
+                "(lhci's default is 3), `ci.collect.url` (the page list), `settings.preset` "
+                "(why there are several passes), and each `ci.assert` assertion's "
+                "`aggregationMethod` (`median`, `optimistic`, `pessimistic` or "
+                "`median-run`), which decides how many runs the check needs. Divide the "
+                "step's wall by the audit count for the per-audit cost. Check what consumes "
+                "the reports (an upload, a budget gate on PRs, a dashboard), and recover "
+                "from git history why these runs, URLs and presets were chosen before "
+                "changing any of them.",
+        "constraints": "Lighthouse scores are noisy. `numberOfRuns` exists so the "
+                       "assertions gate on a median, not on one jittery run, so cutting it "
+                       "toward 1 trades speed for a flakier or falsely green budget. Lower "
+                       "it only to what the assertion aggregation needs, and compare old "
+                       "and new medians side by side first. The device passes may be "
+                       "deliberate (mobile and desktop budgets differ), and every URL that "
+                       "carries a budget must keep one. Do NOT run two Lighthouse passes at "
+                       "the same time on one runner: concurrent audits compete for the same "
+                       "cores, which skews the scores the budget gates on, and each "
+                       "`lhci collect` clears the shared `.lighthouseci/` report folder "
+                       "when it starts. Parallelise across runners (a "
+                       "matrix leg per preset or URL shard), never within one. Each added "
+                       "leg repeats checkout, install and build, so runner minutes go up "
+                       "while the wait goes down. If you take that split-across-jobs path "
+                       "and this step is a required status check, add the new jobs to "
+                       "branch protection as required checks (or the ruleset equivalent), "
+                       "or the split-out audits silently stop gating merges (everything "
+                       "stays green) until that admin-only re-gating step is done.",
+        "docs": ["Lighthouse CI configuration (`collect.numberOfRuns`, `collect.url`, "
+                 "`settings.preset`, assertion `aggregationMethod`): "
+                 "https://googlechrome.github.io/lighthouse-ci/docs/configuration.html",
+                 "Lighthouse performance scoring (why scores fluctuate between runs): "
+                 "https://developer.chrome.com/docs/lighthouse/performance/performance-scoring"],
+        "deliver": "Cut the audit count to what the budget check needs: fewer runs per URL "
+                   "only where the assertion aggregation still holds (medians compared old "
+                   "against new), and a representative URL set per preset. Move the "
+                   "independent passes (device presets, URL shards) onto separate runners "
+                   "so they stop running one after another. Keep every budget and "
+                   "assertion gating, confirm a deliberately regressed page still fails "
+                   "the check, and re-measure the step.",
     },
 }
 
@@ -6992,6 +7199,8 @@ _LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
     "gradle-test-parallelism": "test",
+    # `scan` by tool name; `test` when the step name also says so ("Lighthouse tests").
+    "lighthouse-serial-audits": frozenset({"scan", "test"}),
     "eslint-no-cache": "scan",
     "turbo-remote-cache": "build",
     "turbo-partial-cache": "build",
@@ -7010,6 +7219,10 @@ _HIGH_RISK_LEAVES: dict[str, str] = {
 }
 _LEAF_DOMINANT_STEP_TOKEN: dict[str, "re.Pattern[str]"] = {
     "eslint-no-cache": re.compile(r"lint", re.IGNORECASE),
+    # A Lighthouse step shares its bins with lint, type-check and test steps, so the same
+    # sibling rule applies: this leaf crowns a pole only when the dominant step names
+    # Lighthouse.
+    "lighthouse-serial-audits": re.compile(r"lighthouse|lhci", re.IGNORECASE),
 }
 # Machine markers (HTML comments, like `_CACHE_CONTEXT_MARKER`): the crown marker records
 # the fix_key of the leaf that crowned a pole's MEASURED CAUSE so verify_report can

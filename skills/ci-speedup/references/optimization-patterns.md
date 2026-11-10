@@ -47,7 +47,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
 - **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups; measured one-at-a-time capacity waits (`OPT97`) and repeated merge validation (`OPT98`).
 - **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`), and infrastructure faults that fail whole runs (`OPT100`).
-- **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
+- **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`), Lighthouse CI audits multiplied by runs, URLs and device passes (`OPT103`).
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`), a machine-wide .NET SDK reconciling unrelated workloads (`OPT94`).
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
 - **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`–`OPT85`, `OPT87`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT87` and `OPT74` remain manual. `OPT78` and `OPT85` are routed by drill-time log leaves; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
@@ -4879,6 +4879,115 @@ table: OPT82's ledger is the prerequisite that row assumes.
 
 ---
 
+### OPT103 — Lighthouse CI Audits Every URL N Times Per Pass, One After Another
+
+<!-- METADATA
+pattern: OPT103
+impact: MEDIUM
+class: data-driven
+detector: log-leaf
+risk: MEDIUM
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,lighthouserc*,.lighthouserc*"
+fix_strategy: lighthouse-audit-count
+title_template: "Lighthouse CI audits every URL N times per pass, one after another"
+-->
+
+**TL;DR**: A merge-gating job spends most of its wall time inside Lighthouse CI's
+collect phase. Every configured URL is audited `numberOfRuns` times, and each
+run is a complete page load plus the full audit. The runs go one after another,
+and a job with one pass per device preset pays all of it again per pass. The
+audit count is the product passes x URLs x runs. The report states that
+product, measured from the log, and hands the owner three dials: runs per URL,
+the URL list, and where the passes run. It credits no saving.
+
+**Scope: Lighthouse CI only** (`@lhci/cli` through `lhci autorun` or
+`lhci collect`, and the actions that drive the same collector). Other audit
+tools print other shapes and stay out of scope.
+
+**Anti-pattern**: A `lighthouserc` config lists every page of the site and keeps
+or raises the default of 3 runs per URL. The workflow then runs the collector
+once per device preset, as consecutive steps. The budget check that was meant
+to take a minute now takes ten. With 4 URLs, 5 runs and 2 passes the job runs
+40 audits, and 36 of them audit a page it has already audited.
+
+```
+before:  job: [ mobile pass: 4 URLs x 5 runs ] -> [ desktop pass: 4 URLs x 5 runs ]   (40 audits in a row)
+after:   leg mobile:  4 URLs x N runs   |  separate runners, the same assertions,
+         leg desktop: 4 URLs x N runs   |  N kept at what the assertions need
+```
+
+**Detection heuristic** (the `lighthouse-serial-audits` leaf in
+`blocking_path.py`, run over the drilled job's captured log, see ARCHITECTURE
+§12.3). Everything is read from the log:
+
+1. The log holds at least one completed collect pass. A pass is a block of
+   `Running Lighthouse N time(s) on <url>` lines, one per configured URL,
+   closed by `Done running Lighthouse!`. A block with no closing line (a
+   cancelled or crashed collect) is not counted.
+2. Summing N over every URL of every completed pass gives at least 20 audits.
+   lhci's default of 3 runs over a couple of URLs is a smoke audit and stays
+   silent.
+3. The sum is at least two audits per distinct URL, so the count is a
+   multiplier from repeat runs or repeat passes. One run over many URLs is a
+   different lever (the URL list) and stays silent.
+4. The job's measured dominant step is the Lighthouse step: its name carries
+   `lighthouse` or `lhci`. Otherwise the leaf is shown as a labelled secondary
+   observation and never as the job's cause. The step classifier bins those
+   names as `scan`, so Lighthouse time counts as the job's payload.
+
+The magnitude is the share of audits beyond the first per distinct URL: the
+repeat runs and repeat passes. It follows from the config, so it is stable from
+run to run. The evidence is verbatim lhci output: each pass's first
+`Running Lighthouse` line and its
+`Checking assertions against U URL(s), M total run(s)` line, which states the
+pass's audit count in the tool's own words. A pass is
+named after the `--config` or preset flag of its command when the log pairs
+one command with one pass.
+
+**Fix recipe** (the report hands off, it does not prescribe):
+
+1. Read the config history first (`git log -p` on `lighthouserc*` and the
+   workflow): why these runs, URLs and presets. A deliberate choice is a policy
+   change for the owner.
+2. Runs per URL. lhci's assertions aggregate across the runs of a URL
+   (`aggregationMethod`, set per assertion: `median`, `optimistic`,
+   `pessimistic` or `median-run`). Keep N at what those assertions need for a
+   stable verdict, and compare old and new medians side by side before
+   lowering it. Dropping to 1 trades speed for a flakier or falsely green
+   budget.
+3. The URL list. Audit one representative page per template, and keep every
+   URL that carries a budget.
+4. Where the passes run. The device presets and URL shards are independent, so
+   run them on separate runners (a matrix leg per preset). Never run two
+   Lighthouse passes at the same time on one runner. Concurrent audits
+   compete for the same cores, which skews the scores the budget gates on, and
+   each collect clears the shared `.lighthouseci/` report folder when it
+   starts. OPT83 holds back two Lighthouse CI steps in one tree for that
+   reason.
+
+**Required-checks caveat**: a split into matrix legs creates new check names.
+If the Lighthouse job is a required status check, add the new jobs to branch
+protection as required checks (or the ruleset equivalent). Otherwise the
+split-out audits silently stop gating merges while everything stays green.
+
+**Sizing: uncredited.** The skill measures the audit count and the repeat
+share, not a saving. How far N can drop is the owner's measurement decision, a
+shorter URL list is a coverage decision, and a runner split moves wall time off
+the job without removing it. Each added leg also repeats checkout, install and
+build, so runner minutes go up while the wait goes down.
+
+**Risk: MEDIUM.** Fewer runs or fewer URLs weaken a performance budget's
+signal: a flakier gate, or a regression that slips through. Keep every
+assertion gating, and check that a deliberately regressed page still fails
+after the change.
+
+**References**: [Lighthouse CI configuration](https://googlechrome.github.io/lighthouse-ci/docs/configuration.html)
+(`collect.numberOfRuns`, `collect.url`, `settings.preset`, `aggregationMethod`).
+[Lighthouse performance scoring](https://developer.chrome.com/docs/lighthouse/performance/performance-scoring)
+(why scores fluctuate between runs).
+
+---
+
 ## Category 12: Build Caching (Language-Agnostic)
 
 ---
@@ -5357,7 +5466,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98, OPT100 and OPT101 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98, OPT100, OPT101 and OPT103 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. OPT81, like OPT79 and OPT80, is derived from run history rather than matched against YAML, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer
@@ -5815,7 +5924,7 @@ Two or more candidates that sit directly next to each other in the job's top-lev
 | a candidate that may write build output (build or package by name or by any command line; `tsc --noEmit` is not a build) shares its effective working directory with another candidate, or one directory sits inside the other (`./web`, `web/` and `web` are one directory), whichever step comes first. A working directory outside the checkout (`..`, `../x`, an absolute path) overlaps every tree. When a build is among the candidates, any candidate whose command reaches outside its own tree (`--prefix`, `--cwd`, `--dir`, `-C`, `--outDir` or `--out-dir`, a `../` or absolute path) counts as sharing every tree | run side by side, the build writes files the other step is reading |
 | a candidate carries a step-level `if:` | the group's shape would change by condition |
 | a candidate sets `continue-on-error` (anything but a literal `false`) | a step allowed to fail changes what a failing child does to the job once they run side by side |
-| the job has `services:` containers; two candidates drive Docker; or two candidates in one tree run the same Cargo, Maven, Gradle, .NET (`dotnet test`, `build`, `run`, `publish`), sbt, Swift (`swift test`, `swift build`), Mix (`mix test`, `mix compile`) or Xcode (`xcodebuild`) build, or both run a recognised coverage tool (`pytest --cov`, `coverage run`, `nyc`, `c8`, `--coverage`, `go test -coverprofile`) | they share state the workflow file does not show as a dependency (one `target/`, `bin/` and `obj/`, `.build`, `_build` or DerivedData folder and its lock, one coverage file, one daemon or database) |
+| the job has `services:` containers; two candidates drive Docker; or two candidates in one tree run the same Cargo, Maven, Gradle, .NET (`dotnet test`, `build`, `run`, `publish`), sbt, Swift (`swift test`, `swift build`), Mix (`mix test`, `mix compile`) or Xcode (`xcodebuild`) build, or both run a recognised coverage tool (`pytest --cov`, `coverage run`, `nyc`, `c8`, `--coverage`, `go test -coverprofile`), or both run Lighthouse CI (`lhci`) | they share state the workflow file does not show as a dependency (one `target/`, `bin/` and `obj/`, `.build`, `_build` or DerivedData folder and its lock, one coverage file, one `.lighthouseci/` report folder, one daemon or database) |
 | any line, or any `&&`, `\|\|`, `;` or `\|` part of a line, of a candidate's command is a dependency install (`npm ci`, `pip install`, `uv sync`, `bundle install`, ...) | it writes the dependency tree every other candidate reads |
 | any step up to the last candidate (before them or one of them) runs Docker, Podman or Compose, or is a container action (`docker://`, a Docker or Compose action); or any step before the first candidate runs with `background: true` | the job starts a container or a server the candidates would all use at once (one database, one port) |
 
