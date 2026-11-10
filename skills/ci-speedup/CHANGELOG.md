@@ -1,5 +1,6 @@
 # Changelog
 
+- Keep literal compile targets visible beside unknown Make targets, and preserve the environment boundary of single-quoted Docker payloads when detecting emulated builds.
 - Credit static cache findings only after sampled job logs confirm the predicted miss and the existing budget, invalidation, and transfer-cost guards all pass.
 - Resolve workflow, job, and cache-step environment variables in OPT61 cache paths, while keeping undeclared expressions unknown instead of reporting missing persistence.
 - Route Jest's configured worker cap to uncredited concurrency guidance and its provider choice to an independent uncredited coverage-configuration note, while reserving OPT9 for a disabled or unpersisted result cache.

@@ -554,6 +554,15 @@ def test_named_fixtures_exercise_their_defining_interactions(
         row.get("pattern") for row in docs["multiarch-image"]["findings"]}
     assert "OPT89" in {
         row.get("pattern") for row in docs["emulated-container"]["findings"]}
+    assert any(
+        row.get("pattern") == "OPT89"
+        and "make all" in row.get("evidence_snippet", "")
+        for row in docs["emulated-container"]["findings"])
+    emulated_workflow = (
+        FIXTURE_ROOT / "emulated-container" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    assert "run: make all $EXTRA" in emulated_workflow
+    assert "./configure\n            make -j2" in emulated_workflow
     image_doc = docs["multiarch-image"]
     image_opt72 = [
         row for row in image_doc["findings"]
