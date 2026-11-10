@@ -3548,7 +3548,7 @@ def _parse_log(text: str,
                 r"pytest\s+(?P<id>.+?)\s*$",
                 re.I,
             ),
-            re.compile(r"^collecting\b", re.I),
+            re.compile(r"^(?:collecting\b|collected\s+\d+\s+items?\b)", re.I),
             re.compile(
                 r"^(?:=+\s*)?\d+\s+(?:passed|failed|errors?|skipped)\b"
                 r".*\bin\s+\d",
@@ -3595,6 +3595,7 @@ def _parse_log(text: str,
         startups: list[float] = []
         iterations: list[float] = []
         measurements: list[tuple[str, str, str]] = []
+        work_messages: list[str] = []
         complete = True
         for pos, (line_i, started, identity, boundary_raw) in enumerate(boundaries):
             next_line = (boundaries[pos + 1][0]
@@ -3602,14 +3603,15 @@ def _parse_log(text: str,
             next_started = (boundaries[pos + 1][1]
                             if pos + 1 < len(boundaries) else None)
             window = timestamped[line_i + 1:next_line]
-            work_row = next(((when, raw, match) for when, message, raw in window
+            work_row = next(((when, message, raw, match)
+                             for when, message, raw in window
                              if (match := work_re.match(message))), None)
             done_row = next(((when, raw, match) for when, message, raw in window
                              if (match := done_re.match(message))), None)
             if work_row is None or done_row is None:
                 complete = False
                 break
-            work, work_raw, work_match = work_row
+            work, work_message, work_raw, work_match = work_row
             done, done_raw, done_match = done_row
             if (bind_identity
                     and (work_match.group("id") != identity
@@ -3624,6 +3626,7 @@ def _parse_log(text: str,
             startups.append((work - started).total_seconds())
             iterations.append((done - started).total_seconds())
             measurements.append((boundary_raw, work_raw, done_raw))
+            work_messages.append(work_message)
         if not complete:
             continue
         startup_median = _median(startups)
@@ -3633,15 +3636,24 @@ def _parse_log(text: str,
                 or count * startup_median < 20):
             continue
         modeled = round((count - 1) * startup_median, 2)
+        collection_completion_only = all(
+            re.match(r"^collected\s+\d+\s+items?\b", message, re.IGNORECASE)
+            for message in work_messages
+        )
         startup_leaf = {
             "fix_key": "per-invocation-startup",
-            "unit_label": (
+            "unit_label": ((
+                f"{count} serial {profile_name} iterations each launch a fresh "
+                "process; collection completion is the first observable work marker, "
+                "so removable startup is not separately measurable"
+            ) if collection_completion_only else (
                 f"{count} serial {profile_name} iterations each launch a fresh "
                 f"process; median startup is {startup_median:g}s of a "
                 f"{iteration_median:g}s iteration"
-            ),
-            "magnitude": {"label": "modeled repeated process startup",
-                          "value": modeled, "unit": "s"},
+            )),
+            "magnitude": (None if collection_completion_only else
+                          {"label": "modeled repeated process startup",
+                           "value": modeled, "unit": "s"}),
             "deeper": [],
             "evidence": [
                 *measurements[0],
@@ -3653,7 +3665,7 @@ def _parse_log(text: str,
             "iteration_count": count,
             "startup_median_s": round(startup_median, 2),
             "iteration_median_s": round(iteration_median, 2),
-            "modeled_saving_s": modeled,
+            "modeled_saving_s": None if collection_completion_only else modeled,
         }
         break
     if startup_leaf is not None:
@@ -3743,6 +3755,12 @@ def _parse_log(text: str,
         r"(?:PASSED|OK)\b(?:\s+\[\s*\d+%\])?",
         re.IGNORECASE,
     )
+    pytest_node = re.compile(
+        r"^(?P<node>(?P<file>\S+\.py)::\S+?)(?:\s+.*)?$",
+        re.IGNORECASE,
+    )
+    pytest_outcome = re.compile(
+        r"^PASSED(?:\s+\[\s*\d+%\])?\s*$", re.IGNORECASE)
     pytest_command = re.compile(r"(?:^|\s)(?:python\s+-m\s+)?pytest\b.*(?:^|\s)-v\b",
                                 re.IGNORECASE)
     completions = [
@@ -3750,6 +3768,49 @@ def _parse_log(text: str,
         for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
         if (m := pytest_done.match(message))
     ]
+    # With ``pytest -v -s``, a test's own stdout follows the node id and pytest
+    # writes the outcome on a later physical line. Pair that standalone outcome
+    # with the preceding node, stopping at the next node so unrelated output
+    # cannot be borrowed as proof of completion. A suite may contain both this
+    # split shape and ordinary one-line results, so merge the two sets by node.
+    # Failed summaries withhold the split path: untrusted test stdout can print
+    # ``PASSED`` and must not impersonate pytest's result after the test fails.
+    summary_failed = any(
+        re.search(r"\b\d+\s+(?:failed|errors?)\b", message, re.IGNORECASE)
+        for _when, message, _raw, _stamp in stamped_tests
+    )
+    passed_totals = [
+        int(match.group(1))
+        for _when, message, _raw, _stamp in stamped_tests
+        if (match := re.search(r"\b(\d+)\s+passed\b", message, re.IGNORECASE))
+    ]
+    if not summary_failed and passed_totals:
+        completed_nodes = {row[3] for row in completions}
+        split_completions: list[tuple[int, datetime, str, str, str]] = []
+        node_rows = [
+            (i, when, m.group("file"), m.group("node"), raw)
+            for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
+            if (m := pytest_node.match(message))
+        ]
+        for pos, (line_i, _started, test_file, node, node_raw) in enumerate(node_rows):
+            if node in completed_nodes:
+                continue
+            stop = node_rows[pos + 1][0] if pos + 1 < len(node_rows) else len(stamped_tests)
+            outcomes = [
+                (i, when, raw) for i, (when, message, raw, _stamp)
+                in enumerate(stamped_tests[line_i + 1:stop], start=line_i + 1)
+                if pytest_outcome.match(message)
+            ]
+            outcome = outcomes[-1] if outcomes else None
+            if outcome is not None:
+                split_completions.append(
+                    (outcome[0], outcome[1], test_file, node,
+                     f"{node_raw} … {outcome[2]}")
+                )
+                completed_nodes.add(node)
+        if max(passed_totals) >= len(completions) + len(split_completions):
+            completions.extend(split_completions)
+    completions.sort(key=lambda row: row[0])
     if (len(completions) >= 4
             and len({row[2] for row in completions}) == 1
             and len({row[3] for row in completions}) == len(completions)):
