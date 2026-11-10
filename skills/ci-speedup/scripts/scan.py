@@ -4389,7 +4389,9 @@ def _detect_opt61(
                         name.casefold()
                         for name in _CACHE_ENV_PATH_RE.findall(raw_path))
                 else:
-                    cache_paths.append(resolved.casefold())
+                    cache_paths.extend(
+                        line.strip().casefold()
+                        for line in resolved.splitlines() if line.strip())
         blob = "\n".join((_job_run_blob(job), _job_env_blob(job, doc)))
         reasons: list[tuple[str, str]] = []
 
