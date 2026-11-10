@@ -99,6 +99,13 @@ def repeated_setup_matrix(*, shard_legs: int = 8, axis: str = "shard",
       - uses: actions/upload-artifact@v4
         with: {name: app, path: dist}
 """ if artifact_handoff else ""
+    sibling = f"""  sibling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+{upload}""" if artifact_handoff else ""
     return f"""name: Matrix setup
 on: pull_request
 jobs:
@@ -112,13 +119,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test -- --shard=${{{{ matrix.{axis} }}}}/{shard_legs}
-{handoff}  sibling:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: npm ci
-      - run: npm run build
-{upload}"""
+{handoff}{sibling}"""
 
 
 def trees(tmp_path: Path, base_text: str, merge_text: str):
@@ -130,10 +131,14 @@ def trees(tmp_path: Path, base_text: str, merge_text: str):
     return base, merge
 
 
-def run(guard, base: Path, merge: Path, capsys, monkeypatch, allow=()):
+def run(guard, base: Path, merge: Path, capsys, monkeypatch, allow=(),
+        summary: Path | None = None):
     monkeypatch.setattr(guard, "BLOCKING_ALLOWLIST", frozenset(allow))
-    code = guard.main(["--base", str(base), "--merge", str(merge),
-                       "--default-branch", "main"])
+    args = ["--base", str(base), "--merge", str(merge),
+            "--default-branch", "main"]
+    if summary is not None:
+        args.extend(["--summary", str(summary)])
+    code = guard.main(args)
     captured = capsys.readouterr()
     return code, captured.out + captured.err
 
@@ -178,13 +183,18 @@ def test_shard_matrix_leg_growth_warns_with_repeated_setup(
         tmp_path, repeated_setup_matrix(shard_legs=8),
         repeated_setup_matrix(shard_legs=16))
 
-    code, output = run(guard, base, merge, capsys, monkeypatch)
+    summary = tmp_path / "summary.md"
+    code, output = run(
+        guard, base, merge, capsys, monkeypatch, summary=summary)
 
     assert code == 0
     warnings = [line for line in output.splitlines() if "8 -> 16 legs" in line]
     assert len(warnings) == 1
     assert "shards" in warnings[0]
     assert "repeats checkout, install and build" in warnings[0]
+    rendered = summary.read_text(encoding="utf-8")
+    assert "### New warnings" in rendered
+    assert "OPT14 job shards: 8 -> 16 legs" in rendered
 
 
 @pytest.mark.parametrize("merge_text", [

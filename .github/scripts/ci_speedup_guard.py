@@ -529,6 +529,7 @@ def main(argv: list[str] | None = None) -> int:
         for f in merge_doc["findings"]:
             if f["subject"] == "(workflow)":
                 merge_aggregates[finding_key(f, mapping, non_perfile)].append(f)
+        aggregate_warning_messages: list[str] = []
         for key, current_findings in merge_aggregates.items():
             old_findings = base_aggregates.get(key, [])
             all_old_jobs = {job for old in old_findings
@@ -539,7 +540,9 @@ def main(argv: list[str] | None = None) -> int:
                 grew = sorted(set(f.get("affected_jobs", []))
                               - old_jobs)
                 if grew:
-                    annotation("warning", f"{f['pattern']} scope grew to jobs: {', '.join(grew)}", f)
+                    message = f"{f['pattern']} scope grew to jobs: {', '.join(grew)}"
+                    annotation("warning", message, f)
+                    aggregate_warning_messages.append(message)
                     warnings += 1
                 if old is None or f.get("pattern") != "OPT14":
                     continue
@@ -561,13 +564,12 @@ def main(argv: list[str] | None = None) -> int:
                         repeated_text += f" and {work[-1]}"
                     elif work:
                         repeated_text = str(work[0])
-                    annotation(
-                        "warning",
+                    message = (
                         f"{f['pattern']} job {job}: {before} -> {after} legs; each leg "
                         f"repeats {repeated_text}; try running the work in parallel on "
-                        "one machine first (see OPT88)",
-                        f,
-                    )
+                        "one machine first (see OPT88)")
+                    annotation("warning", message, f)
+                    aggregate_warning_messages.append(message)
                     warnings += 1
 
         if increases and not bootstrap:
@@ -595,7 +597,9 @@ def main(argv: list[str] | None = None) -> int:
                       for f in warning_findings),)
         lines.extend(f"- {nf['pattern']} {label}: {flat(rf.get('workflow_file'))} -> {flat(nf.get('workflow_file'))}"
                      for label, nf, rf in pairs)
-        if not warning_findings and not pairs and not new_gaps and not new_held:
+        lines.extend(f"- {flat(message)}" for message in aggregate_warning_messages)
+        if (not warning_findings and not pairs and not new_gaps and not new_held
+                and not aggregate_warning_messages):
             lines.append("- None.")
         lines.extend(["", "### Resolved findings", ""])
         lines.extend((f"- {f['pattern']} at {flat(f.get('workflow_file'))} ({flat(f.get('subject'))})"

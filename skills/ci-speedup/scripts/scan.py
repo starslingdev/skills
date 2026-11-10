@@ -30,7 +30,6 @@ import argparse
 import functools
 import json
 import logging
-import math
 import os
 import re
 import shlex
@@ -3505,13 +3504,49 @@ _MATRIX_SETUP_BUILD_RE = re.compile(
     r"gradle\w*\s+build|bazel\s+build)\b", re.I)
 
 
+def _matrix_shard_leg_count(job: dict) -> int | None:
+    """Count distinct effective shard configurations, ignoring diagnostics.
+
+    GitHub expands include/exclude against the whole matrix.  Projecting the
+    expanded legs onto shard-like keys keeps an OS or runtime-version axis from
+    inflating this guard fact while still honoring rows that add or remove real
+    shard configurations.
+    """
+    strategy = job.get("strategy") if isinstance(job.get("strategy"), dict) else {}
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if not isinstance(matrix, dict):
+        return None
+    shard_keys = {
+        str(key) for key in matrix
+        if key not in {"include", "exclude"} and _SHARD_AXIS_RE.search(str(key))
+    }
+    include = matrix.get("include")
+    if isinstance(include, list):
+        shard_keys.update(
+            str(key) for row in include if isinstance(row, dict) for key in row
+            if _SHARD_AXIS_RE.search(str(key)))
+    if not shard_keys:
+        return None
+    legs = _opt102_matrix_legs(job)
+    if not legs:
+        return None
+    projected = {
+        tuple((key, leg[key]) for key in sorted(shard_keys) if key in leg)
+        for leg in legs
+        if any(key in leg for key in shard_keys)
+    }
+    return len(projected) if projected else None
+
+
 def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
-    """≥2 jobs each run checkout + dependency install and the workflow has no
-    artifact HANDOFF (an upload paired with a download) between jobs (catalog
-    OPT14 heuristic). An upload-only step (e.g. a coverage report) or a
-    download-only step is NOT a setup handoff and must not suppress the
-    finding — so we require BOTH an upload and a download to exist before
-    treating the workflow as already passing build outputs between jobs."""
+    """Repeated checkout/setup with no artifact handoff (OPT14 heuristic).
+
+    Repetition can be across at least two jobs or across the effective shard
+    configurations of one matrix job. An upload-only step (for example a
+    coverage report) or a download-only step is not a setup handoff, so both
+    actions must exist before this detector treats outputs as passed between
+    jobs.
+    """
     setup_jobs: list[str] = []
     matrix_setup_legs: dict[str, int] = {}
     matrix_setup_repeated: dict[str, list[str]] = {}
@@ -3531,29 +3566,53 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
                 has_download = True
         if has_checkout and has_install:
             setup_jobs.append(job_name)
-            strategy = job.get("strategy") if isinstance(job.get("strategy"), dict) else {}
-            matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
-            shard_axes = [
-                value for key, value in (matrix.items() if isinstance(matrix, dict) else [])
-                if key not in {"include", "exclude"} and _SHARD_AXIS_RE.search(str(key))
-                and isinstance(value, list) and value
-            ]
-            if shard_axes:
-                matrix_setup_legs[job_name] = math.prod(len(value) for value in shard_axes)
-                repeated = ["checkout", "install"]
-                if _MATRIX_SETUP_BUILD_RE.search(_job_run_blob(job)):
+            conditioned_steps = _steps_with_if(job)
+            repeats_checkout = any(
+                _uses(step).startswith("actions/checkout") and cond is None
+                for step, cond in conditioned_steps)
+            repeats_install = any(
+                _INSTALL_RE.search(_run(step)) and cond is None
+                for step, cond in conditioned_steps)
+            repeats_build = any(
+                _MATRIX_SETUP_BUILD_RE.search(_run(step)) and cond is None
+                for step, cond in conditioned_steps)
+            shard_legs = _matrix_shard_leg_count(job)
+            if (shard_legs is not None and repeats_checkout
+                    and (repeats_install or repeats_build)):
+                matrix_setup_legs[job_name] = shard_legs
+                repeated = ["checkout"]
+                if repeats_install:
+                    repeated.append("install")
+                if repeats_build:
                     repeated.append("build")
                 matrix_setup_repeated[job_name] = repeated
     has_handoff = has_upload and has_download
-    # Jobs that never co-run (provably exclusive `if:`) are not repeated work.
-    setup_jobs = _co_running(_jobs_from_doc(doc), setup_jobs)
-    if len(setup_jobs) >= 2 and not has_handoff:
+    # Jobs that never co-run (provably exclusive `if:`) are not repeated work
+    # with each other. A sharded job still repeats its own setup across legs,
+    # so keep it even when it is the workflow's only setup job.
+    setup_jobs = sorted(set(_co_running(_jobs_from_doc(doc), setup_jobs))
+                        | set(matrix_setup_legs))
+    if setup_jobs and not has_handoff:
+        if len(setup_jobs) >= 2:
+            evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "
+                        f"install with no `actions/upload-artifact` / "
+                        f"`download-artifact` handoff: {', '.join(setup_jobs)}")
+        else:
+            job_name = setup_jobs[0]
+            repeated = matrix_setup_repeated[job_name]
+            repeated_text = ", ".join(repeated[:-1])
+            if len(repeated) > 1:
+                repeated_text += f" and {repeated[-1]}"
+            else:
+                repeated_text = repeated[0]
+            evidence = (
+                f"shard matrix repeats {repeated_text} across "
+                f"{matrix_setup_legs[job_name]} legs with no artifact handoff: "
+                f"{job_name}")
         return [Hit(
             line=1,
             affected_jobs=setup_jobs,
-            evidence=(f"{len(setup_jobs)} jobs each run checkout + dependency "
-                      f"install with no `actions/upload-artifact` / "
-                      f"`download-artifact` handoff: {', '.join(setup_jobs)}"),
+            evidence=evidence,
             match_text="(workflow)",
             facts=({
                 "matrix_setup_legs": {

@@ -75,12 +75,6 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test -- --shard=${{ matrix.shardIndex }}/4
-  sibling:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - run: npm ci
-      - run: npm run build
 """)
 
     finding = next(
@@ -90,6 +84,69 @@ jobs:
     assert finding["matrix_setup_legs"] == {"shards": 4}
     assert finding["matrix_setup_repeated"] == {
         "shards": ["checkout", "install", "build"]}
+
+
+def test_opt14_counts_effective_shard_legs_after_include_and_exclude(tmp_path):
+    root = _repo(tmp_path, """on: pull_request
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2, 3, 4]
+        os: [ubuntu-latest, windows-latest]
+        exclude:
+          - shard: 3
+          - shard: 4
+        include:
+          - shard: 5
+            os: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+  sibling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+""")
+
+    finding = next(
+        row for row in scan.scan(root, CATALOG)["findings"]
+        if row["pattern"] == "OPT14")
+
+    assert finding["matrix_setup_legs"] == {"shards": 3}
+
+
+def test_opt14_does_not_claim_conditioned_or_cache_only_setup_repeats(tmp_path):
+    root = _repo(tmp_path, """on: pull_request
+jobs:
+  cache-only:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: {cache: npm}
+  conditional-install:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@v4
+      - if: matrix.shard == 1
+        run: npm ci
+""")
+
+    finding = next(
+        row for row in scan.scan(root, CATALOG)["findings"]
+        if row["pattern"] == "OPT14")
+
+    assert "matrix_setup_legs" not in finding
+    assert "matrix_setup_repeated" not in finding
 
 
 def test_all_scan_incomplete_records_have_a_known_kind(tmp_path):
