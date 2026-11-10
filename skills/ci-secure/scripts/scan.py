@@ -2263,19 +2263,54 @@ _CMD_WRAPPERS = (
     "sudo", "command", "time", "nice", "ionice", "exec", "env",
     "xvfb-run", "nohup", "setsid", "stdbuf", "timeout", "retry",
 )
+# Every piece below has exactly ONE way to read any text. Earlier forms offered
+# two (a bare value that also matched quotes, `--a` as `-`+`-a` or `--`+`a`, an
+# option value that could also be the next wrapper word), and inside the outer
+# repeat a line of repeated `_="" ` made `search()` backtrack exponentially and
+# freeze the scan. Each exclusion below drops a parse that ANOTHER branch
+# reaches at the same position in the same state, so the set of matches, and
+# the order they are tried in, stays what it was; `test_cmd_prefix_redos.py`
+# pins the agreement with the old form and the linear time.
+#
+# A bare run that is exactly one quoted string (`""`, `'a'`) is left to the
+# quoted branch, which reads the same characters.
+_NOT_ONE_QUOTED_WORD = (
+    r"(?!\"[^\"\s;&|]*\"(?![^\s;&|]))(?!'[^'\s;&|]*'(?![^\s;&|]))"
+)
+_CMD_WRAPPER_ALT = "|".join(re.escape(w) for w in _CMD_WRAPPERS)
+# A wrapper option's value, minus the tokens the rest of the prefix already
+# reads from the same spot: a wrapper word (`sudo -x sudo …`), `export NAME=`,
+# and, unless more options or a numeric operand follow, an assignment
+# (`sudo -u A=1 npm ci`) or a numeric operand (`timeout -k 5 npm ci`).
+_WRAPPER_OPT_VALUE = (
+    r"(?!(?:" + _CMD_WRAPPER_ALT + r")[ \t])"
+    r"(?!export[ \t]+[A-Za-z_][A-Za-z0-9_]*=)"
+    r"(?!(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|\d[\w.]*)[ \t]+(?![ \t\d-]))"
+    r"[^-\s;&|][^\s;&|]*"
+)
 _CMD_PREFIX = (
     r"(?:"
-    r"(?:" + "|".join(re.escape(w) for w in _CMD_WRAPPERS) + r")"
+    r"(?:" + _CMD_WRAPPER_ALT + r")"
     # A wrapper option may carry its own VALUE (`sudo -u root`, `nice -n 10`).
     # The value is optional and cannot start with `-`, so `sudo -E npm ci`
-    # backtracks out of it rather than eating the manager.
-    r"(?:[ \t]+-{1,2}[\w-]*(?:[ \t]+[^-\s;&|][^\s;&|]*)?)*"
+    # backtracks out of it rather than eating the manager. `-[\w-]*` reads
+    # `-E` and `--preserve-env` alike.
+    r"(?:[ \t]+-[\w-]*(?:[ \t]+" + _WRAPPER_OPT_VALUE + r")?){0,16}"
     # …and a bare NUMERIC argument, for the wrappers whose first operand is a
     # duration or a count: `timeout 60 npm ci`, `retry 3 pnpm install`.
     r"(?:[ \t]+\d[\w.]*)?[ \t]+"
+    # An assignment value may be empty (`FOO= npm ci`).
     r"|(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*="
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s;&|]*)[ \t]+"
-    r")*"
+    r"(?:\"[^\"]*\"|'[^']*'|" + _NOT_ONE_QUOTED_WORD + r"[^\s;&|]*)[ \t]+"
+    # Bounded: no real command carries 64 prefixes or a wrapper 16 options, and
+    # the bound caps the work each command-position start can do on a hostile
+    # line, so the search over a whole run block stays linear.
+    r"){0,64}"
+)
+# A yarn option's value: `=` then any value, or a space then a value that is
+# not itself the next option (`yarn -a -b` reads `-b` as an option only).
+_YARN_OPT_VALUE = (
+    r"(?:\"[^\"]*\"|'[^']*'|" + _NOT_ONE_QUOTED_WORD + r"[^\s;&|]+)"
 )
 _INSTALL_CMD_RE = re.compile(
     _CMD_START + _CMD_PREFIX +
@@ -2284,7 +2319,9 @@ _INSTALL_CMD_RE = re.compile(
     r"|pnpm\s+(?:install|i)(?![\w-])"
     r"|yarn\s+install(?![\w-])"
     r"|yarn(?!\s+-{0,2}(?:version|help|[vV]|h)(?![\w-]))"
-    r"(?:\s+-[\w-]+(?:[= ](?:\"[^\"]*\"|'[^']*'|[^\s;&|]+))?)*\s*(?:$|[\n;&|])"
+    r"(?:\s+-[\w-]+(?:=" + _YARN_OPT_VALUE + r"|[ ]"
+    r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _YARN_OPT_VALUE + r")?){0,32}"
+    r"\s*(?:$|[\n;&|])"
     r")",
     re.MULTILINE,
 )
