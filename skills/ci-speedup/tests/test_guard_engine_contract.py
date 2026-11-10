@@ -86,6 +86,26 @@ jobs:
         "shards": ["checkout", "install", "build"]}
 
 
+def test_opt14_ignores_a_single_effective_shard_leg(tmp_path):
+    root = _repo(tmp_path, """on: pull_request
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [1]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --shard=${{ matrix.shard }}/1
+""")
+
+    findings = scan.scan(root, CATALOG)["findings"]
+
+    assert not [row for row in findings if row["pattern"] == "OPT14"]
+
+
 def test_opt14_counts_effective_shard_legs_after_include_and_exclude(tmp_path):
     root = _repo(tmp_path, """on: pull_request
 jobs:

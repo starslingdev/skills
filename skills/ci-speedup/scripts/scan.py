@@ -3642,7 +3642,7 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
                 _MATRIX_SETUP_BUILD_RE.search(_run(step)) and cond is None
                 for step, cond in conditioned_steps)
             shard_legs = _matrix_shard_leg_count(job)
-            if (shard_legs is not None and repeats_checkout
+            if (shard_legs is not None and shard_legs >= 2 and repeats_checkout
                     and (repeats_install or repeats_build)):
                 matrix_setup_legs[job_name] = shard_legs
                 repeated = ["checkout"]
