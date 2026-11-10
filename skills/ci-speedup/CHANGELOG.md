@@ -1286,6 +1286,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-10** — Keep path-filter findings visible when sampled pull-request file lists are incomplete, label their hit rate as unmeasured with the reason, and withhold numeric credit.
 - **2026-11-09** — Recognize Playwright's documented camel-case `shardIndex`/`shardTotal` matrix when those dimensions feed `--shard=`, and keep the path-partitioned monorepo fixture focused on package and runtime routing.
 
 - **2026-11-09** — Follow one Make target into Jest configuration and surface uncredited worker-cap, persisted-cache, and coverage-provider checks. Jest's default-enabled cache is no longer misreported as missing merely because `--cache` is absent.

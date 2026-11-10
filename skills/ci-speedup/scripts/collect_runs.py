@@ -6175,7 +6175,14 @@ def _measure_opt32_path_filters(
             changed[number] = _opt32_changed_files(client, repo, number)
     for finding in targets:
         numbers = numbers_by_workflow.get(str(finding.get("workflow_file") or ""), [])
-        if not numbers or any(changed[number] is None for number in numbers):
+        if not numbers:
+            continue
+        if any(changed[number] is None for number in numbers):
+            finding["path_filter_measurement"] = {
+                "status": "unmeasured",
+                "reason": "changed-file list unavailable or incomplete",
+                "sampled_prs": len(numbers),
+            }
             continue
         would_skip = 0
         for number in numbers:
@@ -6846,6 +6853,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         # do NOT substitute the long pole — we render qualitatively (omit rather
         # than fake), since we genuinely can't size the job's own cost.
         measurement = f.get("path_filter_measurement") if pat == "OPT32" else None
+        measurement_unavailable = (
+            isinstance(measurement, dict)
+            and measurement.get("status") == "unmeasured")
         rate = (measurement.get("hit_rate", 0.0)
                 if isinstance(measurement, dict) else cfg.get("hit_rate", 0.0))
         cost_basis = cfg.get("cost_basis")
@@ -6879,7 +6889,13 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f["wall_clock_p50_s"] = 0.0
         f["tier"] = 2
         f["realization"] = "none"
-        if unresolved and cost_basis == "affected_jobs":
+        if measurement_unavailable:
+            reason = str(measurement.get("reason") or "unknown reason")
+            f["runner_min_saving"] = None
+            f["size_note"] = (
+                "runner-minute (bill) only - hit rate not measured "
+                f"({reason})")
+        elif unresolved and cost_basis == "affected_jobs":
             f["runner_min_saving"] = None
             f["size_note"] = ("whole-run cancel runner-minutes not sized — none of "
                               "the affected jobs' durations could be resolved from "

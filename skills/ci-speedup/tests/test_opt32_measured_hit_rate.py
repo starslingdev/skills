@@ -148,6 +148,21 @@ def test_opt32_changed_files_fetch_rejects_the_api_ceiling_as_incomplete():
     assert client.changed_file_calls == cr._OPT32_CHANGED_FILES_MAX_PAGES
 
 
+def test_opt32_unmeasured_ceiling_stays_visible_through_collect_and_verifier(
+        monkeypatch, tmp_path):
+    paths = {n: [f"src/file{n}.py"] for n in range(1, 61)}
+    paths[1] = [f"docs/file-{i}.md" for i in range(3000)]
+
+    doc = _collect(monkeypatch, _PathFilterClient(paths))
+    finding = _opt32(doc)
+
+    assert finding.get("path_filter_measurement", {}).get("status") == "unmeasured"
+    assert finding["path_filter_measurement"]["sampled_prs"] == 60
+    report = _verify_full(doc, tmp_path)
+    assert "hit rate not measured (changed-file list unavailable or incomplete)" in report
+    assert "Add path filters" in report.split('<a id="also-noticed">', 1)[1]
+
+
 def test_opt32_unsupported_negative_glob_fails_closed():
     patterns = ["docs/**", "!docs/[ab]/**"]
 

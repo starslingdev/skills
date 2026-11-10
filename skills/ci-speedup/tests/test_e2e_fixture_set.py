@@ -477,7 +477,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
             "external-required-gate", "heavy-runner-queue", "minority-tail",
             "multiarch-image", "path-partitioned-monorepo", "pr-light-matrix", "vendored-libs",
             "vitest-isolated-serial", "cargo-double-compile", "per-test-startup",
-            "jest-make-hop", "sharded-floor"):
+            "jest-make-hop", "sharded-floor", "path-filter-unmeasured"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -517,6 +517,11 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "`ci.yml` holds its slowest job" not in reports["minority-tail"]
     assert "OPT25" not in {
         row.get("pattern") for row in docs["pr-light-matrix"]["findings"]}
+    unmeasured = next(
+        row for row in docs["path-filter-unmeasured"]["findings"]
+        if row.get("pattern") == "OPT32")
+    assert unmeasured["path_filter_measurement"]["status"] == "unmeasured"
+    assert "hit rate not measured" in reports["path-filter-unmeasured"]
     duplicate = next(
         row for row in docs["duplicate-gate-job"]["findings"]
         if row.get("pattern") == "OPT12"

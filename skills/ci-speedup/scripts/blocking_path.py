@@ -11787,6 +11787,8 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         if str(f.get("pattern") or "") == "OPT32":
             measurement = f.get("path_filter_measurement")
             if isinstance(measurement, dict):
+                if measurement.get("status") == "unmeasured":
+                    return False
                 sampled = measurement.get("sampled_prs")
                 skipped = measurement.get("would_skip_prs")
                 rate = measurement.get("hit_rate")
@@ -12010,6 +12012,14 @@ def _also_noticed_block(findings: list[dict[str, Any]],
                          "**wall-clock-negative** (build-once-then-fan-out adds a serial "
                          "gate), so it lengthens the merge wait. Treat it as a bill "
                          "saving, not a speed win.")
+        if pat == "OPT32":
+            unmeasured = next((m.get("path_filter_measurement") for m in ms
+                               if isinstance(m.get("path_filter_measurement"), dict)
+                               and m["path_filter_measurement"].get("status") == "unmeasured"),
+                              None)
+            if isinstance(unmeasured, dict):
+                reason = str(unmeasured.get("reason") or "unknown reason")
+                lines.append(f"**Measurement:** hit rate not measured ({reason}).")
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
