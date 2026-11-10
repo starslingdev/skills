@@ -27397,6 +27397,8 @@ def _magnitude_sample(
         return leaf.get("magnitude")
 
     parsed: dict[Any, float | None] = {}
+    replayed_ids: set[Any] = set()
+    replay_share = getattr(bp, "_test_result_replay_share", lambda _log: None)
     states: dict[Any, Any] = {}   # jid -> cache_state (only populated when state_fn set)
     units: dict[Any, Any] = {}    # jid -> the run's own magnitude unit (for unit consistency)
 
@@ -27410,6 +27412,11 @@ def _magnitude_sample(
             return parsed[jid]
         log = (repr_log if jid == repr_job.get("id")
                else _fetch_job_log(client, repo, j))
+        replay = replay_share(log)
+        if isinstance(replay, dict) and replay.get("replayed") is True:
+            parsed[jid] = None
+            replayed_ids.add(jid)
+            return None
         leaf = bp._parse_log(log, iso) if log else None
         v = _same_leaf_magnitude(leaf)
         parsed[jid] = v["value"] if v and v.get("value") is not None else None
@@ -27438,6 +27445,11 @@ def _magnitude_sample(
             for jid, log in _fetch_pool().map(
                     lambda j: (j.get("id"), _fetch_job_log(client, repo, j)),
                     chunk):
+                replay = replay_share(log)
+                if isinstance(replay, dict) and replay.get("replayed") is True:
+                    parsed[jid] = None
+                    replayed_ids.add(jid)
+                    continue
                 leaf = bp._parse_log(log, iso) if log else None
                 v = _same_leaf_magnitude(leaf)
                 parsed[jid] = v["value"] if v and v.get("value") is not None else None
@@ -27521,7 +27533,8 @@ def _magnitude_sample(
     if not values:
         return None
     return {"label": mag["label"], "unit": mag.get("unit", "%"),
-            "this_run": mag["value"], "escalated": escalated, "values": values}
+            "this_run": mag["value"], "escalated": escalated, "values": values,
+            "replayed_result_logs_excluded": len(replayed_ids)}
 
 
 def _job_is_fork(j: dict[str, Any], repo: str) -> bool:
@@ -28170,6 +28183,15 @@ def _persist_pole_logs(
         if not log:
             logger.warning("no log captured for pole job %r (id=%s) - fetch returned "
                            "empty; this pole will render without a drill-down", job, jid)
+            continue
+        replay = bp._test_result_replay_share(log)
+        if isinstance(replay, dict) and replay.get("replayed") is True:
+            p["replayed_test_results"] = {
+                "cached_lines": replay["cached_lines"],
+                "test_result_lines": replay["test_result_lines"],
+                "share": round(float(replay["share"]), 4),
+                "excluded_fetched_runs": 1,
+            }
             continue
         safe = _re.sub(r"[^A-Za-z0-9._-]+", "-", str(job))[:60].strip("-") or "job"
         fn = f"{safe}-{jid}.log"

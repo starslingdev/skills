@@ -1670,6 +1670,32 @@ def test_playwright_cause_asserts_no_unrendered_timeline_or_worker_pool_shape():
     assert "do not share a worker pool" not in lp
 
 
+def test_test_result_replay_share_marks_a_cached_majority():
+    log = "\n".join(
+        [f"ok example/pkg{i} (cached)" for i in range(144)]
+        + ["ok example/live 1.23s"])
+
+    replay = bp._test_result_replay_share(log)
+
+    assert replay == {
+        "cached_lines": 144,
+        "test_result_lines": 145,
+        "share": 144 / 145,
+        "replayed": True,
+    }
+
+
+def test_test_result_replay_share_leaves_uncached_results_unchanged():
+    log = "\n".join(f"ok example/pkg{i} 1.23s" for i in range(145))
+
+    replay = bp._test_result_replay_share(log)
+
+    assert replay["cached_lines"] == 0
+    assert replay["test_result_lines"] == 145
+    assert replay["share"] == 0.0
+    assert replay["replayed"] is False
+
+
 # A real Lint pole shape (generalized from a captured gap): a `bun run lint` step that
 # shells to a bare `$ eslint` with no `--cache`, followed by a whole-graph `knip` pass in
 # the same job. eslint prints no duration, so the finding is the missing-flag, not a wall.

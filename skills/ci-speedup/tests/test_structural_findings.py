@@ -415,6 +415,29 @@ def test_persist_pole_logs_picks_run_nearest_the_p50(tmp_path: Path):
     assert 2.0 not in [r["duration_s"] for r in entry["sample"]]
 
 
+def test_persist_pole_logs_marks_and_excludes_replayed_test_results(tmp_path: Path):
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return "\n".join(
+                [f"ok example/pkg{i} (cached)" for i in range(144)]
+                + ["ok example/live 2.1s"]
+            )
+
+    poles = [{"check": "test", "workflow_file": ".github/workflows/ci.yml",
+              "job": "test", "p50_s": 300.0}]
+    jobs = {".github/workflows/ci.yml": [[_job_inst("test", 333, 300)]]}
+
+    manifest = cr._persist_pole_logs(FakeClient(), "o/r", poles, jobs, tmp_path)
+
+    assert manifest == []
+    assert poles[0]["replayed_test_results"] == {
+        "cached_lines": 144,
+        "test_result_lines": 145,
+        "share": round(144 / 145, 4),
+        "excluded_fetched_runs": 1,
+    }
+
+
 def test_persist_pole_logs_picks_real_run_when_noops_are_the_majority(tmp_path: Path):
     # The hard case: a gated job (e.g. `changed-tests`) self-skips on MOST sampled
     # PRs, so no-op instances are the MAJORITY. Here the median is ITSELF a no-op, so
@@ -752,6 +775,36 @@ def test_persist_pole_logs_writes_cross_run_magnitude_sample(tmp_path: Path):
     # upper bound (not >=): the concurrent-batch prefetch must not over-fetch vs the old
     # sequential path — the probe is drilled (reused) + fastest + slowest = 3 distinct logs.
     assert sum("/logs" in c for c in client.calls) == 3
+
+
+def test_magnitude_sample_excludes_replayed_sibling_log():
+    replayed = "\n".join(
+        [f"ok example/pkg{i} (cached)" for i in range(144)]
+        + ["ok example/live 2.1s"]
+    )
+
+    class FakeBp:
+        _test_result_replay_share = staticmethod(bp._test_result_replay_share)
+
+        @staticmethod
+        def _parse_log(log: str, iso=None) -> dict:
+            return {"fix_key": "same", "magnitude": {
+                "label": "work", "unit": "s", "value": 10.0}}
+
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return replayed if "/jobs/2/" in endpoint else "ordinary result"
+
+    primary = _job_inst("test", 1, 300)
+    cached = _job_inst("test", 2, 310)
+    sample = cr._magnitude_sample(
+        FakeBp(), FakeClient(), "o/r", [(300.0, primary), (310.0, cached)],
+        primary, "ordinary result",
+    )
+
+    assert sample is not None
+    assert [v["value"] for v in sample["values"]] == [10.0]
+    assert sample["replayed_result_logs_excluded"] == 1
 
 
 def test_persist_pole_logs_escalates_sample_on_a_wide_spread(tmp_path: Path):
