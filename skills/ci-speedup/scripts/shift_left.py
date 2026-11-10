@@ -15,7 +15,9 @@ from typing import Any, Iterable
 from urllib.parse import quote
 
 BASELINE_RUNS = 20
-MIN_BASELINE = 5
+L2_MIN_BASELINE = 8
+L3_MIN_HISTORY = 15
+STEP_PRE_MIN = 8
 RELATIVE_THRESHOLD = 0.10
 STEP_HOLD = 3
 CREEP_WINDOW = 5
@@ -33,8 +35,18 @@ def _eligible(row: dict[str, Any]) -> bool:
             and float(value) >= 0)
 
 
-def _key(row: dict[str, Any]) -> tuple[str, str]:
-    return str(row.get("workflow", "")), str(row.get("job", ""))
+def _key(row: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(row.get("workflow_id", "")),
+        " ".join(str(row.get("job", "")).split()),
+        tuple(sorted(str(label) for label in row.get("runner_labels", []))),
+        tuple(str(step) for step in row.get("step_signature", [])),
+    )
+
+
+def _rename_key(row: dict[str, Any]) -> tuple[Any, ...]:
+    identity = _key(row)
+    return identity[0], identity[2], identity[3]
 
 
 def _stats(values: Iterable[float]) -> dict[str, float]:
@@ -42,7 +54,7 @@ def _stats(values: Iterable[float]) -> dict[str, float]:
     median = float(statistics.median(sample))
     mad = float(statistics.median(abs(value - median) for value in sample))
     sigma = 1.4826 * mad
-    noise = max(1.0, 0.05 * median, 3.0 * sigma)
+    noise = max(2.0, 3.0 * sigma)
     return {"median_s": round(median, 6), "mad_s": round(mad, 6),
             "robust_sigma_s": round(sigma, 6), "noise_band_s": round(noise, 6),
             "relative_threshold_s": round(median * 1.10, 6)}
@@ -58,57 +70,64 @@ def _observation(kind: str, row: dict[str, Any], **extra: Any) -> dict[str, Any]
 
 
 def analyze_l2(history: list[dict[str, Any]], current: list[dict[str, Any]], *,
-               baseline_runs: int = BASELINE_RUNS, min_history: int = MIN_BASELINE
+               baseline_runs: int = BASELINE_RUNS, min_history: int = L2_MIN_BASELINE
                ) -> dict[str, Any]:
     """Compare this PR's successful jobs with recent successful main jobs."""
     old = [row for row in history if _eligible(row)]
     new = [row for row in current if _eligible(row)]
-    by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
-    current_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
+    current_by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in old:
         by_key[_key(row)].append(row)
     for row in new:
         current_by_key[_key(row)].append(row)
     current_names: dict[str, set[str]] = defaultdict(set)
     old_names: dict[str, set[str]] = defaultdict(set)
-    for workflow, job in current_by_key:
-        current_names[workflow].add(job)
-    for workflow, job in by_key:
-        old_names[workflow].add(job)
+    for identity in current_by_key:
+        current_names[identity[0]].add(identity[1])
+    for identity in by_key:
+        old_names[identity[0]].add(identity[1])
 
     observations, jobs = [], []
     for key in sorted(current_by_key):
-        workflow, job = key
+        workflow_id, job, runner_labels, step_signature = key
         rows = current_by_key[key]
+        workflow = str(rows[-1].get("workflow", workflow_id))
         duration = float(statistics.median(row["duration_s"] for row in rows))
         baseline = by_key.get(key, [])[-baseline_runs:]
         if not baseline:
-            disappeared = sorted(old_names[workflow] - current_names[workflow])
+            disappeared = sorted(old_names[workflow_id] - current_names[workflow_id])
             plausible = []
             for previous in disappeared:
-                previous_rows = by_key[(workflow, previous)][-baseline_runs:]
+                previous_rows = [row for row in old
+                    if _rename_key(row) == (workflow_id, runner_labels, step_signature)
+                    and _key(row)[1] == previous][-baseline_runs:]
                 if len(previous_rows) < min_history:
                     continue
                 summary = _stats(row["duration_s"] for row in previous_rows)
-                if abs(duration - summary["median_s"]) <= max(
-                        summary["noise_band_s"], summary["median_s"] * 0.20):
-                    plausible.append((previous, summary, len(previous_rows)))
+                plausible.append((previous, summary, len(previous_rows)))
             if len(plausible) == 1:
                 previous, summary, count = plausible[0]
                 observations.append(_observation("renamed_job", rows[-1],
                     previous_job=previous, baseline_runs=count,
                     baseline_median_s=summary["median_s"]))
                 evidence, count = "renamed_job", count
-            else:
+            elif not plausible:
                 observations.append(_observation("new_job", rows[-1]))
                 evidence, count = "new_job", 0
-            jobs.append({"workflow": workflow, "job": job, "baseline_runs": count,
+            else:
+                observations.append(_observation("ambiguous_rename", rows[-1],
+                    candidates=sorted(previous for previous, _, _ in plausible)))
+                evidence, count = "ambiguous_rename", 0
+            jobs.append({"workflow": workflow, "workflow_id": workflow_id, "job": job,
+                         "runner_labels": list(runner_labels),
+                         "step_signature": list(step_signature), "baseline_runs": count,
                          "current_s": round(duration, 6), "evidence": evidence})
             continue
         if len(baseline) < min_history:
             observations.append(_observation("no_baseline", rows[-1],
                 available_runs=len(baseline), required_runs=min_history))
-            jobs.append({"workflow": workflow, "job": job,
+            jobs.append({"workflow": workflow, "workflow_id": workflow_id, "job": job,
                          "baseline_runs": len(baseline), "current_s": round(duration, 6),
                          "evidence": "no_baseline"})
             continue
@@ -116,7 +135,9 @@ def analyze_l2(history: list[dict[str, Any]], current: list[dict[str, Any]], *,
         delta = duration - summary["median_s"]
         slower = duration > summary["relative_threshold_s"] and delta > summary["noise_band_s"]
         evidence = "slowdown" if slower else "threshold_not_exceeded"
-        jobs.append({"workflow": workflow, "job": job, "baseline_runs": len(baseline),
+        jobs.append({"workflow": workflow, "workflow_id": workflow_id, "job": job,
+            "runner_labels": list(runner_labels), "step_signature": list(step_signature),
+            "baseline_runs": len(baseline),
             "baseline_median_s": summary["median_s"], "noise_band_s": summary["noise_band_s"],
             "current_s": round(duration, 6),
             "change_percent": round(100 * delta / summary["median_s"], 3)
@@ -158,11 +179,11 @@ def _step(rows: list[dict[str, Any]], baseline_runs: int, min_history: int):
 
 
 def _creep(rows: list[dict[str, Any]], min_history: int):
-    if len(rows) < max(CREEP_MIN_RUNS, min_history + CREEP_WINDOW):
+    if len(rows) < max(CREEP_MIN_RUNS, min_history):
         return None
-    anchor = _stats(row["duration_s"] for row in rows[:min_history])
+    anchor = _stats(row["duration_s"] for row in rows[:CREEP_WINDOW])
     qualifying = []
-    for end in range(min_history + CREEP_WINDOW - 1, len(rows)):
+    for end in range(CREEP_WINDOW * 2 - 1, len(rows)):
         rolling = float(statistics.median(
             row["duration_s"] for row in rows[end - CREEP_WINDOW + 1:end + 1]))
         if (rolling > anchor["relative_threshold_s"]
@@ -181,21 +202,30 @@ def _creep(rows: list[dict[str, Any]], min_history: int):
 
 
 def analyze_l3(history: list[dict[str, Any]], *, baseline_runs: int = BASELINE_RUNS,
-               min_history: int = MIN_BASELINE) -> dict[str, Any]:
+               min_history: int = L3_MIN_HISTORY) -> dict[str, Any]:
     """Find sustained abrupt shifts and gradual creep in successful main jobs."""
     eligible = [row for row in history if _eligible(row)]
-    by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    by_key: dict[tuple[Any, ...], list[dict[str, Any]]] = defaultdict(list)
     for row in eligible:
         by_key[_key(row)].append(row)
     observations, jobs = [], []
-    for (workflow, job), rows in sorted(by_key.items()):
+    if not eligible:
+        observations.append({"kind": "no_baseline", "workflow": "", "job": "",
+            "conclusion": "neutral", "available_runs": 0, "required_runs": min_history})
+        jobs.append({"workflow": "", "job": "", "history_runs": 0,
+                     "evidence": "no_baseline"})
+    for identity, rows in sorted(by_key.items()):
+        workflow_id, job, runner_labels, step_signature = identity
+        workflow = str(rows[-1].get("workflow", workflow_id))
         if len(rows) < min_history:
             observations.append(_observation("no_baseline", rows[-1],
                 available_runs=len(rows), required_runs=min_history))
-            jobs.append({"workflow": workflow, "job": job, "history_runs": len(rows),
+            jobs.append({"workflow": workflow, "workflow_id": workflow_id, "job": job,
+                         "runner_labels": list(runner_labels),
+                         "step_signature": list(step_signature), "history_runs": len(rows),
                          "evidence": "no_baseline"})
             continue
-        step = _step(rows, baseline_runs, min_history)
+        step = _step(rows, baseline_runs, STEP_PRE_MIN)
         if step:
             observations.append(_observation("step_change", step["row"],
                 attribution=_attribution(step["row"]),
@@ -216,7 +246,9 @@ def analyze_l3(history: list[dict[str, Any]], *, baseline_runs: int = BASELINE_R
                 evidence = "creep"
             else:
                 evidence = "no_sustained_shift_established"
-        jobs.append({"workflow": workflow, "job": job, "history_runs": len(rows),
+        jobs.append({"workflow": workflow, "workflow_id": workflow_id, "job": job,
+                     "runner_labels": list(runner_labels),
+                     "step_signature": list(step_signature), "history_runs": len(rows),
                      "evidence": evidence})
     return {"layer": "L3",
             "promise": "sustained history evidence; silence does not prove main stayed fast",
@@ -263,26 +295,38 @@ def _runs(doc: Any) -> list[dict[str, Any]]:
 def _job_records(run: dict[str, Any], jobs: Any) -> list[dict[str, Any]]:
     if not isinstance(jobs, list):
         raise CollectionError("jobs response is incomplete")
-    workflow = str(run.get("path") or run.get("workflow_id") or run.get("name") or "unknown")
+    workflow_id = str(run.get("workflow_id") or "")
+    workflow = str(run.get("path") or run.get("name") or workflow_id or "unknown")
     result = []
     for job in jobs:
         if not isinstance(job, dict):
             continue
         started, completed = _parse_time(job.get("started_at")), _parse_time(job.get("completed_at"))
-        result.append({"workflow": workflow, "job": str(job.get("name") or "unknown"),
+        raw_steps = job.get("steps") if isinstance(job.get("steps"), list) else []
+        step_signature = [" ".join(str(step.get("name", "")).split())
+                          for step in raw_steps if isinstance(step, dict)
+                          and not str(step.get("name", "")).casefold().startswith("post ")]
+        labels = job.get("labels") if isinstance(job.get("labels"), list) else []
+        result.append({"workflow": workflow, "workflow_id": workflow_id,
+            "job": str(job.get("name") or "unknown"),
+            "runner_labels": sorted(str(label) for label in labels),
+            "step_signature": step_signature,
             "duration_s": (completed - started).total_seconds() if started and completed else None,
             "status": job.get("status"), "conclusion": job.get("conclusion"),
             "sha": run.get("head_sha"), "run_id": run.get("id"),
-            "created_at": run.get("created_at"), "pr_number": None})
+            "created_at": run.get("created_at"), "event": run.get("event"),
+            "branch": run.get("head_branch"), "pr_number": None})
     return result
 
 
 def collect_history(repo: str, branch: str, *, pr_number: int | None,
                     max_runs: int, client: GhClient):
     main_doc = client.get(
-        f"repos/{repo}/actions/runs?branch={quote(branch, safe='')}&status=completed&per_page=100")
+        f"repos/{repo}/actions/runs?branch={quote(branch, safe='')}&event=push"
+        "&status=completed&per_page=100")
     main_runs = [row for row in _runs(main_doc)
-                 if row.get("status") == "completed" and row.get("conclusion") == "success"][:max_runs]
+                 if row.get("status") == "completed" and row.get("conclusion") == "success"
+                 and row.get("event") == "push" and row.get("head_branch") == branch][:max_runs]
     main_records = []
     for run in reversed(main_runs):
         doc = client.get(f"repos/{repo}/actions/runs/{run.get('id')}/jobs?filter=latest&per_page=100")
@@ -314,9 +358,18 @@ def _fill_attribution(repo: str, report: dict[str, Any], client: GhClient) -> No
             continue
         if sha not in cache:
             doc = client.get(f"repos/{repo}/commits/{sha}/pulls?per_page=10")
-            numbers = [row.get("number") for row in doc if isinstance(row, dict)] if isinstance(doc, list) else []
-            cache[sha] = next((number for number in numbers if isinstance(number, int)), None)
-        attribution["pr_number"] = cache[sha]
+            numbers = sorted({row.get("number") for row in doc
+                              if isinstance(row, dict) and row.get("merged_at")
+                              and isinstance(row.get("number"), int)}) if isinstance(doc, list) else []
+            cache[sha] = numbers
+        candidates = cache[sha]
+        attribution["candidates"] = candidates
+        if len(candidates) == 1:
+            attribution.update({"status": "unique", "pr_number": candidates[0]})
+        elif candidates:
+            attribution.update({"status": "ambiguous", "pr_number": None})
+        else:
+            attribution.update({"status": "unavailable", "pr_number": None})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -329,8 +382,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--timeout-seconds", type=int, default=15)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
-    if not MIN_BASELINE <= args.max_runs <= 50:
-        parser.error(f"--max-runs must be between {MIN_BASELINE} and 50")
+    if not L2_MIN_BASELINE <= args.max_runs <= 50:
+        parser.error(f"--max-runs must be between {L2_MIN_BASELINE} and 50")
     if not 1 <= args.api_budget <= 100:
         parser.error("--api-budget must be between 1 and 100")
     started = time.monotonic()
