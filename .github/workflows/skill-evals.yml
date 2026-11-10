@@ -36,17 +36,11 @@ on:
       - "skills/ci-secure/references/**"
       - "skills/ci-secure/scripts/**"
       - "skills/ci-secure/evals/**"
-      # ci-speedup's runnable evals.json entries. One workflow-level filter for both
-      # suites, so a change to either skill runs both (no classifier job by design).
-      - "skills/ci-speedup/SKILL.md"
-      - "skills/ci-speedup/references/**"
-      - "skills/ci-speedup/scripts/**"
-      - "skills/ci-speedup/evals/**"
-      # The session runs verify_report.py; the scaffold builds the fixture with the
-      # e2e test's helpers from its replay corpus.
-      - "skills/ci-speedup/tests/verify_report.py"
-      - "skills/ci-speedup/tests/test_offline_pipeline_e2e.py"
-      - "skills/ci-speedup/tests/fixtures/gh_replay/**"
+      # No ci-speedup paths: its suite runs only on schedule or dispatch, so a
+      # ci-speedup-only change would start nothing here but the ci-secure sessions.
+      # Dispatch this workflow on the branch before merging a ci-speedup SKILL.md,
+      # references or scripts change.
+      # The shared harness both suites run through:
       - "maintainers/scripts/run_skill_evals.py"
       - "maintainers/scripts/eval_gh_shim.py"
       - "maintainers/scripts/eval_reading.py"
@@ -72,7 +66,7 @@ on:
         default: "1"
         type: string
       tier:
-        description: "gate = the per-PR regression entries (what pull requests run); measure = only the measurement entries (ci-speedup's quality-review-opt81; ci-secure has none and reports NOT RUN); all = both"
+        description: "gate = the regression entries (what pull requests run for ci-secure, and the nightly run for both); measure = only the measurement entries (ci-speedup's quality-review-opt81; ci-secure has none and reports NOT RUN); all = both"
         required: false
         default: gate
         type: choice
@@ -80,7 +74,8 @@ on:
 
 # A superseded run is wasted tokens, not just wasted minutes.
 concurrency:
-  group: skill-evals-${{ github.ref }}
+  # Keyed on the event too, so a manual dispatch on main never cancels the nightly run.
+  group: skill-evals-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -155,7 +150,7 @@ jobs:
             echo "::error title=SKILL EVALS DID NOT RUN::runs=${RUNS} is not supported: the job timeout budgets one run per case. Nothing was verified; dispatch again for another run."
             exit 2
           fi
-          # Pull requests have no inputs: the gate tier, with no --all.
+          # Pull requests and scheduled runs have no inputs: the gate tier, with no --all.
           case "${TIER:-gate}" in
             gate) tier_args="" ;;
             measure) tier_args="--tier measure" ;;
@@ -240,7 +235,7 @@ jobs:
             echo "::error title=SKILL EVALS DID NOT RUN::runs=${RUNS} is not supported: the job timeout budgets one run per case. Nothing was verified; dispatch again for another run."
             exit 2
           fi
-          # Pull requests have no inputs: the gate tier, with no --all.
+          # Scheduled runs have no inputs: the gate tier, with no --all.
           case "${TIER:-gate}" in
             gate) tier_args="" ;;
             measure) tier_args="--tier measure" ;;

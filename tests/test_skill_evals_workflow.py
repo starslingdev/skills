@@ -1,7 +1,7 @@
 """The skill-evals gate cannot go green over a session that did not happen.
 
-This workflow runs ci-secure's behavioural evals on internal pull requests and keeps
-ci-speedup's longer agent suite available through manual dispatch. A green PR
+This workflow runs ci-secure's behavioural evals on internal pull requests, and both
+suites nightly and through manual dispatch. A green PR
 `skill evals` check means the PR-gated sessions ran and behaved; a green dispatch
 means both suites ran. Every way that decays is invisible in the check list: a fork PR that
 reports green having reached no API key, a verdict job that exits 0 on a skip, a
@@ -272,22 +272,49 @@ def test_the_workflow_asks_for_no_more_than_read_access():
     assert _doc()["permissions"] == {"contents": "read"}
 
 
+def _pr_paths() -> list:
+    doc = _doc()
+    return (doc.get("on") or doc[True])["pull_request"]["paths"]
+
+
 @pytest.mark.parametrize("rel", [
+    "skills/ci-secure/SKILL.md",
+    "skills/ci-secure/references/ci-gate.md",
+    "maintainers/scripts/run_skill_evals.py",
+    "maintainers/scripts/eval_reading.py",  # the runner imports it; a break is exit 2
+])
+def test_the_path_filter_covers_the_pr_gated_ci_secure_inputs(rel):
+    """Pull requests still run the ci-secure sessions when its contract or the
+    shared harness changes."""
+    from fnmatch import fnmatch
+    assert (_REPO / rel).is_file(), rel
+    assert any(fnmatch(rel, p) for p in _pr_paths()), f"{rel} matches no filter path"
+
+
+@pytest.mark.parametrize("rel", [
+    "skills/ci-speedup/SKILL.md",
+    "skills/ci-speedup/references/before-after-verification-spec.md",
+    "skills/ci-speedup/scripts/blocking_path.py",
     "skills/ci-speedup/tests/verify_report.py",
     "skills/ci-speedup/tests/test_offline_pipeline_e2e.py",
     "skills/ci-speedup/tests/fixtures/gh_replay/"
     "repos_synthetic_repo_branches_main_protection_required_status_checks.json",
-    "maintainers/scripts/eval_reading.py",  # the runner imports it; a break is exit 2
 ])
-def test_the_path_filter_covers_the_ci_speedup_eval_inputs(rel):
-    """The session runs verify_report.py, and the synthetic fixture is built by
-    the e2e test's helpers from tests/fixtures/gh_replay/. A PR touching only
-    those files must still run the sessions."""
+def test_a_ci_speedup_only_change_starts_no_pr_sessions(rel):
+    """The ci-speedup suite never runs on pull requests, so a ci-speedup-only
+    change must not start the workflow: its only PR job would be the ci-secure
+    sessions, spending tokens on a skill the change did not touch."""
     from fnmatch import fnmatch
     assert (_REPO / rel).is_file(), rel
-    doc = _doc()
-    paths = (doc.get("on") or doc[True])["pull_request"]["paths"]
-    assert any(fnmatch(rel, p) for p in paths), f"{rel} matches no filter path"
+    hits = [p for p in _pr_paths() if fnmatch(rel, p)]
+    assert not hits, f"{rel} starts PR sessions via {hits}"
+
+
+def test_a_dispatch_does_not_cancel_the_nightly_run():
+    """cancel-in-progress is per group: keyed on the ref alone, a manual dispatch
+    on main would cancel a running nightly (and the reverse), wasting its tokens."""
+    group = _doc()["concurrency"]["group"]
+    assert "github.event_name" in group, group
 
 
 @pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])
