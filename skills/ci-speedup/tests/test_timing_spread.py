@@ -134,6 +134,71 @@ def test_matrix_floor_separates_fixed_and_divided_work():
     assert bp._shard_floor_prompt_lines({"shard_floor": stamp}) == [f"- {sentence}"]
 
 
+def test_playwright_camel_case_shard_matrix_gets_a_floor_sentence():
+    jobs = [[_shard_job(150 + i, f"playwright ({i}, 4)")
+             for i in range(1, 5)]]
+    workflow = {"jobs": {"playwright": {
+        "strategy": {"matrix": {
+            "shardIndex": [1, 2, 3, 4], "shardTotal": [4],
+        }},
+        "steps": [{
+            "run": ("npx playwright test --shard="
+                    "${{ matrix.shardIndex }}/${{ matrix.shardTotal }}"),
+        }],
+    }}}
+
+    stamp = _shard_floor(
+        "playwright (1, 4)", workflow, jobs, logs_by_job_id={})
+
+    assert stamp is not None
+    assert stamp["n_shards"] == 4
+    assert "Each of the 4 shards pays" in bp._shard_floor_sentence(
+        {"shard_floor": stamp})
+
+
+def test_camel_case_shard_names_without_a_shard_step_stay_silent():
+    jobs = [[_shard_job(160 + i, f"playwright ({i}, 4)")
+             for i in range(1, 5)]]
+    workflow = {"jobs": {"playwright": {
+        "strategy": {"matrix": {
+            "shardIndex": [1, 2, 3, 4], "shardTotal": [4],
+        }},
+        "steps": [{"run": "npx playwright test"}],
+    }}}
+
+    assert _shard_floor(
+        "playwright (1, 4)", workflow, jobs, logs_by_job_id={}) is None
+
+
+def test_playwright_shard_argument_ignores_unrelated_matrix_references():
+    jobs = [[
+        _shard_job(170 + project_index * 10 + shard_index,
+                   f"playwright ({project}, {shard_index}, 4)")
+        for project_index, project in enumerate(("chromium", "firefox"))
+        for shard_index in range(1, 5)
+    ]]
+    workflow = {"jobs": {"playwright": {
+        "strategy": {"matrix": {
+            "project": ["chromium", "firefox"],
+            "shardIndex": [1, 2, 3, 4],
+            "shardTotal": [4],
+        }},
+        "steps": [{
+            "run": (
+                "echo project=${{ matrix.project }}\n"
+                "npx playwright test "
+                "--shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}"
+            ),
+        }],
+    }}}
+
+    stamp = _shard_floor(
+        "playwright (chromium, 1, 4)", workflow, jobs, logs_by_job_id={})
+
+    assert stamp is not None
+    assert stamp["n_shards"] == 4
+
+
 def test_in_step_collection_floor_is_removed_from_divided_work():
     jobs = [[_shard_job(200 + i, f"tests / test (pkg, {i})", test_s=215)
              for i in range(4)]]

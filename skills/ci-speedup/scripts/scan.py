@@ -36,6 +36,7 @@ import shlex
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -2543,6 +2544,9 @@ def _opt89_compile_signal(command: str) -> str | None:
                     elif not token.startswith("-") and "=" not in token:
                         targets.append(token.lower())
                 test_targets = {"test", "tests", "check", "checks", "ctest", "verify"}
+                if any(re.search(r"\$(?:\{|[A-Za-z_])|\$\{\{", target)
+                       for target in targets):
+                    continue
                 if targets and all(target in test_targets for target in targets):
                     continue
         if (re.search(r"\bcmake\b", low)
@@ -2566,6 +2570,83 @@ def _opt89_resolve_known_expressions(
         lambda match: matrix.get(match.group(1), match.group(0)),
         command,
     )
+
+
+def _opt89_resolve_known_env_expressions(
+        command: str, env: dict[str, str], matrix: dict[str, str]) -> str:
+    """Resolve GitHub expressions before a command reaches its shell."""
+    command = _opt89_resolve_known_expressions(command, matrix)
+    resolved_env = {
+        key: _opt89_resolve_known_expressions(str(value), matrix)
+        for key, value in env.items()
+    }
+    command = re.sub(
+        r"\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}",
+        lambda match: resolved_env.get(match.group(1), match.group(0)), command)
+    return _opt89_resolve_known_expressions(command, matrix)
+
+
+def _opt89_resolve_known_shell_env(command: str, env: dict[str, str]) -> str:
+    """Resolve declared shell variables while leaving unknown values opaque."""
+    command = re.sub(
+        r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        lambda match: env.get(match.group(1), match.group(0)), command)
+    return re.sub(
+        r"\$([A-Za-z_][A-Za-z0-9_]*)",
+        lambda match: env.get(match.group(1), match.group(0)), command)
+
+
+def _opt89_command_env(command: str, env: dict[str, str]) -> dict[str, str]:
+    """Apply literal shell and Docker environment overrides in command order."""
+    effective = dict(env)
+    assignment_re = re.compile(
+        r"(?:^|[;&|]\s*|\bexport\s+)"
+        r"([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|]+)\s*"
+        r"(?=;|&&|\|\||\n|$)",
+        re.MULTILINE,
+    )
+    docker_env_re = re.compile(
+        r"(?:--env(?:=|\s+)|-e(?:=|\s*)?)"
+        r"([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|]+)"
+    )
+    for pattern in (assignment_re, docker_env_re):
+        for match in pattern.finditer(command):
+            value = match.group(2)
+            if "$" in value:
+                effective.pop(match.group(1), None)
+            else:
+                effective[match.group(1)] = value.strip("'\"")
+    return effective
+
+
+def _opt89_resolve_known_env(
+        command: str, env: dict[str, str], matrix: dict[str, str]) -> str:
+    """Resolve declared target variables while leaving unrelated values opaque."""
+    resolved_env = {
+        key: _opt89_resolve_known_env_expressions(str(value), env, matrix)
+        for key, value in env.items()
+    }
+    command = _opt89_resolve_known_env_expressions(command, env, matrix)
+    return _opt89_resolve_known_shell_env(
+        command, _opt89_command_env(command, resolved_env))
+
+
+def _opt89_action_env(value: object, env: dict[str, str],
+                      matrix: dict[str, str]) -> dict[str, str]:
+    """Read the environment explicitly propagated to run-on-arch's container."""
+    if not isinstance(value, str):
+        return {}
+    try:
+        parsed = yaml.safe_load(value)
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {
+        str(key): _opt89_resolve_known_env_expressions(str(item), env, matrix)
+        for key, item in parsed.items()
+        if not isinstance(item, (dict, list))
+    }
 
 
 def _opt89_collapse_expressions(command: str) -> str:
@@ -2691,6 +2772,8 @@ def _opt89_foreign_container(job: dict, matrix: dict[str, str]) -> str | None:
 def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
     """Find compile commands executed in an emulated foreign container."""
     hits: list[Hit] = []
+    workflow_env = ({str(key): str(value) for key, value in doc["env"].items()}
+                    if isinstance(doc.get("env"), dict) else {})
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
@@ -2702,6 +2785,10 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
             container_arch = _opt89_foreign_container(job, matrix)
             action_occurrence = docker_occurrence = 0
             container_occurrences: dict[str, int] = {}
+            job_env = dict(workflow_env)
+            if isinstance(job.get("env"), dict):
+                job_env.update({str(key): str(value)
+                                for key, value in job["env"].items()})
             for step in _steps(job):
                 uses = _uses(step)
                 run = _run(step)
@@ -2731,12 +2818,20 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                 marker = ""
                 occurrence = 1
                 mechanism = ""
+                step_env = dict(job_env)
+                if isinstance(step.get("env"), dict):
+                    step_env.update({str(key): str(value)
+                                     for key, value in step["env"].items()})
                 if uses.startswith("uraimo/run-on-arch-action@") and isinstance(with_, dict):
                     arch = (_opt102_resolve(
                         with_.get("arch"), env={}, matrix=matrix, inputs={}, outputs={})
                         or "").lower()
-                    command = _opt89_resolve_known_expressions(
-                        str(with_.get("run") or ""), matrix)
+                    command = _opt89_resolve_known_env_expressions(
+                        str(with_.get("run") or ""), step_env, matrix)
+                    action_env = _opt89_action_env(
+                        with_.get("env"), step_env, matrix)
+                    command = _opt89_resolve_known_shell_env(
+                        command, _opt89_command_env(command, action_env))
                     marker = "uraimo/run-on-arch-action@"
                     occurrence = action_occurrence
                     mechanism = "run-on-arch action"
@@ -2749,13 +2844,13 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                           qemu_platforms, platform)):
                     arch = platform
                     command = _opt89_docker_payload(
-                        _opt89_resolve_known_expressions(run, matrix))
+                        _opt89_resolve_known_env(run, step_env, matrix))
                     marker = "docker run"
                     occurrence = docker_occurrence
                     mechanism = "QEMU-backed docker run"
                 elif container_arch and run:
                     arch = container_arch
-                    command = _opt89_resolve_known_expressions(run, matrix)
+                    command = _opt89_resolve_known_env(run, step_env, matrix)
                     marker = first_line
                     occurrence = container_occurrences[first_line]
                     mechanism = "foreign-architecture job container"
@@ -2986,11 +3081,193 @@ _OPT9_TOOLS: tuple[tuple[str, "re.Pattern[str]", "re.Pattern[str]"], ...] = (
      re.compile(r"--cache\b")),
     ("eslint", re.compile(r"(?:^|[\s/&;|])(?:npx |pnpm |yarn |bunx )?eslint\b"),
      re.compile(r"--cache\b")),
-    ("jest", re.compile(r"(?:^|[\s/&;|])(?:npx |pnpm |yarn |bunx )?jest\b"),
-     re.compile(r"--cache\b")),
     ("tsc", re.compile(r"(?:^|[\s/&;|])(?:npx |pnpm |yarn |bunx )?tsc\b"),
      re.compile(r"--incremental\b|--build\b|(?:^|\s)-b\b")),
 )
+
+_OPT9_JEST_COMMAND_RE = re.compile(
+    r"(?:^|[\n;&|])\s*@?(?:npx |pnpm(?:\s+exec)? |yarn |bunx )?jest\b", re.I)
+_OPT9_MAKE_TARGET_RE = re.compile(
+    r"(?:^|[\n;&|])\s*make\s+(?!-)([A-Za-z0-9_.-]+)(?=\s|$)", re.M)
+_OPT9_JEST_CONFIG_RE = re.compile(
+    r"^(?:jest\.config\.(?:js|cjs|mjs|ts|cts|mts)|jest\.config)$", re.I)
+
+
+def _opt9_make_recipe(base: Path, command: str) -> tuple[str, Path] | None:
+    """Resolve one literal ``make target`` to its local Makefile recipe."""
+    match = _OPT9_MAKE_TARGET_RE.search(command)
+    if match is None:
+        return None
+    path = base / "Makefile"
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    target = re.escape(match.group(1))
+    header = re.search(rf"(?m)^{target}\s*:[^\n]*\n", text)
+    if header is None:
+        return None
+    recipe: list[str] = []
+    for line in text[header.end():].splitlines():
+        if line.startswith("\t"):
+            recipe.append(line[1:])
+            continue
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        break
+    return ("\n".join(recipe), path.parent) if recipe else None
+
+
+def _opt9_resolved_cache_path(root: Path, base: Path, value: str,
+                              *, actions_path: bool) -> Path | None:
+    """Resolve one literal Jest/cache-action path without guessing expressions."""
+    raw = value.strip()
+    if actions_path:
+        raw = _normalized_actions_expression(raw)
+        workspace = "${{github.workspace}}"
+        if raw == workspace:
+            raw = str(root)
+        elif raw.startswith(workspace + "/"):
+            raw = str(root / raw[len(workspace) + 1:])
+    else:
+        raw = raw.replace("<rootDir>", str(base))
+    if (not raw or "${{" in raw or raw.startswith("~")
+            or "$" in raw or any(char in raw for char in "*?[]")):
+        return None
+    path = Path(raw)
+    try:
+        return (path if path.is_absolute() else
+                (root if actions_path else base) / path).resolve()
+    except OSError:
+        return None
+
+
+def _opt9_cache_action_paths(job: dict, step: dict) -> list[str]:
+    """Literal cache paths restored before ``step``; later/disabled steps do not help it."""
+    prior: list[dict] = []
+    for candidate in _steps(job):
+        if candidate is step:
+            break
+        condition_value = candidate.get("if")
+        condition = str(condition_value or "").strip().casefold()
+        if (condition_value is False
+                or condition in {"false", "${{ false }}", "${{false}}"}):
+            continue
+        uses = _uses(candidate)
+        if (re.search(r"(?:^|/)cache/save@", uses, re.I) is None
+                and _CACHE_ACTION_RE.search(uses)):
+            prior.append(candidate)
+    paths: list[str] = []
+    for cache_step in prior:
+        values = (cache_step.get("with")
+                  if isinstance(cache_step.get("with"), dict) else {})
+        paths.extend(str(values.get("path") or "").splitlines())
+    return [path.strip() for path in paths if path.strip()]
+
+
+def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
+    root = Path(_OPT102_ROOT or ".").resolve()
+    working = _script_working_directory(job, step, doc)
+    base = (root / working).resolve()
+    try:
+        base.relative_to(root)
+    except (OSError, ValueError):
+        return []
+    command = _run(step)
+    recipe = _opt9_make_recipe(base, command)
+    expanded = recipe[0] if recipe is not None else command
+    base = recipe[1] if recipe is not None else base
+    if not _OPT9_JEST_COMMAND_RE.search(expanded):
+        return []
+    cd = re.search(r"(?:^|[;&|])\s*cd\s+([^\s;&|]+)\s*&&", expanded)
+    if cd is not None:
+        candidate = (base / cd.group(1).strip("'\"")).resolve()
+        try:
+            if os.path.commonpath([str(root), str(candidate)]) == str(root):
+                base = candidate
+            else:
+                return []
+        except ValueError:
+            return []
+    paths, truncated, _manifests = _vitest_config_files(
+        root, lambda name: bool(_OPT9_JEST_CONFIG_RE.match(name)))
+    config: Path | None = None
+    cursor = base
+    while True:
+        here = [path for path in paths if path.parent == cursor]
+        if len(here) > 1:
+            return []
+        if here:
+            config = here[0]
+            break
+        if cursor == root:
+            break
+        parent = cursor.parent
+        try:
+            parent.relative_to(root)
+        except (OSError, ValueError):
+            break
+        if parent == cursor:
+            break
+        cursor = parent
+    if truncated or config is None:
+        return []
+    try:
+        text = _read_config_text(config)
+    except OSError:
+        return []
+    if text is None:
+        return []
+    text = _tal_strip_js_comments(text)
+    notes: list[str] = []
+    max_workers = re.search(
+        r"\bmaxWorkers\s*:\s*(['\"]?)(\d+(?:\.\d+)?)(%)?\1", text)
+    if max_workers is not None and (
+            max_workers.group(3) == "%" and float(max_workers.group(2)) < 100
+            or max_workers.group(3) is None):
+        notes.append(
+            f"Jest maxWorkers is {max_workers.group(2)}{max_workers.group(3) or ''}; "
+            "OPT88 says to measure this CPU-bound worker cap on the actual runner "
+            "before changing it, with no saving credited")
+    provider = re.search(
+        r"\bcoverageProvider\s*:\s*(['\"])(v8|babel)\1", text, re.I)
+    if provider is not None:
+        notes.append(
+            f"Jest coverage provider is `{provider.group(2).lower()}`; compare providers "
+            "on the same commit, re-baseline thresholds, and verify the consumer; "
+            "no provider-switch saving is credited without matched measurements")
+    cache_dir = re.search(
+        r"\bcacheDirectory\s*:\s*(['\"])([^'\"]+)\1", text)
+    configured = cache_dir.group(2) if cache_dir is not None else "<Jest default cache>"
+    disabled = bool(
+        re.search(r"(?:^|[\s;&|])--no-cache\b|--cache(?:=|\s+)false\b", expanded, re.I)
+        or re.search(r"\bcache\s*:\s*false\b", text, re.I)
+    )
+    root_dir = re.search(r"\brootDir\s*:\s*(['\"])([^'\"]+)\1", text)
+    config_root = (_opt9_resolved_cache_path(
+        root, config.parent, root_dir.group(2), actions_path=False)
+        if root_dir is not None else config.parent)
+    expected = (_opt9_resolved_cache_path(root, config_root or config.parent, configured,
+                                          actions_path=False)
+                if cache_dir is not None else None)
+    cached_paths = [
+        resolved
+        for path in _opt9_cache_action_paths(job, step)
+        if (resolved := _opt9_resolved_cache_path(
+            root, root, path, actions_path=True)) is not None
+    ]
+    persisted = bool(expected and any(
+        cached == expected or cached in expected.parents for cached in cached_paths))
+    if disabled:
+        notes.append(
+            "Jest result caching is disabled; remove `--no-cache`/`cache: false` "
+            "before persisting an explicit cacheDirectory")
+    elif not persisted:
+        notes.append(
+            f"Jest cache directory is not persisted across runners (`{configured}`); "
+            "keep Jest's default cache enabled and persist a small explicit cacheDirectory "
+            "with a rolling primary key and stable restore prefix")
+    return notes
 
 
 def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
@@ -3018,6 +3295,17 @@ def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
                                       f"cache flag (`{line.strip()[:80]}`)"),
                             match_text=f"{job_name}#{tool}",
                         ))
+            jest_notes = _opt9_jest_notes(doc, job, s)
+            if jest_notes and "jest" not in flagged:
+                flagged.add("jest")
+                hits.append(Hit(
+                    line=_line_of_in_job(raw, job_name, _run(s).splitlines()[0].strip()),
+                    affected_jobs=[job_name],
+                    evidence=f"job `{job_name}`: " + "; ".join(jest_notes),
+                    match_text=f"{job_name}#jest",
+                    facts={"jest_static_notes": jest_notes,
+                           "static_cache_lint": True},
+                ))
     return hits
 
 
@@ -3587,6 +3875,7 @@ def _detect_opt21(doc: dict, raw: str) -> list[Hit]:
                           f"artifact from them — verify the dependency isn't a "
                           f"required gate before removing"),
                 match_text=job_name,
+                facts={"opt21_needs": [str(need) for need in needs]},
             ))
     return hits
 
@@ -3869,6 +4158,34 @@ def _cache_paths(steps: list[dict]) -> list[str]:
     return [path.strip().casefold() for path in paths if path.strip()]
 
 
+def _cache_saved_keys(docs: Iterable[dict]) -> list[str]:
+    """Normalized key families that repository cache steps can save."""
+    keys: list[str] = []
+    for doc in docs:
+        for job in _jobs_from_doc(doc).values():
+            if not isinstance(job, dict):
+                continue
+            for step in _cache_action_steps(job):
+                uses = _uses(step)
+                if re.search(r"(?:^|/)cache/restore@", uses, re.IGNORECASE):
+                    continue
+                values = step.get("with") if isinstance(step.get("with"), dict) else {}
+                key = str(values.get("key") or "").strip()
+                if key:
+                    keys.append(_normalized_actions_expression(key))
+    return keys
+
+
+def _job_env_blob(job: dict, doc: dict | None = None) -> str:
+    envs = [doc.get("env") if isinstance(doc, dict) else None,
+            job.get("env"), *(step.get("env") for step in _steps(job))]
+    return "\n".join(
+        f"{key}={value}"
+        for env in envs if isinstance(env, dict)
+        for key, value in env.items()
+    )
+
+
 def _size_mib(value: str) -> float | None:
     match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*([kmgt])(?:i?b)?\s*", value,
                          re.IGNORECASE)
@@ -3888,8 +4205,9 @@ def _normalized_actions_expression(value: str) -> str:
     )
 
 
-def _compiler_cache_has_remote_backend(job: dict) -> bool:
-    envs = [job.get("env")] + [step.get("env") for step in _steps(job)]
+def _compiler_cache_has_remote_backend(job: dict, doc: dict | None = None) -> bool:
+    envs = [doc.get("env") if isinstance(doc, dict) else None,
+            job.get("env"), *(step.get("env") for step in _steps(job))]
     names = "\n".join(
         str(key) for env in envs if isinstance(env, dict) for key in env
     )
@@ -3897,25 +4215,112 @@ def _compiler_cache_has_remote_backend(job: dict) -> bool:
                 or _REMOTE_COMPILER_CACHE_RE.search(_job_run_blob(job)))
 
 
-def _buildkit_cache_blob(job: dict) -> str:
-    """BuildKit cache flags from shell commands and build-push-action inputs."""
-    parts = [_job_run_blob(job)]
+def _buildkit_cache_invocations(job: dict) -> list[str]:
+    """BuildKit cache flags grouped by the build invocation that consumes them."""
+    invocations: list[str] = []
     for step in _steps(job):
+        run = _run(step).strip()
+        if run:
+            invocations.append(run)
         if not re.search(r"(?:^|/)build-push-action@", _uses(step), re.I):
             continue
         values = step.get("with") if isinstance(step.get("with"), dict) else {}
+        parts: list[str] = []
         for key in ("cache-from", "cache-to"):
             value = values.get(key)
             if value is not None:
                 parts.extend(f"{key} {line.strip()}" for line in str(value).splitlines()
                              if line.strip())
-    return "\n".join(parts)
+        if parts:
+            invocations.append("\n".join(parts))
+    return invocations
 
 
-def _buildkit_cache_round_trip(job: dict) -> bool:
-    blob = _buildkit_cache_blob(job)
-    return bool(re.search(r"(?:--)?cache-from\b", blob, re.I)
-                and re.search(r"(?:--)?cache-to\b", blob, re.I))
+def _normalized_cache_path(value: object) -> str | None:
+    """A comparable literal cache path, or None for a dynamic/ambiguous value."""
+    path = _normalized_actions_expression(str(value).strip()).replace("\\", "/")
+    if not path or any(char in path for char in "*?[]"):
+        return None
+    while "//" in path:
+        path = path.replace("//", "/")
+    return path.rstrip("/").casefold() or "/"
+
+
+def _cache_path_covers(saved: object, source: object) -> bool:
+    saved_path = _normalized_cache_path(saved)
+    source_path = _normalized_cache_path(source)
+    return bool(saved_path and source_path
+                and (source_path == saved_path or source_path.startswith(saved_path + "/")))
+
+
+def _docker_cache_mount_targets(docker_text: str) -> set[str]:
+    targets: set[str] = set()
+    for match in re.finditer(r"--mount\s*=\s*([^\s\\]+)", docker_text, re.IGNORECASE):
+        options = match.group(1)
+        if not re.search(r"(?:^|,)type=cache(?:,|$)", options, re.IGNORECASE):
+            continue
+        target = re.search(r"(?:^|,)(?:target|dst|destination)=([^,]+)", options,
+                           re.IGNORECASE)
+        if target is not None:
+            normalized = _normalized_cache_path(target.group(1))
+            if normalized:
+                targets.add(normalized)
+    return targets
+
+
+def _literal_truthy(value: object) -> bool:
+    return isinstance(value, bool) and value or (
+        isinstance(value, str) and value.strip().casefold() in {"true", "yes", "on", "1"})
+
+
+def _buildkit_mount_persisted(
+    job: dict, root: Path, dockerfile: Path, mount_targets: set[str],
+) -> bool:
+    """Whether cache-dance persists each Dockerfile mount between hosted runs."""
+    saved_paths = _cache_paths(_cache_action_steps(job))
+    if not saved_paths or not mount_targets:
+        return False
+    for step in _steps(job):
+        if not re.search(r"(?:^|/)buildkit-cache-dance@", _uses(step), re.IGNORECASE):
+            continue
+        values = step.get("with") if isinstance(step.get("with"), dict) else {}
+        if _literal_truthy(values.get("skip-extraction")):
+            continue
+        cache_map = values.get("cache-map")
+        if cache_map is not None and str(cache_map).strip():
+            try:
+                mapping = yaml.safe_load(str(cache_map))
+            except yaml.YAMLError:
+                continue
+            if not isinstance(mapping, dict):
+                continue
+            persisted_targets: set[str] = set()
+            for source, destination in mapping.items():
+                if isinstance(destination, dict):
+                    destination = (destination.get("target") or destination.get("dst")
+                                   or destination.get("destination"))
+                target = _normalized_cache_path(destination)
+                if target in mount_targets and any(
+                        _cache_path_covers(saved, source) for saved in saved_paths):
+                    persisted_targets.add(target)
+            if mount_targets <= persisted_targets:
+                return True
+            continue
+
+        configured = str(values.get("dockerfile") or "Dockerfile").strip()
+        if "${{" in configured:
+            continue
+        configured_path = (root / configured).resolve()
+        if configured_path != dockerfile.resolve():
+            continue
+        cache_dir = str(values.get("cache-dir") or "").strip()
+        if cache_dir and any(_cache_path_covers(saved, cache_dir) for saved in saved_paths):
+            return True
+        if not cache_dir and all(
+                any(_cache_path_covers(saved, target) for saved in saved_paths)
+                for target in mount_targets):
+            return True
+    return False
 
 
 def _uses_persistent_remote_builder(job: dict) -> bool:
@@ -3929,15 +4334,19 @@ def _uses_persistent_remote_builder(job: dict) -> bool:
     return False
 
 
-def _detect_opt61(doc: dict, raw: str) -> list[Hit]:
+def _detect_opt61(
+    doc: dict, raw: str, *, saved_keys: list[str] | None = None,
+) -> list[Hit]:
     """Find cache declarations whose own workflow shape prevents useful reuse."""
     hits: list[Hit] = []
+    if saved_keys is None:
+        saved_keys = _cache_saved_keys([doc])
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
         cache_steps = _cache_action_steps(job)
         cache_paths = _cache_paths(cache_steps)
-        blob = _job_run_blob(job)
+        blob = "\n".join((_job_run_blob(job), _job_env_blob(job, doc)))
         reasons: list[tuple[str, str]] = []
 
         for step in cache_steps:
@@ -3945,11 +4354,10 @@ def _detect_opt61(doc: dict, raw: str) -> list[Hit]:
             key = str(values.get("key") or "").strip()
             restore = [line.strip() for line in
                        str(values.get("restore-keys") or "").splitlines() if line.strip()]
-            normalized_key = _normalized_actions_expression(key)
             rolling_key = re.search(r"github\.(?:sha|run_id|run_number)", key, re.I)
             if key and restore and rolling_key and not any(
-                    normalized_key.startswith(_normalized_actions_expression(prefix))
-                    for prefix in restore):
+                    saved_key.startswith(_normalized_actions_expression(prefix))
+                    for prefix in restore for saved_key in saved_keys):
                 reasons.append(("restore-keys", "none of its `restore-keys` can restore the "
                                 "rolling saved-key family on a later edit"))
             size = values.get("max-size") or values.get("max_size")
@@ -3970,23 +4378,60 @@ def _detect_opt61(doc: dict, raw: str) -> list[Hit]:
 
         temp = _TEMP_CACHE_RE.search(blob)
         cache_path_text = "\n".join(cache_paths)
-        if temp and not any(token in cache_path_text for token in
-                            ("ccache", "sccache", "staticcheck", "golangci")):
+        declared_dirs = [
+            (str(name).casefold(), str(value).strip())
+            for env in [doc.get("env"), job.get("env"),
+                        *(step.get("env") for step in _steps(job))]
+            if isinstance(env, dict)
+            for name, value in env.items()
+            if str(name).casefold() in {
+                "ccache_dir", "sccache_dir", "staticcheck_cache", "golangci_lint_cache",
+            } and str(value).strip()
+        ]
+        declared_dirs.extend(
+            (match.group(1).casefold(), match.group(2))
+            for match in re.finditer(
+                r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
+                r"\s*=\s*([^\s;&]+)", _job_run_blob(job), re.IGNORECASE)
+        )
+        declared_compiler_dirs = [
+            value for name, value in declared_dirs
+            if name in {"ccache_dir", "sccache_dir"}
+        ]
+        declared_analysis_dirs = [
+            value for name, value in declared_dirs
+            if name in {"staticcheck_cache", "golangci_lint_cache"}
+        ]
+
+        def persisted_dirs(directories: list[str]) -> bool:
+            return bool(directories) and all(
+                any(_cache_path_covers(path, directory) for path in cache_paths)
+                for directory in directories
+            )
+
+        persisted_declared = persisted_dirs([value for _name, value in declared_dirs])
+        if temp and not (persisted_declared or any(
+                _cache_path_covers(path, temp.group(0).split("=", 1)[-1])
+                for path in cache_paths)):
             reasons.append((temp.group(0),
                             "a compiler or analysis cache lives in temporary storage and is not saved"))
         uses_compiler_cache = bool(_COMPILER_CACHE_RE.search(blob))
         supplied_by_cache_action = any(
             re.search(r"ccache-action|rust-cache", _uses(step), re.IGNORECASE)
             for step in cache_steps)
-        persisted_compiler = any(token in cache_path_text
-                                 for token in ("ccache", "sccache", "target"))
+        persisted_compiler = (persisted_dirs(declared_compiler_dirs)
+                                if declared_compiler_dirs else any(
+            token in cache_path_text for token in ("ccache", "sccache", "target")))
         if (uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler
                 and not _is_self_hosted(job)
-                and not _compiler_cache_has_remote_backend(job)):
+                and not _compiler_cache_has_remote_backend(job, doc)):
             reasons.append((_COMPILER_CACHE_RE.search(blob).group(0),
                             "the compiler cache has no persistence step"))
-        if _ANALYSIS_CACHE_RE.search(blob) and not any(
-                token in cache_path_text for token in ("staticcheck", "golangci")):
+        persisted_analysis = (persisted_dirs(declared_analysis_dirs)
+                               if declared_analysis_dirs else any(
+                                   token in cache_path_text
+                                   for token in ("staticcheck", "golangci")))
+        if _ANALYSIS_CACHE_RE.search(blob) and not persisted_analysis:
             reasons.append((_ANALYSIS_CACHE_RE.search(blob).group(0),
                             "the analysis cache has no persistence step"))
         steps = _steps(job)
@@ -4029,26 +4474,29 @@ def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
     """Find BuildKit cache exports whose scope or local rotation defeats reuse."""
     hits: list[Hit] = []
     volatile = re.compile(
-        r"type=gha[^\n]*(?:scope=\$\{\{\s*github\.(?:sha|run_id|run_number)\s*\}\})",
+        r"type=gha[^\n]*(?:scope=[^\s,]*\$\{\{\s*github\."
+        r"(?:sha|run_id|run_number)\s*\}\})",
         re.IGNORECASE)
-    local_from = re.compile(r"--cache-from\s+type=local,src=([^\s,]+)", re.IGNORECASE)
-    local_to = re.compile(r"--cache-to\s+type=local,dest=([^\s,]+)([^\n]*)", re.IGNORECASE)
+    local_from = re.compile(
+        r"(?:--)?cache-from\s+type=local,src=([^\s,]+)", re.IGNORECASE)
+    local_to = re.compile(
+        r"(?:--)?cache-to\s+type=local,dest=([^\s,]+)([^\n]*)", re.IGNORECASE)
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
-        blob = _buildkit_cache_blob(job)
-        match = volatile.search(blob)
-        reason = ("a commit-scoped GHA cache cannot be restored by a later commit"
-                  if match is not None and "github.sha" in match.group(0)
-                  else "a run-scoped GHA cache cannot be restored by a fresh workflow invocation")
-        if match is None:
-            source, destination = local_from.search(blob), local_to.search(blob)
-            if (source and destination and source.group(1) == destination.group(1)
-                    and "mode=max" not in destination.group(2).casefold()):
-                match = destination
-                reason = ("the local cache exports over the directory it imports without "
-                          "a complete mode=max cache")
-        if match is not None:
+        for blob in _buildkit_cache_invocations(job):
+            match = volatile.search(blob)
+            reason = ("a commit-scoped GHA cache cannot be restored by a later commit"
+                      if match is not None and "github.sha" in match.group(0)
+                      else "a run-scoped GHA cache cannot be restored by a fresh workflow invocation")
+            if match is None:
+                source, destination = local_from.search(blob), local_to.search(blob)
+                if source and destination and source.group(1) == destination.group(1):
+                    match = destination
+                    reason = ("the local cache exports over the directory it imports without "
+                              "rotating to a fresh destination")
+            if match is None:
+                continue
             hits.append(Hit(
                 line=_line_of_in_job(raw, job_name, match.group(0).strip()),
                 affected_jobs=[job_name],
@@ -4058,6 +4506,7 @@ def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
                 match_text=match.group(0).strip(),
                 facts={"static_cache_lint": True},
             ))
+            break
     return hits
 
 
@@ -4071,8 +4520,6 @@ def _detect_opt4_ephemeral_mounts(
             if not isinstance(job, dict) or _is_self_hosted(job):
                 continue
             steps = _steps(job)
-            if _buildkit_cache_round_trip(job) or _uses_persistent_remote_builder(job):
-                continue
             dockerfile: Path | None = None
             matched = "RUN --mount=type=cache"
             for step in steps:
@@ -4091,7 +4538,11 @@ def _detect_opt4_ephemeral_mounts(
                 docker_text = dockerfile.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
-            if not re.search(r"(?im)^\s*RUN\s+--mount=type=cache\b", docker_text):
+            mount_targets = _docker_cache_mount_targets(docker_text)
+            if not mount_targets:
+                continue
+            if (_buildkit_mount_persisted(job, root, dockerfile, mount_targets)
+                    or _uses_persistent_remote_builder(job)):
                 continue
             out.append(("OPT4", rel, Hit(
                 line=_line_of_in_job(raw, job_name, "docker"),
@@ -8321,6 +8772,10 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         and e.pattern not in _NON_PERFILE_PATTERNS
     }
 
+    # A restore prefix can be seeded by a cache step in any workflow in the
+    # repository, so OPT61 needs one repository-wide saved-key index.
+    repo_cache_saved_keys = _cache_saved_keys(doc for _rel, doc, _raw in parsed)
+
     # --- Per-file pass ---
     for rel, doc, raw in parsed:
         basename = Path(rel).name
@@ -8331,7 +8786,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             # handled by a cross-workflow / repo pass or is genuinely
             # not-yet-implemented (already counted in unmatched_patterns above).
             fn = _DETECTORS.get(entry.pattern)
-            if fn is not None:
+            if entry.pattern == "OPT61":
+                hits = list(_detect_opt61(doc, raw, saved_keys=repo_cache_saved_keys))
+            elif fn is not None:
                 hits = list(fn(doc, raw))
             elif entry.match or entry.yaml_path:
                 if entry.wf_name_filter and not re.search(entry.wf_name_filter, basename):

@@ -250,7 +250,10 @@ def test_every_short_combination_agrees() -> None:
 def test_unpaired_quote_no_longer_counts_as_a_prefix() -> None:
     # The old bare class took the quote as one more character; the new one needs
     # the string to close. The shell rejects the unescaped forms.
-    for text in ("FOO=don\\'t make", "FOO=\"a make", "FOO=a'b make", "FOO=' make"):
+    # An odd number of escaped quotes inside a double-quoted value is the same
+    # case: the string closes early and leaves one quote unpaired.
+    for text in ("FOO=don\\'t make", "FOO=\"a make", "FOO=a'b make", "FOO=' make",
+                 "X=\"a\\\"b\" make"):
         for name, (old, new) in _PAIRS.items():
             assert old.search(text), (name, text)
             assert new.search(text) is None, (name, text)

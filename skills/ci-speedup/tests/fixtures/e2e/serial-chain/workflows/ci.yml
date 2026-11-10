@@ -2,12 +2,17 @@ name: CI
 on:
   pull_request:
 jobs:
-  build:
+  lint:
     runs-on: ubuntu-latest
     steps:
-      - run: make build
-  gate:
-    needs: build
+      - run: go run build/ci.go lint
+  test:
+    needs: lint
     runs-on: ubuntu-latest
     steps:
       - run: make test
+  t32:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test-32

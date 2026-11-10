@@ -1,6 +1,9 @@
 # Changelog
 
 - Match the shell prefixes before a build command (`KEY=value`, `env`, `sudo`, `time`) with disjoint regex branches in OPT89, OPT102 and the emulated-image drill, from one shared source in `shell_prefix.py`. The bare-value class no longer overlaps the quoted branches, both repeats are bounded, and a value with an unpaired quote no longer counts as a prefix. CodeQL flagged the three copies as `py/redos`, the same shape #257 fixed in `_STATUS_POST_RE`.
+- Recognize repository-seeded cache families and BuildKit cache-mount persistence, while flagging volatile scopes, in-place local exports, export-only mount caches, and compiler caches declared through job environments.
+- Show the median per-commit projection and the workflow holding the worst sampled commit beside PR-lane commit projections.
+- Treat Buildx inspect blocks with unusable node platforms as unconfirmed topology, keeping foreign-build guidance uncredited until every node is readable.
 - Break excessive queue wait down by runner label with per-run queue and work distributions, including censored jobs cancelled before pickup. Reports name a materially faster observed label without treating queue wait as evidence to reduce jobs or shards.
 - Detect the same checked-out Cargo crates being compiled in separate steps under the same observable artifact settings, report the second step's wall as an upper bound, and guide safe command consolidation without dropping package, feature, platform, or test coverage.
 - Fill a short pull-request gate sample from a bounded walk through recent run pages, and disclose whether the walk met its target, exhausted visible candidates, reached its page cap, crossed a workflow-configuration boundary, or encountered unreadable history.
@@ -1283,6 +1286,15 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-09** — Recognize Playwright's documented camel-case `shardIndex`/`shardTotal` matrix when those dimensions feed `--shard=`, and keep the path-partitioned monorepo fixture focused on package and runtime routing.
+
+- **2026-11-09** — Follow one Make target into Jest configuration and surface uncredited worker-cap, persisted-cache, and coverage-provider checks. Jest's default-enabled cache is no longer misreported as missing merely because `--cache` is absent.
+- **2026-11-09** — Size unnecessary dependency edges from the measured longest-path change instead of a flat estimate. Reports now disclose an upper bound on downstream compute exposed on sampled failure paths, exclude runs where the dependency job cannot be resolved, and keep Go script launchers from being mistaken for check-only gates.
+- **2026-11-10** — Stop crediting the generic redundant-work lever when a measured foreign-platform compile already explains the long pole. The specific compile drill remains, while the redundant-work row becomes uncredited and no longer recommends cache warming.
+- **2026-11-09** — Read pytest's real non-terminal `collected N items` line when measuring repeated invocation startup, and pair `-v -s` node IDs with later standalone outcomes when proving isolated tests run serially.
+- **2026-11-09** — Distinguish a selected Cargo package's newly compiled test harness from a repeated dependency compile. Package-scoped steps now report only shared local crates that compile again, and unscoped follow-up commands fail closed.
+- **2026-11-09** — Resolve workflow, job, step and explicitly propagated action environment values before classifying Make and Ninja targets inside emulated containers. Declared test targets and unresolved variable targets stay silent, while declared build targets remain detectable.
+- **2026-11-09** — Exclude matrix legs that skipped all work, or never ran their siblings' divided-work step, from shard-imbalance comparisons. Findings stamp how many no-work leg samples were excluded, and fewer than two working legs stay silent.
 - **2026-11-09** — Keep post-fix verification from rerunning default-branch workflows, compare cache-sensitive results with baseline facts from the same push lane, and label repeated attempts of one commit as no-change reruns.
 
 - **2026-11-09** — Match the `repos/<owner>/<repo>/statuses/` path in `_STATUS_POST_RE` with disjoint branches. The catch-all character class no longer overlaps the `${{ ... }}` branch, so a long run of `${{` fragments with no `/statuses/` fails in linear time instead of backtracking (CodeQL `py/redos`). Both repeats are bounded at 200 units, so a file of repeated `repos/` prefixes scans in linear time too. Every realistic call still matches at the same span; only a `${{` left open at `/statuses/`, which GitHub rejects anyway, or a path over 200 units, no longer counts.

@@ -258,6 +258,213 @@ jobs:
     assert "OPT9" not in _scan_one(tmp_path, neg)
 
 
+def _write_jest_make_project(tmp_path: Path, *, max_workers: str = '"50%"',
+                             provider: str = '"v8"', persist: bool = False,
+                             cache_path: str = "frontend/.cache/jest",
+                             cache_uses: str = "actions/cache@v4",
+                             cache_before: bool = True, cache_if: str = "",
+                             recipe: str = "cd frontend && npx jest --coverage",
+                             cache_directory: str = "'<rootDir>/.cache/jest'",
+                             extra_config: str = "") -> dict:
+    condition = f"\n        if: {cache_if}" if cache_if else ""
+    cache_step = f"""
+      - uses: {cache_uses}{condition}
+        with:
+          path: {cache_path}
+          key: jest-${{ github.sha }}
+          restore-keys: jest-
+""" if persist else ""
+    before = cache_step if cache_before else ""
+    after = cache_step if not cache_before else ""
+    workflow = f"""name: CI
+on: pull_request
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+{before}      - run: make test_frontend_ci
+{after}
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    (tmp_path / "Makefile").write_text(
+        f"test_frontend_ci:\n\t{recipe}\n")
+    frontend = tmp_path / "frontend"
+    frontend.mkdir(exist_ok=True)
+    (frontend / "package.json").write_text('{"scripts":{"test":"jest"}}')
+    (frontend / "jest.config.js").write_text(
+        "module.exports = {\n"
+        f"  {extra_config}\n"
+        f"  maxWorkers: {max_workers},\n"
+        f"  coverageProvider: {provider},\n"
+        f"  cacheDirectory: {cache_directory},\n"
+        "};\n")
+    return _scan(tmp_path)
+
+
+def test_opt9_follows_one_make_recipe_and_reads_jest_config(tmp_path: Path):
+    finding = _finding(_write_jest_make_project(tmp_path), "OPT9")
+    assert finding is not None
+    evidence = finding["evidence"]
+    assert "cache directory is not persisted" in evidence
+    assert "maxWorkers" in evidence and "OPT88" in evidence
+    assert "coverage provider" in evidence
+    assert "no provider-switch saving is credited" in evidence
+
+
+def test_opt9_jest_notes_have_independent_negative_controls(tmp_path: Path):
+    persisted = _finding(_write_jest_make_project(tmp_path, persist=True), "OPT9")
+    assert persisted is not None
+    assert "cache directory is not persisted" not in persisted["evidence"]
+
+    trailing_slash = _finding(
+        _write_jest_make_project(
+            tmp_path, persist=True, cache_path="frontend/.cache/jest/"),
+        "OPT9",
+    )
+    assert trailing_slash is not None
+    assert "cache directory is not persisted" not in trailing_slash["evidence"]
+
+    full_workers = _finding(
+        _write_jest_make_project(tmp_path, max_workers='"100%"'), "OPT9")
+    assert full_workers is not None
+    assert "OPT88" not in full_workers["evidence"]
+
+    no_provider = _finding(
+        _write_jest_make_project(tmp_path, provider='undefined'), "OPT9")
+    assert no_provider is not None
+    assert "coverage provider" not in no_provider["evidence"]
+
+
+def test_opt9_jest_cache_paths_are_ordered_and_compared_by_containment(tmp_path: Path):
+    parent = _finding(_write_jest_make_project(
+        tmp_path / "parent", persist=True, cache_path="frontend/.cache"), "OPT9")
+    assert parent is not None
+    assert "cache directory is not persisted" not in parent["evidence"]
+
+    workspace = _finding(_write_jest_make_project(
+        tmp_path / "workspace", persist=True,
+        cache_path="${{ github.workspace }}/frontend/.cache/jest"), "OPT9")
+    assert workspace is not None
+    assert "cache directory is not persisted" not in workspace["evidence"]
+
+    for name, options in (
+        ("unrelated", {"cache_path": "backup/frontend/.cache/jest"}),
+        ("late", {"cache_before": False}),
+        ("save-only", {"cache_uses": "actions/cache/save@v4"}),
+        ("disabled-step", {"cache_if": "false"}),
+    ):
+        finding = _finding(_write_jest_make_project(
+            tmp_path / name, persist=True, **options), "OPT9")
+        assert finding is not None
+        assert "cache directory is not persisted" in finding["evidence"], name
+
+
+def test_opt9_jest_disabled_comments_provider_and_root_dir(tmp_path: Path):
+    for name, options in (
+        ("cli-off", {"recipe": "cd frontend && npx jest --no-cache",
+                     "persist": True, "max_workers": "undefined",
+                     "provider": "undefined"}),
+        ("config-off", {"extra_config": "cache: false,", "persist": True,
+                        "max_workers": "undefined", "provider": "undefined"}),
+    ):
+        finding = _finding(_write_jest_make_project(tmp_path / name, **options), "OPT9")
+        assert finding is not None
+        assert "result caching is disabled" in finding["evidence"]
+
+    babel = _finding(_write_jest_make_project(
+        tmp_path / "babel", provider='"babel"'), "OPT9")
+    assert babel is not None and "coverage provider is `babel`" in babel["evidence"]
+
+    comments = _finding(_write_jest_make_project(
+        tmp_path / "comments", persist=True, max_workers="undefined",
+        provider="undefined", extra_config="// maxWorkers: 2,"), "OPT9")
+    assert comments is None
+
+    rooted = _finding(_write_jest_make_project(
+        tmp_path / "rooted", persist=True, max_workers="undefined",
+        provider="undefined", extra_config="rootDir: 'src',"), "OPT9")
+    assert rooted is not None
+    assert "cache directory is not persisted" in rooted["evidence"]
+
+    outside = _finding(_write_jest_make_project(
+        tmp_path / "outside", persist=True, cache_path="/tmp/jest-review-cache",
+        cache_directory="'/tmp/jest-review-cache'", max_workers="undefined",
+        provider="undefined"), "OPT9")
+    assert outside is None
+
+
+def test_opt9_jest_uses_effective_working_directory_and_nearest_config(tmp_path: Path):
+    project = tmp_path / "working"
+    frontend = project / "frontend"
+    frontend.mkdir(parents=True)
+    _write_workflow(project, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - run: make test
+""")
+    (frontend / "Makefile").write_text("test:\n\tnpx jest\n")
+    (frontend / "jest.config.js").write_text(
+        "module.exports = { maxWorkers: '50%' };\n")
+    finding = _finding(_scan(project), "OPT9")
+    assert finding is not None and "OPT88" in finding["evidence"]
+
+    nested = tmp_path / "nested"
+    (nested / "frontend").mkdir(parents=True)
+    _write_workflow(nested, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx jest
+""")
+    (nested / "frontend/jest.config.js").write_text(
+        "module.exports = { maxWorkers: '50%' };\n")
+    assert _finding(_scan(nested), "OPT9") is None
+
+    parent = tmp_path / "parent-config"
+    (parent / "frontend/tests").mkdir(parents=True)
+    _write_workflow(parent, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx jest
+        working-directory: frontend/tests
+""")
+    (parent / "frontend/jest.config.js").write_text(
+        "module.exports = { maxWorkers: '50%' };\n")
+    finding = _finding(_scan(parent), "OPT9")
+    assert finding is not None and "OPT88" in finding["evidence"]
+
+    echoed = tmp_path / "echoed"
+    (echoed / "frontend").mkdir(parents=True)
+    _write_workflow(echoed, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+""")
+    (echoed / "Makefile").write_text("test:\n\t@echo 'npx jest'\n")
+    (echoed / "jest.config.js").write_text(
+        "module.exports = { maxWorkers: '50%' };\n")
+    assert _finding(_scan(echoed), "OPT9") is None
+
+    outside_cd = _finding(_write_jest_make_project(
+        tmp_path / "outside-cd", recipe="cd ../outside && npx jest"), "OPT9")
+    assert outside_cd is None
+
+
 def test_opt14_repeated_setup_no_artifact(tmp_path: Path):
     pos = """name: CI
 on: push
@@ -542,6 +749,29 @@ _OPT21_LINT_GATE = """  lint:
       - run: npm ci
       - run: npm run lint
 """
+
+
+@pytest.mark.parametrize(("command", "flagged"), [
+    ("go run build/ci.go lint", True),
+    ("go run ./cmd/server", True),
+    ("golangci-lint run", False),
+])
+def test_opt21_go_run_is_not_a_check_gate_but_golangci_lint_is(
+        tmp_path: Path, command: str, flagged: bool) -> None:
+    content = f"""name: CI
+on: pull_request
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: {command}
+  test:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    assert ("test" in _opt21_jobs(tmp_path, content)) is flagged
 
 
 @pytest.mark.parametrize("dep_job", [
