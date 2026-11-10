@@ -290,11 +290,13 @@ def multiset_delta(base: list[dict[str, Any]], merge: list[dict[str, Any]],
     return new, resolved, existing
 
 
-def pair_aggregate_scopes(base: list[dict[str, Any]], merge: list[dict[str, Any]]):
+def pair_aggregate_scopes(
+        base: list[dict[str, Any]], merge: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
     """Pair repeated aggregate findings by exact jobs, then greatest overlap."""
     remaining_base = list(base)
     remaining_merge = list(merge)
-    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    pairs: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
 
     for current in list(remaining_merge):
         jobs = set(current.get("affected_jobs", []))
@@ -318,6 +320,7 @@ def pair_aggregate_scopes(base: list[dict[str, Any]], merge: list[dict[str, Any]
         pairs.append((current, old))
         remaining_merge.remove(current)
         remaining_base.remove(old)
+    pairs.extend((current, None) for current in remaining_merge)
     return pairs
 
 
@@ -528,9 +531,13 @@ def main(argv: list[str] | None = None) -> int:
                 merge_aggregates[finding_key(f, mapping, non_perfile)].append(f)
         for key, current_findings in merge_aggregates.items():
             old_findings = base_aggregates.get(key, [])
+            all_old_jobs = {job for old in old_findings
+                            for job in old.get("affected_jobs", [])}
             for f, old in pair_aggregate_scopes(old_findings, current_findings):
+                old_jobs = (set(old.get("affected_jobs", []))
+                            if old is not None else all_old_jobs)
                 grew = sorted(set(f.get("affected_jobs", []))
-                              - set(old.get("affected_jobs", [])))
+                              - old_jobs)
                 if grew:
                     annotation("warning", f"{f['pattern']} scope grew to jobs: {', '.join(grew)}", f)
                     warnings += 1

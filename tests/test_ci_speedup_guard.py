@@ -165,6 +165,37 @@ def test_same_identity_aggregate_finding_reports_regrouped_job(
     assert all("lint" in line for line in growth)
 
 
+def test_new_same_identity_aggregate_group_names_its_jobs(
+        guard, tmp_path, capsys, monkeypatch):
+    base = two_duplicate_setup_groups()
+    added_group = """
+  added-a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+      - run: go mod download
+      - run: go test ./...
+  added-b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+      - run: go mod download
+      - run: go test ./...
+"""
+    merge = base.replace("jobs:\n", "jobs:\n" + added_group, 1)
+    base_root, merge_root = trees(tmp_path, base, merge)
+
+    code, output = run(guard, base_root, merge_root, capsys, monkeypatch)
+
+    assert code == 0
+    growth = [line for line in output.splitlines()
+              if "OPT12 scope grew" in line]
+    assert growth
+    assert all("added-a" in line and "added-b" in line for line in growth)
+
+
 def test_new_allowlisted_instance_is_policy_block_not_operational_failure(
         guard, tmp_path, capsys, monkeypatch):
     second = """
