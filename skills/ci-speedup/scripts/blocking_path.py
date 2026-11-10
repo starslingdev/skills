@@ -11787,6 +11787,8 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         if str(f.get("pattern") or "") == "OPT32":
             measurement = f.get("path_filter_measurement")
             if isinstance(measurement, dict):
+                if measurement.get("status") == "unmeasured":
+                    return False
                 sampled = measurement.get("sampled_prs")
                 skipped = measurement.get("would_skip_prs")
                 rate = measurement.get("hit_rate")
@@ -11841,13 +11843,20 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     # `_group_by_pattern_ranked`, so they survive this slice (they'd only be cut if there
     # were >_ALSO_NOTICED_CAP of them — not a case that arises today; see that docstring).
     shown, rest = ranked[:_ALSO_NOTICED_CAP], ranked[_ALSO_NOTICED_CAP:]
-    # OPT82 is exempt from the cap. It carries no bill saving BY DESIGN, so it ranks
-    # last and would be the first row the cap cuts — but its card is the only place
-    # its named rules, its benchmark and its ledger requirement reach the reader
-    # (the same reason `_on_pole_job` exempts it). The "+N more" tail is for rows
-    # whose substance is a smaller number; OPT82 has no number to be smaller.
-    shown += [g for g in rest if g[0] == "OPT82"]
-    rest = [g for g in rest if g[0] != "OPT82"]
+    # OPT82 and unmeasured OPT32 are exempt from the cap. OPT82 carries no bill saving
+    # BY DESIGN, while an unmeasured OPT32 has no number because GitHub did not return
+    # enough evidence to calculate one. In both cases the card is the only place the
+    # reader sees the substance that a numeric ranking cannot represent.
+    def _uncapped_group(group: tuple[str, list[dict[str, Any]]]) -> bool:
+        pat, members = group
+        return pat == "OPT82" or (
+            pat == "OPT32" and any(
+                isinstance(m.get("path_filter_measurement"), dict)
+                and m["path_filter_measurement"].get("status") == "unmeasured"
+                for m in members))
+
+    shown += [g for g in rest if _uncapped_group(g)]
+    rest = [g for g in rest if not _uncapped_group(g)]
     # A credited wall-clock lever (OPT24) can land in this appendix; it sorts first and
     # carries a per-row correction below. Qualify the blanket "off-path / ~0 wall-clock"
     # blurb when one is present, so the section header doesn't contradict that row.
@@ -12010,6 +12019,14 @@ def _also_noticed_block(findings: list[dict[str, Any]],
                          "**wall-clock-negative** (build-once-then-fan-out adds a serial "
                          "gate), so it lengthens the merge wait. Treat it as a bill "
                          "saving, not a speed win.")
+        if pat == "OPT32":
+            unmeasured = next((m.get("path_filter_measurement") for m in ms
+                               if isinstance(m.get("path_filter_measurement"), dict)
+                               and m["path_filter_measurement"].get("status") == "unmeasured"),
+                              None)
+            if isinstance(unmeasured, dict):
+                reason = str(unmeasured.get("reason") or "unknown reason")
+                lines.append(f"**Measurement:** hit rate not measured ({reason}).")
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
