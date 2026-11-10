@@ -487,7 +487,8 @@ def test_named_fixtures_exercise_their_defining_interactions(
             "external-required-gate", "heavy-runner-queue", "minority-tail",
             "multiarch-image", "path-partitioned-monorepo", "pr-light-matrix", "vendored-libs",
             "vitest-isolated-serial", "cargo-double-compile", "per-test-startup",
-            "jest-make-hop", "sharded-floor", "path-filter-unmeasured"):
+             "jest-make-hop", "sharded-floor", "replayed-test-cache",
+             "path-filter-unmeasured"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
@@ -595,6 +596,12 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "per-invocation-startup" in fixture_facts(
         docs["per-test-startup"], [])["leaves"]
     assert "state-leak canary" in reports["per-test-startup"]
+    replayed_pole = next(
+        pole for pole in docs["replayed-test-cache"]["pr_critical_path"]["poles"]
+        if pole.get("job") == "build")
+    assert replayed_pole["replayed_test_results"]["cached_lines"] == 144
+    assert replayed_pole["replayed_test_results"]["test_result_lines"] == 145
+    assert "Replayed test results" in reports["replayed-test-cache"]
     assert any(
         row.get("cache_net_negative", {}).get("kind") == "opt79_buildkit_export"
         for row in image_doc["findings"])
