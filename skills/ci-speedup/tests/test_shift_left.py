@@ -41,6 +41,13 @@ def test_noisy_job_does_not_flag_a_slowdown():
     assert report["jobs"][0]["evidence"] == "threshold_not_exceeded"
 
 
+def test_zero_duration_baseline_does_not_crash_or_hide_a_detected_slowdown():
+    report = SHIFT.analyze_l2([record(0) for _ in range(8)], [record(3)])
+    slowdown = next(item for item in report["observations"] if item["kind"] == "slowdown")
+    assert slowdown["change_percent"] is None
+    assert report["jobs"][0]["evidence"] == "slowdown"
+
+
 def test_real_step_change_is_flagged_and_attributed_to_first_merge_where_it_holds():
     case = FIXTURES["step_l3"]
     history = [record(d, pr=p) for d, p in zip(case["durations"], case["prs"])]
@@ -336,6 +343,27 @@ def test_pagination_cap_is_explicit_and_partial_invalidates_clean_evidence():
     assert report["observations"][0]["kind"] == "partial"
 
 
+def test_identity_scoped_partial_history_preserves_other_job_slowdowns():
+    report = {"jobs": [
+        {"workflow": "ci.yml", "workflow_id": "1", "job": "test",
+         "runner_labels": ["linux"], "step_signature": ["test"],
+         "evidence": "slowdown"},
+        {"workflow": "ci.yml", "workflow_id": "1", "job": "new",
+         "runner_labels": ["linux"], "step_signature": ["test"],
+         "evidence": "new_job"},
+    ], "observations": [
+        {"kind": "slowdown", "workflow": "ci.yml", "job": "test"},
+        {"kind": "new_job", "workflow": "ci.yml", "job": "new"},
+    ]}
+    coverage = {"partial_identities": [{
+        "workflow_id": "1", "job": "new", "runner_labels": ["linux"],
+        "step_signature": ["test"], "reason": "run list reached page cap"}]}
+    SHIFT._apply_coverage(report, coverage)
+    assert report["jobs"][0]["evidence"] == "slowdown"
+    assert report["jobs"][1]["evidence"] == "partial"
+    assert any(item["kind"] == "slowdown" for item in report["observations"])
+
+
 def test_attribution_distinguishes_zero_one_and_multiple_merged_prs():
     class Client:
         def get(self, endpoint):
@@ -384,11 +412,16 @@ def test_exact_rename_keeps_metadata_and_continues_timing_comparison():
 
 
 def test_markdown_is_bounded_advisory_and_never_claims_no_slowdown():
-    result = {"status": "measured", "l3": SHIFT.analyze_l3([])}
+    report = SHIFT.analyze_l3([])
+    report["observations"].append({"kind": "step_change", "workflow": "ci.yml",
+        "job": "test", "attribution": {"status": "unique", "pr_number": 42,
+                                          "sha": "abcdef1234567890"}})
+    result = {"status": "measured", "l3": report}
     rendered = SHIFT.render_markdown(result, max_bytes=1024)
     assert len(rendered.encode()) <= 1024
     assert "Advisory timing evidence" in rendered
     assert "no slowdown" not in rendered.lower()
+    assert "PR #42" in rendered
 
 
 def test_markdown_escapes_untrusted_html_and_markdown_names():

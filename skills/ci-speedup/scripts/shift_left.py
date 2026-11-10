@@ -61,6 +61,13 @@ def _stats(values: Iterable[float]) -> dict[str, float]:
             "relative_threshold_s": round(median * 1.10, 6)}
 
 
+def _change_percent(delta: float, baseline: float) -> float | None:
+    """Return a finite relative change, or no percentage for a zero baseline."""
+    if baseline <= 0:
+        return None
+    return round(100 * delta / baseline, 3)
+
+
 def _observation(kind: str, row: dict[str, Any], **extra: Any) -> dict[str, Any]:
     result = {"kind": kind, "workflow": str(row.get("workflow", "")),
               "job": str(row.get("job", "")),
@@ -142,6 +149,8 @@ def analyze_l2(history: list[dict[str, Any]], current: list[dict[str, Any]], *,
             observations.append(_observation("no_baseline", rows[-1],
                 available_runs=len(baseline), required_runs=min_history))
             jobs.append({"workflow": workflow, "workflow_id": workflow_id, "job": job,
+                         "runner_labels": list(runner_labels),
+                         "step_signature": list(step_signature),
                          "baseline_runs": len(baseline), "current_s": round(duration, 6),
                          "evidence": "no_baseline"})
             continue
@@ -154,14 +163,14 @@ def analyze_l2(history: list[dict[str, Any]], current: list[dict[str, Any]], *,
             "baseline_runs": len(baseline),
             "baseline_median_s": summary["median_s"], "noise_band_s": summary["noise_band_s"],
             "current_s": round(duration, 6),
-            "change_percent": round(100 * delta / summary["median_s"], 3)
-            if summary["median_s"] else None, "evidence": evidence,
+            "change_percent": _change_percent(delta, summary["median_s"]),
+            "evidence": evidence,
             "renamed_from": renamed_from})
         if slower:
             observations.append(_observation("slowdown", rows[-1],
                 baseline_runs=len(baseline), baseline_median_s=summary["median_s"],
                 noise_band_s=summary["noise_band_s"], current_s=round(duration, 6),
-                change_percent=round(100 * delta / summary["median_s"], 3),
+                change_percent=_change_percent(delta, summary["median_s"]),
                 renamed_from=renamed_from))
     return {"layer": "L2",
             "promise": "job-history evidence; silence does not prove CI stayed fast",
@@ -193,8 +202,8 @@ def _step(rows: list[dict[str, Any]], baseline_runs: int, min_history: int):
             first_slow = next(row for row in post[:4]
                               if float(row["duration_s"]) > boundary)
             return {"row": first_slow, "baseline": summary, "after_s": round(after, 6),
-                    "change": round(100 * (after - summary["median_s"])
-                                    / summary["median_s"], 3)}
+                    "change": _change_percent(after - summary["median_s"],
+                                              summary["median_s"])}
     return None
 
 
@@ -219,7 +228,7 @@ def _creep(rows: list[dict[str, Any]], min_history: int):
             continue
         return {"row": window[CREEP_WINDOW], "baseline": first,
                 "recent_s": round(last_median, 6),
-                "change": round(100 * rise / first["median_s"], 3),
+                "change": _change_percent(rise, first["median_s"]),
                 "window_start": start}
     return None
 
@@ -399,7 +408,8 @@ def _latest_pr_runs(rows: list[dict[str, Any]], head: str) -> list[dict[str, Any
 def collect_history(repo: str, branch: str, *, pr_number: int | None,
                     max_runs: int, client: GhClient, max_workflows: int = 5):
     """Collect candidate-first L2 history or bounded per-workflow L3 history."""
-    coverage: dict[str, Any] = {"partial_workflows": {}, "omitted_workflows": [],
+    coverage: dict[str, Any] = {"partial_workflows": {}, "partial_identities": [],
+                                "omitted_workflows": [],
                                 "budget_limited_workflows": {}}
     main_records: list[dict[str, Any]] = []
     pr_records: list[dict[str, Any]] = []
@@ -441,17 +451,18 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
             coverage["workflow_list_partial"] = "workflow list reached page cap"
 
     for workflow_index, workflow_id in enumerate(workflow_ids):
+        counts: dict[tuple[Any, ...], int] = defaultdict(int)
+        relevant: set[tuple[Any, ...]] = {
+            key for key in candidate_keys if key[0] == workflow_id
+        }
+        jobs_partial: set[tuple[Any, ...]] = set()
         try:
             runs, runs_truncated = _paginate(client,
                 f"repos/{repo}/actions/workflows/{workflow_id}/runs?"
                 f"branch={quote(branch, safe='')}&event=push&status=completed",
                 "workflow_runs", max_pages=2)
             selected = _successful_push_runs(runs, branch)
-            counts: dict[tuple[Any, ...], int] = defaultdict(int)
             fetched = 0
-            relevant: set[tuple[Any, ...]] = {
-                key for key in candidate_keys if key[0] == workflow_id
-            }
             for run in selected:
                 jobs, jobs_truncated = _jobs_for_run(repo, run.get("id"), client)
                 records = _job_records(run, jobs)
@@ -466,7 +477,8 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
                     # still collecting enough comparable observations per identity.
                     relevant = {_key(record) for record in records if _eligible(record)}
                 if jobs_truncated:
-                    coverage["partial_workflows"][workflow_id] = "jobs reached page cap"
+                    seen = {_key(record) for record in records if _eligible(record)}
+                    jobs_partial.update(relevant - seen)
                 if relevant and all(counts[key] >= max_runs for key in relevant):
                     break
             preferred_unfilled = sorted(
@@ -475,11 +487,22 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
             if not relevant and runs_truncated:
                 coverage["partial_workflows"].setdefault(
                     workflow_id, "no eligible identity found before the run-list page cap")
-            elif runs_truncated and preferred_unfilled:
-                reason = (f"comparable history below {max_runs} observations for: "
-                          + ", ".join(preferred_unfilled[:10])
-                          + "; run list reached page cap")
-                coverage["partial_workflows"].setdefault(workflow_id, reason)
+            elif ((runs_truncated and preferred_unfilled) or
+                  any(counts[key] < max_runs for key in jobs_partial)):
+                reason_parts = [f"comparable history below {max_runs} observations for: "
+                                + ", ".join(preferred_unfilled[:10])]
+                if runs_truncated:
+                    reason_parts.append("run list reached page cap")
+                if jobs_partial:
+                    reason_parts.append("one or more job lists reached page cap")
+                reason = "; ".join(reason_parts)
+                incomplete = ({key for key in relevant if runs_truncated and counts[key] < max_runs}
+                              | {key for key in jobs_partial if counts[key] < max_runs})
+                for identity in sorted(incomplete):
+                    coverage["partial_identities"].append({
+                        "workflow_id": identity[0], "job": identity[1],
+                        "runner_labels": list(identity[2]),
+                        "step_signature": list(identity[3]), "reason": reason})
             elif any(counts[key] < minimum for key in relevant):
                 # A complete short history is not partial: analysis reports
                 # no_baseline when it is below the layer's minimum.
@@ -488,7 +511,15 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
                 coverage["budget_limited_workflows"][workflow_id] = (
                     f"stopped after all selected identities reached {max_runs} observations")
         except CollectionError as exc:
-            coverage["partial_workflows"][workflow_id] = str(exc)
+            incomplete = {key for key in relevant if counts[key] < max_runs}
+            if incomplete:
+                for identity in sorted(incomplete):
+                    coverage["partial_identities"].append({
+                        "workflow_id": identity[0], "job": identity[1],
+                        "runner_labels": list(identity[2]),
+                        "step_signature": list(identity[3]), "reason": str(exc)})
+            else:
+                coverage["partial_workflows"][workflow_id] = str(exc)
             if getattr(client, "calls", 0) >= getattr(client, "budget", math.inf):
                 for omitted_id in workflow_ids[workflow_index + 1:]:
                     coverage["partial_workflows"].setdefault(
@@ -500,11 +531,20 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
 def _apply_coverage(report: dict[str, Any], coverage: dict[str, Any], *,
                     candidate: bool = False) -> None:
     partial_ids = set(coverage.get("partial_workflows", {}))
+    partial_identities = {
+        (str(item.get("workflow_id", "")), str(item.get("job", "")),
+         tuple(str(label) for label in item.get("runner_labels", [])),
+         tuple(str(step) for step in item.get("step_signature", [])))
+        for item in coverage.get("partial_identities", []) if isinstance(item, dict)
+    }
     if candidate and coverage.get("candidate_partial"):
         partial_ids.update(str(job.get("workflow_id", "")) for job in report.get("jobs", []))
     affected = []
     for job in report.get("jobs", []):
-        if str(job.get("workflow_id", "")) in partial_ids:
+        identity = (str(job.get("workflow_id", "")), str(job.get("job", "")),
+                    tuple(str(label) for label in job.get("runner_labels", [])),
+                    tuple(str(step) for step in job.get("step_signature", [])))
+        if str(job.get("workflow_id", "")) in partial_ids or identity in partial_identities:
             job["evidence"] = "partial"
             affected.append((str(job.get("workflow", "")), str(job.get("job", ""))))
     if not affected:
@@ -587,7 +627,12 @@ def render_markdown(result: dict[str, Any], *, max_bytes: int = 65536) -> str:
             if item.get("change_percent") is not None:
                 line += f" ({_md(item['change_percent'])}% versus baseline)"
             if isinstance(item.get("attribution"), dict):
-                line += f"; attribution={_md(item['attribution'].get('status', 'unresolved'))}"
+                attribution = item["attribution"]
+                line += f"; attribution={_md(attribution.get('status', 'unresolved'))}"
+                if attribution.get("pr_number") is not None:
+                    line += f" (PR #{_md(attribution['pr_number'])})"
+                elif attribution.get("sha"):
+                    line += f" (commit {_md(str(attribution['sha'])[:12])})"
             lines.append(line)
         lines.append("")
     coverage = result.get("coverage")
@@ -613,8 +658,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output-byte-limit", type=int, default=2 * 1024 * 1024)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
-    if not L2_MIN_BASELINE <= args.max_runs <= 50:
-        parser.error(f"--max-runs must be between {L2_MIN_BASELINE} and 50")
+    minimum_runs = L2_MIN_BASELINE if args.pr is not None else L3_MIN_HISTORY
+    if not minimum_runs <= args.max_runs <= 50:
+        parser.error(f"--max-runs must be between {minimum_runs} and 50")
     if not 1 <= args.api_budget <= 110:
         parser.error("--api-budget must be between 1 and 110")
     if not 10 <= args.deadline_seconds <= 300:
@@ -629,7 +675,8 @@ def main(argv: list[str] | None = None) -> int:
         l3 = analyze_l3(main_records)
         _apply_coverage(l3, coverage)
         _fill_attribution(args.repo, l3, client)
-        partial = bool(coverage.get("partial_workflows") or coverage.get("candidate_partial")
+        partial = bool(coverage.get("partial_workflows") or coverage.get("partial_identities")
+                       or coverage.get("candidate_partial")
                        or coverage.get("workflow_list_partial") or coverage.get("omitted_workflows"))
         result: dict[str, Any] = {"status": "partial" if partial else "measured",
             "job_conclusion": "success", "repository": args.repo, "branch": args.branch,
