@@ -43,6 +43,51 @@ jobs:
 """
 
 
+def two_duplicate_setup_groups(*, grow_first: bool = False) -> str:
+    extra = """
+  added:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm install
+      - run: npm test
+""" if grow_first else ""
+    return """name: Test
+on: pull_request
+jobs:
+  guard-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm install
+      - run: npm test
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm install
+      - run: npm test
+""" + extra + """
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - run: pip install ruff
+      - run: ruff check .
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - run: pip install ruff
+      - run: ruff check .
+"""
+
+
 def trees(tmp_path: Path, base_text: str, merge_text: str):
     base, merge = tmp_path / "base", tmp_path / "merge"
     for root, text in ((base, base_text), (merge, merge_text)):
@@ -66,6 +111,32 @@ def test_identical_trees_pass_with_existing_debt(guard, tmp_path, capsys, monkey
     assert code == 0
     assert "Pass" in output
     assert "blocked:" not in output
+
+
+def test_identical_same_identity_aggregate_findings_do_not_report_scope_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    text = two_duplicate_setup_groups()
+    base, merge = trees(tmp_path, text, text)
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "scope grew" not in output
+
+
+def test_same_identity_aggregate_finding_reports_only_the_added_job(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path, two_duplicate_setup_groups(),
+        two_duplicate_setup_groups(grow_first=True))
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    growth = [line for line in output.splitlines() if "scope grew" in line]
+    assert growth
+    assert all("added" in line for line in growth)
+    assert all("guard-verify" not in line and "test" not in line for line in growth)
 
 
 def test_new_allowlisted_instance_is_policy_block_not_operational_failure(
