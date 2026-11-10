@@ -3688,8 +3688,9 @@ _OPT21_CHECK_LINE_RE = re.compile(
 # check command in the same sense as a direct linter invocation; a runnable
 # application under ./cmd remains ordinary work.
 _OPT21_GO_RUN_CHECK_RE = re.compile(
-    r"^go\s+run\s+(?!\./cmd(?:/|\s|$))\S+\.go\s+"
-    r"(?:lint|check[\w:.-]*)(?:\s|$)", re.I)
+    r"^(?!.*(?:\|\||&&|[|;&`]|\$\())"
+    r"go\s+run\s+(?!\./cmd(?:/|\s|$))\S+\.go\s+"
+    r"(?:lint|check[\w:.-]*)(?:\s+\S+)*\s*$", re.I)
 # A step NAMED as a check ("Verify ...", "Check ...", "Lint ...") also counts
 # as a check when its body is a bespoke inline check (openai-python's
 # provenance check): every line is a recognised check or setup line, an inline
@@ -3752,6 +3753,11 @@ def _opt21_step_kind(step: dict) -> str:
     if not run or uses:
         return "other"
     if "shell" in step:
+        return "other"
+    # Once errexit is disabled, a later successful setup command can hide a
+    # failed check.  Such a step cannot be a gate even when every command is
+    # otherwise recognizable.
+    if re.search(r"(?m)^\s*set\s+\+(?:e\b|o\s+errexit\b)", run):
         return "other"
     lines = _opt21_run_lines(run)
     # `go run` is generally work, but a source-file lint/check driver is a
