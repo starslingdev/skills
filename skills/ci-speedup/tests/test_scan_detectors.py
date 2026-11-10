@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+import scan
+
 _SKILL_DIR = Path(__file__).resolve().parents[1]
 _SCAN_SCRIPT = _SKILL_DIR / "scripts" / "scan.py"
 
@@ -789,11 +791,18 @@ _OPT21_LINT_GATE = """  lint:
 
 
 @pytest.mark.parametrize(("command", "flagged"), [
-    ("go run build/ci.go lint", True),
+    ("go run build/ci.go lint", False),
+    ("go run build/ci.go check-generated", False),
     ("go run ./cmd/server", True),
+    ("go run cmd/server.go lint", True),
+    ("go run cmd/server/main.go lint", True),
+    ("go run build/ci.go checkout", True),
+    ("go run build/ci.go checkpoint", True),
+    ("go run build/ci.go lint && make test", True),
+    ("go run build/ci.go lint || true", True),
     ("golangci-lint run", False),
 ])
-def test_opt21_go_run_is_not_a_check_gate_but_golangci_lint_is(
+def test_opt21_go_run_lint_script_and_golangci_lint_are_check_gates(
         tmp_path: Path, command: str, flagged: bool) -> None:
     content = f"""name: CI
 on: pull_request
@@ -809,6 +818,66 @@ jobs:
       - run: make test
 """
     assert ("test" in _opt21_jobs(tmp_path, content)) is flagged
+
+
+@pytest.mark.parametrize("command", [
+    "go run build/ci.go lint || make test",
+    "go run build/ci.go lint & make test",
+    "go run build/ci.go lint $(go test ./...)",
+    "go run build/ci.go lint <(make test)",
+    "go run build/ci.go lint >(go test ./...)",
+])
+def test_opt21_check_named_go_lint_with_hidden_work_is_not_a_gate(
+        tmp_path: Path, command: str) -> None:
+    content = f"""name: CI
+on: pull_request
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check lint
+        run: {command}
+  test:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    assert _opt21_jobs(tmp_path, content) == ["test"]
+
+
+def test_opt21_go_lint_with_errexit_disabled_is_not_a_gate(tmp_path: Path) -> None:
+    content = """name: CI
+on: pull_request
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check lint
+        run: |
+          set +e
+          go run build/ci.go lint
+          echo done=yes >> "$GITHUB_OUTPUT"
+  test:
+    needs: gate
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test
+"""
+    assert _opt21_jobs(tmp_path, content) == ["test"]
+
+
+@pytest.mark.parametrize("run", [
+    "go run build/ci.go lint || make test",
+    "go run build/ci.go lint & make test",
+    "go run build/ci.go lint $(go test ./...)",
+    "go run build/ci.go lint <(make test)",
+    "go run build/ci.go lint >(go test ./...)",
+    "set +e\ngo run build/ci.go lint\necho done=yes >> \"$GITHUB_OUTPUT\"",
+])
+def test_opt21_step_kind_rejects_go_lint_that_can_hide_work_or_failure(
+        run: str) -> None:
+    assert scan._opt21_step_kind({"name": "Check lint", "run": run}) == "other"
 
 
 @pytest.mark.parametrize("dep_job", [

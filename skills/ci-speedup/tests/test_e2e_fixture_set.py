@@ -374,6 +374,16 @@ def test_serial_chain_sizes_removed_edge_and_failure_path_compute(
     assert not [check for check in checks if not check.skipped and not check.ok]
 
 
+def test_serial_chain_keeps_a_go_script_lint_as_a_gate(monkeypatch, tmp_path):
+    fixture = FIXTURE_ROOT / "serial-chain"
+    doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+
+    assert not [row for row in doc["findings"]
+                if row.get("pattern") == "OPT21"
+                and row.get("affected_jobs") == ["checked-test"]]
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
 def test_opt21_edge_sizing_certificate_rejects_a_tampered_path_delta(
         monkeypatch, tmp_path):
     fixture = FIXTURE_ROOT / "serial-chain"

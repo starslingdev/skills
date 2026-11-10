@@ -4017,6 +4017,13 @@ _OPT21_CHECK_LINE_RE = re.compile(
     r"golangci-lint|gofmt\s+-l|cargo\s+fmt\b.*--check|cargo\s+clippy|"
     r"stylelint|biome\s+(?:check|lint|ci)|codespell|typos|"
     r"git\s+diff\s+--exit-code)\b", re.I)
+# Some repositories keep their lint driver in a Go source file.  This is a
+# check command in the same sense as a direct linter invocation; a runnable
+# application under ./cmd remains ordinary work.
+_OPT21_GO_RUN_CHECK_RE = re.compile(
+    r"^(?!.*(?:\|\||&&|[|;&`]|[$<>]\())"
+    r"go\s+run\s+(?!(?:\./)?cmd/)\S+\.go\s+"
+    r"(?:lint|check(?:[-:._][\w:.-]*)?)(?:\s+\S+)*\s*$", re.I)
 # A step NAMED as a check ("Verify ...", "Check ...", "Lint ...") also counts
 # as a check when its body is a bespoke inline check (openai-python's
 # provenance check): every line is a recognised check or setup line, an inline
@@ -4080,20 +4087,31 @@ def _opt21_step_kind(step: dict) -> str:
         return "other"
     if "shell" in step:
         return "other"
-    if (_OPT21_NOT_A_GATE_RE.search(run) or _OPT21_CANNOT_FAIL_RE.search(run)
+    # Once errexit is disabled, a later successful setup command can hide a
+    # failed check.  Such a step cannot be a gate even when every command is
+    # otherwise recognizable.
+    if re.search(r"(?m)^\s*set\s+\+(?:e\b|o\s+errexit\b)", run):
+        return "other"
+    lines = _opt21_run_lines(run)
+    # `go run` is generally work, but a source-file lint/check driver is a
+    # gate.  Remove only those complete commands before applying the broad
+    # work detector so another command in the same step can still disqualify
+    # the job.
+    work_lines = [ln for ln in lines if not _OPT21_GO_RUN_CHECK_RE.match(ln)]
+    if (_OPT21_NOT_A_GATE_RE.search("\n".join(work_lines))
+            or _OPT21_CANNOT_FAIL_RE.search(run)
             or "--exit-zero" in run):
         return "other"
     if (_OPT21_CHECK_NAME_RE.match(str(step.get("name") or "").strip())
             and _opt21_is_scripted_check(run)):
         return "check"
-    lines = _opt21_run_lines(run)
     if not lines:
         return "other"
     kinds = []
     for ln in lines:
         if "|" in ln:
             return "other"
-        if _OPT21_CHECK_LINE_RE.match(ln):
+        if _OPT21_CHECK_LINE_RE.match(ln) or _OPT21_GO_RUN_CHECK_RE.match(ln):
             kinds.append("check")
         elif _OPT21_SETUP_LINE_RE.match(ln):
             kinds.append("setup")
@@ -4115,7 +4133,9 @@ def _opt21_is_scripted_check(run: str) -> bool:
         if _OPT21_INLINE_SCRIPT_RE.match(ln):
             continue
         for part in _opt21_run_lines(_OPT21_EXIT_NONZERO_RE.sub("", ln)):
-            if not (_OPT21_CHECK_LINE_RE.match(part) or _OPT21_SETUP_LINE_RE.match(part)
+            if not (_OPT21_CHECK_LINE_RE.match(part)
+                    or _OPT21_GO_RUN_CHECK_RE.match(part)
+                    or _OPT21_SETUP_LINE_RE.match(part)
                     or _OPT21_SHELL_CHECK_RE.match(part)):
                 return False
     return True
