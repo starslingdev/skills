@@ -8361,6 +8361,14 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     if _par:
         rows.append(("Parallel steps", _par,
                      parallel_steps_used_for(doc.get("parallel_steps"))))
+    _jest_coverage = doc.get("jest_coverage_notes")
+    if isinstance(_jest_coverage, list):
+        _notes = sorted({str(row.get("note")) for row in _jest_coverage
+                         if isinstance(row, dict) and row.get("note")})
+        if _notes:
+            rows.append(("Jest coverage configuration", _flatten_cell("; ".join(_notes)),
+                         "Provider comparison guidance; no saving credited without "
+                         "matched measurements"))
     # Candidates a pattern measured and then HELD BACK because it could not
     # decide them — a candidate cache (OPT79), a group of small jobs sharing one
     # setup (OPT77), a checkout with a slow tail (OPT80). Without these rows the
@@ -11787,6 +11795,8 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         if str(f.get("pattern") or "") == "OPT32":
             measurement = f.get("path_filter_measurement")
             if isinstance(measurement, dict):
+                if measurement.get("status") == "unmeasured":
+                    return False
                 sampled = measurement.get("sampled_prs")
                 skipped = measurement.get("would_skip_prs")
                 rate = measurement.get("hit_rate")
@@ -11841,13 +11851,20 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     # `_group_by_pattern_ranked`, so they survive this slice (they'd only be cut if there
     # were >_ALSO_NOTICED_CAP of them — not a case that arises today; see that docstring).
     shown, rest = ranked[:_ALSO_NOTICED_CAP], ranked[_ALSO_NOTICED_CAP:]
-    # OPT82 is exempt from the cap. It carries no bill saving BY DESIGN, so it ranks
-    # last and would be the first row the cap cuts — but its card is the only place
-    # its named rules, its benchmark and its ledger requirement reach the reader
-    # (the same reason `_on_pole_job` exempts it). The "+N more" tail is for rows
-    # whose substance is a smaller number; OPT82 has no number to be smaller.
-    shown += [g for g in rest if g[0] == "OPT82"]
-    rest = [g for g in rest if g[0] != "OPT82"]
+    # OPT82 and unmeasured OPT32 are exempt from the cap. OPT82 carries no bill saving
+    # BY DESIGN, while an unmeasured OPT32 has no number because GitHub did not return
+    # enough evidence to calculate one. In both cases the card is the only place the
+    # reader sees the substance that a numeric ranking cannot represent.
+    def _uncapped_group(group: tuple[str, list[dict[str, Any]]]) -> bool:
+        pat, members = group
+        return pat == "OPT82" or (
+            pat == "OPT32" and any(
+                isinstance(m.get("path_filter_measurement"), dict)
+                and m["path_filter_measurement"].get("status") == "unmeasured"
+                for m in members))
+
+    shown += [g for g in rest if _uncapped_group(g)]
+    rest = [g for g in rest if not _uncapped_group(g)]
     # A credited wall-clock lever (OPT24) can land in this appendix; it sorts first and
     # carries a per-row correction below. Qualify the blanket "off-path / ~0 wall-clock"
     # blurb when one is present, so the section header doesn't contradict that row.
@@ -12010,6 +12027,14 @@ def _also_noticed_block(findings: list[dict[str, Any]],
                          "**wall-clock-negative** (build-once-then-fan-out adds a serial "
                          "gate), so it lengthens the merge wait. Treat it as a bill "
                          "saving, not a speed win.")
+        if pat == "OPT32":
+            unmeasured = next((m.get("path_filter_measurement") for m in ms
+                               if isinstance(m.get("path_filter_measurement"), dict)
+                               and m["path_filter_measurement"].get("status") == "unmeasured"),
+                              None)
+            if isinstance(unmeasured, dict):
+                reason = str(unmeasured.get("reason") or "unknown reason")
+                lines.append(f"**Measurement:** hit rate not measured ({reason}).")
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
@@ -13165,11 +13190,12 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # row. A quiet repo with the stamp and nothing else collapsed to the
     # one-line note, dropping the footer and failing its own verifier.
     parallel_n = parallel_steps_used(doc.get("parallel_steps"))
+    jest_coverage_n = bool(doc.get("jest_coverage_notes"))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
             and not cache_guard_lines
             and not withheld_n and not opt79_off_pole and not opt81_n
-            and not parallel_n):
+            and not parallel_n and not jest_coverage_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
