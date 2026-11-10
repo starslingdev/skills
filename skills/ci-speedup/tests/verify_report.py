@@ -12684,15 +12684,24 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
     name = "no drilled pole's job is also framed as an 'Also noticed' minor-cleanup finding"
     pole_jobs = {(Path(wf).name, _matrix_base(_cmp_name(check)))
                  for wf, check, _body in _pole_header_sections(report)}
-    if not pole_jobs or not findings_path:
-        return Check(name, True, "no drilled poles / no findings", skipped=True)
+    if not findings_path:
+        return Check(name, True, "no findings", skipped=True)
     appendix = _section(report, "Also noticed")
-    if not appendix:
-        return Check(name, True, "no 'Also noticed' appendix", skipped=True)
     try:
         findings = _as_list(_as_dict(json.loads(findings_path.read_text(encoding="utf-8"))).get("findings"))
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
+    has_unmeasured_opt32 = any(
+        isinstance(f, dict) and f.get("pattern") == "OPT32"
+        and isinstance(f.get("path_filter_measurement"), dict)
+        and f["path_filter_measurement"].get("status") == "unmeasured"
+        for f in findings)
+    if not appendix:
+        if has_unmeasured_opt32:
+            return Check(name, False,
+                         "an unmeasured path-filter finding vanished instead of "
+                         "appearing in 'Also noticed'")
+        return Check(name, True, "no 'Also noticed' appendix", skipped=True)
     # Per appendix pattern block, the (wf_base, job_base) keys its `**Where:**` line discloses.
     block_keys: dict[str, set[tuple[str, str]]] = {}
     for block in appendix.split("<details>"):
@@ -12703,6 +12712,19 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         keys = {_appendix_wf_job_key(wf, job)
                 for wf, job in (_APPENDIX_WHERE_PAIR_RE.findall(mw.group(1)) if mw else [])}
         block_keys.setdefault(mp.group(1), set()).update(keys)
+    missing_unmeasured = [
+        str(f.get("pattern") or "") for f in findings
+        if isinstance(f, dict) and f.get("pattern") == "OPT32"
+        and isinstance(f.get("path_filter_measurement"), dict)
+        and f["path_filter_measurement"].get("status") == "unmeasured"
+        and "OPT32" not in block_keys
+    ]
+    if missing_unmeasured:
+        return Check(name, False,
+                     "an unmeasured path-filter finding vanished instead of appearing "
+                     "in 'Also noticed'")
+    if not pole_jobs:
+        return Check(name, True, "no drilled poles", skipped=True)
     offenders = []
     for f in findings:
         if not isinstance(f, dict) or f.get("advisory"):
@@ -12719,6 +12741,8 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         if pat == "OPT32":
             measurement = f.get("path_filter_measurement")
             if isinstance(measurement, dict):
+                if measurement.get("status") == "unmeasured":
+                    continue
                 sampled = measurement.get("sampled_prs")
                 skipped = measurement.get("would_skip_prs")
                 rate = measurement.get("hit_rate")

@@ -39,7 +39,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT23 — Single-Threaded Matrix (`max-parallel: 1`) (MEDIUM, static) — matrix max-parallel: 1
 - OPT24 — Long Test Job Without Sharding (HIGH, static) — long test job, no shards
 - OPT25 — Shard Imbalance (MEDIUM, data-driven) — one shard far slower than the rest
-- OPT88 — Test Concurrency Is a Guess, Not a Measurement (MEDIUM, data-driven) — unmeasured test worker count
+- OPT88 — Test Concurrency Is a Guess, Not a Measurement (MEDIUM, static) — unmeasured test worker count
 - OPT89 — The Slowest Platform Compiles Its Own Tests (HIGH, static) — cross-compile once, test on each platform
 ## Category 5 — Actions and Checkout
 - OPT26 — Outdated Action Major Versions (LOW, static) — old actions/* major versions
