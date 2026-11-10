@@ -15004,7 +15004,7 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
         return Check(name, True, "findings unreadable", skipped=True)
     findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
     guarded = [f for f in findings if isinstance(f.get("cache_sizing_guard"), dict)]
-    cache_patterns = {"OPT4", "OPT6", "OPT9", "OPT61", "OPT96", "OPT101"}
+    cache_patterns = {"OPT4", "OPT6", "OPT9", "OPT61", "OPT62", "OPT96", "OPT101"}
     missing = [
         f for f in findings
         if (str(f.get("pattern") or "") in cache_patterns

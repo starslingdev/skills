@@ -64,6 +64,16 @@ class FixtureClient:
         repo = self.recorded["repo"]
         if endpoint == f"repos/{repo}":
             return {"default_branch": self.recorded.get("default_branch", "main")}
+        if endpoint == f"repos/{repo}/actions/cache/usage":
+            value = self.recorded.get("cache_usage_bytes")
+            return ({"active_caches_size_in_bytes": value}
+                    if isinstance(value, int) else None)
+        match = re.match(
+            rf"repos/{re.escape(repo)}/pulls/(\d+)/files\?", endpoint)
+        if match:
+            rows = self.recorded.get("changed_files", {}).get(match.group(1))
+            return ([{"filename": name} for name in rows]
+                    if isinstance(rows, list) else None)
         if endpoint.startswith(f"repos/{repo}/actions/workflows?"):
             return {"workflows": [
                 {"id": row["id"], "path": row["path"],
@@ -494,7 +504,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
         row.get("pattern") == "OPT61"
         and "restore-family" in (row.get("affected_jobs") or [])
         for row in cache_rows)
-    assert any(
+    assert not any(
         row.get("pattern") == "OPT61"
         and "env-ccache" in (row.get("affected_jobs") or [])
         for row in cache_rows)
@@ -506,6 +516,14 @@ def test_named_fixtures_exercise_their_defining_interactions(
         row.get("pattern") == "OPT4"
         and "cache-dance" in (row.get("affected_jobs") or [])
         for row in cache_rows)
+    static_cache_rows = [row for row in cache_rows if row.get("static_cache_lint")]
+    assert static_cache_rows
+    assert all(not (row.get("cache_log_confirmation") or {}).get("misses")
+               for row in static_cache_rows)
+    assert all(
+        not float(row.get("wall_clock_p50_s") or 0)
+        and not float(row.get("runner_min_saving") or 0)
+        for row in static_cache_rows)
     external = docs["external-required-gate"]["pr_critical_path"]
     assert external["gate_kind"] == "pr_floor_fallback"
     assert external["provenance"] == "pr_floor_fallback"
@@ -537,6 +555,15 @@ def test_named_fixtures_exercise_their_defining_interactions(
         row.get("pattern") for row in docs["multiarch-image"]["findings"]}
     assert "OPT89" in {
         row.get("pattern") for row in docs["emulated-container"]["findings"]}
+    assert any(
+        row.get("pattern") == "OPT89"
+        and "make all" in row.get("evidence_snippet", "")
+        for row in docs["emulated-container"]["findings"])
+    emulated_workflow = (
+        FIXTURE_ROOT / "emulated-container" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+    assert "run: make all $EXTRA" in emulated_workflow
+    assert "./configure\n            make -j2" in emulated_workflow
     image_doc = docs["multiarch-image"]
     image_opt72 = [
         row for row in image_doc["findings"]
@@ -596,11 +623,200 @@ def test_named_fixtures_exercise_their_defining_interactions(
         any(row.get("node") == "gate" for row in fact.get("job_projections") or [])
         for fact in path_facts if fact.get("partial") is not True)
 
+
+@pytest.mark.parametrize(("family", "pattern", "miss", "hit", "credited"), [
+    ("ccache", "OPT61", "Cache not found for input keys: ccache-linux-old",
+     "Cache restored from key: ccache-linux-stable", True),
+    ("ccache", "OPT61", "Cache not found for input keys: pnpm-linux-old",
+     "Cache restored from key: pnpm-linux-stable", False),
+    ("buildkit", "OPT4", "ERROR importing cache manifest from gha: not found",
+     "#5 CACHED", True),
+    ("buildkit", "OPT4", "Cache not found for input keys: pnpm-linux-old",
+     "Cache restored from key: pnpm-linux-stable", False),
+    ("go", "OPT62", "Go build cache miss",
+     "Go cache restored from key: go-build-stable", True),
+    ("go", "OPT62", "Cache not found for input keys: cargo-linux-old",
+     "Cache restored from key: cargo-linux-stable", False),
+])
+def test_static_cache_lint_with_measured_miss_can_be_credited(
+        monkeypatch, tmp_path, family, pattern, miss, hit, credited):
+    fixture = tmp_path / "inputs" / "cache-lint-confirmed"
+    fixture.parent.mkdir()
+    shutil.copytree(FIXTURE_ROOT / "cache-lints", fixture)
+    responses = fixture / "responses.json"
+    recorded = json.loads(responses.read_text(encoding="utf-8"))
+    recorded["repo"] = "fixture/cache-lint-confirmed"
+    recorded["required_checks"] = ["build"]
+    recorded["cache_usage_bytes"] = 0
+    recorded["changed_files"] = {
+        "1": ["src/a.cc"], "2": ["src/b.cc"], "3": ["src/c.cc"]}
+    for number, workflow_run in enumerate(recorded["workflows"][0]["runs"], 1):
+        workflow_run["pull_requests"] = [{"number": number}]
+        sha = workflow_run["head_sha"]
+        recorded["checks"][sha] = [{
+            "name": "build",
+            "started_at": workflow_run["run_started_at"],
+            "completed_at": workflow_run["updated_at"],
+        }]
+        jobs = recorded["jobs"][str(workflow_run["id"])]
+        build = next(job for job in jobs if job["name"] == "build")
+        recorded["jobs"][str(workflow_run["id"])] = [build]
+        day = build["started_at"][:10]
+        install_end = "01:02" if number == 1 else "00:12"
+        build["steps"] = [
+            {"name": "Restore compiler cache",
+             "started_at": f"{day}T00:00:00Z", "completed_at": f"{day}T00:00:02Z"},
+            {"name": "Install dependencies",
+             "started_at": f"{day}T00:00:02Z", "completed_at": f"{day}T00:{install_end}Z"},
+            {"name": "Build",
+             "started_at": f"{day}T00:{install_end}Z", "completed_at": f"{day}T00:01:58Z"},
+            {"name": "Post Restore compiler cache",
+             "started_at": f"{day}T00:01:58Z", "completed_at": f"{day}T00:02:00Z"},
+        ]
+    miss = (f"{miss}\nCache size: 50 MB\n"
+            "Cache restored in 2s\nCache saved in 2s")
+    hit = (f"{hit}\nCache size: 50 MB\n"
+           "Cache restored in 2s\nCache saved in 2s")
+    recorded["logs"] = {"1101": miss, "1201": miss, "1301": hit}
+    responses.write_text(json.dumps(recorded, indent=2) + "\n", encoding="utf-8")
+    family_steps = {
+        "ccache": """
+    env:
+      CCACHE_MAXSIZE: 50M
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ hashFiles('compiler.lock') }}
+      - run: cmake --build build
+""",
+        "buildkit": """
+    steps:
+      - run: >-
+          docker buildx build --cache-to type=gha,scope=image-${{ github.sha }} .
+""",
+        "go": """
+    steps:
+      - run: go clean -i -cache
+""",
+    }
+    workflow = fixture / "workflows" / "ci.yml"
+    workflow.write_text(f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest{family_steps[family]}""", encoding="utf-8")
+    (fixture / "expected.json").write_text("{}\n", encoding="utf-8")
+
+    doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    confirmed = [row for row in doc["findings"]
+                 if row.get("static_cache_lint")
+                 and row.get("pattern") == pattern
+                 and family in " ".join(str(row.get(key) or "")
+                                        for key in ("evidence", "subject")).lower()
+                 and "build" in (row.get("affected_jobs") or [])
+                 and row.get("cache_log_confirmation", {}).get("misses")]
+    if credited:
+        assert confirmed
+        assert all(isinstance(row.get("cache_sizing_guard"), dict)
+                   for row in confirmed), json.dumps(confirmed, indent=2)
+        if family == "ccache":
+            assert all(row["cache_sizing_guard"]["status"] == "passed"
+                       for row in confirmed), json.dumps(confirmed, indent=2)
+            assert any(
+                float(row.get("wall_clock_p50_s") or 0) > 0
+                or float(row.get("runner_min_saving") or 0) > 0
+                for row in confirmed), json.dumps(confirmed, indent=2)
+        else:
+            assert all(
+                row["cache_sizing_guard"]["status"] != "passed"
+                and not float(row.get("wall_clock_p50_s") or 0)
+                and not float(row.get("runner_min_saving") or 0)
+                for row in confirmed), json.dumps(confirmed, indent=2)
+    else:
+        assert not confirmed
+
     red = json.loads(
         (FIXTURE_ROOT / "red-default-branch" / "responses.json").read_text())
     assert any(
         run.get("event") == "push" and run.get("conclusion") == "failure"
         for workflow in red["workflows"] for run in workflow["runs"])
+
+
+@pytest.mark.parametrize("statuses", [
+    ("hit", "hit", "hit", "hit"),
+    ("miss", "hit", "hit", "hit"),
+])
+def test_collect_withholds_cache_credit_without_a_majority_of_misses(
+        monkeypatch, tmp_path, statuses):
+    fixture = tmp_path / "inputs" / "cache-hit-distribution"
+    fixture.parent.mkdir()
+    shutil.copytree(FIXTURE_ROOT / "cache-lints", fixture)
+    responses = fixture / "responses.json"
+    recorded = json.loads(responses.read_text(encoding="utf-8"))
+    recorded["repo"] = "fixture/cache-hit-distribution"
+    recorded["required_checks"] = ["build"]
+    recorded["cache_usage_bytes"] = 0
+
+    extra_run = json.loads(json.dumps(recorded["workflows"][0]["runs"][-1]))
+    extra_run["id"] = 1004
+    extra_run["head_sha"] = "sha-d"
+    extra_run["html_url"] = str(extra_run.get("html_url") or "").replace(
+        "/1003", "/1004")
+    recorded["workflows"][0]["runs"].append(extra_run)
+    extra_jobs = json.loads(json.dumps(recorded["jobs"]["1003"]))
+    for job in extra_jobs:
+        old_id = str(job.get("id") or "")
+        if old_id:
+            job["id"] = int(old_id) + 100
+            job["html_url"] = str(job.get("html_url") or "").replace(
+                f"/job/{old_id}", f"/job/{job['id']}")
+    recorded["jobs"]["1004"] = extra_jobs
+    recorded["changed_files"] = {
+        str(number): [f"src/{letter}.cc"]
+        for number, letter in enumerate("abcd", 1)
+    }
+    log_by_status = {
+        "miss": ("Cache not found for input keys: pnpm-linux-old\n"
+                 "pnpm install\nCache size: 50 MB\n"
+                 "Cache restored in 2s\nCache saved in 2s"),
+        "hit": ("Cache restored from key: pnpm-linux-stable\n"
+                "pnpm install\nCache size: 50 MB\n"
+                "Cache restored in 2s\nCache saved in 2s"),
+    }
+    recorded["logs"] = {
+        job_id: log_by_status[status]
+        for job_id, status in zip(("1101", "1201", "1301", "1401"), statuses)
+    }
+    for number, workflow_run in enumerate(recorded["workflows"][0]["runs"], 1):
+        workflow_run["pull_requests"] = [{"number": number}]
+        recorded["checks"][workflow_run["head_sha"]] = [{
+            "name": "build",
+            "started_at": workflow_run["run_started_at"],
+            "completed_at": workflow_run["updated_at"],
+        }]
+    responses.write_text(json.dumps(recorded, indent=2) + "\n", encoding="utf-8")
+    (fixture / "workflows" / "ci.yml").write_text("""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install
+""", encoding="utf-8")
+    (fixture / "expected.json").write_text("{}\n", encoding="utf-8")
+
+    doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT5")
+    assert finding.get("wall_clock_p50_s") == 0
+    assert not float(finding.get("runner_min_saving") or 0)
 
 
 def _pr_commit_tail_fixture(root: Path) -> Path:

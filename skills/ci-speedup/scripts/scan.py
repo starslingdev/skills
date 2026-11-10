@@ -2544,10 +2544,14 @@ def _opt89_compile_signal(command: str) -> str | None:
                     elif not token.startswith("-") and "=" not in token:
                         targets.append(token.lower())
                 test_targets = {"test", "tests", "check", "checks", "ctest", "verify"}
-                if any(re.search(r"\$(?:\{|[A-Za-z_])|\$\{\{", target)
-                       for target in targets):
+                literal_targets = [
+                    target for target in targets
+                    if not re.search(r"\$(?:\{|[A-Za-z_])|\$\{\{", target)
+                ]
+                if targets and not literal_targets:
                     continue
-                if targets and all(target in test_targets for target in targets):
+                if literal_targets and all(
+                        target in test_targets for target in literal_targets):
                     continue
         if (re.search(r"\bcmake\b", low)
                 and re.search(r"\bcmake\s+(?:--version|--help|-e)\b", low)):
@@ -2596,7 +2600,67 @@ def _opt89_resolve_known_shell_env(command: str, env: dict[str, str]) -> str:
         lambda match: env.get(match.group(1), match.group(0)), command)
 
 
-def _opt89_command_env(command: str, env: dict[str, str]) -> dict[str, str]:
+def _opt89_resolve_host_shell_env(command: str, env: dict[str, str]) -> str:
+    """Resolve host variables except inside POSIX single-quoted spans."""
+    pieces: list[str] = []
+    index = 0
+    quote = ""
+    variable_re = re.compile(
+        r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'" and index + 1 < len(command):
+            pieces.append(command[index:index + 2])
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if not quote:
+                quote = char
+            elif quote == char:
+                quote = ""
+            pieces.append(char)
+            index += 1
+            continue
+        if char == "$" and quote != "'":
+            match = variable_re.match(command, index)
+            if match is not None:
+                name = match.group(1) or match.group(2)
+                pieces.append(env.get(name, match.group(0)))
+                index = match.end()
+                continue
+        pieces.append(char)
+        index += 1
+    return "".join(pieces)
+
+
+def _opt89_mask_host_single_quotes(command: str) -> str:
+    """Hide container-shell text from host assignment discovery."""
+    pieces: list[str] = []
+    quote = ""
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'" and index + 1 < len(command):
+            pieces.append(command[index:index + 2])
+            index += 2
+            continue
+        if char in {"'", '"'}:
+            if not quote:
+                quote = char
+            elif quote == char:
+                quote = ""
+            pieces.append(char)
+        elif quote == "'":
+            pieces.append("\n" if char == "\n" else " ")
+        else:
+            pieces.append(char)
+        index += 1
+    return "".join(pieces)
+
+
+def _opt89_command_env(
+    command: str, env: dict[str, str], *, docker_options: bool = True,
+) -> dict[str, str]:
     """Apply literal shell and Docker environment overrides in command order."""
     effective = dict(env)
     assignment_re = re.compile(
@@ -2609,7 +2673,9 @@ def _opt89_command_env(command: str, env: dict[str, str]) -> dict[str, str]:
         r"(?:--env(?:=|\s+)|-e(?:=|\s*)?)"
         r"([A-Za-z_][A-Za-z0-9_]*)=([^\s;&|]+)"
     )
-    for pattern in (assignment_re, docker_env_re):
+    patterns = ((assignment_re, docker_env_re) if docker_options
+                else (assignment_re,))
+    for pattern in patterns:
         for match in pattern.finditer(command):
             value = match.group(2)
             if "$" in value:
@@ -2617,6 +2683,96 @@ def _opt89_command_env(command: str, env: dict[str, str]) -> dict[str, str]:
             else:
                 effective[match.group(1)] = value.strip("'\"")
     return effective
+
+
+def _opt89_docker_env(
+    command: str, host_env: dict[str, str],
+) -> tuple[dict[str, str], bool]:
+    """Environment propagated through Docker options and whether one is a file."""
+    propagated: dict[str, str] = {}
+    try:
+        tokens = shlex.split(_LINE_CONTINUATION_RE.sub(" ", command))
+        index = tokens.index("run", tokens.index("docker") + 1) + 1
+    except (ValueError, IndexError):
+        return propagated, False
+    value_options = {
+        "--add-host", "--cap-add", "--cpus", "--device", "--env-file",
+        "--entrypoint", "--hostname", "-h", "--memory", "-m", "--mount",
+        "--name", "--network", "--platform", "--user", "-u", "--volume",
+        "-v", "--workdir", "-w",
+    }
+    specs: list[str] = []
+    env_file = False
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--env-file":
+            env_file = True
+            index += 2
+            continue
+        if token.startswith("--env-file="):
+            env_file = True
+            index += 1
+            continue
+        if token in {"--env", "-e"}:
+            if index + 1 >= len(tokens):
+                break
+            specs.append(tokens[index + 1])
+            index += 2
+            continue
+        if token.startswith("--env="):
+            specs.append(token.removeprefix("--env="))
+            index += 1
+            continue
+        if token.startswith("-e") and len(token) > 2:
+            specs.append(token[2:].removeprefix("="))
+            index += 1
+            continue
+        if token in value_options:
+            index += 2
+            continue
+        if token.startswith("-"):
+            index += 1
+            continue
+        break
+    for spec in specs:
+        match = re.fullmatch(
+            r"([A-Za-z_][A-Za-z0-9_]*)(?:=(.*))?", spec)
+        if match is None:
+            continue
+        name, value = match.group(1), match.group(2)
+        if value is None:
+            if name in host_env:
+                propagated[name] = host_env[name]
+            continue
+        resolved = _opt89_resolve_known_shell_env(value, host_env)
+        if "$" not in resolved:
+            propagated[name] = resolved.strip("'\"")
+    return propagated, env_file
+
+
+def _opt89_resolve_docker_payload_env(
+    payload: str, host_env: dict[str, str], container_env: dict[str, str], *,
+    env_file: bool = False,
+) -> str:
+    """Resolve container variables without importing the step environment."""
+    def value(name: str, original: str) -> str:
+        if name in container_env:
+            return container_env[name]
+        # An env file is read by Docker at runtime.  Its names and values are
+        # unavailable here, so an otherwise unresolved container variable must
+        # stay opaque even when a same-named host variable exists.
+        if env_file:
+            return original
+        if name in host_env:
+            return ""
+        return original
+
+    payload = re.sub(
+        r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        lambda match: value(match.group(1), match.group(0)), payload)
+    return re.sub(
+        r"\$([A-Za-z_][A-Za-z0-9_]*)",
+        lambda match: value(match.group(1), match.group(0)), payload)
 
 
 def _opt89_resolve_known_env(
@@ -2843,8 +2999,33 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                       and _opt89_qemu_supports(
                           qemu_platforms, platform)):
                     arch = platform
-                    command = _opt89_docker_payload(
-                        _opt89_resolve_known_env(run, step_env, matrix))
+                    expanded = _opt89_resolve_known_env_expressions(
+                        run, step_env, matrix)
+                    resolved_step_env = {
+                        key: _opt89_resolve_known_env_expressions(
+                            str(value), step_env, matrix)
+                        for key, value in step_env.items()
+                    }
+                    host_env = _opt89_command_env(
+                        _opt89_mask_host_single_quotes(expanded),
+                        resolved_step_env)
+                    docker_start = re.search(r"\bdocker\s+run\b", expanded, re.I)
+                    if docker_start is not None:
+                        # Preserve quoted shell assignments that execute before
+                        # Docker.  The masking above is only needed to keep
+                        # assignments inside the container payload out.
+                        host_env.update(_opt89_command_env(
+                            expanded[:docker_start.start()], resolved_step_env,
+                            docker_options=False))
+                    expanded = _opt89_resolve_host_shell_env(expanded, host_env)
+                    payload = _opt89_docker_payload(expanded)
+                    docker_env, env_file = _opt89_docker_env(expanded, host_env)
+                    container_env = _opt89_command_env(
+                        payload, docker_env,
+                        docker_options=False)
+                    command = _opt89_resolve_docker_payload_env(
+                        payload, host_env, container_env,
+                        env_file=env_file)
                     marker = "docker run"
                     occurrence = docker_occurrence
                     mechanism = "QEMU-backed docker run"
@@ -4223,6 +4404,36 @@ def _cache_paths(steps: list[dict]) -> list[str]:
     return [path.strip().casefold() for path in paths if path.strip()]
 
 
+_CACHE_ENV_PATH_RE = re.compile(
+    r"\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", re.IGNORECASE)
+
+
+def _resolved_cache_env_path(
+    value: str, doc: dict, job: dict, step: dict,
+) -> str | None:
+    """Resolve cache-path env expressions with Actions' scope precedence.
+
+    ``None`` means an expression named an unavailable variable. Callers keep
+    that case unknown rather than turning it into an absence finding.
+    """
+    env: dict[str, str] = {}
+    for scope in (doc.get("env"), job.get("env"), step.get("env")):
+        if isinstance(scope, dict):
+            env.update({str(name): str(item) for name, item in scope.items()})
+    missing = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal missing
+        name = match.group(1)
+        if name not in env:
+            missing = True
+            return match.group(0)
+        return env[name]
+
+    resolved = _CACHE_ENV_PATH_RE.sub(replace, value)
+    return None if missing else resolved
+
+
 def _cache_saved_keys(docs: Iterable[dict]) -> list[str]:
     """Normalized key families that repository cache steps can save."""
     keys: list[str] = []
@@ -4410,7 +4621,28 @@ def _detect_opt61(
         if not isinstance(job, dict):
             continue
         cache_steps = _cache_action_steps(job)
-        cache_paths = _cache_paths(cache_steps)
+        cache_paths: list[str] = []
+        unknown_env_cache_names: set[str] = set()
+        for cache_step in cache_steps:
+            values = (cache_step.get("with")
+                      if isinstance(cache_step.get("with"), dict) else {})
+            for raw_path in str(values.get("path") or "").splitlines():
+                if not raw_path.strip():
+                    continue
+                resolved = _resolved_cache_env_path(raw_path.strip(), doc, job, cache_step)
+                if resolved is None:
+                    # Preserve the literal suffix for family checks such as
+                    # `${{ env.CACHE_ROOT }}/ccache`.  A value written through
+                    # GITHUB_ENV is unavailable to the static YAML parser, but
+                    # the suffix still proves which cache the action saves.
+                    cache_paths.append(raw_path.strip().casefold())
+                    unknown_env_cache_names.update(
+                        name.casefold()
+                        for name in _CACHE_ENV_PATH_RE.findall(raw_path))
+                else:
+                    cache_paths.extend(
+                        line.strip().casefold()
+                        for line in resolved.splitlines() if line.strip())
         blob = "\n".join((_job_run_blob(job), _job_env_blob(job, doc)))
         reasons: list[tuple[str, str]] = []
 
@@ -4443,22 +4675,89 @@ def _detect_opt61(
 
         temp = _TEMP_CACHE_RE.search(blob)
         cache_path_text = "\n".join(cache_paths)
-        declared_dirs = [
-            (str(name).casefold(), str(value).strip())
-            for env in [doc.get("env"), job.get("env"),
-                        *(step.get("env") for step in _steps(job))]
-            if isinstance(env, dict)
-            for name, value in env.items()
-            if str(name).casefold() in {
-                "ccache_dir", "sccache_dir", "staticcheck_cache", "golangci_lint_cache",
-            } and str(value).strip()
-        ]
-        declared_dirs.extend(
-            (match.group(1).casefold(), match.group(2))
-            for match in re.finditer(
-                r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
-                r"\s*=\s*([^\s;&]+)", _job_run_blob(job), re.IGNORECASE)
-        )
+        cache_dir_names = {
+            "ccache_dir", "sccache_dir", "staticcheck_cache", "golangci_lint_cache",
+        }
+        base_env: dict[str, str] = {}
+        for scope in (doc.get("env"), job.get("env")):
+            if isinstance(scope, dict):
+                base_env.update({str(name).casefold(): str(value).strip()
+                                 for name, value in scope.items()})
+        # Cache-action step env affects only the action input and must not be
+        # mistaken for the compiler process's directory.  Walk run steps in
+        # order so literal GITHUB_ENV writes affect later steps, while inline
+        # assignments remain scoped to the command that contains them.
+        assignment_re = re.compile(
+            r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
+            r"\s*=\s*([^\s;&]+)", re.IGNORECASE)
+        build_command_re = re.compile(
+            r"\b(?:cmake\s+--build|make|ninja|meson\s+compile|cargo\s+(?:build|test)|"
+            r"go\s+(?:build|test))\b", re.IGNORECASE)
+        direct_compiler_re = re.compile(
+            r"(?:^|[\s;&|])(ccache|sccache)(?=\s|$)", re.IGNORECASE)
+        analysis_command_re = re.compile(
+            r"(?:^|[\s;&|])(?:staticcheck|golangci-lint)(?=\s|$)", re.IGNORECASE)
+
+        def consumes_directory(name: str, command: str, env: dict[str, str]) -> bool:
+            if not command.strip() or "$GITHUB_ENV" in command:
+                return False
+            if name in {"ccache_dir", "sccache_dir"}:
+                family = name.removesuffix("_dir")
+                direct = direct_compiler_re.search(command)
+                if direct:
+                    return family == direct.group(1).casefold()
+                env_text = "\n".join(f"{key}={value}" for key, value in env.items())
+                return family in env_text.casefold() and bool(build_command_re.search(command))
+            family = "staticcheck" if name == "staticcheck_cache" else "golangci"
+            match = analysis_command_re.search(command)
+            return bool(match and family in match.group(0).casefold())
+
+        inherited_env = dict(base_env)
+        declared_dirs: list[tuple[str, str]] = []
+        for step in _steps(job):
+            run = _run(step)
+            if not run.strip():
+                continue
+            shell_env = dict(inherited_env)
+            step_env = step.get("env")
+            if isinstance(step_env, dict):
+                for name, value in step_env.items():
+                    folded = str(name).casefold()
+                    if folded in cache_dir_names and str(value).strip():
+                        shell_env[folded] = str(value).strip()
+            github_env_updates: dict[str, str] = {}
+            for command in run.splitlines():
+                matches = list(assignment_re.finditer(command))
+                if "$GITHUB_ENV" in command:
+                    github_env_updates.update(
+                        (match.group(1).casefold(), match.group(2).strip("'\""))
+                        for match in matches)
+                    continue
+                exported = bool(re.match(r"\s*export\s+", command, re.IGNORECASE))
+                if exported:
+                    shell_env.update(
+                        (match.group(1).casefold(), match.group(2).strip("'\""))
+                        for match in matches)
+                elif matches and not assignment_re.sub("", command).strip():
+                    # A bare assignment is shell state for following commands
+                    # in the same run step, unlike `NAME=value command`.
+                    shell_env.update(
+                        (match.group(1).casefold(), match.group(2).strip("'\""))
+                        for match in matches)
+                    continue
+                for name in cache_dir_names:
+                    if not consumes_directory(name, command, shell_env):
+                        continue
+                    inline = next(
+                        (match.group(2).strip("'\"") for match in matches
+                         if match.group(1).casefold() == name and not exported),
+                        None,
+                    )
+                    value = inline or shell_env.get(name)
+                    if value:
+                        declared_dirs.append((name, value))
+            inherited_env.update(github_env_updates)
+        declared_dirs = list(dict.fromkeys(declared_dirs))
         declared_compiler_dirs = [
             value for name, value in declared_dirs
             if name in {"ccache_dir", "sccache_dir"}
@@ -4468,13 +4767,14 @@ def _detect_opt61(
             if name in {"staticcheck_cache", "golangci_lint_cache"}
         ]
 
-        def persisted_dirs(directories: list[str]) -> bool:
+        def persisted_dirs(directories: list[tuple[str, str]]) -> bool:
             return bool(directories) and all(
-                any(_cache_path_covers(path, directory) for path in cache_paths)
-                for directory in directories
+                name in unknown_env_cache_names
+                or any(_cache_path_covers(path, directory) for path in cache_paths)
+                for name, directory in directories
             )
 
-        persisted_declared = persisted_dirs([value for _name, value in declared_dirs])
+        persisted_declared = persisted_dirs(declared_dirs)
         if temp and not (persisted_declared or any(
                 _cache_path_covers(path, temp.group(0).split("=", 1)[-1])
                 for path in cache_paths)):
@@ -4484,18 +4784,29 @@ def _detect_opt61(
         supplied_by_cache_action = any(
             re.search(r"ccache-action|rust-cache", _uses(step), re.IGNORECASE)
             for step in cache_steps)
-        persisted_compiler = (persisted_dirs(declared_compiler_dirs)
+        compiler_dir_entries = [
+            (name, value) for name, value in declared_dirs
+            if name in {"ccache_dir", "sccache_dir"}
+        ]
+        persisted_compiler = (persisted_dirs(compiler_dir_entries)
                                 if declared_compiler_dirs else any(
-            token in cache_path_text for token in ("ccache", "sccache", "target")))
+            token in cache_path_text for token in ("ccache", "sccache", "target"))
+            or bool(unknown_env_cache_names & {"ccache_dir", "sccache_dir"}))
         if (uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler
                 and not _is_self_hosted(job)
                 and not _compiler_cache_has_remote_backend(job, doc)):
             reasons.append((_COMPILER_CACHE_RE.search(blob).group(0),
                             "the compiler cache has no persistence step"))
-        persisted_analysis = (persisted_dirs(declared_analysis_dirs)
+        analysis_dir_entries = [
+            (name, value) for name, value in declared_dirs
+            if name in {"staticcheck_cache", "golangci_lint_cache"}
+        ]
+        persisted_analysis = (persisted_dirs(analysis_dir_entries)
                                if declared_analysis_dirs else any(
                                    token in cache_path_text
-                                   for token in ("staticcheck", "golangci")))
+                                   for token in ("staticcheck", "golangci"))
+                               or bool(unknown_env_cache_names & {
+                                   "staticcheck_cache", "golangci_lint_cache"}))
         if _ANALYSIS_CACHE_RE.search(blob) and not persisted_analysis:
             reasons.append((_ANALYSIS_CACHE_RE.search(blob).group(0),
                             "the analysis cache has no persistence step"))

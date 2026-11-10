@@ -6220,7 +6220,7 @@ def _measure_opt32_path_filters(
 
 
 _CACHE_SIZING_PATTERNS = frozenset(
-    {"OPT4", "OPT6", "OPT9", "OPT61", "OPT96", "OPT101"})
+    {"OPT4", "OPT6", "OPT9", "OPT61", "OPT62", "OPT96", "OPT101"})
 _CACHE_DEFAULT_BUDGET_BYTES = 10 * 1024 ** 3
 _CACHE_BUDGET_FULL_FRACTION = 0.90
 _CACHE_LIMIT_UNKNOWN_ABOVE = 1.10
@@ -6427,6 +6427,19 @@ def _apply_cache_sizing_guard(
     wf_docs: dict[str, dict[str, Any]],
 ) -> None:
     """Admit a cache saving only after budget, invalidation and net-cost checks."""
+    old_guard = finding.get("cache_sizing_guard")
+    if isinstance(old_guard, dict):
+        old_checks = old_guard.get("checks") if isinstance(old_guard.get("checks"), dict) else {}
+        old_details = "; ".join(
+            str(value.get("detail") or "") for value in old_checks.values()
+            if isinstance(value, dict) and value.get("status") != "passed"
+        )
+        if old_guard.get("status") == "passed":
+            old_details = "all three cache sizing checks passed"
+        old_suffix = f" Cache sizing guard: {old_details}."
+        evidence = str(finding.get("evidence") or "")
+        if old_details and evidence.endswith(old_suffix):
+            finding["evidence"] = evidence[:-len(old_suffix)]
     real_edit_shas = {
         str(run.get("head_sha") or "")
         for run in sampled_runs
@@ -6709,7 +6722,13 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
-    if f.get("static_cache_lint"):
+    cache_confirmation = f.get("cache_log_confirmation")
+    confirmed_miss_majority = (
+        isinstance(cache_confirmation, dict)
+        and int(cache_confirmation.get("misses") or 0)
+        > int(cache_confirmation.get("hits") or 0)
+    )
+    if f.get("static_cache_lint") and not confirmed_miss_majority:
         f["wall_clock_p50_s"] = None
         f["runner_min_saving"] = None
         f["tier"] = 2
@@ -24419,6 +24438,23 @@ _CACHE_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _cache_keywords_for_finding(finding: dict[str, Any]) -> tuple[str, ...]:
+    """Scope a static compiler-cache lint to the cache family it predicts."""
+    pattern = str(finding.get("pattern") or "")
+    keywords = _CACHE_KEYWORDS.get(pattern, ())
+    if not finding.get("static_cache_lint"):
+        return keywords
+    explicit = str(finding.get("cache_family") or "").strip().lower()
+    if explicit:
+        return (explicit,)
+    evidence = " ".join(str(finding.get(key) or "")
+                        for key in ("evidence", "subject", "evidence_snippet")).lower()
+    compiler_families = tuple(
+        family for family in ("sccache", "ccache", "staticcheck", "golangci", "buildkit", "go")
+        if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", evidence))
+    return compiler_families or keywords
+
+
 def _clean_log_line(line: str) -> str:
     return _TS_PREFIX_RE.sub("", line).strip()[:160]
 
@@ -24428,8 +24464,32 @@ def _cache_status_from_log(log: str, keywords: tuple[str, ...] = ()) -> tuple[st
     the finding is about). Prefer a MISS line (the problem); else a HIT line;
     else ('unknown', '') — which for a 'not cached at all' finding is itself
     the proof (no cache line ⇒ the work ran full)."""
+    if keywords == ("buildkit",):
+        first_hit = ""
+        for raw_line in log.splitlines():
+            if re.search(
+                    r"(?:error|failed|not found).*(?:importing cache|cache manifest)|"
+                    r"(?:importing cache|cache manifest).*(?:error|failed|not found)",
+                    raw_line, re.I):
+                return "miss", _clean_log_line(raw_line)
+            if not first_hit and re.search(
+                    r"\bCACHED\b|imported cache manifest|cache import complete",
+                    raw_line, re.I):
+                first_hit = _clean_log_line(raw_line)
+        return ("hit", first_hit) if first_hit else ("unknown", "")
+
     def _relevant(line: str) -> bool:
-        return not keywords or any(k.lower() in line.lower() for k in keywords)
+        if not keywords:
+            return True
+        for keyword in keywords:
+            if keyword == "go":
+                if re.search(r"\b(?:go(?:\s+build)?\s+cache|GOCACHE)\b", line, re.I):
+                    return True
+                continue
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(keyword)}(?![A-Za-z0-9])",
+                         line, re.I):
+                return True
+        return False
     first_hit = ""
     for raw_line in log.splitlines():
         if not _relevant(raw_line):
@@ -24476,7 +24536,7 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
         sel = []
         for f in findings:
             pat = f.get("pattern")
-            if pat not in _CACHE_FAMILY:
+            if pat not in _CACHE_FAMILY and not f.get("static_cache_lint"):
                 continue
             jobs = f.get("affected_jobs") or []
             if not jobs:
@@ -24485,7 +24545,7 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
                 jobs_per_run_by_wf.get(f.get("workflow_file", ""), []), jobs[0])
             if not instances:
                 continue
-            sel.append((f, _CACHE_KEYWORDS.get(pat, ()), instances[:cap]))
+            sel.append((f, _cache_keywords_for_finding(f), instances[:cap]))
         return sel
 
     targets = _targets()
@@ -24543,12 +24603,20 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
         if not rows:
             continue
         sampled = len(rows)
+        f["cache_log_confirmation"] = {
+            "misses": miss_n,
+            "hits": hit_n,
+            "unreadable": unknown_n,
+            "sampled_runs": sampled,
+        }
         noun = f"{keywords[0]} cache" if keywords else "cache"   # "pnpm cache"
         the_cache = f"the {noun}"                                  # "the pnpm cache"
         if miss_n and hit_n:
+            credit = ("misses outnumber hits, so the miss-mode saving is eligible "
+                      "for the sizing guards" if miss_n > hit_n else
+                      "hits are at least as common as misses, so no saving is credited")
             summary = (f"Across {sampled} sampled run(s), {the_cache} MISSED on "
-                       f"{miss_n} and hit on {hit_n} — bimodal, so the saving is "
-                       f"the miss-mode cost × miss rate, not the full step:")
+                       f"{miss_n} and hit on {hit_n} — bimodal; {credit}:")
             note = ("Each link opens that run's job log with the verbatim cache "
                     "line. Compare the MISS vs hit run durations to size the win.")
         elif miss_n:
@@ -24559,13 +24627,24 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
             note = ("Each link opens that run's job log; the quoted line is the "
                     "verbatim cache-miss line from it.")
         elif hit_n:
-            summary = (f"⚠️ {the_cache.capitalize()} HIT on all {hit_n} sampled "
-                       f"run(s) — no miss observed in logs. Config-hygiene only "
-                       f"unless a miss is shown; do NOT claim wall-clock savings:")
+            if hit_n == sampled:
+                summary = (f"⚠️ {the_cache.capitalize()} HIT on all {hit_n} sampled "
+                           f"run(s) — no miss observed in logs. Config-hygiene only "
+                           f"unless a miss is shown; do NOT claim wall-clock savings:")
+                f["size_note"] = (
+                    "logs show the cache HITTING on every sampled run — treat as "
+                    "config hygiene, savings unconfirmed")
+            else:
+                summary = (f"⚠️ {the_cache.capitalize()} HIT on {hit_n} of {sampled} "
+                           f"sampled run(s) ({unknown_n} showed no matching cache "
+                           "line) — no miss observed in logs. Config-hygiene only "
+                           "unless a miss is shown; do NOT claim wall-clock savings:")
+                f["size_note"] = (
+                    f"logs show the cache hitting on {hit_n} of {sampled} sampled "
+                    f"runs; {unknown_n} had no matching cache line — treat as config "
+                    "hygiene, savings unconfirmed")
             note = ("Logs show the cache restoring. Re-review: the configured "
                     "issue may not actually cost time on this runner.")
-            f["size_note"] = ("logs show the cache HITTING on every sampled run — "
-                              "treat as config hygiene, savings unconfirmed")
             # The evidence here REFUTES a wall-clock saving (the cache already
             # restores), so don't keep a sized wall-clock number that the
             # evidence contradicts — zero it. (Config hygiene = no measured
@@ -32073,6 +32152,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         client, repo, findings, sampled_runs_by_wf, _wf_docs,
         changed_files=_changed_files)
 
+    # Confirm static cache misses before the shared sizing pass so newly
+    # creditable findings cross the same guards and wall-clock cascade as every
+    # other finding.
+    if with_logs:
+        _attach_cache_log_evidence(client, repo, findings, jobs_per_run_by_wf)
+
     # A cache log distribution belongs to the same workflow/job finding even
     # when the finding is not OPT96. Reuse the already-fetched pole logs; this
     # adds no job-log reads.
@@ -32106,6 +32191,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         crit = crit_by_wf.get(wf_path, {})
         vol = vol_by_wf.get(wf_path)
         _size_finding(f, crit, vol)
+        confirmation = f.get("cache_log_confirmation")
+        if isinstance(confirmation, dict):
+            misses = int(confirmation.get("misses") or 0)
+            hits = int(confirmation.get("hits") or 0)
+            if hits and misses <= hits:
+                f["wall_clock_p50_s"] = 0.0
+                f["runner_min_saving"] = 0.0
+                f["tier"] = 2
+                f["realization"] = "none"
+                f["size_note"] = (
+                    "sampled cache hits are at least as common as misses — no "
+                    "wall-clock or runner-minute saving is credited")
         if f in _cache_candidates:
             _apply_cache_sizing_guard(
                 f, usage_bytes=_cache_usage, changed=_changed_files,
@@ -32431,7 +32528,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     tiers = ["gh-timing"]
     logs_fetched: int | None = None
     if with_logs:
-        _attach_cache_log_evidence(client, repo, findings, jobs_per_run_by_wf)
         tiers.append("job-logs")
         # Capture the long-pole jobs' raw logs into a local data bundle so the
         # report / fix-agent can read the step's internal timing without
