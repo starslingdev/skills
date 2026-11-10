@@ -4502,43 +4502,81 @@ def _detect_opt61(
             if isinstance(scope, dict):
                 base_env.update({str(name).casefold(): str(value).strip()
                                  for name, value in scope.items()})
-        # A run-step declaration shadows workflow/job env for that command.
         # Cache-action step env affects only the action input and must not be
-        # mistaken for the compiler process's directory.
-        run_overrides: dict[str, list[str]] = {}
-        run_step_overrides: list[set[str]] = []
+        # mistaken for the compiler process's directory.  Walk run steps in
+        # order so literal GITHUB_ENV writes affect later steps, while inline
+        # assignments remain scoped to the command that contains them.
         assignment_re = re.compile(
             r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
             r"\s*=\s*([^\s;&]+)", re.IGNORECASE)
+        build_command_re = re.compile(
+            r"\b(?:cmake\s+--build|make|ninja|meson\s+compile|cargo\s+(?:build|test)|"
+            r"go\s+(?:build|test))\b", re.IGNORECASE)
+        direct_compiler_re = re.compile(
+            r"(?:^|[\s;&|])(ccache|sccache)(?=\s|$)", re.IGNORECASE)
+        analysis_command_re = re.compile(
+            r"(?:^|[\s;&|])(?:staticcheck|golangci-lint)(?=\s|$)", re.IGNORECASE)
+
+        def consumes_directory(name: str, command: str, env: dict[str, str]) -> bool:
+            if not command.strip() or "$GITHUB_ENV" in command:
+                return False
+            if name in {"ccache_dir", "sccache_dir"}:
+                family = name.removesuffix("_dir")
+                direct = direct_compiler_re.search(command)
+                if direct:
+                    return family == direct.group(1).casefold()
+                env_text = "\n".join(f"{key}={value}" for key, value in env.items())
+                return family in env_text.casefold() and bool(build_command_re.search(command))
+            family = "staticcheck" if name == "staticcheck_cache" else "golangci"
+            match = analysis_command_re.search(command)
+            return bool(match and family in match.group(0).casefold())
+
+        inherited_env = dict(base_env)
+        declared_dirs: list[tuple[str, str]] = []
         for step in _steps(job):
             run = _run(step)
             if not run.strip():
                 continue
-            overridden: set[str] = set()
+            shell_env = dict(inherited_env)
             step_env = step.get("env")
             if isinstance(step_env, dict):
                 for name, value in step_env.items():
                     folded = str(name).casefold()
                     if folded in cache_dir_names and str(value).strip():
-                        run_overrides.setdefault(folded, []).append(str(value).strip())
-                        overridden.add(folded)
-            for match in assignment_re.finditer(run):
-                folded = match.group(1).casefold()
-                run_overrides.setdefault(folded, []).append(match.group(2))
-                overridden.add(folded)
-            run_step_overrides.append(overridden)
-        declared_dirs: list[tuple[str, str]] = []
-        for name in cache_dir_names:
-            values = run_overrides.get(name)
-            if values:
-                declared_dirs.extend((name, value) for value in dict.fromkeys(values))
-            # A step-local override replaces the inherited directory for that
-            # step only.  Keep the workflow/job value when another run step
-            # still inherits it.
-            if (base_env.get(name)
-                    and (not values or any(name not in names
-                                           for names in run_step_overrides))):
-                declared_dirs.append((name, base_env[name]))
+                        shell_env[folded] = str(value).strip()
+            github_env_updates: dict[str, str] = {}
+            for command in run.splitlines():
+                matches = list(assignment_re.finditer(command))
+                if "$GITHUB_ENV" in command:
+                    github_env_updates.update(
+                        (match.group(1).casefold(), match.group(2).strip("'\""))
+                        for match in matches)
+                    continue
+                exported = bool(re.match(r"\s*export\s+", command, re.IGNORECASE))
+                if exported:
+                    shell_env.update(
+                        (match.group(1).casefold(), match.group(2).strip("'\""))
+                        for match in matches)
+                elif matches and not assignment_re.sub("", command).strip():
+                    # A bare assignment is shell state for following commands
+                    # in the same run step, unlike `NAME=value command`.
+                    shell_env.update(
+                        (match.group(1).casefold(), match.group(2).strip("'\""))
+                        for match in matches)
+                    continue
+                for name in cache_dir_names:
+                    if not consumes_directory(name, command, shell_env):
+                        continue
+                    inline = next(
+                        (match.group(2).strip("'\"") for match in matches
+                         if match.group(1).casefold() == name and not exported),
+                        None,
+                    )
+                    value = inline or shell_env.get(name)
+                    if value:
+                        declared_dirs.append((name, value))
+            inherited_env.update(github_env_updates)
+        declared_dirs = list(dict.fromkeys(declared_dirs))
         declared_compiler_dirs = [
             value for name, value in declared_dirs
             if name in {"ccache_dir", "sccache_dir"}

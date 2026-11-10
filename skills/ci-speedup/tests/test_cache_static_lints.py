@@ -487,6 +487,95 @@ jobs:
     assert "OPT61" in _patterns(rows)
 
 
+def test_opt61_applies_an_inline_override_only_to_its_command(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /inline/ccache
+          key: ccache-v1
+      - run: |
+          CCACHE_DIR=/inline/ccache ccache make first
+          ccache make second
+""")
+
+    assert "OPT61" in _patterns(rows)
+
+
+def test_opt61_keeps_a_standalone_shell_assignment_for_later_commands(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /shell/ccache
+          key: ccache-v1
+      - run: |
+          CCACHE_DIR=/shell/ccache
+          ccache make all
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_applies_github_env_writes_to_later_steps(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - run: echo "CCACHE_DIR=/later/ccache" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: /later/ccache
+          key: ccache-v1
+      - run: ccache make
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_ignores_inherited_directories_in_unrelated_run_steps(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - run: echo setup
+      - uses: actions/cache@v4
+        with:
+          path: /step/ccache
+          key: ccache-v1
+      - run: cmake --build build
+        env:
+          CCACHE_DIR: /step/ccache
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
 def test_opt61_splits_a_multiline_env_cache_path(tmp_path) -> None:
     rows = _scan_workflow(tmp_path, """name: CI
 on: pull_request
