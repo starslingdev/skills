@@ -493,7 +493,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
         row.get("pattern") == "OPT61"
         and "restore-family" in (row.get("affected_jobs") or [])
         for row in cache_rows)
-    assert any(
+    assert not any(
         row.get("pattern") == "OPT61"
         and "env-ccache" in (row.get("affected_jobs") or [])
         for row in cache_rows)
