@@ -61,6 +61,37 @@ jobs:
     assert [f["subject"] for f in second] == ["one", "two"]
 
 
+def test_opt14_stamps_only_shard_axis_leg_counts(tmp_path):
+    root = _repo(tmp_path, """on: pull_request
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shardIndex: [1, 2, 3, 4]
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --shard=${{ matrix.shardIndex }}/4
+  sibling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+""")
+
+    finding = next(
+        row for row in scan.scan(root, CATALOG)["findings"]
+        if row["pattern"] == "OPT14")
+
+    assert finding["matrix_setup_legs"] == {"shards": 4}
+    assert finding["matrix_setup_repeated"] == {
+        "shards": ["checkout", "install", "build"]}
+
+
 def test_all_scan_incomplete_records_have_a_known_kind(tmp_path):
     root = _repo(tmp_path, "jobs: [unterminated")
     records = scan.scan(root, CATALOG)["scan_incomplete"]

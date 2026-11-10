@@ -30,6 +30,7 @@ import argparse
 import functools
 import json
 import logging
+import math
 import os
 import re
 import shlex
@@ -3498,6 +3499,10 @@ def _co_running(jobs: dict, names: list[str]) -> list[str]:
 _INSTALL_RE = re.compile(
     r"\b(pnpm\s+(install|i|ci)|npm\s+(ci|install)|yarn(\s+install)?|"
     r"bun\s+install|pip\s+install|poetry\s+install|uv\s+sync)\b", re.I)
+_MATRIX_SETUP_BUILD_RE = re.compile(
+    r"\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?build\b|"
+    r"\b(?:make|cmake\s+--build|cargo\s+build|go\s+build|"
+    r"gradle\w*\s+build|bazel\s+build)\b", re.I)
 
 
 def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
@@ -3508,6 +3513,8 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
     finding — so we require BOTH an upload and a download to exist before
     treating the workflow as already passing build outputs between jobs."""
     setup_jobs: list[str] = []
+    matrix_setup_legs: dict[str, int] = {}
+    matrix_setup_repeated: dict[str, list[str]] = {}
     has_upload = has_download = False
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
@@ -3524,6 +3531,19 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
                 has_download = True
         if has_checkout and has_install:
             setup_jobs.append(job_name)
+            strategy = job.get("strategy") if isinstance(job.get("strategy"), dict) else {}
+            matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+            shard_axes = [
+                value for key, value in (matrix.items() if isinstance(matrix, dict) else [])
+                if key not in {"include", "exclude"} and _SHARD_AXIS_RE.search(str(key))
+                and isinstance(value, list) and value
+            ]
+            if shard_axes:
+                matrix_setup_legs[job_name] = math.prod(len(value) for value in shard_axes)
+                repeated = ["checkout", "install"]
+                if _MATRIX_SETUP_BUILD_RE.search(_job_run_blob(job)):
+                    repeated.append("build")
+                matrix_setup_repeated[job_name] = repeated
     has_handoff = has_upload and has_download
     # Jobs that never co-run (provably exclusive `if:`) are not repeated work.
     setup_jobs = _co_running(_jobs_from_doc(doc), setup_jobs)
@@ -3535,6 +3555,14 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
                       f"install with no `actions/upload-artifact` / "
                       f"`download-artifact` handoff: {', '.join(setup_jobs)}"),
             match_text="(workflow)",
+            facts=({
+                "matrix_setup_legs": {
+                    job: count for job, count in matrix_setup_legs.items()
+                    if job in setup_jobs},
+                "matrix_setup_repeated": {
+                    job: repeated for job, repeated in matrix_setup_repeated.items()
+                    if job in setup_jobs},
+            } if any(job in setup_jobs for job in matrix_setup_legs) else {}),
         )]
     return []
 

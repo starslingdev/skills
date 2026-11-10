@@ -541,6 +541,34 @@ def main(argv: list[str] | None = None) -> int:
                 if grew:
                     annotation("warning", f"{f['pattern']} scope grew to jobs: {', '.join(grew)}", f)
                     warnings += 1
+                if old is None or f.get("pattern") != "OPT14":
+                    continue
+                old_legs = old.get("matrix_setup_legs")
+                new_legs = f.get("matrix_setup_legs")
+                repeated = f.get("matrix_setup_repeated")
+                if not all(isinstance(value, dict)
+                           for value in (old_legs, new_legs, repeated)):
+                    continue
+                for job in sorted(set(old_legs) & set(new_legs)):
+                    before, after = old_legs.get(job), new_legs.get(job)
+                    work = repeated.get(job)
+                    if (not isinstance(before, int) or not isinstance(after, int)
+                            or after <= before or not isinstance(work, list)
+                            or not ({"install", "build"} & set(work))):
+                        continue
+                    repeated_text = ", ".join(str(name) for name in work[:-1])
+                    if len(work) > 1:
+                        repeated_text += f" and {work[-1]}"
+                    elif work:
+                        repeated_text = str(work[0])
+                    annotation(
+                        "warning",
+                        f"{f['pattern']} job {job}: {before} -> {after} legs; each leg "
+                        f"repeats {repeated_text}; try running the work in parallel on "
+                        "one machine first (see OPT88)",
+                        f,
+                    )
+                    warnings += 1
 
         if increases and not bootstrap:
             verdict = "Policy block: " + ", ".join(

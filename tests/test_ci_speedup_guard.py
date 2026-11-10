@@ -88,6 +88,39 @@ jobs:
 """
 
 
+def repeated_setup_matrix(*, shard_legs: int = 8, axis: str = "shard",
+                          artifact_handoff: bool = False) -> str:
+    values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    handoff = """
+      - uses: actions/download-artifact@v4
+        with: {name: app}
+""" if artifact_handoff else ""
+    upload = """
+      - uses: actions/upload-artifact@v4
+        with: {name: app, path: dist}
+""" if artifact_handoff else ""
+    return f"""name: Matrix setup
+on: pull_request
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        {axis}: [{values}]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --shard=${{{{ matrix.{axis} }}}}/{shard_legs}
+{handoff}  sibling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+{upload}"""
+
+
 def trees(tmp_path: Path, base_text: str, merge_text: str):
     base, merge = tmp_path / "base", tmp_path / "merge"
     for root, text in ((base, base_text), (merge, merge_text)):
@@ -137,6 +170,36 @@ def test_same_identity_aggregate_finding_reports_only_the_added_job(
     assert growth
     assert all("added" in line for line in growth)
     assert all("guard-verify" not in line and "test" not in line for line in growth)
+
+
+def test_shard_matrix_leg_growth_warns_with_repeated_setup(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path, repeated_setup_matrix(shard_legs=8),
+        repeated_setup_matrix(shard_legs=16))
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    warnings = [line for line in output.splitlines() if "8 -> 16 legs" in line]
+    assert len(warnings) == 1
+    assert "shards" in warnings[0]
+    assert "repeats checkout, install and build" in warnings[0]
+
+
+@pytest.mark.parametrize("merge_text", [
+    repeated_setup_matrix(shard_legs=8),
+    repeated_setup_matrix(shard_legs=16, axis="os"),
+    repeated_setup_matrix(shard_legs=16, artifact_handoff=True),
+])
+def test_matrix_growth_exception_stays_silent_for_non_growth_or_non_shards(
+        guard, tmp_path, capsys, monkeypatch, merge_text):
+    base, merge = trees(tmp_path, repeated_setup_matrix(shard_legs=8), merge_text)
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "legs; each leg repeats" not in output
 
 
 def test_same_identity_aggregate_finding_reports_regrouped_job(
