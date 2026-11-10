@@ -133,13 +133,19 @@ def test_verifier_rederives_a_chained_projection_from_the_commit_fact(tmp_path: 
         "projection_4x": {"job_speedup": 4.0, "projected_s": 660.0, "multiple": 1.73},
     }
     doc = {"pr_critical_path": {"commit_wall_clock": {
-        "p50_s": 1140.0, "p90_s": 1140.0, "facts": [fact]}}, "findings": []}
+        "p50_s": 1140.0, "p90_s": 1140.0, "facts": [fact],
+        "median_projection_multiple": 1.73,
+        "worst_commit": {"sha": "abc123", "wall_s": 1140.0,
+                         "workflow_file": ""},
+    }}, "findings": []}
     findings = tmp_path / "findings.json"
     findings.write_text(json.dumps(doc), encoding="utf-8")
     report = ("> **Per-commit PR wait:** p50 **19m 00s**, p90 **19m 00s**, from the "
               "earliest workflow run created to the last job completed across every "
               "workflow on that commit. At the sampled p50 commit, a 4x speedup to "
-              "its slowest job projects to **11m 00s** (**1.73x**).\n")
+              "its slowest job projects to **11m 00s** (**1.73x**). Across commits, "
+              "the median projection is **1.73x**. The worst sampled commit is "
+              "`abc123` at **19m 00s**.\n")
     check = verifier.check_commit_wall_clock_projection(report, findings)
     assert check.ok, check.detail
 

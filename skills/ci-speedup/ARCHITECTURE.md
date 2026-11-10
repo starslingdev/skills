@@ -886,7 +886,7 @@ never discards a whole wave.
 | --- | --- | --- |
 | `findings` | scan + collect_runs | the finding list (see below) |
 | `scanned_workflows` | scan | count of workflow files seen |
-| `scan_incomplete` | scan | files that could not be read/parsed (coverage gaps) |
+| `scan_incomplete` | scan | files that could not be read/parsed (coverage gaps); every record carries a stable machine `kind` as well as its human `reason` |
 | `catalog_patterns_without_detector` | scan | coverage-honesty list |
 | `scanned_at` / `skill_commit_sha` / `commit_sha` / `repo` | scan main | provenance |
 | `data_sources` | collect_runs | tiers run, gh counts, `sampled_runs_created_before`, `partial_reason`, adaptive-sampling fields (`shallow_runs`, `max_runs`, `shallow_capped`, `capped_workflows`, `pole_candidates`, `deepened_workflows`, `deepen_converged`, `full_depth_workflows`, `shallow_remaining_workflows` — §2.1), run-list-triage fields (`triaged_fast_workflows`, `triaged_fast_count`, `recovered_fast_workflows`, `recovered_fast_count` — §2.1), cost-spine-only triage/fetch fields (`cost_spine_triaged_workflows_included`, counts for workflows/runs/jobs, `cost_spine_job_fetch_failures`, `cost_deepen_candidate_workflows`, `cost_deepened_workflows`, `cost_spine_full_depth_workflows`, and `cost_spine_shallow_workflows`), and `cache_dist_probe` (`{cache_poles, push_logs_fetched, pr_logs_reused}` — the cache-distribution provenance + the schema stamp `verify_report`'s cache checks SKIP on when absent, §12.4) |
@@ -904,7 +904,8 @@ A single **finding** dict carries (load-bearing fields in bold):
 - `id` (`f1`, …), **`pattern`** (a catalog OPT-id), `pattern_class`
   (`static` | `data-driven` | `structural`), **`severity`**
   (HIGH/MEDIUM/LOW/MANUAL), `title`, **`workflow_file`**, **`line`**,
-  `affected_jobs`, `evidence`, `fix_strategy`, `fix_recipe_anchor`.
+  `affected_jobs`, **`subject`** (the detector-owned stable identity), `evidence`,
+  `fix_strategy`, `fix_recipe_anchor`.
 - **Structural findings only** (`structural: true`, OPT70–OPT75 — see §11):
   **`risk`** (`LOW`/`MEDIUM`/`HIGH`), **`guardrail`**, `rollout`,
   `failure_mode`, `decomposition` (`{dominant_step, dominant_category,
@@ -912,6 +913,7 @@ A single **finding** dict carries (load-bearing fields in bold):
   (`required`/`not-required`/`unknown`). `risk` + `guardrail` are
   load-bearing: `_validate_findings` pulls out any structural finding missing
   them, so a high-leverage change can never render as if it were safe hygiene.
+
 - Sizing: **`wall_clock_p50_s`** (the ranking metric; `null` = qualitative,
   `0.0` = sized-as-zero), **`runner_min_saving`**, `tier` (1 direct lever / 2
   bill-only-or-negative / 3 reliability), `realization` (`direct` / `tail` /
@@ -924,6 +926,13 @@ A single **finding** dict carries (load-bearing fields in bold):
 - Cross-workflow: `concurrent_workflows` (`[{workflow, long_pole_p50_s}]`) and
   `workflow_long_pole_p50_s`.
 - Routing: `advisory` (excluded from the report, kept in JSON), `needs_log_confirmation`.
+
+The static scanner also exports `INSTANCE_GRANULAR`, the pattern ids whose
+detectors have cardinality tests proving that each physical occurrence produces
+its own finding. Differential consumers such as `ci-speedup-guard` may enforce
+only members of this set. Scanner readers do not follow symlinks outside the
+scan root; each such path is disclosed as `scan_incomplete.kind =
+symlink-out-of-tree`.
 
 A pattern absent from the `_SIZING` table is rendered qualitatively (both axes
 `null`) - the scanner never invents a number.

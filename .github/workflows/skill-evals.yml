@@ -12,16 +12,15 @@
 #
 # WHY THIS IS NOT THE `test` GATE, and is not required:
 #
-#   - It spends real tokens. One session per case, so it is path-filtered to the files that can
-#     actually change agent behaviour. An example or top-level docs PR never pays for it;
-#     an edit to an evals/ README does, because evals/** is in the filter.
+#   - It spends real tokens. The shorter ci-secure suite is path-filtered to files that can
+#     change agent behaviour. The longer ci-speedup suite runs on schedule or by dispatch.
 #   - It is non-deterministic. An agent can reach a correct outcome by a different route, so a
 #     required check here would be flaky, and a flaky gate gets disabled or ignored.
 #   - It cannot run on fork PRs at all: `pull_request` from a fork has no access to
 #     ANTHROPIC_API_KEY. A fork PR therefore gets no `skill evals` check and a separate check
 #     whose NAME is the message — `skill evals NOT RUN (fork PR — no agent session)` — exactly
-#     as registry-scan.yml reports its own fork gap. A green check called "skill evals" must
-#     never appear over a session that did not happen.
+#     as registry-scan.yml reports its own fork gap. A green check called "skill evals" means
+#     every suite selected for that event completed successfully.
 #     `.github/workflows/claude.yml` shows the other pattern (comment-triggered, base-repo
 #     context) if on-demand fork coverage is ever wanted.
 #
@@ -37,21 +36,19 @@ on:
       - "skills/ci-secure/references/**"
       - "skills/ci-secure/scripts/**"
       - "skills/ci-secure/evals/**"
-      # ci-speedup's runnable evals.json entries. One workflow-level filter for both
-      # suites, so a change to either skill runs both (no classifier job by design).
-      - "skills/ci-speedup/SKILL.md"
-      - "skills/ci-speedup/references/**"
-      - "skills/ci-speedup/scripts/**"
-      - "skills/ci-speedup/evals/**"
-      # The session runs verify_report.py; the scaffold builds the fixture with the
-      # e2e test's helpers from its replay corpus.
-      - "skills/ci-speedup/tests/verify_report.py"
-      - "skills/ci-speedup/tests/test_offline_pipeline_e2e.py"
-      - "skills/ci-speedup/tests/fixtures/gh_replay/**"
+      # No ci-speedup paths: its suite runs only on schedule or dispatch, so a
+      # ci-speedup-only change would start nothing here but the ci-secure sessions.
+      # Dispatch this workflow on the branch before merging a ci-speedup SKILL.md,
+      # references or scripts change.
+      # The shared harness both suites run through:
       - "maintainers/scripts/run_skill_evals.py"
       - "maintainers/scripts/eval_gh_shim.py"
       - "maintainers/scripts/eval_reading.py"
       - ".github/workflows/skill-evals.yml"
+
+  # Keep live-agent coverage without putting nondeterministic sessions on the PR path.
+  schedule:
+    - cron: "17 3 * * *"
 
   # Manual: run it against any branch on demand, from the Actions tab or
   # `gh workflow run skill-evals.yml --ref <branch>`. This is the escape hatch for a PR that
@@ -69,7 +66,7 @@ on:
         default: "1"
         type: string
       tier:
-        description: "gate = the per-PR regression entries (what pull requests run); measure = only the measurement entries (ci-speedup's quality-review-opt81; ci-secure has none and reports NOT RUN); all = both"
+        description: "gate = the regression entries (what pull requests run for ci-secure, and the nightly run for both); measure = only the measurement entries (ci-speedup's quality-review-opt81; ci-secure has none and reports NOT RUN); all = both"
         required: false
         default: gate
         type: choice
@@ -77,7 +74,8 @@ on:
 
 # A superseded run is wasted tokens, not just wasted minutes.
 concurrency:
-  group: skill-evals-${{ github.ref }}
+  # Keyed on the event too, so a manual dispatch on main never cancels the nightly run.
+  group: skill-evals-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -91,6 +89,7 @@ jobs:
     # convenience. The verdict job below reports the gap rather than hiding it.
     if: >-
       github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule' ||
       github.event.pull_request.head.repo.full_name == github.repository
     runs-on: starsling-ubuntu-26.04
     # Above the runner's own worst case: the five entries run in parallel (one round), so the
@@ -151,7 +150,7 @@ jobs:
             echo "::error title=SKILL EVALS DID NOT RUN::runs=${RUNS} is not supported: the job timeout budgets one run per case. Nothing was verified; dispatch again for another run."
             exit 2
           fi
-          # Pull requests have no inputs: the gate tier, with no --all.
+          # Pull requests and scheduled runs have no inputs: the gate tier, with no --all.
           case "${TIER:-gate}" in
             gate) tier_args="" ;;
             measure) tier_args="--tier measure" ;;
@@ -184,13 +183,13 @@ jobs:
 
   # ci-speedup's runnable evals.json entries (a full audit of the synthetic repo against its
   # offline replay corpus, the security ask that must route to ci-secure, and reading-sensitive
-  # cases), run by the shared runner. Same trust model as `evals` above. Pull requests run the
-  # four gate entries; quality-review-opt81 is a measurement (tier measure), run by dispatch.
+  # cases), run by the shared runner. These nondeterministic agent sessions are deliberately
+  # scheduled or dispatched; pull requests use deterministic pytest coverage for ci-speedup.
   ci-speedup-evals:
     name: ci-speedup skill evals
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      github.event.pull_request.head.repo.full_name == github.repository
+      github.event_name == 'schedule'
     runs-on: starsling-ubuntu-26.04
     # Entries run in parallel, except the three `serial` full audits (10, 11, 13), which write
     # fixed /tmp paths and so take turns: worst case (tier all) is those three end to end at the
@@ -236,7 +235,7 @@ jobs:
             echo "::error title=SKILL EVALS DID NOT RUN::runs=${RUNS} is not supported: the job timeout budgets one run per case. Nothing was verified; dispatch again for another run."
             exit 2
           fi
-          # Pull requests have no inputs: the gate tier, with no --all.
+          # Scheduled runs have no inputs: the gate tier, with no --all.
           case "${TIER:-gate}" in
             gate) tier_args="" ;;
             measure) tier_args="--tier measure" ;;
@@ -283,12 +282,13 @@ jobs:
     steps:
       - name: Report
         env:
+          EVENT_NAME: ${{ github.event_name }}
           RESULT: ${{ needs.evals.result }}
           SPEEDUP_RESULT: ${{ needs.ci-speedup-evals.result }}
         run: |
           set -euo pipefail
           status=0
-          for pair in "ci-secure:${RESULT:-}" "ci-speedup:${SPEEDUP_RESULT:-}"; do
+          for pair in "ci-secure:${RESULT:-}"; do
             suite="${pair%%:*}"; result="${pair#*:}"
             echo "${suite} evals job: ${result}"
             case "${result}" in
@@ -298,6 +298,20 @@ jobs:
               *)         echo "::error::${suite} skill evals did not run (${result}); that is not a pass."; status=1 ;;
             esac
           done
+          if [ "${EVENT_NAME:-}" = "workflow_dispatch" ] || [ "${EVENT_NAME:-}" = "schedule" ]; then
+            echo "ci-speedup evals job: ${SPEEDUP_RESULT:-}"
+            case "${SPEEDUP_RESULT:-}" in
+              success)   echo "ci-speedup skill evals passed." ;;
+              failure)   echo "::error::ci-speedup skill evals FAILED. Read the job log: the harness prints whether a case ran and failed, or whether it could not run at all."; status=1 ;;
+              cancelled) echo "::warning::ci-speedup skill evals were cancelled; nothing was verified."; status=1 ;;
+              *)         echo "::error::ci-speedup skill evals did not run (${SPEEDUP_RESULT:-}); that is not a pass."; status=1 ;;
+            esac
+          elif [ "${SPEEDUP_RESULT:-}" = "skipped" ]; then
+            echo "ci-speedup agent evals run on schedule or dispatch; deterministic PR tests cover ci-speedup."
+          else
+            echo "::error::ci-speedup evals had unexpected PR result ${SPEEDUP_RESULT:-}; expected skipped."
+            status=1
+          fi
           exit "$status"
 
   # The name is the message: this check being green must not read as "the contract was
