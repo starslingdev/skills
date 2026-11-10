@@ -22097,6 +22097,7 @@ def _detect_structural_candidates(
     overlap_withheld: "list[dict[str, Any]] | None" = None,
     status_publishers: "dict[str, dict[str, Any]] | None" = None,
     pr_check_populations_complete: list[bool] | None = None,
+    log_leaf_owners: "frozenset[tuple[str, str, str]]" = frozenset(),
 ) -> list[dict[str, Any]]:
     """Route the top measured critical-path checks into STRUCTURAL candidates
     instead of the old inherent-cost dead-end. For each top check: map it to its
@@ -22430,6 +22431,32 @@ def _detect_structural_candidates(
                         "could not confirm this check blocks merging. Optimize it only "
                         "if repository policy confirms that it gates the merge.")
                 f["size_note"] = note
+            if (pat == "OPT72" and (
+                    wf_path, job_name, "emulated-image-compile") in log_leaf_owners):
+                # The log-grounded emulated compile is the specific root cause for this
+                # pole. Retain an uncredited OPT72 row so downstream lever selection does
+                # not invent a different generic route, but remove both its saving and
+                # its cache-warming advice: neither follows from foreign-platform work.
+                f["wall_clock_p50_s"] = 0.0
+                f.pop("wall_clock_uncapped_p50_s", None)
+                f.pop("wall_clock_derivation", None)
+                f["realization"] = "none"
+                f["tier"] = 2
+                f["guardrail"] = (
+                    "Preserve every published platform, artifact, release flag, test, "
+                    "provenance record, and manifest; confirm the builder topology before "
+                    "changing how the foreign-platform work executes.")
+                f["rollout"] = (
+                    "Do not run a separate OPT72 rollout for this pole; follow the "
+                    "emulated-image compile drill and re-measure the same check after "
+                    "that change.")
+                f["failure_mode"] = (
+                    "Treating this uncredited row as an independent lever would "
+                    "double-count the same pole; preserve every published platform and "
+                    "artifact while validating the specific compile change.")
+                f["size_note"] = (
+                    "The emulated-image compile leaf owns this pole; OPT72 receives no "
+                    "separate saving.")
             out.append(f)
         if mapping is not None:
             seen_jobs.add((wf_path, job_name))
@@ -28070,6 +28097,7 @@ def _persist_pole_logs(
                 mag_fn = None
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
+            "leaf_fix_key": leaf0.get("fix_key"),
             "steps_file": steps_fn, "mag_file": mag_fn,
             "html_url": repr_job.get("html_url", ""), "workflow_file": wf,
             "duration_s": round(repr_dur, 1), "selected": "nearest-p50",
@@ -31903,7 +31931,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         chain_win_s=_chain_ctx_win,
         wf_docs=_wf_docs, overlap_withheld=_overlap_withheld,
         status_publishers=findings_doc.get("workflow_status_publishers"),
-        pr_check_populations_complete=pr_check_population_complete)
+        pr_check_populations_complete=pr_check_population_complete,
+        log_leaf_owners=frozenset(
+            (str(entry.get("workflow_file") or ""), str(entry.get("job") or ""),
+             str(entry.get("leaf_fix_key") or ""))
+            for entry in pole_logs if entry.get("leaf_fix_key")))
     # Stamped only when a lever was held back, so a repo without `parallel:`
     # groups or background steps keeps a byte-identical findings document.
     if _overlap_withheld:
