@@ -1882,6 +1882,48 @@ _CACHE_SAVE_SECONDS_RE = re.compile(
 # save-path leaf is uncredited and says nothing about the job's dominant work.
 _OBSERVATION_ONLY_LEAVES = frozenset({"dependency-cache", "cache-effective-path-mismatch"})
 
+_GO_TEST_RESULT_RE = re.compile(
+    r"^(?:ok|FAIL)\s+\S+(?:\s+(?:\(cached\)|[0-9]+(?:\.[0-9]+)?s))?"
+    r"(?:\s+coverage:\s+(?:[0-9]+(?:\.[0-9]+)?%\s+of\s+statements|"
+    r"\[no statements\]))?$", re.I)
+_BAZEL_TEST_RESULT_RE = re.compile(
+    r"^\S.*\b(?:PASSED|FAILED)\b(?:\s+in\s+[0-9]+(?:\.[0-9]+)?s)?$", re.I)
+_GRADLE_TEST_RESULT_RE = re.compile(
+    r"^> Task \S*test(?:\s+(?:FROM-CACHE|UP-TO-DATE|SKIPPED|FAILED))?$", re.I)
+_TURBO_TEST_RESULT_RE = re.compile(
+    r"^(?:[^:\s]+:)*[^:\s]*test[^:\s]*:\s+cache\s+"
+    r"(?:hit, replaying logs|miss, executing)\b", re.I)
+
+
+def _test_result_replay_share(text: str | None) -> dict[str, Any] | None:
+    """Count narrowly recognized cached test-result lines in one job log."""
+    if not text:
+        return None
+    cached = total = 0
+    for line in _clean_log(text):
+        if _GO_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += "(cached)" in line.casefold()
+        elif _BAZEL_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += bool(re.search(
+                r"\(cached\)\s+(?:PASSED|FAILED)\b", line, re.I))
+        elif _GRADLE_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += "FROM-CACHE" in line.upper()
+        elif _TURBO_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += "cache hit, replaying logs" in line.casefold()
+    if not total:
+        return None
+    share = cached / total
+    return {
+        "cached_lines": cached,
+        "test_result_lines": total,
+        "share": share,
+        "replayed": share > 0.5,
+    }
+
 
 def _catalog_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
     """`leaf`, unless it is an observation-only leaf (then None)."""
@@ -7145,10 +7187,17 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
     finding) or fewer than 2 runs to compare."""
     if not mag or not isinstance(mag, dict):
         return []
+    excluded = mag.get("replayed_result_logs_excluded")
+    excluded_n = excluded if isinstance(excluded, int) and excluded > 0 else 0
+    exclusion = (
+        f"**Replayed-result exclusion:** {excluded_n} fetched sibling "
+        f"log{'s were' if excluded_n != 1 else ' was'} left out of this cross-run "
+        "magnitude baseline because most recognized test results were replayed from cache."
+    ) if excluded_n else ""
     entries = [x for x in (mag.get("values") or []) if _num(x.get("value")) is not None]
     vals = [_num(x.get("value")) for x in entries]
     if len(vals) < 2:
-        return []
+        return [exclusion, ""] if exclusion else []
     unit = str(mag.get("unit", ""))
     fmt = (lambda x: f"{x:.0f}%") if unit == "%" else (lambda x: _clock(x))
     # The median can land on a half (even sample -> mean of the two middles, e.g.
@@ -7190,6 +7239,8 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
             if x.get("fork"):
                 tag += " — fork PR (no repo secrets; can't reach upstream branch caches)"
             out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
+        if exclusion:
+            out += ["", exclusion]
         out.append("")
         return out
     if n >= 5:
@@ -7234,6 +7285,8 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
         if x.get("fork"):
             tag += " — fork PR (no repo secrets; can't reach upstream branch caches)"
         out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
+    if exclusion:
+        out += ["", exclusion]
     out.append("")
     return out
 
@@ -15398,6 +15451,18 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out.append("")
         out.append(f"_{role}_" if not role.startswith("**") else role)
         out.append("")
+        replay = p.get("replayed_test_results")
+        if isinstance(replay, dict):
+            cached = replay.get("cached_lines")
+            total = replay.get("test_result_lines")
+            if isinstance(cached, int) and isinstance(total, int) and total > 0:
+                out += [
+                    f"**Replayed test results:** {cached} of {total} recognized test-result "
+                    "lines came from a result cache. This fetched run is excluded from the "
+                    "log-derived pole drill and cross-run magnitude baseline; timing samples "
+                    "whose logs were not fetched remain in the jobs-API population.",
+                    "",
+                ]
         # Advisory-job disclosure. Sits directly under the role line, because it qualifies
         # what this pole's ranking MEANS before any drill, prompt or saving is read. Plain
         # prose, not a `Claim`: it asserts no framing-vocabulary phrase and no derived
