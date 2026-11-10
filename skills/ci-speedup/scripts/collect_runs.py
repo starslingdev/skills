@@ -10153,13 +10153,44 @@ def _detect_opt25_shard_imbalance(
     suffix_base = _detect_common_suffix_matrices(jobs_per_run)
     by_base: dict[str, dict[str, list[tuple[float, str]]]] = {}
     base_sharded: dict[str, bool] = {}
-    excluded_by_base: dict[str, int] = {}
+    excluded_by_base: dict[str, set[str]] = {}
 
     def _is_preparation_step(name: str) -> bool:
         return bool(_re.search(
             r"(?i)^(?:set up|setup(?:\s|$)|complete|post |checkout|restore|"
+            r"(?:post )?run actions/(?:checkout|upload-artifact)@|"
             r"save cache|install (?:dependencies|deps|packages)(?:\s|$))",
             name.strip()))
+
+    dominant_step_by_base: dict[str, str] = {}
+    step_seconds_by_base: dict[str, dict[str, float]] = {}
+    for run_jobs in jobs_per_run:
+        for job in run_jobs:
+            job_name = str(job.get("name", ""))
+            matrix_base = _matrix_base_name(job_name)
+            if matrix_base != job_name:
+                base = matrix_base
+            elif job_name in suffix_base:
+                base = suffix_base[job_name]
+            else:
+                continue
+            for step in job.get("steps") or []:
+                if (not isinstance(step, dict)
+                        or _is_preparation_step(str(step.get("name") or ""))
+                        or str(step.get("conclusion") or "").lower() == "skipped"):
+                    continue
+                started = _parse_dt(step.get("started_at"))
+                completed = _parse_dt(step.get("completed_at"))
+                if started is None or completed is None or completed <= started:
+                    continue
+                step_name = str(step.get("name") or "")
+                seconds = (completed - started).total_seconds()
+                by_step = step_seconds_by_base.setdefault(base, {})
+                by_step[step_name] = by_step.get(step_name, 0.0) + seconds
+    for base, totals in step_seconds_by_base.items():
+        if totals:
+            dominant_step_by_base[base] = max(
+                totals, key=lambda step_name: (totals[step_name], step_name))
 
     for run_jobs in jobs_per_run:
         for j in run_jobs:
@@ -10181,9 +10212,21 @@ def _detect_opt25_shard_imbalance(
             active_work_steps = [
                 step for step in work_steps
                 if str(step.get("conclusion") or "").lower() != "skipped"]
+            dominant_name = dominant_step_by_base.get(base)
+            dominant_steps = [step for step in work_steps
+                              if str(step.get("name") or "") == dominant_name]
+            # A differently named active step is positive evidence that this
+            # leg did real work (for example platform-specific test steps).
+            # Only use the dominant sibling step to confirm an otherwise
+            # workless leg; never discard that alternate work.
+            skipped_dominant = bool(dominant_name) and not active_work_steps and (
+                not dominant_steps or all(
+                    str(step.get("conclusion") or "").lower() == "skipped"
+                    for step in dominant_steps))
             if (str(j.get("conclusion") or "").lower() == "skipped"
+                    or skipped_dominant
                     or (work_steps and not active_work_steps)):
-                excluded_by_base[base] = excluded_by_base.get(base, 0) + 1
+                excluded_by_base.setdefault(base, set()).add(name)
                 continue
             d, url = _job_dur_url(j)
             if d is None or d <= 0:
@@ -10344,7 +10387,7 @@ def _detect_opt25_shard_imbalance(
             out[-1]["measured_signal"] = summary
         if next_step is not None:
             out[-1]["next_step"] = next_step
-        out[-1]["legs_excluded_no_work"] = excluded_by_base.get(base, 0)
+        out[-1]["legs_excluded_no_work"] = len(excluded_by_base.get(base, set()))
     return out
 
 
