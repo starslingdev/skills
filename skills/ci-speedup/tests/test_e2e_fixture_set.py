@@ -531,6 +531,9 @@ def test_named_fixtures_exercise_their_defining_interactions(
         row.get("pattern") for row in docs["multiarch-image"]["findings"]}
     assert "OPT89" in {
         row.get("pattern") for row in docs["emulated-container"]["findings"]}
+    assert any(
+        row.get("pattern") == "OPT89" and "make" in row.get("evidence", "")
+        for row in docs["emulated-container"]["findings"])
     image_doc = docs["multiarch-image"]
     image_opt72 = [
         row for row in image_doc["findings"]

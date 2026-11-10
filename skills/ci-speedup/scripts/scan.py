@@ -2544,10 +2544,14 @@ def _opt89_compile_signal(command: str) -> str | None:
                     elif not token.startswith("-") and "=" not in token:
                         targets.append(token.lower())
                 test_targets = {"test", "tests", "check", "checks", "ctest", "verify"}
-                if any(re.search(r"\$(?:\{|[A-Za-z_])|\$\{\{", target)
-                       for target in targets):
+                literal_targets = [
+                    target for target in targets
+                    if not re.search(r"\$(?:\{|[A-Za-z_])|\$\{\{", target)
+                ]
+                if targets and not literal_targets:
                     continue
-                if targets and all(target in test_targets for target in targets):
+                if literal_targets and all(
+                        target in test_targets for target in literal_targets):
                     continue
         if (re.search(r"\bcmake\b", low)
                 and re.search(r"\bcmake\s+(?:--version|--help|-e)\b", low)):
@@ -2617,6 +2621,43 @@ def _opt89_command_env(command: str, env: dict[str, str]) -> dict[str, str]:
             else:
                 effective[match.group(1)] = value.strip("'\"")
     return effective
+
+
+def _opt89_docker_env(command: str, host_env: dict[str, str]) -> dict[str, str]:
+    """Environment explicitly propagated through Docker's ``--env`` options."""
+    propagated: dict[str, str] = {}
+    option_re = re.compile(
+        r"(?:--env(?:=|\s+)|-e(?:=|\s*)?)"
+        r"([A-Za-z_][A-Za-z0-9_]*)(?:=([^\s;&|]+))?")
+    for match in option_re.finditer(command):
+        name, value = match.group(1), match.group(2)
+        if value is None:
+            if name in host_env:
+                propagated[name] = host_env[name]
+            continue
+        resolved = _opt89_resolve_known_shell_env(value, host_env)
+        if "$" not in resolved:
+            propagated[name] = resolved.strip("'\"")
+    return propagated
+
+
+def _opt89_resolve_docker_payload_env(
+    payload: str, host_env: dict[str, str], container_env: dict[str, str],
+) -> str:
+    """Resolve container variables without importing the step environment."""
+    def value(name: str, original: str) -> str:
+        if name in container_env:
+            return container_env[name]
+        if name in host_env:
+            return ""
+        return original
+
+    payload = re.sub(
+        r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
+        lambda match: value(match.group(1), match.group(0)), payload)
+    return re.sub(
+        r"\$([A-Za-z_][A-Za-z0-9_]*)",
+        lambda match: value(match.group(1), match.group(0)), payload)
 
 
 def _opt89_resolve_known_env(
@@ -2843,8 +2884,11 @@ def _detect_opt89(doc: dict, raw: str) -> list[Hit]:
                       and _opt89_qemu_supports(
                           qemu_platforms, platform)):
                     arch = platform
-                    command = _opt89_docker_payload(
-                        _opt89_resolve_known_env(run, step_env, matrix))
+                    expanded = _opt89_resolve_known_env_expressions(
+                        run, step_env, matrix)
+                    command = _opt89_resolve_docker_payload_env(
+                        _opt89_docker_payload(expanded), step_env,
+                        _opt89_docker_env(expanded, step_env))
                     marker = "docker run"
                     occurrence = docker_occurrence
                     mechanism = "QEMU-backed docker run"

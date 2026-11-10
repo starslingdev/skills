@@ -358,6 +358,38 @@ jobs:
     assert hits == []
 
 
+def test_job_container_keeps_a_literal_compile_target_beside_an_unknown_target(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: partial target
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    container: arm64v8/ubuntu:24.04
+    steps:
+      - run: make all $EXTRA
+""")
+
+    assert len(hits) == 1
+
+
+def test_docker_single_quoted_payload_does_not_inherit_step_environment(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: container environment boundary
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: docker run --platform linux/arm64 image sh -c 'make $MAKE_TARGET'
+        env:
+          MAKE_TARGET: check
+""")
+
+    assert len(hits) == 1
+
+
 def test_run_on_arch_resolves_only_its_propagated_environment(tmp_path: Path):
     hits = _opt89(tmp_path, """name: action environment target
 on: pull_request
