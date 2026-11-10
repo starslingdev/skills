@@ -8361,6 +8361,14 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     if _par:
         rows.append(("Parallel steps", _par,
                      parallel_steps_used_for(doc.get("parallel_steps"))))
+    _jest_coverage = doc.get("jest_coverage_notes")
+    if isinstance(_jest_coverage, list):
+        _notes = sorted({str(row.get("note")) for row in _jest_coverage
+                         if isinstance(row, dict) and row.get("note")})
+        if _notes:
+            rows.append(("Jest coverage configuration", _flatten_cell("; ".join(_notes)),
+                         "Provider comparison guidance; no saving credited without "
+                         "matched measurements"))
     # Candidates a pattern measured and then HELD BACK because it could not
     # decide them — a candidate cache (OPT79), a group of small jobs sharing one
     # setup (OPT77), a checkout with a slow tail (OPT80). Without these rows the
@@ -13182,11 +13190,12 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # row. A quiet repo with the stamp and nothing else collapsed to the
     # one-line note, dropping the footer and failing its own verifier.
     parallel_n = parallel_steps_used(doc.get("parallel_steps"))
+    jest_coverage_n = bool(doc.get("jest_coverage_notes"))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
             and not cache_guard_lines
             and not withheld_n and not opt79_off_pole and not opt81_n
-            and not parallel_n):
+            and not parallel_n and not jest_coverage_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
