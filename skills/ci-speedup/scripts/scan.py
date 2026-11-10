@@ -3165,20 +3165,25 @@ def _opt9_cache_action_paths(job: dict, step: dict) -> list[str]:
     return [path.strip() for path in paths if path.strip()]
 
 
-def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
+_OPT9_JEST_NOTES_CACHE: dict[
+    tuple[int, int, int], dict[str, list[str]]
+] = {}
+
+
+def _read_opt9_jest_notes(doc: dict, job: dict, step: dict) -> dict[str, list[str]]:
     root = Path(_OPT102_ROOT or ".").resolve()
     working = _script_working_directory(job, step, doc)
     base = (root / working).resolve()
     try:
         base.relative_to(root)
     except (OSError, ValueError):
-        return []
+        return {}
     command = _run(step)
     recipe = _opt9_make_recipe(base, command)
     expanded = recipe[0] if recipe is not None else command
     base = recipe[1] if recipe is not None else base
     if not _OPT9_JEST_COMMAND_RE.search(expanded):
-        return []
+        return {}
     cd = re.search(r"(?:^|[;&|])\s*cd\s+([^\s;&|]+)\s*&&", expanded)
     if cd is not None:
         candidate = (base / cd.group(1).strip("'\"")).resolve()
@@ -3186,9 +3191,9 @@ def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
             if os.path.commonpath([str(root), str(candidate)]) == str(root):
                 base = candidate
             else:
-                return []
+                return {}
         except ValueError:
-            return []
+            return {}
     paths, truncated, _manifests = _vitest_config_files(
         root, lambda name: bool(_OPT9_JEST_CONFIG_RE.match(name)))
     config: Path | None = None
@@ -3196,7 +3201,7 @@ def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
     while True:
         here = [path for path in paths if path.parent == cursor]
         if len(here) > 1:
-            return []
+            return {}
         if here:
             config = here[0]
             break
@@ -3211,28 +3216,29 @@ def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
             break
         cursor = parent
     if truncated or config is None:
-        return []
+        return {}
     try:
         text = _read_config_text(config)
     except OSError:
-        return []
+        return {}
     if text is None:
-        return []
+        return {}
     text = _tal_strip_js_comments(text)
-    notes: list[str] = []
+    concurrency_notes: list[str] = []
     max_workers = re.search(
         r"\bmaxWorkers\s*:\s*(['\"]?)(\d+(?:\.\d+)?)(%)?\1", text)
     if max_workers is not None and (
             max_workers.group(3) == "%" and float(max_workers.group(2)) < 100
             or max_workers.group(3) is None):
-        notes.append(
+        concurrency_notes.append(
             f"Jest maxWorkers is {max_workers.group(2)}{max_workers.group(3) or ''}; "
             "OPT88 says to measure this CPU-bound worker cap on the actual runner "
             "before changing it, with no saving credited")
     provider = re.search(
         r"\bcoverageProvider\s*:\s*(['\"])(v8|babel)\1", text, re.I)
+    coverage_notes: list[str] = []
     if provider is not None:
-        notes.append(
+        coverage_notes.append(
             f"Jest coverage provider is `{provider.group(2).lower()}`; compare providers "
             "on the same commit, re-baseline thresholds, and verify the consumer; "
             "no provider-switch saving is credited without matched measurements")
@@ -3258,16 +3264,29 @@ def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> list[str]:
     ]
     persisted = bool(expected and any(
         cached == expected or cached in expected.parents for cached in cached_paths))
+    cache_notes: list[str] = []
     if disabled:
-        notes.append(
+        cache_notes.append(
             "Jest result caching is disabled; remove `--no-cache`/`cache: false` "
             "before persisting an explicit cacheDirectory")
     elif not persisted:
-        notes.append(
+        cache_notes.append(
             f"Jest cache directory is not persisted across runners (`{configured}`); "
             "keep Jest's default cache enabled and persist a small explicit cacheDirectory "
             "with a rolling primary key and stable restore prefix")
-    return notes
+    return {
+        "cache": cache_notes,
+        "concurrency": concurrency_notes,
+        "coverage": coverage_notes,
+    }
+
+
+def _opt9_jest_notes(doc: dict, job: dict, step: dict) -> dict[str, list[str]]:
+    """Read one Jest config at most once for all note-routing consumers."""
+    key = (id(doc), id(job), id(step))
+    if key not in _OPT9_JEST_NOTES_CACHE:
+        _OPT9_JEST_NOTES_CACHE[key] = _read_opt9_jest_notes(doc, job, step)
+    return _OPT9_JEST_NOTES_CACHE[key]
 
 
 def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
@@ -3296,17 +3315,63 @@ def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
                             match_text=f"{job_name}#{tool}",
                         ))
             jest_notes = _opt9_jest_notes(doc, job, s)
-            if jest_notes and "jest" not in flagged:
+            cache_notes = jest_notes.get("cache", [])
+            if cache_notes and "jest" not in flagged:
                 flagged.add("jest")
                 hits.append(Hit(
                     line=_line_of_in_job(raw, job_name, _run(s).splitlines()[0].strip()),
                     affected_jobs=[job_name],
-                    evidence=f"job `{job_name}`: " + "; ".join(jest_notes),
+                    evidence=f"job `{job_name}`: " + "; ".join(cache_notes),
                     match_text=f"{job_name}#jest",
-                    facts={"jest_static_notes": jest_notes,
+                    facts={"jest_static_notes": cache_notes,
                            "static_cache_lint": True},
                 ))
     return hits
+
+
+def _detect_opt88(doc: dict, raw: str) -> list[Hit]:
+    """Route Jest worker-cap advice away from the cache detector."""
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        for step in _steps(job):
+            notes = _opt9_jest_notes(doc, job, step)
+            concurrency = notes.get("concurrency", [])
+            if not concurrency:
+                continue
+            command = _run(step)
+            hits.append(Hit(
+                line=_line_of_in_job(raw, job_name, command.splitlines()[0].strip()),
+                affected_jobs=[job_name],
+                evidence=f"job `{job_name}`: " + "; ".join(concurrency),
+                match_text=f"{job_name}#jest-max-workers",
+                facts={"jest_concurrency_notes": concurrency},
+            ))
+            break
+    return hits
+
+
+def _jest_coverage_notes(
+    parsed: list[tuple[str, dict, str]],
+) -> list[dict[str, str]]:
+    """Uncredited Jest provider guidance, independent of cache/concurrency findings."""
+    out: list[dict[str, str]] = []
+    for rel, doc, _raw in parsed:
+        for job_name, job in _jobs_from_doc(doc).items():
+            if not isinstance(job, dict):
+                continue
+            for step in _steps(job):
+                coverage = _opt9_jest_notes(doc, job, step).get("coverage", [])
+                if not coverage:
+                    continue
+                out.append({
+                    "workflow_file": rel,
+                    "job": job_name,
+                    "note": coverage[0],
+                })
+                break
+    return out
 
 
 # ---- Job exclusivity (shared by the cross-job duplicate detectors) -----------
@@ -4158,6 +4223,36 @@ def _cache_paths(steps: list[dict]) -> list[str]:
     return [path.strip().casefold() for path in paths if path.strip()]
 
 
+_CACHE_ENV_PATH_RE = re.compile(
+    r"\$\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}", re.IGNORECASE)
+
+
+def _resolved_cache_env_path(
+    value: str, doc: dict, job: dict, step: dict,
+) -> str | None:
+    """Resolve cache-path env expressions with Actions' scope precedence.
+
+    ``None`` means an expression named an unavailable variable. Callers keep
+    that case unknown rather than turning it into an absence finding.
+    """
+    env: dict[str, str] = {}
+    for scope in (doc.get("env"), job.get("env"), step.get("env")):
+        if isinstance(scope, dict):
+            env.update({str(name): str(item) for name, item in scope.items()})
+    missing = False
+
+    def replace(match: re.Match[str]) -> str:
+        nonlocal missing
+        name = match.group(1)
+        if name not in env:
+            missing = True
+            return match.group(0)
+        return env[name]
+
+    resolved = _CACHE_ENV_PATH_RE.sub(replace, value)
+    return None if missing else resolved
+
+
 def _cache_saved_keys(docs: Iterable[dict]) -> list[str]:
     """Normalized key families that repository cache steps can save."""
     keys: list[str] = []
@@ -4345,7 +4440,28 @@ def _detect_opt61(
         if not isinstance(job, dict):
             continue
         cache_steps = _cache_action_steps(job)
-        cache_paths = _cache_paths(cache_steps)
+        cache_paths: list[str] = []
+        unknown_env_cache_names: set[str] = set()
+        for cache_step in cache_steps:
+            values = (cache_step.get("with")
+                      if isinstance(cache_step.get("with"), dict) else {})
+            for raw_path in str(values.get("path") or "").splitlines():
+                if not raw_path.strip():
+                    continue
+                resolved = _resolved_cache_env_path(raw_path.strip(), doc, job, cache_step)
+                if resolved is None:
+                    # Preserve the literal suffix for family checks such as
+                    # `${{ env.CACHE_ROOT }}/ccache`.  A value written through
+                    # GITHUB_ENV is unavailable to the static YAML parser, but
+                    # the suffix still proves which cache the action saves.
+                    cache_paths.append(raw_path.strip().casefold())
+                    unknown_env_cache_names.update(
+                        name.casefold()
+                        for name in _CACHE_ENV_PATH_RE.findall(raw_path))
+                else:
+                    cache_paths.extend(
+                        line.strip().casefold()
+                        for line in resolved.splitlines() if line.strip())
         blob = "\n".join((_job_run_blob(job), _job_env_blob(job, doc)))
         reasons: list[tuple[str, str]] = []
 
@@ -4378,22 +4494,89 @@ def _detect_opt61(
 
         temp = _TEMP_CACHE_RE.search(blob)
         cache_path_text = "\n".join(cache_paths)
-        declared_dirs = [
-            (str(name).casefold(), str(value).strip())
-            for env in [doc.get("env"), job.get("env"),
-                        *(step.get("env") for step in _steps(job))]
-            if isinstance(env, dict)
-            for name, value in env.items()
-            if str(name).casefold() in {
-                "ccache_dir", "sccache_dir", "staticcheck_cache", "golangci_lint_cache",
-            } and str(value).strip()
-        ]
-        declared_dirs.extend(
-            (match.group(1).casefold(), match.group(2))
-            for match in re.finditer(
-                r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
-                r"\s*=\s*([^\s;&]+)", _job_run_blob(job), re.IGNORECASE)
-        )
+        cache_dir_names = {
+            "ccache_dir", "sccache_dir", "staticcheck_cache", "golangci_lint_cache",
+        }
+        base_env: dict[str, str] = {}
+        for scope in (doc.get("env"), job.get("env")):
+            if isinstance(scope, dict):
+                base_env.update({str(name).casefold(): str(value).strip()
+                                 for name, value in scope.items()})
+        # Cache-action step env affects only the action input and must not be
+        # mistaken for the compiler process's directory.  Walk run steps in
+        # order so literal GITHUB_ENV writes affect later steps, while inline
+        # assignments remain scoped to the command that contains them.
+        assignment_re = re.compile(
+            r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
+            r"\s*=\s*([^\s;&]+)", re.IGNORECASE)
+        build_command_re = re.compile(
+            r"\b(?:cmake\s+--build|make|ninja|meson\s+compile|cargo\s+(?:build|test)|"
+            r"go\s+(?:build|test))\b", re.IGNORECASE)
+        direct_compiler_re = re.compile(
+            r"(?:^|[\s;&|])(ccache|sccache)(?=\s|$)", re.IGNORECASE)
+        analysis_command_re = re.compile(
+            r"(?:^|[\s;&|])(?:staticcheck|golangci-lint)(?=\s|$)", re.IGNORECASE)
+
+        def consumes_directory(name: str, command: str, env: dict[str, str]) -> bool:
+            if not command.strip() or "$GITHUB_ENV" in command:
+                return False
+            if name in {"ccache_dir", "sccache_dir"}:
+                family = name.removesuffix("_dir")
+                direct = direct_compiler_re.search(command)
+                if direct:
+                    return family == direct.group(1).casefold()
+                env_text = "\n".join(f"{key}={value}" for key, value in env.items())
+                return family in env_text.casefold() and bool(build_command_re.search(command))
+            family = "staticcheck" if name == "staticcheck_cache" else "golangci"
+            match = analysis_command_re.search(command)
+            return bool(match and family in match.group(0).casefold())
+
+        inherited_env = dict(base_env)
+        declared_dirs: list[tuple[str, str]] = []
+        for step in _steps(job):
+            run = _run(step)
+            if not run.strip():
+                continue
+            shell_env = dict(inherited_env)
+            step_env = step.get("env")
+            if isinstance(step_env, dict):
+                for name, value in step_env.items():
+                    folded = str(name).casefold()
+                    if folded in cache_dir_names and str(value).strip():
+                        shell_env[folded] = str(value).strip()
+            github_env_updates: dict[str, str] = {}
+            for command in run.splitlines():
+                matches = list(assignment_re.finditer(command))
+                if "$GITHUB_ENV" in command:
+                    github_env_updates.update(
+                        (match.group(1).casefold(), match.group(2).strip("'\""))
+                        for match in matches)
+                    continue
+                exported = bool(re.match(r"\s*export\s+", command, re.IGNORECASE))
+                if exported:
+                    shell_env.update(
+                        (match.group(1).casefold(), match.group(2).strip("'\""))
+                        for match in matches)
+                elif matches and not assignment_re.sub("", command).strip():
+                    # A bare assignment is shell state for following commands
+                    # in the same run step, unlike `NAME=value command`.
+                    shell_env.update(
+                        (match.group(1).casefold(), match.group(2).strip("'\""))
+                        for match in matches)
+                    continue
+                for name in cache_dir_names:
+                    if not consumes_directory(name, command, shell_env):
+                        continue
+                    inline = next(
+                        (match.group(2).strip("'\"") for match in matches
+                         if match.group(1).casefold() == name and not exported),
+                        None,
+                    )
+                    value = inline or shell_env.get(name)
+                    if value:
+                        declared_dirs.append((name, value))
+            inherited_env.update(github_env_updates)
+        declared_dirs = list(dict.fromkeys(declared_dirs))
         declared_compiler_dirs = [
             value for name, value in declared_dirs
             if name in {"ccache_dir", "sccache_dir"}
@@ -4403,13 +4586,14 @@ def _detect_opt61(
             if name in {"staticcheck_cache", "golangci_lint_cache"}
         ]
 
-        def persisted_dirs(directories: list[str]) -> bool:
+        def persisted_dirs(directories: list[tuple[str, str]]) -> bool:
             return bool(directories) and all(
-                any(_cache_path_covers(path, directory) for path in cache_paths)
-                for directory in directories
+                name in unknown_env_cache_names
+                or any(_cache_path_covers(path, directory) for path in cache_paths)
+                for name, directory in directories
             )
 
-        persisted_declared = persisted_dirs([value for _name, value in declared_dirs])
+        persisted_declared = persisted_dirs(declared_dirs)
         if temp and not (persisted_declared or any(
                 _cache_path_covers(path, temp.group(0).split("=", 1)[-1])
                 for path in cache_paths)):
@@ -4419,18 +4603,29 @@ def _detect_opt61(
         supplied_by_cache_action = any(
             re.search(r"ccache-action|rust-cache", _uses(step), re.IGNORECASE)
             for step in cache_steps)
-        persisted_compiler = (persisted_dirs(declared_compiler_dirs)
+        compiler_dir_entries = [
+            (name, value) for name, value in declared_dirs
+            if name in {"ccache_dir", "sccache_dir"}
+        ]
+        persisted_compiler = (persisted_dirs(compiler_dir_entries)
                                 if declared_compiler_dirs else any(
-            token in cache_path_text for token in ("ccache", "sccache", "target")))
+            token in cache_path_text for token in ("ccache", "sccache", "target"))
+            or bool(unknown_env_cache_names & {"ccache_dir", "sccache_dir"}))
         if (uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler
                 and not _is_self_hosted(job)
                 and not _compiler_cache_has_remote_backend(job, doc)):
             reasons.append((_COMPILER_CACHE_RE.search(blob).group(0),
                             "the compiler cache has no persistence step"))
-        persisted_analysis = (persisted_dirs(declared_analysis_dirs)
+        analysis_dir_entries = [
+            (name, value) for name, value in declared_dirs
+            if name in {"staticcheck_cache", "golangci_lint_cache"}
+        ]
+        persisted_analysis = (persisted_dirs(analysis_dir_entries)
                                if declared_analysis_dirs else any(
                                    token in cache_path_text
-                                   for token in ("staticcheck", "golangci")))
+                                   for token in ("staticcheck", "golangci"))
+                               or bool(unknown_env_cache_names & {
+                                   "staticcheck_cache", "golangci_lint_cache"}))
         if _ANALYSIS_CACHE_RE.search(blob) and not persisted_analysis:
             reasons.append((_ANALYSIS_CACHE_RE.search(blob).group(0),
                             "the analysis cache has no persistence step"))
@@ -5184,6 +5379,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT61": _detect_opt61,
     "OPT62": _detect_opt62,
     "OPT63": _detect_opt63,
+    "OPT88": _detect_opt88,
     "OPT89": _detect_opt89,
     "OPT102": _detect_opt102,
 }
@@ -8750,6 +8946,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # `git checkout origin/main` hidden inside `uses: ./.github/actions/foo`.
     global _GIT_HISTORY_LOCAL_ACTIONS, _GIT_HISTORY_LOCAL_SCRIPTS, _OPT102_ROOT
     _OPT102_ROOT = root
+    _OPT9_JEST_NOTES_CACHE.clear()
     _GIT_HISTORY_LOCAL_ACTIONS = _index_local_git_actions(root, parsed)
     _GIT_HISTORY_LOCAL_SCRIPTS = _index_local_git_scripts(root, parsed)
 
@@ -8885,6 +9082,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     if held_back:
         parallel_stats["held_back"] = held_back
     extra: dict[str, Any] = dict(extra_opt96)
+    jest_coverage = _jest_coverage_notes(parsed)
+    if jest_coverage:
+        extra["jest_coverage_notes"] = jest_coverage
     if parallel_steps_used(parallel_stats):
         # Stamped only when the syntax is used, so every other findings
         # document is byte-identical to before. Rendered as the "Parallel steps"

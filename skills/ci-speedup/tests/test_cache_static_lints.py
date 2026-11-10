@@ -289,6 +289,316 @@ jobs:
     assert "OPT61" not in _patterns(expression_match)
 
 
+def test_opt61_resolves_job_env_in_a_saved_cache_path(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /tmp/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1
+      - run: cmake --build build
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_keeps_an_unknown_cache_path_expression_silent(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1
+      - run: CCACHE_DIR=/tmp/ccache ccache cmake --build build
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_keeps_an_unknown_cache_path_suffix_silent(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - run: echo "CACHE_ROOT=/mnt/cache" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CACHE_ROOT }}/ccache
+          key: ccache-v1
+      - run: cmake --build build
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_unknown_unrelated_path_does_not_hide_a_literal_mismatch(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /tmp/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-v1
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.NPM_CACHE_DIR }}
+          key: npm-v1
+      - run: cmake --build build
+""")
+
+    assert any(
+        row.get("pattern") == "OPT61"
+        and "compiler cache has no persistence step" in row.get("evidence", "")
+        for row in rows)
+
+
+def test_opt61_uses_job_env_instead_of_shadowed_workflow_env(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+env:
+  CCACHE_DIR: /workflow/ccache
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1
+      - run: cmake --build build
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_resolves_workflow_env_in_a_saved_cache_path(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+env:
+  CCACHE_DIR: /workflow/ccache
+  CMAKE_C_COMPILER_LAUNCHER: ccache
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1
+      - run: cmake --build build
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_cache_step_env_overrides_job_env_for_the_saved_path(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        env:
+          CCACHE_DIR: /cache-step/ccache
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1
+      - run: cmake --build build
+""")
+
+    assert "OPT61" in _patterns(rows)
+
+
+def test_opt61_matches_cache_and_run_step_overrides(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        env:
+          CCACHE_DIR: /step/ccache
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: ccache-v1
+      - run: cmake --build build
+        env:
+          CCACHE_DIR: /step/ccache
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_applies_a_run_step_override_only_to_that_step(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /step/ccache
+          key: ccache-v1
+      - run: cmake --build first
+        env:
+          CCACHE_DIR: /step/ccache
+      - run: cmake --build second
+""")
+
+    assert "OPT61" in _patterns(rows)
+
+
+def test_opt61_applies_an_inline_override_only_to_its_command(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /inline/ccache
+          key: ccache-v1
+      - run: |
+          CCACHE_DIR=/inline/ccache ccache make first
+          ccache make second
+""")
+
+    assert "OPT61" in _patterns(rows)
+
+
+def test_opt61_keeps_a_standalone_shell_assignment_for_later_commands(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /shell/ccache
+          key: ccache-v1
+      - run: |
+          CCACHE_DIR=/shell/ccache
+          ccache make all
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_applies_github_env_writes_to_later_steps(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - run: echo "CCACHE_DIR=/later/ccache" >> "$GITHUB_ENV"
+      - uses: actions/cache@v4
+        with:
+          path: /later/ccache
+          key: ccache-v1
+      - run: ccache make
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_ignores_inherited_directories_in_unrelated_run_steps(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /job/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+    steps:
+      - run: echo setup
+      - uses: actions/cache@v4
+        with:
+          path: /step/ccache
+          key: ccache-v1
+      - run: cmake --build build
+        env:
+          CCACHE_DIR: /step/ccache
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_splits_a_multiline_env_cache_path(tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      CCACHE_DIR: /tmp/ccache
+      CMAKE_C_COMPILER_LAUNCHER: ccache
+      CACHE_PATHS: |-
+        /tmp/ccache
+        ~/.npm
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CACHE_PATHS }}
+          key: caches-v1
+      - run: cmake --build build
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
 def test_opt61_marks_a_restored_then_unread_deleted_path_as_pure_cost(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:

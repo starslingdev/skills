@@ -35,6 +35,10 @@ jobs:
       CCACHE_DIR: ${{ runner.temp }}/ccache
       CMAKE_C_COMPILER_LAUNCHER: ccache
     steps:
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CCACHE_DIR }}
+          key: env-ccache-${{ hashFiles('CMakeLists.txt') }}
       - run: cmake --build build
   export-only:
     runs-on: ubuntu-latest
