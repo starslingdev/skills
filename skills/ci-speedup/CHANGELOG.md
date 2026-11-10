@@ -1,5 +1,6 @@
 # Changelog
 
+- Recognize repository-seeded cache families and BuildKit cache-mount persistence, while flagging volatile scopes, in-place local exports, export-only mount caches, and compiler caches declared through job environments.
 - Show the median per-commit projection and the workflow holding the worst sampled commit beside PR-lane commit projections.
 - Treat Buildx inspect blocks with unusable node platforms as unconfirmed topology, keeping foreign-build guidance uncredited until every node is readable.
 - Break excessive queue wait down by runner label with per-run queue and work distributions, including censored jobs cancelled before pickup. Reports name a materially faster observed label without treating queue wait as evidence to reduce jobs or shards.
