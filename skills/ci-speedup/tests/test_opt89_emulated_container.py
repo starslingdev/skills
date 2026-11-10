@@ -293,6 +293,164 @@ jobs:
     assert hits == []
 
 
+@pytest.mark.parametrize("scope", ["job", "step"])
+def test_job_container_resolves_env_test_target_before_classifying(
+        tmp_path: Path, scope: str):
+    job_env = "    env:\n      MAKE_TARGET: check\n" if scope == "job" else ""
+    step_env = "        env:\n          MAKE_TARGET: check\n" if scope == "step" else ""
+    hits = _opt89(tmp_path, f"""name: environment container target
+on: pull_request
+jobs:
+  arm:
+{job_env}    runs-on: ubuntu-latest
+    container: arm64v8/ubuntu:24.04
+    steps:
+      - run: make $MAKE_TARGET
+{step_env}
+""")
+
+    assert hits == []
+
+
+def test_job_container_resolves_env_compile_target(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: environment container target
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    env:
+      MAKE_TARGET: all
+    container: arm64v8/ubuntu:24.04
+    steps:
+      - run: make ${MAKE_TARGET}
+""")
+
+    assert len(hits) == 1
+
+
+def test_job_container_tolerates_non_string_workflow_env(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: scalar workflow environment
+on: pull_request
+env:
+  CI: false
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    container: arm64v8/ubuntu:24.04
+    steps:
+      - run: echo $CI && make -j2
+""")
+
+    assert len(hits) == 1
+
+
+def test_job_container_unresolved_target_stays_silent(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: unknown container target
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    container: arm64v8/ubuntu:24.04
+    steps:
+      - run: make $MAKE_TARGET
+""")
+
+    assert hits == []
+
+
+def test_run_on_arch_resolves_only_its_propagated_environment(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: action environment target
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    env:
+      MAKE_TARGET: all
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          env: |
+            MAKE_TARGET: check
+          run: make $MAKE_TARGET
+""")
+
+    assert hits == []
+
+
+def test_run_on_arch_does_not_import_parent_environment(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: action environment boundary
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    env:
+      MAKE_TARGET: all
+    steps:
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          run: make $MAKE_TARGET
+""")
+
+    assert hits == []
+
+
+def test_job_container_resolves_matrix_value_inside_environment(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix environment target
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        target: [all]
+    runs-on: ubuntu-latest
+    container: arm64v8/ubuntu:24.04
+    env:
+      MAKE_TARGET: ${{ matrix.target }}
+    steps:
+      - run: make $MAKE_TARGET
+""")
+
+    assert len(hits) == 1
+
+
+def test_job_container_inline_assignment_overrides_declared_environment(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: inline target override
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    container: arm64v8/ubuntu:24.04
+    env:
+      MAKE_TARGET: check
+    steps:
+      - run: MAKE_TARGET=all; make $MAKE_TARGET
+""")
+
+    assert len(hits) == 1
+
+
+def test_docker_environment_option_overrides_declared_environment(
+        tmp_path: Path):
+    hits = _opt89(tmp_path, """name: docker target override
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    env:
+      MAKE_TARGET: check
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: >-
+          docker run --platform linux/arm64 -e MAKE_TARGET=all image
+          sh -c 'make $MAKE_TARGET'
+""")
+
+    assert len(hits) == 1
+
+
 def test_job_container_resolves_matrix_compile_command(tmp_path: Path):
     hits = _opt89(tmp_path, """name: matrix container command
 on: pull_request

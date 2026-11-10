@@ -29,14 +29,20 @@ def _startup_log(
         if shape == "pytest":
             work = ("collecting ... collected 1 item"
                     if pytest_output == "normal" else
+                    "collected 1 item"
+                    if pytest_output == "piped" else
                     ". [100%]" if pytest_output == "quiet" else
                     "collecting ...")
             done = ("======= 1 passed, 1 warning in 1.00s ======="
                     if pytest_output == "normal" else "1 passed in 1.00s")
+            command = (
+                f"+ python -m pytest tests/case_{i}.py"
+                if pytest_output == "piped" else
+                f"+ python3 -m pytest -q tests/case_{i}.py"
+                if pytest_option_first else
+                f"+ python -m pytest tests/case_{i}.py -q")
             messages = (
-                (f"+ python3 -m pytest -q tests/case_{i}.py"
-                 if pytest_option_first else
-                 f"+ python -m pytest tests/case_{i}.py -q"),
+                command,
                 work,
                 done,
             )
@@ -96,6 +102,19 @@ def test_opt85_accepts_decorated_normal_pytest_output():
 
     assert leaf is not None
     assert leaf["fix_key"] == "per-invocation-startup"
+
+
+def test_opt85_accepts_collected_line_from_real_piped_pytest_output():
+    # Captured from ``python3 -m pytest test_real.py | cat`` on 2026-11-09:
+    # when stdout is not a terminal pytest prints this line without the
+    # transient ``collecting ...`` prefix.
+    leaf = bp._parse_log(_startup_log("pytest", pytest_output="piped"))
+
+    assert leaf is not None
+    assert leaf["fix_key"] == "per-invocation-startup"
+    assert leaf["magnitude"] is None
+    assert leaf["modeled_saving_s"] is None
+    assert "not separately measurable" in leaf["unit_label"]
 
 
 def test_opt85_rejects_quiet_pytest_output_without_a_pre_work_marker():

@@ -10153,6 +10153,14 @@ def _detect_opt25_shard_imbalance(
     suffix_base = _detect_common_suffix_matrices(jobs_per_run)
     by_base: dict[str, dict[str, list[tuple[float, str]]]] = {}
     base_sharded: dict[str, bool] = {}
+    excluded_by_base: dict[str, int] = {}
+
+    def _is_preparation_step(name: str) -> bool:
+        return bool(_re.search(
+            r"(?i)^(?:set up|setup(?:\s|$)|complete|post |checkout|restore|"
+            r"save cache|install (?:dependencies|deps|packages)(?:\s|$))",
+            name.strip()))
+
     for run_jobs in jobs_per_run:
         for j in run_jobs:
             name = str(j.get("name", ""))
@@ -10166,6 +10174,17 @@ def _detect_opt25_shard_imbalance(
                 sharded = False  # prefix varies → distinct packages, not shards
             else:
                 continue  # neither convention matched → not a matrix job
+            steps = [step for step in j.get("steps") or [] if isinstance(step, dict)]
+            work_steps = [
+                step for step in steps
+                if not _is_preparation_step(str(step.get("name") or ""))]
+            active_work_steps = [
+                step for step in work_steps
+                if str(step.get("conclusion") or "").lower() != "skipped"]
+            if (str(j.get("conclusion") or "").lower() == "skipped"
+                    or (work_steps and not active_work_steps)):
+                excluded_by_base[base] = excluded_by_base.get(base, 0) + 1
+                continue
             d, url = _job_dur_url(j)
             if d is None or d <= 0:
                 continue
@@ -10325,6 +10344,7 @@ def _detect_opt25_shard_imbalance(
             out[-1]["measured_signal"] = summary
         if next_step is not None:
             out[-1]["next_step"] = next_step
+        out[-1]["legs_excluded_no_work"] = excluded_by_base.get(base, 0)
     return out
 
 
@@ -22213,6 +22233,7 @@ def _detect_structural_candidates(
     overlap_withheld: "list[dict[str, Any]] | None" = None,
     status_publishers: "dict[str, dict[str, Any]] | None" = None,
     pr_check_populations_complete: list[bool] | None = None,
+    log_leaf_owners: "frozenset[tuple[str, str, str]]" = frozenset(),
 ) -> list[dict[str, Any]]:
     """Route the top measured critical-path checks into STRUCTURAL candidates
     instead of the old inherent-cost dead-end. For each top check: map it to its
@@ -22546,6 +22567,32 @@ def _detect_structural_candidates(
                         "could not confirm this check blocks merging. Optimize it only "
                         "if repository policy confirms that it gates the merge.")
                 f["size_note"] = note
+            if (pat == "OPT72" and (
+                    wf_path, job_name, "emulated-image-compile") in log_leaf_owners):
+                # The log-grounded emulated compile is the specific root cause for this
+                # pole. Retain an uncredited OPT72 row so downstream lever selection does
+                # not invent a different generic route, but remove both its saving and
+                # its cache-warming advice: neither follows from foreign-platform work.
+                f["wall_clock_p50_s"] = 0.0
+                f.pop("wall_clock_uncapped_p50_s", None)
+                f.pop("wall_clock_derivation", None)
+                f["realization"] = "none"
+                f["tier"] = 2
+                f["guardrail"] = (
+                    "Preserve every published platform, artifact, release flag, test, "
+                    "provenance record, and manifest; confirm the builder topology before "
+                    "changing how the foreign-platform work executes.")
+                f["rollout"] = (
+                    "Do not run a separate OPT72 rollout for this pole; follow the "
+                    "emulated-image compile drill and re-measure the same check after "
+                    "that change.")
+                f["failure_mode"] = (
+                    "Treating this uncredited row as an independent lever would "
+                    "double-count the same pole; preserve every published platform and "
+                    "artifact while validating the specific compile change.")
+                f["size_note"] = (
+                    "The emulated-image compile leaf owns this pole; OPT72 receives no "
+                    "separate saving.")
             out.append(f)
         if mapping is not None:
             seen_jobs.add((wf_path, job_name))
@@ -28186,6 +28233,7 @@ def _persist_pole_logs(
                 mag_fn = None
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
+            "leaf_fix_key": leaf0.get("fix_key"),
             "steps_file": steps_fn, "mag_file": mag_fn,
             "html_url": repr_job.get("html_url", ""), "workflow_file": wf,
             "duration_s": round(repr_dur, 1), "selected": "nearest-p50",
@@ -30308,6 +30356,69 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _commit_facts.append(_commit_wall_fact(
             _sha, _event, _run_rows, _commit_jobs_by_run, _expected_workflows))
 
+    def _projection_population(facts: list[dict[str, Any]]) -> dict[str, Any]:
+        complete = [
+            fact for fact in facts
+            if fact.get("partial") is not True
+            and isinstance(fact.get("wall_s"), (int, float))
+            and not isinstance(fact.get("wall_s"), bool)
+            and float(fact["wall_s"]) > 0
+        ]
+        if not complete:
+            return {"median_projection_multiple": None, "worst_commit": None}
+        p50 = _percentile([float(fact["wall_s"]) for fact in complete], 50)
+        typical = min(
+            complete, key=lambda fact: abs(float(fact["wall_s"]) - p50))
+        target = typical.get("slowest_job") or {}
+        target_workflow = str(target.get("workflow_file") or "")
+        target_name = str(target.get("name") or "")
+        multiples: list[float] = []
+        for fact in complete:
+            wall = float(fact["wall_s"])
+            target_row = next((
+                row for row in fact.get("job_projections") or []
+                if isinstance(row, dict)
+                and str(row.get("workflow_file") or "") == target_workflow
+                and str(row.get("name") or "") == target_name
+            ), None)
+            if target_row is None:
+                fact_slowest = fact.get("slowest_job") or {}
+                if (str(fact_slowest.get("workflow_file") or "") == target_workflow
+                        and str(fact_slowest.get("name") or "") == target_name):
+                    target_row = {
+                        "duration_s": fact_slowest.get("duration_s"),
+                        "next_longest_s": (fact.get("next_longest_job") or {}).get(
+                            "duration_s", 0.0),
+                        "chain_span_s": fact.get("slowest_chain_span_s"),
+                    }
+            if target_row is None:
+                multiples.append(1.0)
+                continue
+            duration = float(target_row.get("duration_s") or 0.0)
+            next_longest = float(target_row.get("next_longest_s") or 0.0)
+            chain = float(target_row.get("chain_span_s") or duration)
+            if duration <= 0:
+                multiples.append(1.0)
+                continue
+            projection = project_commit_wall(
+                wall, duration, next_longest, 4.0,
+                **({"chain_s": chain, "pole_s": duration,
+                    "runner_up_s": next_longest}
+                   if chain > duration else {}))
+            if isinstance(projection.multiple, (int, float)):
+                multiples.append(float(projection.multiple))
+        worst = max(complete, key=lambda fact: float(fact["wall_s"]))
+        return {
+            "median_projection_multiple": (
+                round(_percentile(multiples, 50), 3) if multiples else None),
+            "worst_commit": {
+                "sha": worst.get("sha"),
+                "wall_s": worst.get("wall_s"),
+                "workflow_file": (worst.get("slowest_job") or {}).get(
+                    "workflow_file"),
+            },
+        }
+
     _complete_walls = [float(f["wall_s"]) for f in _commit_facts
                        if isinstance(f.get("wall_s"), (int, float))]
     _commit_wall_clock = {
@@ -30316,6 +30427,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "p90_s": (round(_percentile(_complete_walls, 90), 3)
                   if _complete_walls else None),
         "facts": _commit_facts,
+        **_projection_population(_commit_facts),
     }
     _joint_runner_bases = {
         tuple(sorted((observation.get("check_runners") or {}).items()))
@@ -30386,23 +30498,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _typical_push = min(
                 _complete_push_facts,
                 key=lambda fact: abs(float(fact["wall_s"]) - _push_p50))
-            _worst_push = max(_complete_push_facts, key=lambda fact: float(fact["wall_s"]))
-            _projection_multiples = [
-                float(projection["multiple"])
-                for fact in _complete_push_facts
-                for projection in [fact.get("projection_4x")]
-                if isinstance(projection, dict)
-                and isinstance(projection.get("multiple"), (int, float))
-            ]
-            _push_lane["median_projection_multiple"] = (
-                round(_percentile(_projection_multiples, 50), 3)
-                if _projection_multiples else None)
-            _push_lane["worst_commit"] = {
-                "sha": _worst_push.get("sha"),
-                "wall_s": _worst_push.get("wall_s"),
-                "workflow_file": (_worst_push.get("slowest_job") or {}).get(
-                    "workflow_file"),
-            }
+            _push_lane.update(_projection_population(_complete_push_facts))
 
             # Drill the representative push-lane pole from the job lists already
             # fetched above. The only new request is its log; selection, steps,
@@ -32044,7 +32140,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         chain_win_s=_chain_ctx_win,
         wf_docs=_wf_docs, overlap_withheld=_overlap_withheld,
         status_publishers=findings_doc.get("workflow_status_publishers"),
-        pr_check_populations_complete=pr_check_population_complete)
+        pr_check_populations_complete=pr_check_population_complete,
+        log_leaf_owners=frozenset(
+            (str(entry.get("workflow_file") or ""), str(entry.get("job") or ""),
+             str(entry.get("leaf_fix_key") or ""))
+            for entry in pole_logs if entry.get("leaf_fix_key")))
     # Stamped only when a lever was held back, so a repo without `parallel:`
     # groups or background steps keeps a byte-identical findings document.
     if _overlap_withheld:
