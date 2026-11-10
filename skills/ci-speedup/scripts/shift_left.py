@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import html
 import json
 import math
 import statistics
@@ -88,9 +89,12 @@ def analyze_l2(history: list[dict[str, Any]], current: list[dict[str, Any]], *,
     for identity in by_key:
         old_names[identity[0]].add(identity[1])
 
-    observations = [_observation("excluded", row,
+    observations = ([] if current else [{"kind": "no_candidate_data", "workflow": "",
+        "job": "", "conclusion": "neutral",
+        "reason": "no supported completed pull-request workflow run was found"}])
+    observations.extend(_observation("excluded", row,
         excluded_conclusion=str(row.get("conclusion") or "unknown"))
-        for row in current if row.get("status") == "completed" and not _eligible(row)]
+        for row in current if row.get("status") == "completed" and not _eligible(row))
     jobs = [{"workflow": str(row.get("workflow", "")),
              "workflow_id": str(row.get("workflow_id", "")),
              "job": str(row.get("job", "")), "evidence": "excluded",
@@ -371,6 +375,27 @@ def _successful_push_runs(rows: list[dict[str, Any]], branch: str) -> list[dict[
             and row.get("head_branch") == branch]
 
 
+def _latest_pr_runs(rows: list[dict[str, Any]], head: str) -> list[dict[str, Any]]:
+    """Choose one latest completed pull_request run per workflow for this head."""
+    selected: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        workflow_id = str(row.get("workflow_id") or "")
+        if (not workflow_id or row.get("status") != "completed"
+                or row.get("event") != "pull_request" or row.get("head_sha") != head):
+            continue
+        previous = selected.get(workflow_id)
+        recency = (str(row.get("created_at") or row.get("updated_at") or ""),
+                   int(row.get("run_number") or 0), int(row.get("run_attempt") or 0),
+                   int(row.get("id") or 0))
+        previous_recency = ((str(previous.get("created_at") or previous.get("updated_at") or ""),
+                            int(previous.get("run_number") or 0),
+                            int(previous.get("run_attempt") or 0),
+                            int(previous.get("id") or 0)) if previous else None)
+        if previous_recency is None or recency > previous_recency:
+            selected[workflow_id] = row
+    return [selected[key] for key in sorted(selected)]
+
+
 def collect_history(repo: str, branch: str, *, pr_number: int | None,
                     max_runs: int, client: GhClient, max_workflows: int = 5):
     """Collect candidate-first L2 history or bounded per-workflow L3 history."""
@@ -387,13 +412,12 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
         if not isinstance(head, str) or not head:
             raise CollectionError("pull request head SHA is unavailable")
         pr_runs, pr_truncated = _paginate(client,
-            f"repos/{repo}/actions/runs?head_sha={quote(head, safe='')}&status=completed",
+            f"repos/{repo}/actions/runs?head_sha={quote(head, safe='')}"
+            "&event=pull_request&status=completed",
             "workflow_runs", max_pages=2)
         if pr_truncated:
             coverage["candidate_partial"] = "pull-request run list reached page cap"
-        for run in pr_runs:
-            if run.get("status") != "completed":
-                continue
+        for run in _latest_pr_runs(pr_runs, head):
             jobs, jobs_truncated = _jobs_for_run(repo, run.get("id"), client)
             records = _job_records(run, jobs)
             pr_records.extend(records)
@@ -445,16 +469,21 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
                     coverage["partial_workflows"][workflow_id] = "jobs reached page cap"
                 if relevant and all(counts[key] >= max_runs for key in relevant):
                     break
-            unfilled = sorted(key[1] for key in relevant if counts[key] < max_runs)
+            preferred_unfilled = sorted(
+                key[1] for key in relevant if counts[key] < max_runs)
+            minimum = L2_MIN_BASELINE if pr_number is not None else L3_MIN_HISTORY
             if not relevant and runs_truncated:
                 coverage["partial_workflows"].setdefault(
                     workflow_id, "no eligible identity found before the run-list page cap")
-            elif unfilled:
+            elif runs_truncated and preferred_unfilled:
                 reason = (f"comparable history below {max_runs} observations for: "
-                          + ", ".join(unfilled[:10]))
-                if runs_truncated:
-                    reason += "; run list reached page cap"
+                          + ", ".join(preferred_unfilled[:10])
+                          + "; run list reached page cap")
                 coverage["partial_workflows"].setdefault(workflow_id, reason)
+            elif any(counts[key] < minimum for key in relevant):
+                # A complete short history is not partial: analysis reports
+                # no_baseline when it is below the layer's minimum.
+                pass
             elif len(selected) > fetched:
                 coverage["budget_limited_workflows"][workflow_id] = (
                     f"stopped after all selected identities reached {max_runs} observations")
@@ -532,7 +561,11 @@ def _fill_attribution(repo: str, report: dict[str, Any], client: GhClient,
 
 
 def _md(value: Any) -> str:
-    return " ".join(str(value).split()).replace("|", "\\|").replace("`", "'")[:300]
+    text = " ".join(str(value).split())
+    text = text.replace("\\", "\\\\").replace("`", "\\`").replace("|", "\\|")
+    for marker in "*_[]#":
+        text = text.replace(marker, "\\" + marker)
+    return html.escape(text, quote=True)[:300]
 
 
 def render_markdown(result: dict[str, Any], *, max_bytes: int = 65536) -> str:
@@ -547,7 +580,7 @@ def render_markdown(result: dict[str, Any], *, max_bytes: int = 65536) -> str:
         lines.extend([f"### {layer_name.upper()}", ""])
         observations = report.get("observations", [])
         if not observations:
-            lines.append("- Thresholds were not crossed in the collected comparable evidence.")
+            lines.append("- No reportable observation was produced; no performance conclusion is available.")
         for item in observations:
             line = f"- **{_md(item.get('kind', 'unknown'))}:** "
             line += f"{_md(item.get('workflow', ''))} / {_md(item.get('job', ''))}"

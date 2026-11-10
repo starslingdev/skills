@@ -217,10 +217,99 @@ def test_l2_collection_fills_each_pr_identity_from_its_workflow_history():
             raise AssertionError(endpoint)
 
     main, current, coverage = SHIFT.collect_history(
-        "owner/repo", "main", pr_number=7, max_runs=8, client=Client())
-    assert len([row for row in main if SHIFT._eligible(row)]) == 8
+        "owner/repo", "main", pr_number=7, max_runs=20, client=Client())
+    assert len([row for row in main if SHIFT._eligible(row)]) == 10
     assert len([row for row in current if SHIFT._eligible(row)]) == 1
     assert coverage["partial_workflows"] == {}
+    assert SHIFT.analyze_l2(main, current)["jobs"][0]["baseline_runs"] == 10
+
+
+def test_candidate_collection_keeps_only_latest_supported_run_per_workflow():
+    class Client:
+        calls = 0
+        budget = 64
+
+        def __init__(self):
+            self.job_run_ids = []
+
+        def get(self, endpoint):
+            self.calls += 1
+            if endpoint.endswith("/pulls/7"):
+                return {"head": {"sha": "head"}}
+            if "head_sha=head" in endpoint:
+                assert "event=pull_request" in endpoint
+                runs = [
+                    {"id": 7, "workflow_id": 1, "status": "completed", "event": "workflow_dispatch", "head_sha": "head"},
+                    {"id": 8, "workflow_id": 1, "status": "completed", "event": "push", "head_sha": "head"},
+                    {"id": 9, "workflow_id": 1, "status": "completed", "event": "pull_request", "head_sha": "head", "created_at": "2026-01-01T00:00:00Z", "run_attempt": 1},
+                    {"id": 10, "workflow_id": 1, "status": "completed", "event": "pull_request", "head_sha": "head", "created_at": "2026-01-02T00:00:00Z", "run_attempt": 1},
+                    {"id": 11, "workflow_id": 1, "status": "completed", "event": "pull_request", "head_sha": "head", "created_at": "2026-01-02T00:00:00Z", "run_attempt": 2},
+                    {"id": 20, "workflow_id": 2, "status": "completed", "event": "pull_request", "head_sha": "head", "created_at": "2026-01-01T00:00:00Z"},
+                    {"id": 21, "workflow_id": 3, "status": "completed", "event": "pull_request", "head_sha": "other", "created_at": "2026-01-03T00:00:00Z"},
+                ]
+                return {"total_count": len(runs), "workflow_runs": runs}
+            if "/actions/runs/" in endpoint and "/jobs" in endpoint:
+                run_id = int(endpoint.split("/runs/")[1].split("/")[0])
+                self.job_run_ids.append(run_id)
+                return {"total_count": 1, "jobs": [{"name": "test", "status": "completed",
+                    "conclusion": "failure", "labels": ["linux"], "steps": [{"name": "test"}]}]}
+            raise AssertionError(endpoint)
+
+    client = Client()
+    _, current, _ = SHIFT.collect_history(
+        "owner/repo", "main", pr_number=7, max_runs=20, client=client)
+    assert client.job_run_ids == [11, 20]
+    assert [row["run_id"] for row in current] == [11, 20]
+
+
+def test_complete_empty_candidate_history_renders_no_candidate_data():
+    class Client:
+        calls = 0
+        budget = 64
+
+        def get(self, endpoint):
+            self.calls += 1
+            if endpoint.endswith("/pulls/7"):
+                return {"head": {"sha": "head"}}
+            if "head_sha=head" in endpoint:
+                return {"total_count": 0, "workflow_runs": []}
+            raise AssertionError(endpoint)
+
+    main, current, coverage = SHIFT.collect_history(
+        "owner/repo", "main", pr_number=7, max_runs=20, client=Client())
+    report = SHIFT.analyze_l2(main, current)
+    rendered = SHIFT.render_markdown({"status": "measured", "coverage": coverage,
+                                      "l2": report})
+    assert kinds(report) == ["no_candidate_data"]
+    assert r"no\_candidate\_data" in rendered
+    assert "Thresholds were not crossed" not in rendered
+
+
+def test_complete_fifteen_to_nineteen_run_l3_history_is_valid_not_partial():
+    class Client:
+        calls = 0
+        budget = 64
+
+        def get(self, endpoint):
+            self.calls += 1
+            if "/actions/workflows?" in endpoint:
+                return {"total_count": 1, "workflows": [
+                    {"id": 1, "state": "active", "path": ".github/workflows/ci.yml"}]}
+            if "/actions/workflows/1/runs" in endpoint:
+                runs = [{"id": 100 + index, "workflow_id": 1, "status": "completed",
+                         "conclusion": "success", "event": "push", "head_branch": "main"}
+                        for index in range(16)]
+                return {"total_count": len(runs), "workflow_runs": runs}
+            if "/actions/runs/" in endpoint and "/jobs" in endpoint:
+                return {"total_count": 1, "jobs": [timed_job("test", 100)]}
+            raise AssertionError(endpoint)
+
+    main, _, coverage = SHIFT.collect_history(
+        "owner/repo", "main", pr_number=None, max_runs=20, client=Client())
+    report = SHIFT.analyze_l3(main)
+    assert coverage["partial_workflows"] == {}
+    assert report["jobs"][0]["history_runs"] == 16
+    assert report["jobs"][0]["evidence"] == "no_sustained_shift_established"
 
 
 def timed_job(name, duration):
@@ -300,3 +389,15 @@ def test_markdown_is_bounded_advisory_and_never_claims_no_slowdown():
     assert len(rendered.encode()) <= 1024
     assert "Advisory timing evidence" in rendered
     assert "no slowdown" not in rendered.lower()
+
+
+def test_markdown_escapes_untrusted_html_and_markdown_names():
+    hostile = "</strong><script>alert(1)</script>[click](https://evil) **owned**"
+    report = {"observations": [{"kind": "new_job", "workflow": hostile,
+                                 "job": hostile, "conclusion": "neutral"}]}
+    rendered = SHIFT.render_markdown({"status": "measured", "l2": report})
+    assert "<script>" not in rendered
+    assert "</strong>" not in rendered
+    assert "[click](https://evil)" not in rendered
+    assert "**owned**" not in rendered
+    assert "&lt;script&gt;" in rendered
