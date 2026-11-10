@@ -383,7 +383,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
     for name in (
             "cache-lints", "config-era-change", "duplicate-gate-job", "emulated-container",
             "external-required-gate", "heavy-runner-queue", "minority-tail",
-            "multiarch-image", "path-partitioned-monorepo", "vendored-libs",
+            "multiarch-image", "path-partitioned-monorepo", "pr-light-matrix", "vendored-libs",
             "vitest-isolated-serial", "cargo-double-compile", "per-test-startup"):
         docs[name], reports[name], _checks = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
@@ -406,6 +406,8 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for row in docs["minority-tail"]["pr_critical_path"]["checks"])
     assert "Across commits, the median projection is" in reports["minority-tail"]
     assert "`ci.yml` holds its slowest job" not in reports["minority-tail"]
+    assert "OPT25" not in {
+        row.get("pattern") for row in docs["pr-light-matrix"]["findings"]}
     duplicate = next(
         row for row in docs["duplicate-gate-job"]["findings"]
         if row.get("pattern") == "OPT12"
@@ -831,6 +833,26 @@ def test_no_inspect_foreign_compile_runs_through_collection(
     assert "docker buildx inspect --bootstrap" in report
     assert "does not establish whether that work ran under emulation" in report
     assert "building a foreign architecture under emulation instead" not in report
+
+
+def test_inactive_builder_runs_through_collection_as_an_uncredited_check(
+        monkeypatch, tmp_path):
+    def inactive_builder(log: str) -> str:
+        return re.sub(r"(?m)^Platforms:.*$", "Platforms:", log)
+
+    _doc, report, facts = _run_multiarch_log_variant(
+        "multiarch-inactive-builder", monkeypatch, tmp_path, inactive_builder)
+    leaf = next(
+        row for row in facts["leaf_details"]
+        if row.get("fix_key") == "emulated-image-compile")
+
+    assert leaf["magnitude"] is None
+    assert leaf["builder_topology_unconfirmed"] is True
+    assert "#15 [linux/arm64 build 2/3] RUN go build ./..." in report
+    assert "Do not size or claim a saving" in report
+    assert "docker buildx rebuilds 2 layers from scratch every run" not in report
+    assert "builder topology was not printed" not in report
+    assert "native platform for every builder node" in report
 
 
 def test_builder_detected_platform_and_dominance_guards_run_through_collection(

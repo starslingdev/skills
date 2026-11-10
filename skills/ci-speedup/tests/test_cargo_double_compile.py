@@ -62,6 +62,81 @@ def test_unique_local_compile_in_second_step_stays_silent() -> None:
     assert bp._parse_log(f"{first}\n{later}") is None
 
 
+def test_later_selected_crate_is_its_own_test_harness_not_a_repeat() -> None:
+    first = _step("cargo test -p app", "core", "test", 181)
+    later = _step("cargo test --package core", "core", "test", 175)
+    assert bp._parse_log(f"{first}\n{later}") is None
+
+
+def test_later_selected_crate_in_build_command_is_a_repeat() -> None:
+    first = _step("cargo build --lib -p app", "core", "release", 181)
+    later = _step("cargo build --lib -p core", "core", "release", 175)
+    leaf = bp._parse_log(f"{first}\n{later}")
+    assert leaf is not None
+    assert leaf["fix_key"] == "cargo-double-compile"
+
+
+def test_shared_dependency_rebuilt_beside_selected_crate_is_a_repeat() -> None:
+    first = _step("cargo test -p app", "shared", "test", 181)
+    later = "\n".join((
+        "##[group]Run cargo test -p core",
+        "cargo test -p core",
+        "shell: /usr/bin/bash -e {0}",
+        "##[endgroup]",
+        "   Compiling shared v0.1.0 (/repo/crates/shared)",
+        "   Compiling core v0.1.0 (/repo/crates/core)",
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 175s",
+    ))
+    leaf = bp._parse_log(f"{first}\n{later}")
+    assert leaf is not None
+    assert leaf["fix_key"] == "cargo-double-compile"
+    assert "shared" in "\n".join(leaf["evidence"])
+    assert "Compiling core" not in "\n".join(leaf["evidence"])
+
+
+def test_later_unscoped_cargo_command_stays_silent() -> None:
+    first = _step("cargo test -p app", "shared", "test", 181)
+    later = _step("cargo test", "shared", "test", 175)
+    assert bp._parse_log(f"{first}\n{later}") is None
+
+
+def test_crate_selected_by_both_commands_can_still_be_a_repeat() -> None:
+    first = _step("cargo test -p core", "core", "test", 181)
+    later = _step("cargo test --package core", "core", "test", 175)
+    leaf = bp._parse_log(f"{first}\n{later}")
+    assert leaf is not None
+    assert leaf["fix_key"] == "cargo-double-compile"
+
+
+def test_glob_selected_package_harness_is_not_a_repeat() -> None:
+    first = _step("cargo test -p app", "core-utils", "test", 181)
+    later = _step("cargo test -p 'core-*'", "core-utils", "test", 175)
+    assert bp._parse_log(f"{first}\n{later}") is None
+
+
+def test_package_like_harness_arguments_do_not_hide_a_shared_repeat() -> None:
+    first = _step("cargo test -p app", "shared", "test", 181)
+    later = "\n".join((
+        "##[group]Run cargo test -p core -- -p shared",
+        "cargo test -p core -- -p shared",
+        "shell: /usr/bin/bash -e {0}",
+        "##[endgroup]",
+        "   Compiling shared v0.1.0 (/repo/crates/shared)",
+        "   Compiling core v0.1.0 (/repo/crates/core)",
+        "    Finished `test` profile [unoptimized + debuginfo] target(s) in 175s",
+    ))
+    leaf = bp._parse_log(f"{first}\n{later}")
+    assert leaf is not None
+    assert leaf["fix_key"] == "cargo-double-compile"
+    assert "shared" in "\n".join(leaf["evidence"])
+
+
+def test_attached_short_package_selector_is_scoped() -> None:
+    first = _step("cargo test -p app", "core", "test", 181)
+    later = _step("cargo test -pcore", "core", "test", 175)
+    assert bp._parse_log(f"{first}\n{later}") is None
+
+
 def test_different_artifact_contexts_stay_silent() -> None:
     first = _step("cargo test -p goport_core", "goport_core", "test", 181)
     variants = (

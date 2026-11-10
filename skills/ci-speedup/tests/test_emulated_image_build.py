@@ -424,6 +424,75 @@ def test_no_inspect_dominant_foreign_compile_is_an_uncredited_check():
     assert "config_fact" not in leaf
     assert "#15 DONE 120.0s" in leaf["evidence"]
 
+    foreign_header = "#15 [linux/arm64 build 2/3] RUN go build ./..."
+    assert leaf["evidence"][:2] == [foreign_header, "#15 DONE 120.0s"]
+    meta = bp._fix_meta_for_leaf(leaf)
+    assert meta is not None
+    assert "Size the opportunity" not in meta["constraints"]
+    assert "Do not size" in meta["constraints"]
+
+
+def test_inactive_builder_with_empty_platforms_is_an_uncredited_check():
+    log = """docker buildx inspect --bootstrap
+Name:          default
+Driver:        docker-container
+Nodes:
+Name:                  default0
+Endpoint:              unix:///var/run/docker.sock
+Status:                inactive
+Platforms:
+#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+"""
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+    assert leaf["magnitude"] is None
+    assert leaf["uncredited"] is True
+    assert leaf["builder_topology_unconfirmed"] is True
+    assert leaf["evidence"][:2] == [
+        "#15 [linux/arm64 build 2/3] RUN go build ./...",
+        "#15 DONE 120.0s",
+    ]
+
+
+def test_unreadable_builder_evidence_is_bounded():
+    nodes = "\n".join(
+        f"Name: node-{index}\nPlatforms:"
+        for index in range(12)
+    )
+    log = f"""Nodes:
+{nodes}
+#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+"""
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+    assert len(leaf["evidence"]) <= 8
+
+
+def test_builder_parser_stops_before_later_name_shaped_output():
+    log = _SINGLE_AMD64_BUILDER + """#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+Name: release-artifact
+"""
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+    assert leaf["magnitude"] == {
+        "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
+    assert "builder_topology_unconfirmed" not in leaf
+
 
 def test_buildkit_headers_without_a_buildx_invocation_do_not_assume_topology():
     log = """#10 [linux/amd64 build 2/3] RUN go build ./...
