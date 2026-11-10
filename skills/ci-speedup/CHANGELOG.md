@@ -1286,6 +1286,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-10** — Treat `go run <source-file> lint` and `go run <source-file> check...` as check-only gates while keeping runnable `./cmd` applications and mixed work steps out of that classification.
 - **2026-11-10** — Compare repeated aggregate guard findings by their affected jobs, so an unchanged workflow with multiple same-pattern groups stays quiet while a real expansion names only newly covered jobs.
 - **2026-11-09** — Recognize Playwright's documented camel-case `shardIndex`/`shardTotal` matrix when those dimensions feed `--shard=`, and keep the path-partitioned monorepo fixture focused on package and runtime routing.
 

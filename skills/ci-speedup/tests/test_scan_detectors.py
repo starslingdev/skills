@@ -752,11 +752,14 @@ _OPT21_LINT_GATE = """  lint:
 
 
 @pytest.mark.parametrize(("command", "flagged"), [
-    ("go run build/ci.go lint", True),
+    ("go run build/ci.go lint", False),
+    ("go run build/ci.go check-generated", False),
     ("go run ./cmd/server", True),
+    ("go run build/ci.go lint && make test", True),
+    ("go run build/ci.go lint || true", True),
     ("golangci-lint run", False),
 ])
-def test_opt21_go_run_is_not_a_check_gate_but_golangci_lint_is(
+def test_opt21_go_run_lint_script_and_golangci_lint_are_check_gates(
         tmp_path: Path, command: str, flagged: bool) -> None:
     content = f"""name: CI
 on: pull_request
