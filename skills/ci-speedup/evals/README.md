@@ -14,9 +14,14 @@ audit turns a check red.
 | 6 | `security-ask-routes-to-ci-secure` | a security-posture request is answered by ci-secure (mounted beside ci-speedup), never by ci-speedup's pipeline |
 | 11 | `quality-review-opt81` | **tier `measure`**: after the audit, the quality review checks the OPT81 runner-class card against its catalog entry and names the fork pull request caveat that exists only in that entry; the session must have read the `### OPT81` heading |
 | 12 | `gap-fill-coverage-lookup` | before a gap-fill, the agent looks up whether a dependency compiled from source on one matrix leg is already a catalog pattern and names OPT86 (a manual pattern no script names); reading is recorded |
-| 13 | `no-catalog-read-needed` | a question the measured report answers on its own (the typical wait, the slowest check); whether the catalog was opened is recorded, not asserted |
+| 13 | `no-catalog-read-needed` | a question the measured report answers on its own (the typical wait, the slowest check); the answer may name the slowest job in any wording that puts the `test` job, the `CI` workflow (or `ci.yml`) and its 3m 17s median on one line; whether the catalog was opened is recorded, not asserted |
+| 14 | `post-fix-verification-resume` | after an authorized push, the session resumes verification with `run.py --verify-branch` from the audit findings it is given, and commits or pushes nothing |
 
-All but 12 use the `synthetic` fixture (`fixtures/synthetic/scaffold.py`), which
+Entry 14 uses `synthetic-audited` (`fixtures/synthetic-audited/scaffold.py`): the
+`synthetic` fixture plus the audit's data pass, run offline at scaffold time into
+the session's own scratch, whose path the prompt names through
+`$CI_SPEEDUP_AUDIT_FINDINGS`. The other entries except 12 use the `synthetic`
+fixture (`fixtures/synthetic/scaffold.py`), which
 builds the repository and gh replay corpus of `tests/test_offline_pipeline_e2e.py`
 with that test's own helpers. Every run-history read is answered offline from
 the corpus, so the report's numbers are fixed. The agent's own `gh repo view` /
@@ -34,7 +39,7 @@ entry still prints a `SKIPPED (tier)` line and a `skipped` row in the results.
 
 **Parallel sessions.** Runs go up to five at a time (`--jobs N`, or env
 `SKILL_EVALS_JOBS`), each with its own sandbox, skill copy and `TMPDIR`. The
-full-audit entries 10, 11 and 13 are marked `serial: true` and take turns:
+full-audit entries 10, 11, 13 and 14 are marked `serial: true` and take turns:
 their sessions write their findings and report to a `/tmp/...` path they pick
 themselves (seen: `/tmp/cisp-audit/`), not under `TMPDIR`, so two at once
 would overwrite each other's files. Entries 6 and 12 run beside them. The
