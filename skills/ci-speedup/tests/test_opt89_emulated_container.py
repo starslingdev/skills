@@ -516,6 +516,8 @@ jobs:
       - run: >-
           docker run --platform linux/arm64 image sh -c
           'python tool.py --env MAKE_TARGET=check; make $MAKE_TARGET'
+        env:
+          MAKE_TARGET: all
 """)
 
     assert len(hits) == 1
@@ -533,6 +535,45 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - run: >-
           export MAKE_TARGET=check;
+          docker run --platform linux/arm64 -e MAKE_TARGET image
+          sh -c 'make $MAKE_TARGET'
+""")
+
+    assert hits == []
+
+
+@pytest.mark.parametrize("target, expected", [("all", 1), ("check", 0)])
+def test_docker_payload_resolves_its_own_exported_environment(
+        tmp_path: Path, target: str, expected: int):
+    hits = _opt89(tmp_path, """name: container export
+on: pull_request
+jobs:
+  arm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: >-
+          docker run --platform linux/arm64 image
+          sh -c 'export MAKE_TARGET=TARGET; make $MAKE_TARGET'
+""".replace("TARGET", target))
+
+    assert len(hits) == expected
+
+
+def test_docker_pass_through_resolves_matrix_environment(tmp_path: Path):
+    hits = _opt89(tmp_path, """name: matrix pass through
+on: pull_request
+jobs:
+  arm:
+    strategy:
+      matrix:
+        target: [check]
+    runs-on: ubuntu-latest
+    env:
+      MAKE_TARGET: ${{ matrix.target }}
+    steps:
+      - uses: docker/setup-qemu-action@v3
+      - run: >-
           docker run --platform linux/arm64 -e MAKE_TARGET image
           sh -c 'make $MAKE_TARGET'
 """)
