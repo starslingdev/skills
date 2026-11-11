@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 import runpy
+import signal
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 
@@ -12,6 +17,14 @@ SCRIPT = ROOT / "maintainers" / "ci-speedup" / "scripts" / "mutation_prune.py"
 
 def _module() -> dict:
     return runpy.run_path(str(SCRIPT), run_name="mutation_prune_test_module")
+
+
+def _commit_repo(root: Path) -> None:
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.email", "audit@example.invalid"], cwd=root, check=True)
+    subprocess.run(["git", "config", "user.name", "Audit Test"], cwd=root, check=True)
+    subprocess.run(["git", "add", "."], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
 
 
 def test_committed_mutation_report_records_the_reproducible_baseline() -> None:
@@ -46,6 +59,7 @@ def test_committed_mutation_report_records_the_reproducible_baseline() -> None:
         ),
         "mutants": [],
         "phrase": "No measured critical path",
+        "prerequisite": "fold both input shapes into the kept test",
     }]
 
 
@@ -60,12 +74,50 @@ def test_mutant_run_is_offline_and_restores_the_source(tmp_path: Path) -> None:
         "    assert engine.ENABLED\n",
         encoding="utf-8",
     )
+    _commit_repo(tmp_path)
     mutant = module["Mutant"]("disable-engine", "engine.py", "True", "False")
 
     row = module["_run_mutant"](
         tmp_path, mutant, ["test_engine.py::test_engine_stays_enabled"])
 
     assert row["killers"] == ["test_engine.py::test_engine_stays_enabled"]
+    assert source.read_text(encoding="utf-8") == "ENABLED = True\n"
+
+
+def test_interrupted_mutant_run_never_changes_the_source_tree(tmp_path: Path) -> None:
+    source = tmp_path / "engine.py"
+    source.write_text("ENABLED = True\n", encoding="utf-8")
+    (tmp_path / "test_engine.py").write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "from engine import ENABLED\n\n"
+        "def test_engine_stays_enabled():\n"
+        "    Path(os.environ['MUTATION_MARKER']).write_text('started')\n"
+        "    time.sleep(30)\n"
+        "    assert ENABLED\n",
+        encoding="utf-8",
+    )
+    _commit_repo(tmp_path)
+    marker = tmp_path / "started"
+    command = (
+        "import runpy; from pathlib import Path; m=runpy.run_path(%r); "
+        "x=m['Mutant']('disable-engine','engine.py','True','False'); "
+        "m['_run_mutant'](Path(%r),x,['test_engine.py::test_engine_stays_enabled'])"
+    ) % (str(SCRIPT), str(tmp_path))
+    env = {**os.environ, "MUTATION_MARKER": str(marker)}
+    process = subprocess.Popen(
+        [sys.executable, "-c", command], env=env, start_new_session=True)
+    try:
+        for _ in range(100):
+            if marker.exists():
+                break
+            time.sleep(0.05)
+        assert marker.exists(), "mutant suite did not start"
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
     assert source.read_text(encoding="utf-8") == "ENABLED = True\n"
 
 
@@ -78,6 +130,8 @@ def test_phrase_clusters_require_a_single_wording_assertion(tmp_path: Path) -> N
         "    assert 'No measured critical path' in 'No measured critical path'\n\n"
         "def test_second():\n"
         "    assert 'No measured critical path' in 'No measured critical path'\n\n"
+        "def test_opposite():\n"
+        "    assert 'No measured critical path' not in 'another message'\n\n"
         "def test_not_wording_only():\n"
         "    assert 'No measured critical path' in 'No measured critical path'\n"
         "    assert 2 + 2 == 4\n",
@@ -85,6 +139,7 @@ def test_phrase_clusters_require_a_single_wording_assertion(tmp_path: Path) -> N
     )
 
     assert module["_phrase_clusters"](tmp_path) == [{
+        "expectation": "present",
         "phrase": "No measured critical path",
         "tests": [
             "skills/ci-speedup/tests/test_messages.py::test_first",

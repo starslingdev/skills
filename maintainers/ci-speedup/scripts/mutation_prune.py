@@ -22,7 +22,6 @@ E2E_FILES = (
     "skills/ci-speedup/tests/test_offline_pipeline_e2e.py",
 )
 TEST_ROOTS = ("skills/ci-speedup/tests", "maintainers/ci-speedup/tests", "tests")
-HARNESS_TEST = "maintainers/ci-speedup/tests/test_mutation_prune.py"
 PROTECTED_WORDS = (
     "e2e", "install_surface", "privacy", "public_output", "repo_guard", "verify_report",
 )
@@ -60,10 +59,10 @@ MUTANTS = (
         "_WALL_CLOCK_LONG_POLE_FLOOR_S = 30000.0",
     ),
     Mutant(
-        "scan-pattern-catalog",
+        "scan-opt21-dispatch",
         "skills/ci-speedup/scripts/scan.py",
-        "for p in pattern_files(path):",
-        "for p in []:",
+        '    "OPT21": _detect_opt21,',
+        '    "OPT21": lambda doc, raw: [],',
     ),
 )
 
@@ -107,26 +106,32 @@ def _junit_failures(path: Path, nodeids: list[str]) -> list[str]:
 
 
 def _run_mutant(root: Path, mutant: Mutant, nodeids: list[str]) -> dict[str, object]:
-    source_path = root / mutant.path
-    original = source_path.read_text(encoding="utf-8")
+    original = (root / mutant.path).read_text(encoding="utf-8")
     if original.count(mutant.old) != 1:
         raise RuntimeError(f"{mutant.id}: expected one mutation site")
     mutated = original.replace(mutant.old, mutant.new)
     with tempfile.TemporaryDirectory(prefix="ci-speedup-mutant-") as temp:
-        junit = Path(temp) / "junit.xml"
+        temp_path = Path(temp)
+        run_root = temp_path / "repo"
+        added = _run(root, ["git", "worktree", "add", "--quiet", "--detach",
+                            str(run_root), "HEAD"])
+        if added.returncode:
+            raise RuntimeError(f"{mutant.id}: could not create worktree\n{added.stderr}")
+        source_path = run_root / mutant.path
+        source_path.write_text(mutated, encoding="utf-8")
+        junit = temp_path / "junit.xml"
         env = dict(os.environ)
-        env["PYTHONPYCACHEPREFIX"] = str(Path(temp) / "pycache")
+        env["PYTHONPYCACHEPREFIX"] = str(temp_path / "pycache")
         started = time.monotonic()
         try:
-            source_path.write_text(mutated, encoding="utf-8")
             result = _run(
-                root,
+                run_root,
                 [sys.executable, "-m", "pytest", "-q", "-n", "4", "--dist",
-                 "worksteal", f"--ignore={HARNESS_TEST}", f"--junitxml={junit}"],
+                 "worksteal", f"--junitxml={junit}"],
                 env=env,
             )
         finally:
-            source_path.write_text(original, encoding="utf-8")
+            _run(root, ["git", "worktree", "remove", "--force", str(run_root)])
         if not junit.exists():
             raise RuntimeError(f"{mutant.id}: pytest produced no JUnit report")
         killers = _junit_failures(junit, nodeids)
@@ -152,7 +157,7 @@ def _natural_phrase(value: str) -> str | None:
 
 
 def _phrase_clusters(root: Path) -> list[dict[str, object]]:
-    groups: dict[str, set[str]] = {}
+    groups: dict[tuple[str, str], set[str]] = {}
     for test_root in TEST_ROOTS:
         for path in sorted((root / test_root).glob("test_*.py")):
             tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -166,8 +171,10 @@ def _phrase_clusters(root: Path) -> list[dict[str, object]]:
                 if len(assertions) != 1:
                     continue
                 comparison = assertions[0].test
+                negated = False
                 if isinstance(comparison, ast.UnaryOp) and isinstance(comparison.op, ast.Not):
                     comparison = comparison.operand
+                    negated = True
                 if (not isinstance(comparison, ast.Compare)
                         or len(comparison.ops) != 1
                         or not isinstance(comparison.ops[0], (ast.In, ast.NotIn))
@@ -176,10 +183,13 @@ def _phrase_clusters(root: Path) -> list[dict[str, object]]:
                     continue
                 phrase = _natural_phrase(comparison.left.value)
                 if phrase:
-                    groups.setdefault(phrase, set()).add(f"{rel}::{function.name}")
+                    present = isinstance(comparison.ops[0], ast.In) != negated
+                    expectation = "present" if present else "absent"
+                    groups.setdefault((phrase, expectation), set()).add(
+                        f"{rel}::{function.name}")
     return [
-        {"phrase": phrase, "tests": sorted(tests)}
-        for phrase, tests in sorted(groups.items()) if len(tests) >= 2
+        {"expectation": expectation, "phrase": phrase, "tests": sorted(tests)}
+        for (phrase, expectation), tests in sorted(groups.items()) if len(tests) >= 2
     ]
 
 
@@ -227,6 +237,7 @@ def _deletion_candidates(rows: list[dict[str, object]],
                     "keep": keep,
                     "mutants": sorted(mutants),
                     "phrase": cluster["phrase"],
+                    "prerequisite": "fold both input shapes into the kept test",
                 })
     return candidates
 
@@ -238,8 +249,7 @@ def build_report(root: Path, *, starting_count: int, local_seconds: float,
     baseline_started = time.monotonic()
     baseline = _run(
         root,
-        [sys.executable, "-m", "pytest", "-q", "-n", "4", "--dist", "worksteal",
-         f"--ignore={HARNESS_TEST}"],
+        [sys.executable, "-m", "pytest", "-q", "-n", "4", "--dist", "worksteal"],
     )
     baseline_seconds = time.monotonic() - baseline_started
     if baseline.returncode:
