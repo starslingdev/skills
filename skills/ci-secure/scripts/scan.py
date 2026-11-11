@@ -3540,6 +3540,8 @@ _CHAIN_RELEVANT_RE = re.compile(
     # Command NAMES that fetch or execute…
     r"\b(?:git|cd|source|pip|pip3|python[0-9.]*|node|nodejs|bash|sh|zsh|ksh"
     r"|ruby|perl|php|pwsh|powershell)\b"
+    # …a GitHub CLI extension install (the third shape)…
+    r"|\bgh\s+(?:extensions?|ext)\s"
     # …and the shape of an execution that names no command at all: a PATH
     # invoked directly (`tools/setup.py --msg=…`). Without this arm a visible
     # clone followed by an unparseable `tools/setup.py` produced zero findings
@@ -4638,6 +4640,160 @@ def _mutable_fetch_executions(
     return sorted(pairs, key=lambda p: p[0].line)
 
 
+# --- P14.24, third shape: a GitHub CLI extension installed at a mutable ref ---
+#
+# `gh extension install OWNER/REPO` downloads the extension — a release binary,
+# or the repository's own script — at the LATEST release, or at the ref named by
+# `--pin`. A release tag or a branch is whatever that repository's owner points
+# it at when the job runs, so it is the same trust model as a `git clone` at a
+# branch, and it follows the same rule: a finding needs the install AND a later
+# run of the extension in the same job (`gh <name> …`, or `gh extension exec
+# <name>`). Only a full 40-hex `--pin` is immutable, and a local install
+# (`gh extension install .`) is the repository's own code.
+_GH_EXTENSION_GROUPS = frozenset({"extension", "extensions", "ext"})
+_GH_EXTENSION_VALUE_OPTS = frozenset({"--pin"})
+
+
+@dataclass(frozen=True)
+class _GhExtensionInstall:
+    line: int
+    raw: str
+    repo: str            # as written: OWNER/REPO, HOST/OWNER/REPO or a URL
+    name: str | None     # the command it installs; None when not knowable
+    ref: str | None      # None = the latest release (no `--pin`)
+    pos: int
+
+
+def _gh_extension_command(tokens: list[str]) -> tuple[str, list[str]] | None:
+    """(subcommand, args) for `gh extension|ext <sub> …`, else None."""
+    if len(tokens) >= 3 and tokens[0] == "gh" and tokens[1] in _GH_EXTENSION_GROUPS:
+        return tokens[2], tokens[3:]
+    return None
+
+
+def _parse_gh_extension_install(
+    args: list[str],
+) -> tuple[str | None, str | None]:
+    """(target, `--pin` value) from `gh extension install`'s arguments."""
+    target: str | None = None
+    pin: str | None = None
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok.startswith("--pin="):
+            pin = tok.split("=", 1)[1]
+        elif tok in _GH_EXTENSION_VALUE_OPTS:
+            if i + 1 < len(args):
+                pin = args[i + 1]
+            i += 1
+        elif not tok.startswith("-") and target is None:
+            target = tok
+        i += 1
+    return target, pin
+
+
+def _gh_extension_is_local(target: str) -> bool:
+    return target == "." or target.startswith(("./", "../", "/", "~"))
+
+
+def _gh_extension_name(target: str) -> str | None:
+    """The command an extension repository installs: its name minus `gh-`."""
+    if "$" in target or "\x00" in target:
+        return None
+    base = target.rstrip("/").rsplit("/", 1)[-1]
+    if base.endswith(".git"):
+        base = base[: -len(".git")]
+    if base.startswith("gh-"):
+        base = base[len("gh-"):]
+    return base or None
+
+
+def _gh_extension_executions(
+    text: str, job_range: tuple[int, int] | None,
+    gap: Callable[..., None] | None = None,
+    file_path: Path | None = None,
+) -> list[tuple[_GhExtensionInstall, int, str]]:
+    """Every (mutable install, invocation line, invocation as written) in a job.
+
+    Mirrors `_mutable_fetch_executions`: both halves must be in the SAME job and
+    the invocation must come after the install it runs (or in a step that may
+    run at the same time). A mutable install with no visible invocation is a
+    coverage note — the extension may still run from a script this scan cannot
+    read — rather than a finding or a silent pass.
+    """
+    installs: list[_GhExtensionInstall] = []
+    # (position, line, extension name, invocation as written)
+    invocations: list[tuple[int, int, str, str]] = []
+    pos = 0
+    for line_no, raw, command, _new_step in _job_shell_commands(text, job_range):
+        bodies = _substitution_command_bodies(command)
+        for segment in bodies + _install_command_segments(
+                _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
+            pos += 1
+            tokens = _strip_command_prefix(_shell_tokens(segment))
+            if not tokens or tokens[0] != "gh" or len(tokens) < 2:
+                continue
+            ext = _gh_extension_command(tokens)
+            if ext is None:
+                # `gh <name> …` — a built-in command never collides with an
+                # installed extension's name (gh refuses the install), so only
+                # names a visible install provided are ever matched below.
+                invocations.append((pos, line_no, tokens[1],
+                                    f"gh {tokens[1]}"))
+                continue
+            sub, args = ext
+            if sub == "exec" and args and not args[0].startswith("-"):
+                invocations.append((pos, line_no, args[0],
+                                    f"gh {tokens[1]} exec {args[0]}"))
+                continue
+            if sub != "install":
+                continue
+            target, pin = _parse_gh_extension_install(args)
+            if not target or _gh_extension_is_local(target):
+                continue
+            if "://" in target:
+                slug_url = target
+            elif target.count("/") >= 2:            # HOST/OWNER/REPO
+                slug_url = "https://" + target
+            else:                                   # OWNER/REPO
+                slug_url = "https://github.com/" + target
+            if file_path is not None and _is_self_clone(slug_url, file_path):
+                continue
+            if pin and _FULL_SHA_RE.match(pin):
+                if gap is not None:
+                    gap(f"a GitHub CLI extension `{_as_written(target)}` on "
+                        f"line {line_no} is pinned to a full commit id, so it "
+                        f"is deliberately not reported", kind=_KIND_SUPPRESSED)
+                continue
+            installs.append(_GhExtensionInstall(
+                line_no, raw, target, _gh_extension_name(target), pin, pos))
+
+    spans = _step_spans(text)
+    pairs: list[tuple[_GhExtensionInstall, int, str]] = []
+    for idx, inst in enumerate(installs):
+        # A later install of the same extension replaces this one; it is then
+        # judged on its own.
+        until = next((later.pos for later in installs[idx + 1:]
+                      if later.name == inst.name), None)
+        hit = None
+        if inst.name is not None:
+            hit = next(
+                ((line, written) for at, line, name, written in invocations
+                 if name == inst.name
+                 and (at > inst.pos or _lines_concurrent(spans, inst.line, line))
+                 and (until is None or at < until)),
+                None,
+            )
+        if hit is not None:
+            pairs.append((inst, hit[0], hit[1]))
+        elif until is None and gap is not None:
+            gap(f"a GitHub CLI extension `{_as_written(inst.repo)}` is "
+                f"installed at a mutable reference on line {inst.line}, but "
+                f"no run of it is visible in this job, so whether it executes "
+                f"was NOT checked — review the job by hand")
+    return pairs
+
+
 def _pin_races(pin_line: int | None, lines: tuple[int, ...],
                racing: Callable[[int, int], bool], concurrency: bool) -> bool:
     """A pin may run at the same time as one of `lines` (the fetch, the
@@ -4717,6 +4873,28 @@ def _correlation_unverified_remote_code_execution(
                     f"line {exec_line}. "
                     f"A full 40-character commit id is the only reference that "
                     f"cannot change under you."
+                ),
+            )
+
+        for inst, exec_line, invoked in _gh_extension_executions(
+            text, job_range, _gap, file_path,
+        ):
+            ref_text = ("its latest release (no `--pin`)" if inst.ref is None
+                        else _ref_description(inst.ref))
+            yield RawHit(
+                line=inst.line,
+                evidence=f"{inst.line:>4}: {inst.raw}  <-- here",
+                match_text=(f"gh extension {_as_written(inst.repo)} at "
+                            f"{inst.ref or 'latest release'}"),
+                derived_note=(
+                    f"jobs.{job_name} installs the GitHub CLI extension "
+                    f"`{_as_written(inst.repo)}` at {ref_text} — a MUTABLE "
+                    f"reference, so what is installed is whatever that "
+                    f"repository's owner publishes under it at the moment the "
+                    f"job runs — and then runs it as `{invoked}` at line "
+                    f"{exec_line}. A full 40-character commit id passed to "
+                    f"`--pin` is the only reference that cannot change under "
+                    f"you."
                 ),
             )
 

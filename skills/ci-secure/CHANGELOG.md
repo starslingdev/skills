@@ -305,6 +305,18 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-11** — Unverified remote code execution now covers a GitHub CLI
+  extension installed at a mutable reference (PR #TBD). A job that runs
+  `gh extension install OWNER/REPO` with no `--pin` (the latest release) or
+  with `--pin` set to a tag, branch or abbreviated commit, and then runs that
+  extension in the same job (`gh <name> …` or `gh extension exec <name>`),
+  is reported: whoever can move that tag or branch decides what the next run
+  executes with the job's token. GitHub's own recommended lockfile-check job
+  had this shape and scanned clean. A full 40-hex `--pin`, a local install
+  and an install of the scanned repository are not reported; an install with
+  no visible run of the extension is recorded as a coverage note. Covers the
+  `ext` alias, `--pin=X`, `--force`, flag order, `HOST/OWNER/REPO` and URL
+  targets, and multi-line `run:` blocks.
 - **2026-11-09** — A crafted workflow line can no longer freeze the scan. The
   install-command matcher (dependency install scripts in a job that holds
   secrets) offered two readings of the same text in four places: an
