@@ -1,6 +1,7 @@
 """Differential policy tests for the repository-local ci-speedup guard."""
 from __future__ import annotations
 
+import copy
 import importlib.util
 import shutil
 import sys
@@ -227,6 +228,7 @@ def test_shard_matrix_leg_growth_warns_with_repeated_setup(
     assert code == 0
     warnings = [line for line in output.splitlines() if "8 -> 16 legs" in line]
     assert len(warnings) == 1
+    assert warnings[0].startswith("::warning file=.github/workflows/ci.yml,line=1::")
     assert "shards" in warnings[0]
     assert "repeats checkout, install and build" in warnings[0]
     rendered = summary.read_text(encoding="utf-8")
@@ -462,6 +464,29 @@ def test_malformed_finding_schema_fails_closed(
     monkeypatch.setattr(guard, "BLOCKING_ALLOWLIST", frozenset())
     with pytest.raises(guard.OperationalFailure, match=message):
         guard.validate_scan(doc, module)
+
+
+def test_malformed_matrix_setup_facts_fail_closed(guard, tmp_path, monkeypatch):
+    root, _ = trees(
+        tmp_path, repeated_setup_matrix(shard_legs=8),
+        repeated_setup_matrix(shard_legs=8))
+    engine, _refs, _layout = guard.resolve_layout()
+    module = guard.load_engine(engine)
+    doc = guard.run_scan(engine, root, "main")
+    monkeypatch.setattr(guard, "BLOCKING_ALLOWLIST", frozenset())
+
+    mutations = (
+        lambda facts: facts.__setitem__(".github/workflows/ci.yml", []),
+        lambda facts: facts[".github/workflows/ci.yml"].__setitem__("shards", []),
+        lambda facts: facts[".github/workflows/ci.yml"]["shards"].__setitem__("legs", "8"),
+        lambda facts: facts[".github/workflows/ci.yml"]["shards"].__setitem__(
+            "repeated", ["checkout", 1]),
+    )
+    for mutate in mutations:
+        malformed = copy.deepcopy(doc)
+        mutate(malformed["matrix_setup_facts"])
+        with pytest.raises(guard.OperationalFailure, match="matrix_setup_facts"):
+            guard.validate_scan(malformed, module)
 
 
 def test_unknown_scan_gap_kind_fails_closed(guard, tmp_path, monkeypatch):

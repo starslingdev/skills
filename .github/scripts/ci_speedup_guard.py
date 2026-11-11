@@ -184,6 +184,20 @@ def validate_scan(doc: Any, engine_module: Any) -> None:
     parallel = doc.get("parallel_steps", {})
     if not isinstance(parallel, dict) or not isinstance(parallel.get("held_back", []), list):
         raise OperationalFailure("parallel_steps.held_back is malformed")
+    matrix_facts = doc.get("matrix_setup_facts", {})
+    if not isinstance(matrix_facts, dict):
+        raise OperationalFailure("matrix_setup_facts is malformed")
+    for workflow, jobs in matrix_facts.items():
+        if not isinstance(workflow, str) or not workflow or not isinstance(jobs, dict):
+            raise OperationalFailure("matrix_setup_facts workflow is malformed")
+        for job, fact in jobs.items():
+            if not isinstance(job, str) or not job or not isinstance(fact, dict):
+                raise OperationalFailure("matrix_setup_facts job is malformed")
+            legs, repeated = fact.get("legs"), fact.get("repeated")
+            if (type(legs) is not int or legs < 2 or not isinstance(repeated, list)
+                    or not repeated
+                    or any(not isinstance(name, str) or not name for name in repeated)):
+                raise OperationalFailure("matrix_setup_facts entry is malformed")
 
 
 def workflow_files(root: Path) -> dict[str, bytes]:
@@ -410,6 +424,28 @@ def held_back(doc: dict[str, Any], mapping: dict[str, str]) -> set[tuple]:
     return records
 
 
+def matrix_setup_facts(
+    doc: dict[str, Any], mapping: dict[str, str]
+) -> dict[tuple[str, str], tuple[int, list[str]]]:
+    """Index guard-only matrix setup facts by stable workflow and job identity."""
+    result: dict[tuple[str, str], tuple[int, list[str]]] = {}
+    workflows = doc.get("matrix_setup_facts")
+    if not isinstance(workflows, dict):
+        return result
+    for workflow, jobs in workflows.items():
+        if not isinstance(workflow, str) or not isinstance(jobs, dict):
+            continue
+        workflow = mapping.get(workflow, workflow)
+        for job, fact in jobs.items():
+            if not isinstance(job, str) or not isinstance(fact, dict):
+                continue
+            legs, repeated = fact.get("legs"), fact.get("repeated")
+            if (isinstance(legs, int) and isinstance(repeated, list)
+                    and all(isinstance(name, str) for name in repeated)):
+                result[workflow, job] = legs, repeated
+    return result
+
+
 def write_summary(path: Path | None, lines: list[str]) -> None:
     if path is None:
         return
@@ -545,33 +581,29 @@ def main(argv: list[str] | None = None) -> int:
                     annotation("warning", message, f)
                     aggregate_warning_messages.append(message)
                     warnings += 1
-                if old is None or f.get("pattern") != "OPT14":
-                    continue
-                old_legs = old.get("matrix_setup_legs")
-                new_legs = f.get("matrix_setup_legs")
-                repeated = f.get("matrix_setup_repeated")
-                if not all(isinstance(value, dict)
-                           for value in (old_legs, new_legs, repeated)):
-                    continue
-                for job in sorted(set(old_legs) & set(new_legs)):
-                    before, after = old_legs.get(job), new_legs.get(job)
-                    work = repeated.get(job)
-                    if (not isinstance(before, int) or not isinstance(after, int)
-                            or after <= before or not isinstance(work, list)
-                            or not ({"install", "build"} & set(work))):
-                        continue
-                    repeated_text = ", ".join(str(name) for name in work[:-1])
-                    if len(work) > 1:
-                        repeated_text += f" and {work[-1]}"
-                    elif work:
-                        repeated_text = str(work[0])
-                    message = (
-                        f"{f['pattern']} job {job}: {before} -> {after} legs; each leg "
-                        f"repeats {repeated_text}; try running the work in parallel on "
-                        "one machine first (see OPT88)")
-                    annotation("warning", message, f)
-                    aggregate_warning_messages.append(message)
-                    warnings += 1
+        base_matrix = matrix_setup_facts(base_doc, {})
+        merge_matrix = matrix_setup_facts(merge_doc, mapping)
+        for key in sorted(set(base_matrix) & set(merge_matrix)):
+            before, _old_work = base_matrix[key]
+            after, work = merge_matrix[key]
+            if after <= before or not ({"install", "build"} & set(work)):
+                continue
+            workflow, job = key
+            repeated_text = ", ".join(work[:-1])
+            if len(work) > 1:
+                repeated_text += f" and {work[-1]}"
+            elif work:
+                repeated_text = work[0]
+            message = (
+                f"OPT14 job {job}: {before} -> {after} legs; each leg "
+                f"repeats {repeated_text}; try running the work in parallel on "
+                "one machine first (see OPT88)")
+            annotation("warning", message, {
+                "workflow_file": workflow,
+                "line": 1,
+            })
+            aggregate_warning_messages.append(message)
+            warnings += 1
 
         if increases and not bootstrap:
             verdict = "Policy block: " + ", ".join(
