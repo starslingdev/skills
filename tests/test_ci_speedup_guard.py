@@ -158,6 +158,45 @@ jobs:
 """
 
 
+def index_metadata_matrix(*, matrix_legs: int) -> str:
+    """An index dimension used beside, rather than inside, --shard."""
+    workflow = repeated_setup_matrix(shard_legs=matrix_legs, axis="index")
+    return workflow.replace(
+        f"--shard=${{{{ matrix.index }}}}/{matrix_legs}",
+        "--shard=1/1 --project=${{ matrix.index }}",
+    )
+
+
+def sharded_build_export_matrix(*, shard_legs: int) -> str:
+    """Shards export their own builds; they do not consume a shared build."""
+    values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    return f"""name: Sharded build export
+on: pull_request
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [{values}]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --shard=${{{{ matrix.shard }}}}/{shard_legs}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{{{ matrix.shard }}}}
+          path: dist
+  deploy:
+    needs: shards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: app-*
+"""
+
+
 def trees(tmp_path: Path, base_text: str, merge_text: str):
     base, merge = tmp_path / "base", tmp_path / "merge"
     for root, text in ((base, base_text), (merge, merge_text)):
@@ -254,6 +293,34 @@ def test_playwright_blob_report_handoff_does_not_hide_shard_growth(
         tmp_path,
         playwright_report_matrix(shard_legs=8),
         playwright_report_matrix(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_index_axis_beside_shard_argument_is_not_a_shard_dimension(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        index_metadata_matrix(matrix_legs=8),
+        index_metadata_matrix(matrix_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards" not in output
+
+
+def test_sharded_producer_is_not_a_build_handoff_consumer(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        sharded_build_export_matrix(shard_legs=8),
+        sharded_build_export_matrix(shard_legs=16),
     )
 
     code, output = run(guard, base, merge, capsys, monkeypatch)

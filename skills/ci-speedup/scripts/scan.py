@@ -3771,8 +3771,9 @@ def _matrix_shard_leg_count(job: dict) -> int | None:
         if _SHARD_AXIS_RE.search(key_text) or (
                 key_text.casefold() == "index"
                 and re.search(
-                    rf"--shard(?:=|\s+)[^\r\n]*\$\{{\{{\s*matrix\."
-                    rf"{re.escape(key_text)}\s*\}}\}}",
+                    rf"--shard(?:=|\s+)[\"']?[^\s\"']*"
+                    rf"\$\{{\{{\s*matrix\.{re.escape(key_text)}\s*\}}\}}"
+                    rf"[^\s\"']*[\"']?",
                     run_blob,
                     re.IGNORECASE,
                 )):
@@ -3814,8 +3815,8 @@ def _artifact_selector_matches(
     return re.fullmatch(pattern_re, upload_name) is not None
 
 
-def _jobs_in_build_handoff(jobs: dict[str, Any]) -> set[str]:
-    """Producer and consumer jobs in a confirmed build-artifact handoff."""
+def _jobs_with_build_handoff(jobs: dict[str, Any]) -> set[str]:
+    """Jobs that consume a build artifact uploaded by a different job."""
     producers: list[tuple[str, str]] = []
     for job_name, job in jobs.items():
         if not isinstance(job, dict) or not _MATRIX_SETUP_BUILD_RE.search(
@@ -3828,7 +3829,7 @@ def _jobs_in_build_handoff(jobs: dict[str, Any]) -> set[str]:
             if upload_name:
                 producers.append((job_name, upload_name))
 
-    participants: set[str] = set()
+    consumers: set[str] = set()
     for job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
@@ -3842,10 +3843,9 @@ def _jobs_in_build_handoff(jobs: dict[str, Any]) -> set[str]:
                     upload_name, download_name, download_pattern)
             }
             if matched_producers:
-                participants.add(job_name)
-                participants.update(matched_producers)
+                consumers.add(job_name)
                 break
-    return participants
+    return consumers
 
 
 def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
@@ -3860,7 +3860,7 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
     matrix_setup_legs: dict[str, int] = {}
     matrix_setup_repeated: dict[str, list[str]] = {}
     jobs = _jobs_from_doc(doc)
-    handoff_jobs = _jobs_in_build_handoff(jobs)
+    handoff_jobs = _jobs_with_build_handoff(jobs)
     for job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
@@ -3894,8 +3894,10 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
     # Jobs that never co-run (provably exclusive `if:`) are not repeated work
     # with each other. A sharded job still repeats its own setup across legs,
     # so keep it even when it is the workflow's only setup job.
-    setup_jobs = sorted((set(_co_running(jobs, setup_jobs))
-                         | set(matrix_setup_legs)) - handoff_jobs)
+    setup_jobs_without_handoffs = [
+        job for job in setup_jobs if job not in handoff_jobs]
+    setup_jobs = sorted(set(_co_running(jobs, setup_jobs_without_handoffs))
+                        | (set(matrix_setup_legs) - handoff_jobs))
     if setup_jobs:
         if len(setup_jobs) >= 2:
             evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "
