@@ -40,6 +40,7 @@ from typing import Any, Callable, Literal, NamedTuple
 import pr_lifecycle
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
+from gate_frequency_contract import POLE_HOLDS_UP_MIN_COUNT as _POLE_HOLDS_UP_MIN_COUNT
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
 from shell_prefix import SHELL_PREFIX_SRC  # same-skill module; one source for three detectors
 from workflow_steps import (  # same-skill module; step walker
@@ -7594,6 +7595,22 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
             matrices.append(p)
     if not matrices:
         return [], file_poles
+    if have_frequencies:
+        # Reader-facing order is two explicit groups.  Frequency decides which
+        # group a pole belongs to; duration decides the order inside that group.
+        # Aggregation-gate upstreams inherit the sink's frequency because the PR
+        # waits for that upstream before the tiny terminal gate can finish.
+        for p in matrices:
+            count = int(frequencies.get(key(p)[0]) or 0)
+            p["_display_gate_count"] = count
+            p["_pole_group"] = (
+                "holds-up" if count >= _POLE_HOLDS_UP_MIN_COUNT else "rare-last")
+        holds_up = sorted((p for p in matrices if p["_pole_group"] == "holds-up"),
+                          key=lambda p: -impact(p))
+        rare_last = sorted((p for p in matrices if p["_pole_group"] == "rare-last"),
+                           key=lambda p: -impact(p))
+        selected = [*holds_up, *rare_last]
+        return selected[:_TOP_WORKFLOWS], file_poles
     typical_rest = sorted((p for p in matrices[1:] if typical(p)), key=lambda p: -impact(p))
     rare_rest = sorted((p for p in matrices[1:] if not typical(p)), key=lambda p: -impact(p))
     selected = [matrices[0], *typical_rest, *rare_rest]
@@ -7688,12 +7705,28 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
     lines = ["## 📋 Contents", "",
              f"**🐌 {heading}** — {intro}, each linking to its long-pole drill-down "
              "(waterfall → biggest lever → agent prompt):", ""]
+    grouped = all(p.get("_pole_group") in {"holds-up", "rare-last"} for p in pole_wfs)
+    last_group = ""
     for i, p in enumerate(pole_wfs, 1):
+        group = str(p.get("_pole_group") or "")
+        if grouped and group != last_group:
+            if last_group:
+                lines.append("")
+            if group == "holds-up":
+                lines += [
+                    "**Checks that hold up most PRs** - finished last on at least "
+                    f"{_POLE_HOLDS_UP_MIN_COUNT} sampled PRs; longest first:", ""]
+            else:
+                lines += [
+                    "**Long but rarely the last to finish** - finished last on fewer than "
+                    f"{_POLE_HOLDS_UP_MIN_COUNT} sampled PRs; longest first, with why:", ""]
+            last_group = group
         check = _lbl(_clean_label(str(p.get("check", ""))))
         # Use the headline duration (slow mode for a bimodal pole), so the TOC's dot +
         # time match the pole's own header instead of disagreeing (median 🟠 vs slow 🔴).
         head_s, _ = _pole_headline(p)
         dur = _clock(head_s)
+        p50_dur = _clock(_num(p.get("p50_s")) or 0.0)
         gc = wf_gate.get(str(p.get("workflow_file", "")), 0)
         # The count is a per-WORKFLOW sum (over its matrix legs/jobs), so attribute it
         # to the workflow file, not the single representative check name - a matrix leg
@@ -7723,8 +7756,20 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
         # slowest single check, not the gate). Carry that exact condition here as a
         # " (the gate)" tag on the first critical-path row.
         _gate_tag = " (the gate)" if (top_is_gate and i == 1) else ""
+        if grouped and npop:
+            own_count = int(p.get("_display_gate_count") or 0)
+            frequency = f" · finishes last on {own_count}/{npop} PRs"
+            if group == "rare-last":
+                present = int(p.get("_present") or 0)
+                reason = ("ran on few PRs" if present <= npop * _RARE_PRESENCE_FRAC
+                          else "a slower check usually ran alongside")
+                frequency += f" · {reason}"
+            lead = f"P50 {p50_dur}"
+        else:
+            frequency = ""
+            lead = dur
         lines.append(f"{i}. {_severity_dot(head_s)} [{check}]"
-                     f"(#pole-{i}) — {dur}{_gate_tag}{gates}")
+                     f"(#pole-{i}) - {lead}{_gate_tag}{frequency}{gates}")
     lines.append("")
     if queue_count:
         qp = "s" if queue_count != 1 else ""
@@ -14463,9 +14508,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         chain_active and _dvg is not None and _makespan_p50 > 0
         and _dvg < -_CHAIN_MAKESPAN_DIVERGENCE_PCT
         and _makespan_p50 > _chain_total + 0.5)
-    _wall_dur = _clock(_makespan_p50) if _chain_diverges else _clock(_chain_total)
+    _wall_dur = (_clock(_makespan_p50) if _chain_diverges else
+                 _clock(_chain_total) if chain_active else merge_dur)
     if chain_active:
         merge_dur = _clock(_chain_total)
+    if chain_active:
         # Review V2 (OD-F2): stash the chain story on each modal-MEMBER pole so
         # the per-pole floor helpers (`_floor_note` / `_pole_addressable`) can
         # render the chain-stage framing with the win capped at the stamped
@@ -14484,7 +14531,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     # headline claims as the wait, so the per-pole agent-prompt gate line frames this
                     # stage against the chain total instead of mis-labelling a mid-chain `needs:`
                     # stage "the slowest check a typical PR waits on" (it is not — the CHAIN is).
-                    "merge_dur": merge_dur,
+                    "merge_dur": _clock(_chain_total),
                     # The chain's OTHER members (raw names) so the floor note can exclude serial
                     # `needs:` partners when it names the slowest CONCURRENT floor (Class A #6): a
                     # partner runs before/after this stage, not alongside it, so it must never be
@@ -14718,7 +14765,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # the chain's headroom down to the next-longest COMPETING path
     # (`runner_up_p50_s`); shortening any chain member comes 1:1 off the wait
     # until that bound. Verifier-re-derived from `chain_facts`.
-    _chain_win = (_num(_chs.get("chain_win_p50_s")) or 0.0) if chain_active else 0.0
+    _chain_win = ((_num(_chs.get("chain_win_p50_s")) or 0.0)
+                  if chain_active else 0.0)
     # #49 — RENDER-LAYER SINGLE DOOR. The headline lever consumes the STAMPED per-finding
     # cluster ceilings collect_runs sized, never a re-computed sibling-capped headroom. A
     # credited cluster-floor lever (OPT73) saves its full stamped ceiling (concurrent legs
@@ -14816,6 +14864,18 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     out[_i] = out[_i].rstrip() + " " + _queue_bottom[len(_prefix):]
                 else:
                     out[_i] = _queue_bottom
+                break
+    if pole_wfs and pole_wfs[0].get("_pole_group") in {"holds-up", "rare-last"}:
+        _pole_one = _lbl(_clean_label(str(pole_wfs[0].get("check", ""))))
+        _pole_one_group = (
+            "Checks that hold up most PRs"
+            if pole_wfs[0].get("_pole_group") == "holds-up"
+            else "Long but rarely the last to finish")
+        for _i in range(len(out) - 1, -1, -1):
+            if out[_i].startswith("> **Bottom line.**"):
+                out[_i] = out[_i].rstrip() + (
+                    f" Long pole 1, `{_pole_one}`, is the longest check in "
+                    f"**{_pole_one_group}**.")
                 break
     # Owner UX edit (2026-07-19): TOP MATTER = metadata table → ONE Bottom-line blockquote
     # → Contents, nothing else. Everything that used to render as its own blockquote between

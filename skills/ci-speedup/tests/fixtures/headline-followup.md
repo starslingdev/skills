@@ -11,7 +11,7 @@ not measured: lifecycle data was not collected
 | **PR gate sample** | 4 of 4 PRs sampled: target met |
 | **Audit** | ran 2026-11-02 · ci-speedup skill commit [`abcdef1`](https://github.com/starslingdev/skills/commit/abcdef1234567890) |
 
-> **Bottom line.** A typical PR waits **10m 00s** for all checks to finish. The biggest single measured win is **~4m 10s** off the slowest fixable check, `tests` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
+> **Bottom line.** A typical PR waits **10m 00s** for all checks to finish. The biggest single measured win is **~4m 10s** off the slowest fixable check, `tests` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever. Long pole 1, `tests`, is the longest check in **Checks that hold up most PRs**.
 >
 > **10m 00s until all checks finish** - `tests` is the slowest check a typical PR waits on.
 >
@@ -29,7 +29,9 @@ not measured: lifecycle data was not collected
 
 **🐌 Critical path** - the checks that gate your merge, each linking to its long-pole drill-down (waterfall → biggest lever → agent prompt):
 
-1. 🔴 [tests](#pole-1) - 10m 00s (the gate)
+**Checks that hold up most PRs** - finished last on at least 2 sampled PRs; longest first:
+
+1. 🔴 [tests](#pole-1) - P50 10m 00s (the gate) · finishes last on 4/4 PRs
 
 **🧹 Also noticed** - 1 finding (mostly off-path runner-minute savings; **one or more flagged DO sit on the critical path** and cut wall-clock): [see below](#also-noticed).
 

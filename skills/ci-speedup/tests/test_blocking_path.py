@@ -7332,6 +7332,107 @@ def test_render_minority_slow_genuine_minority_keeps_opt_in_wording():
     assert "ran on a minority of sampled PRs (label-gated or path-filtered" in out
 
 
+def _pole_order_agreement_doc() -> dict:
+    """Four public-facing poles shaped like issue #305's example.
+
+    A is the longest frequent gate.  B is a shorter member of the saved modal
+    ``needs:`` chain.  D is longer than all of them but finished last only once.
+    """
+    npop = 20
+    checks = [
+        {"name": "A", "p50_s": 250.0, "present_on": npop,
+         "workflow_file": "a.yml", "pole_n": 9},
+        {"name": "B setup", "p50_s": 30.0, "present_on": npop,
+         "workflow_file": "b.yml", "pole_n": 0},
+        {"name": "B", "p50_s": 230.0, "present_on": npop,
+         "workflow_file": "b.yml", "pole_n": 6},
+        {"name": "C", "p50_s": 125.0, "present_on": npop,
+         "workflow_file": "c.yml", "pole_n": 3},
+        {"name": "D", "p50_s": 280.0, "present_on": npop,
+         "workflow_file": "d.yml", "pole_n": 1},
+    ]
+    winners = ["A"] * 9 + ["B"] * 6 + ["C"] * 3 + ["D"] + ["external"]
+    populations = []
+    for winner in winners:
+        rows = [[c["name"], 1000.0 if c["name"] == winner else c["p50_s"]]
+                for c in checks]
+        if winner == "external":
+            rows.append(["external", 1100.0])
+        populations.append([0.1, rows])
+    poles = [
+        {"check": c["name"], "p50_s": c["p50_s"],
+         "workflow_file": c["workflow_file"], "job": c["name"]}
+        for c in checks if c["name"] != "B setup"
+    ]
+    return {
+        "repo": "example/repo",
+        "required_checks": ["A"],
+        "data_sources": {},
+        "pr_critical_path": {
+            "critical_path_check": "A",
+            "critical_path_s": 250.0,
+            "check_present_n_pr": npop,
+            "checks": checks,
+            "populations": populations,
+            "poles": poles,
+            "chain_summary": {
+                "modal_chain": ["B setup", "B"],
+                "chain_p50_s": 230.0,
+                "chain_win_p50_s": 0.0,
+                "runner_up_p50_s": 250.0,
+                "makespan_p50_s": 280.0,
+                "divergence_pct": 0.0,
+            },
+        },
+    }
+
+
+def test_poles_render_in_two_duration_ordered_groups_and_bottom_names_pole_one():
+    report = bp.render(_pole_order_agreement_doc())
+    contents = report.split("## 📋 Contents", 1)[1].split("<a id=\"long-pole-map\"", 1)[0]
+
+    assert "Checks that hold up most PRs" in contents
+    assert "Long but rarely the last to finish" in contents
+    frequent = contents.index("Checks that hold up most PRs")
+    rare = contents.index("Long but rarely the last to finish")
+    assert frequent < contents.index("[A]") < contents.index("[B]") < contents.index("[C]") < rare
+    assert rare < contents.index("[D]")
+    for check, p50, gates in (("A", "4m 10s", "9/20"), ("B", "3m 50s", "6/20"),
+                              ("C", "2m 05s", "3/20"), ("D", "4m 40s", "1/20")):
+        row = next(line for line in contents.splitlines() if f"[{check}]" in line)
+        assert f"P50 {p50}" in row and f"finishes last on {gates} PRs" in row
+    d_row = next(line for line in contents.splitlines() if "[D]" in line)
+    assert "a slower check usually ran alongside" in d_row
+    bottom = next(line for line in report.splitlines() if line.startswith("> **Bottom line.**"))
+    assert "Long pole 1" in bottom and "`A`" in bottom
+
+
+def test_verifier_rejects_pole_group_order_bottom_disagreement_and_missing_rare_reason(tmp_path):
+    doc = _pole_order_agreement_doc()
+    clean = bp.render(doc)
+    contents = clean.split("## 📋 Contents", 1)[1].split("<a id=\"long-pole-map\"", 1)[0]
+    a_row = next(line for line in contents.splitlines() if "[A]" in line)
+    b_row = next(line for line in contents.splitlines() if "[B]" in line)
+    d_row = next(line for line in contents.splitlines() if "[D]" in line)
+    variants = [
+        clean.replace(a_row + "\n" + b_row, b_row + "\n" + a_row),
+        clean.replace("Long pole 1, `A`", "Long pole 1, `B`"),
+        clean.replace(" · a slower check usually ran alongside", ""),
+    ]
+    vr = _load_verify_report()
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    for i, report in enumerate(variants):
+        report_path = tmp_path / f"report-{i}.md"
+        report_path.write_text(report, encoding="utf-8")
+        failures = [
+            c for c in vr.run_checks(report, report_path, findings, skill_repo=None)
+            if c.name == "pole groups are duration-ordered and Bottom line agrees with Long pole 1"
+            and not c.skipped and not c.ok
+        ]
+        assert failures, f"pole-order verifier accepted tampered variant {i}"
+
+
 def test_render_legacy_no_pole_n_keeps_presence_wording():
     # Backward compat: a pre-`pole_n` doc (no `pole_n` on any check) still falls back to the legacy
     # PRESENCE demotion + its original "Opt-in / rare — ran on only N/npop" wording, unchanged.

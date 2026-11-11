@@ -12893,6 +12893,109 @@ def check_workflow_gate_frequency_matches(report: str, findings_path: Path | Non
     return Check(name, True, f"all {checked} gate-frequency claim(s) match populations{tail}")
 
 
+_POLE_GROUP_ROW_RE = re.compile(
+    r"^(\d+)\.\s+\S+\s+\[([^\]]+)\]\(#pole-(\d+)\)\s+-\s+"
+    r"P50\s+([^·\n]+?)\s+·\s+finishes last on\s+(\d+)/(\d+)\s+PRs(.*)$",
+    re.MULTILINE)
+
+
+def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) -> Check:
+    """Two duration-ordered groups and the executive summary share one pole 1."""
+    name = "pole groups are duration-ordered and Bottom line agrees with Long pole 1"
+    if not findings_path or _is_static_only(report):
+        return Check(name, True, "no findings / static-only", skipped=True)
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings unreadable", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    checks = [row for row in _as_list(cp.get("checks")) if isinstance(row, dict)]
+    if not checks or any(row.get("pole_n") is None for row in checks):
+        return Check(name, True, "legacy findings lack complete pole counts", skipped=True)
+
+    contents = _section(report, "📋 Contents")
+    frequent_heading = "Checks that hold up most PRs"
+    rare_heading = "Long but rarely the last to finish"
+    threshold_match = re.search(
+        r"(?:Checks that hold up most PRs.*?at least|"
+        r"Long but rarely the last to finish.*?fewer than)\s+(\d+)\s+sampled PRs",
+        contents)
+    rows = list(_POLE_GROUP_ROW_RE.finditer(contents))
+    pole_sections = _pole_header_sections(report)
+    if not threshold_match or len(rows) != len(pole_sections):
+        return Check(name, False,
+                     "every modern pole must appear under one of the two labelled groups with "
+                     "its P50 and finishes-last count")
+
+    threshold = int(threshold_match.group(1))
+    rare_at = contents.find(rare_heading)
+    failures: list[str] = []
+    groups: dict[str, list[float]] = {"holds-up": [], "rare-last": []}
+    by_name = {_cmp_name(str(row.get("name") or row.get("check") or "")): row
+               for row in checks}
+    first_name = ""
+    first_full_name = ""
+    for index, match in enumerate(rows, 1):
+        number, label, anchor, p50_text, count_text, total_text, tail = match.groups()
+        if int(number) != index or int(anchor) != index:
+            failures.append(f"row {index} has numbering {number}/anchor {anchor}")
+        if index == 1:
+            first_name = label
+            first_full_name = pole_sections[0][1]
+        count, total = int(count_text), int(total_text)
+        group = ("rare-last" if rare_at >= 0 and match.start() > rare_at
+                 else "holds-up")
+        expected_group = "holds-up" if count >= threshold else "rare-last"
+        if group != expected_group:
+            failures.append(
+                f"`{label}` is in {group} with {count} finishes; threshold is {threshold}")
+        seconds = _parse_clock_to_s(p50_text)
+        if seconds is None:
+            failures.append(f"`{label}` has an unreadable P50 {p50_text!r}")
+        else:
+            groups[group].append(seconds)
+        if group == "rare-last" and not (
+                "ran on few PRs" in tail or "a slower check usually ran alongside" in tail):
+            failures.append(f"`{label}` has no reason in the rare-last group")
+        # Contents labels are deliberately width-limited for readability.  Join
+        # through the corresponding full drill heading before looking up the
+        # stamped check, so an ellipsis cannot make real evidence unjoinable.
+        full_label = pole_sections[index - 1][1]
+        stamped = by_name.get(_cmp_name(full_label))
+        if stamped is None:
+            failures.append(f"`{label}` has no matching stamped check")
+        else:
+            stamped_count = int(_num(stamped.get("pole_n")) or 0)
+            stamped_p50 = _num(stamped.get("p50_s"))
+            if stamped_count != count:
+                failures.append(
+                    f"`{label}` renders {count} finishes, stamped {stamped_count}")
+            if seconds is not None and stamped_p50 is not None and abs(seconds - stamped_p50) > 1.0:
+                failures.append(
+                    f"`{label}` renders P50 {_fmt_clock(seconds)}, stamped {_fmt_clock(stamped_p50)}")
+        if total != int(cp.get("check_present_n_pr") or total):
+            failures.append(f"`{label}` renders denominator {total}, not the sampled population")
+
+    for group, values in groups.items():
+        if any(values[i] < values[i + 1] for i in range(len(values) - 1)):
+            failures.append(f"{group} P50 values are not non-increasing: {values}")
+    if groups["holds-up"] and frequent_heading not in contents:
+        failures.append("holds-up rows have no labelled group heading")
+    if groups["rare-last"] and rare_heading not in contents:
+        failures.append("rare-last rows have no labelled group heading")
+
+    bottom = next((line for line in report.splitlines()
+                   if line.startswith("> **Bottom line.**")), "")
+    if not first_name or f"Long pole 1, `{first_name}`," not in bottom:
+        failures.append(f"Bottom line does not name Long pole 1 `{first_name}`")
+    if not first_full_name:
+        failures.append("Contents pole 1 has no corresponding drill heading")
+
+    return Check(name, not failures,
+                 "; ".join(failures[:8]) if failures else
+                 f"{len(rows)} poles grouped and duration-ordered; Bottom line names pole 1")
+
+
 def check_spine_heavy_check_disclosed(report: str, findings_path: Path | None) -> Check:
     """**The spine-drop disclosure class (Phase 0, Class A #6).** Every drilled pole's BINDING floor
     — the slowest concurrent check that co-occurs with it on a MAJORITY of its own gating PRs,
@@ -16732,6 +16835,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_headline_wait_is_divergence_correct(report, findings_path, report_path),  # issue #115
         check_spine_heavy_check_disclosed(report, findings_path),
         check_workflow_gate_frequency_matches(report, findings_path),
+        check_pole_groups_and_bottom_agree(report, findings_path),
         check_pole_not_reframed_as_hygiene(report, findings_path),
         check_toc_also_noticed_label_honest(report),
         check_cache_claim_backed_by_distribution(report, findings_path),

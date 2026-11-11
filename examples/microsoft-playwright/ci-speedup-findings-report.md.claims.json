@@ -77,12 +77,12 @@
       "fields": {
         "merge_dur": "41m 12s",
         "slowest_dur": "72m 57s",
-        "floor_name": "Windows (firefox)",
-        "gate_check": "ubuntu-22.04 (webkit - Node.js 20)",
+        "gate_check": "Windows (firefox)",
+        "floor_lowered": true,
         "present": 4,
         "npop": 20
       },
-      "rendered": "**41m 12s until all checks finish** - the slowest check a typical PR waits on is `Windows (firefox)` (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s; `ubuntu-22.04 (webkit - Node.js 20)` is the check most PRs gate on (drilled below). "
+      "rendered": "**41m 12s until all checks finish** - `Windows (firefox)` is the slowest check a typical PR waits on (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s. "
     },
     {
       "kind": "tier2_headline",
@@ -95,15 +95,13 @@
       "rendered": "> **After the gate.** 73,029 min/mo of wall-clock-neutral runner minutes is recoverable (5 neutral findings; none can slow a merge)."
     },
     {
-      "kind": "pole_gate_prompt",
-      "subject": "ubuntu-22.04 (webkit - Node.js 20)",
+      "kind": "pole_role_line",
+      "subject": "Windows (firefox)",
       "fields": {
-        "dur": "41m 21s",
-        "gate_count": 7,
-        "npop": 20,
-        "demoted": false
+        "dur": "72m 57s",
+        "npop": 20
       },
-      "rendered": "Slowest check a typical PR waits on: P50 41m 21s; its workflow `tests_primary.yml` gates 7/20 sampled PRs."
+      "rendered": "**The slowest check a typical PR waits on.**"
     },
     {
       "kind": "pole_gate_prompt",
@@ -115,6 +113,26 @@
         "demoted": false
       },
       "rendered": "Slowest check a typical PR waits on: P50 72m 57s; its workflow `tests_secondary.yml` gates 5/20 sampled PRs."
+    },
+    {
+      "kind": "pole_role_line",
+      "subject": "Windows (firefox)",
+      "fields": {
+        "lead_floor": "72m 57s",
+        "dur": "41m 21s"
+      },
+      "rendered": "Runs concurrently behind `Windows (firefox)` (72m 57s); it becomes the gate only once every slower concurrent check drops below 41m 21s."
+    },
+    {
+      "kind": "pole_gate_prompt",
+      "subject": "ubuntu-22.04 (webkit - Node.js 20)",
+      "fields": {
+        "dur": "41m 21s",
+        "gate_count": 7,
+        "npop": 20,
+        "demoted": false
+      },
+      "rendered": "Slowest check a typical PR waits on: P50 41m 21s; its workflow `tests_primary.yml` gates 7/20 sampled PRs."
     },
     {
       "kind": "pole_role_line",

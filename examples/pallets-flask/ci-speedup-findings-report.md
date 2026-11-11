@@ -12,13 +12,13 @@ not measured: lifecycle data was not collected
 | **PR gate sample** | 20 of 20 PRs sampled: target met |
 | **Audit** | ran 2026-07-24 · ci-speedup skill commit [`2f048be`](https://github.com/starslingdev/skills/commit/2f048be) |
 
-> **Bottom line.** A typical PR waits **34s** for all checks to finish. The biggest single measured win is **~7s** off the slowest fixable check, `Windows` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
+> **Bottom line.** A typical PR waits **34s** for all checks to finish. The biggest single measured win is **~7s** off the slowest fixable check, `Windows` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever. Long pole 1, `Windows`, is the longest check in **Checks that hold up most PRs**.
 >
 > **34s until all checks finish** - `Windows` is the slowest check a typical PR waits on. 
 >
-> **`.github/workflows/tests.yaml` changed ~217 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests.yaml` changed ~219 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/zizmor.yaml` changed ~219 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/zizmor.yaml` changed ~221 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **What gates next:** After this fix, CI is gated by `tests.yaml / PyPy` at ~26 s.
 > This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.
@@ -36,11 +36,16 @@ not measured: lifecycle data was not collected
 
 **🐌 Critical path** - the checks that gate your merge, each linking to its long-pole drill-down (waterfall → biggest lever → agent prompt):
 
-1. 🟡 [Windows](#pole-1) - 34s (the gate)
-2. 🟡 [main](#pole-2) - 19s
-3. 🟡 [PyPy](#pole-3) - 26s · rarely the merge pole
-4. 🟡 [3.14t](#pole-4) - 25s · rarely the merge pole
-5. 🟡 [3.9](#pole-5) - 24s · rarely the merge pole
+**Checks that hold up most PRs** - finished last on at least 2 sampled PRs; longest first:
+
+1. 🟡 [Windows](#pole-1) - P50 34s (the gate) · finishes last on 18/20 PRs
+2. 🟡 [main](#pole-2) - P50 19s · finishes last on 2/20 PRs
+
+**Long but rarely the last to finish** - finished last on fewer than 2 sampled PRs; longest first, with why:
+
+3. 🟡 [PyPy](#pole-3) - P50 26s · finishes last on 0/20 PRs · a slower check usually ran alongside · rarely the merge pole
+4. 🟡 [3.14t](#pole-4) - P50 25s · finishes last on 0/20 PRs · a slower check usually ran alongside · rarely the merge pole
+5. 🟡 [3.9](#pole-5) - P50 24s · finishes last on 0/20 PRs · ran on few PRs · rarely the merge pole
 
 **💸 Runner-minute reductions** - ~3 min/mo of measured, merge-safe runner-minute savings, backed by a 12-row cost spine (+7 more runner-minute rows hidden): [section](#runner-minute-reductions).
 
