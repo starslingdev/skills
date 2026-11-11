@@ -152,6 +152,8 @@ def test_real_imbalance_stamps_excluded_legs_without_work():
 
 @pytest.mark.parametrize("housekeeping", [
     ["Run actions/checkout@v4"],
+    ["Run actions/setup-node@v4"],
+    ["Run actions/setup-python@v5"],
     ["Post Run actions/checkout@v4", "Run actions/upload-artifact@v4"],
     ["Upload test results"],
     [""],
