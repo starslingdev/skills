@@ -2219,15 +2219,15 @@ This applies to any framework with sharding (pytest `--shard`, cargo-nextest `--
 <!-- METADATA
 pattern: OPT88
 impact: MEDIUM
-class: data-driven
-detector: manual
+class: static
+detector: bespoke
 risk: MEDIUM
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,pyproject.toml,pytest.ini,setup.cfg,.bazelrc,.config/nextest.toml,jest.config.*,vitest.config.*,package.json"
 fix_strategy: measure-test-concurrency
 title_template: "Test concurrency is set by guess, not measurement"
 -->
 
-**Not auto-detected yet.** Like OPT86, no pass emits OPT88, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow test step's command and configuration against the heuristic below.
+**Narrowly auto-detected for Jest.** When a workflow invokes Jest and its nearest configuration pins `maxWorkers` to an absolute number or a percentage below 100%, the static pass emits this uncredited measurement note. Other tools and unpinned Jest worker counts still require the measured review below.
 
 **TL;DR**: The slowest test job runs with a worker count nobody measured: one worker on a runner with several cores, a fixed cap carried over from an older runner, or "as many as there are cores" where memory or a shared service is the real limit. Time two or three settings on the real runner class and keep the fastest. More workers is not always faster.
 
@@ -2235,9 +2235,9 @@ title_template: "Test concurrency is set by guess, not measurement"
 
 **Relation to other patterns**: [OPT23](#opt23--single-threaded-matrix-max-parallel-1) is `max-parallel: 1` across matrix jobs and [OPT24](#opt24--long-test-job-without-sharding) splits a suite across machines. OPT88 is the worker count inside one job on one machine, and it applies before sharding: a shard that wastes its own cores multiplies the waste.
 
-**Detection heuristic** (manual; read, never inferred):
+**Detection heuristic**:
 
-A log-level `test-loop-serial` observation can point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another; OPT88 remains manual because the safe worker count still has to be measured.
+A configured Jest `maxWorkers` below 100% is static evidence to measure, never evidence of a saving. A log-level `test-loop-serial` observation can also point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another. In both cases the safe worker count still has to be measured.
 
 1. The slow step runs tests, and concurrency is set explicitly (serial, or a fixed number), or not at all on a runner whose test tool defaults to serial. Look everywhere it can be set: the test command, the workflow, and the test tool's own config files (for example `local_test_jobs` and a `test_env` thread count such as `RUST_TEST_THREADS` in `.bazelrc`, or pytest, jest and nextest config files).
 2. The setting does not match the runner: compare it with the core count of the job's runner label. If the label is custom and its core count is not documented, measure it first with a one-line probe step (`nproc`, or `[Environment]::ProcessorCount` on Windows).
@@ -3480,7 +3480,7 @@ fix_strategy: fast-subset-on-prs-full-after-merge
 title_template: "Every pull request pays for coverage that could run after merge"
 -->
 
-**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
+**Not auto-detected yet.** Like OPT86, no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
 
 **TL;DR**: Every pull request waits for the full matrix (every OS, every runtime version, every heavyweight configuration) even though a small subset catches almost every failure. Run the subset that catches what matters before merge, and move the rest to a run after merge or on a schedule, where it still gates releases and pages someone when it fails.
 
@@ -5186,7 +5186,7 @@ fix_strategy: profile-the-compile
 title_template: "The compile is the long pole and nobody profiled it"
 -->
 
-**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT91, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow build step and the compiler's own timing reports against the heuristic below.
+**Not auto-detected yet.** Like OPT86, no pass emits OPT91, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow build step and the compiler's own timing reports against the heuristic below.
 
 **TL;DR**: The slowest job's time goes to compiling, the cache is already doing its job, and nobody has asked the compiler where the time goes. Profile the compile with the compiler's own timing reports, then fix the hotspot it names: a build-profile setting that costs far more build time than it returns at runtime, or one piece of code that is expensive to compile.
 

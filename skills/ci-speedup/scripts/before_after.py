@@ -15,11 +15,36 @@ from urllib.parse import quote
 
 from wall_clock import observed_commit_wall_s
 
-_COLD = re.compile(r"(?i)cache (?:key )?miss|not found in cache|cache.*evict|branch.scope")
-_WARM = re.compile(r"(?i)cache hit|from-cache|cache hit, replaying|\(cached\)|\bcached\b")
+_COLD = re.compile(
+    r"(?i)cache (?:key )?miss|cache not found for input keys|not found in cache|"
+    r"cache.*evict|branch.scope")
+_WARM = re.compile(
+    r"(?i)cache restored from key|cache hit|from-cache|cache hit, replaying|"
+    r"\(cached\)|\bcached\b")
 _CACHED_COUNT = re.compile(
     r"(?i)\b(\d+)\s+(?:(?:packages?|tests?|steps?|lines?).{0,20}\(cached\)|"
     r"(?:go\s+)?cached(?:\s+lines?)?)")
+
+# Job logs are the largest verification responses.  Bound both the number of
+# API reads per cohort and the amount of each response retained in the
+# persisted verification context.
+_VERIFY_LOG_JOB_CAP = 20
+_VERIFY_LOG_TOTAL_CHAR_CAP = 100_000
+
+
+def _bounded_logs(*values: Any) -> list[str]:
+    logs: list[str] = []
+    remaining = _VERIFY_LOG_TOTAL_CHAR_CAP
+    for value in values:
+        rows = [value] if isinstance(value, str) else (
+            value if isinstance(value, list) else [])
+        for row in rows:
+            if isinstance(row, str) and row:
+                logs.append(row[:remaining])
+                remaining -= len(logs[-1])
+                if len(logs) == _VERIFY_LOG_JOB_CAP or remaining == 0:
+                    return logs
+    return logs
 
 
 def advance_verification(
@@ -98,7 +123,8 @@ def advance_verification(
         before = _baseline_for_lane(before, baseline_lane)
     if (not isinstance(before, list) or not before) and isinstance(
             baseline_doc, dict):
-        before = _baseline_from_findings(baseline_doc, lane=baseline_lane)
+        before = _baseline_from_findings(
+            baseline_doc, lane=baseline_lane, client=client, repo=repo)
     resolved_head = client.remote_head(repo, branch)
     head = resolved_head
     if tracking_default and static_matches and saved_binding.get("head_sha"):
@@ -126,7 +152,7 @@ def advance_verification(
 
     initial = saved.get("initial") if same_binding else None
     if not isinstance(initial, dict):
-        initial = client.completed_cohort(repo, head)
+        initial = client.completed_cohort(repo, head, branch)
     if initial is None:
         return {"status": "waiting-for-first-cohort", "head_sha": head,
                 "verdict": None}
@@ -154,6 +180,18 @@ def advance_verification(
             encoding="utf-8")
         temporary.replace(context_file)
 
+    def preflight_refused_result(cohort: dict[str, Any] | None,
+                                 current_samples: list[dict[str, Any]]
+                                 ) -> dict[str, Any] | None:
+        if not isinstance(cohort, dict) or cohort.get("_rerun_status") != "preflight-refused":
+            return None
+        context["pending_rerun"] = None
+        context["samples"] = current_samples
+        persist()
+        return {"status": "rerun-preflight-refused", "head_sha": head,
+                "sample_count": len(current_samples), "verdict": None,
+                "discarded_moved_head": moved}
+
     def moved_result() -> dict[str, Any] | None:
         current = client.remote_head(repo, branch)
         if tracking_default or (current is None and cache_sensitive):
@@ -171,7 +209,9 @@ def advance_verification(
     if not isinstance(before, list) or not before:
         context["samples"] = samples
         persist()
+        emit(f"Verification baseline for the {baseline_lane} lane is unavailable.")
         return {"status": "baseline-unavailable", "head_sha": head,
+                "baseline_lane": baseline_lane,
                 "sample_count": len(samples), "verdict": None,
                 "discarded_moved_head": moved}
 
@@ -231,6 +271,9 @@ def advance_verification(
                 }
                 persist()
             cohort = client.rerun_cohort(repo, initial, trigger=trigger)
+            refused = preflight_refused_result(cohort, samples)
+            if refused is not None:
+                return refused
             if cohort is None:
                 context["samples"] = samples
                 persist()
@@ -283,6 +326,9 @@ def advance_verification(
                 }
                 persist()
             cohort = client.rerun_cohort(repo, initial, trigger=trigger)
+            refused = preflight_refused_result(cohort, samples)
+            if refused is not None:
+                return refused
             if cohort is None:
                 context["samples"] = samples
                 persist()
@@ -342,6 +388,57 @@ class GhVerificationClient:
             return json.loads(result.stdout)
         except json.JSONDecodeError:
             return None
+
+    @staticmethod
+    def _text(endpoint: str) -> str | None:
+        from collect_runs import (_ESCAPE_FLAG, _flag_was_rejected,
+                                  _strip_terminal_escapes)
+
+        command = ["gh", "api", _ESCAPE_FLAG, endpoint]
+        try:
+            result = subprocess.run(
+                command, text=True, capture_output=True, timeout=90)
+            if result.returncode != 0 and _flag_was_rejected(result.stderr or ""):
+                result = subprocess.run(
+                    ["gh", "api", endpoint], text=True, capture_output=True,
+                    timeout=90)
+        except (OSError, subprocess.TimeoutExpired, UnicodeDecodeError):
+            return None
+        if result.returncode != 0:
+            return None
+        return _strip_terminal_escapes(result.stdout)
+
+    def _job_logs(self, repo: str, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+        logs: list[str] = []
+        calls = unreadable = omitted = truncated = 0
+        remaining = _VERIFY_LOG_TOTAL_CHAR_CAP
+        for job in jobs:
+            try:
+                job_id = int(job.get("id") or 0)
+            except (TypeError, ValueError):
+                job_id = 0
+            if not job_id:
+                unreadable += 1
+                continue
+            if calls >= _VERIFY_LOG_JOB_CAP or remaining == 0:
+                omitted += 1
+                continue
+            calls += 1
+            text = self._text(f"repos/{repo}/actions/jobs/{job_id}/logs")
+            if text:
+                if len(text) > remaining:
+                    truncated += 1
+                logs.append(text[:remaining])
+                remaining -= len(logs[-1])
+            else:
+                unreadable += 1
+        return {
+            "logs": logs,
+            "log_api_calls": calls,
+            "log_jobs_unreadable": unreadable,
+            "log_jobs_omitted": omitted,
+            "log_jobs_truncated": truncated,
+        }
 
     def remote_head(self, repo: str, branch: str) -> str | None:
         payload = self._api(f"repos/{repo}/branches/{quote(branch, safe='')}")
@@ -452,6 +549,7 @@ class GhVerificationClient:
                         or job.get("conclusion") != "success"):
                     return None
                 jobs.append({
+                    "id": job.get("id"),
                     "name": str(job.get("name") or ""),
                     "workflow": workflow,
                     "head_sha": head,
@@ -474,6 +572,7 @@ class GhVerificationClient:
         lane_runs = (sum(lane_counts)
                      if lane_counts and all(value is not None for value in lane_counts)
                      else None)
+        log_sample = self._job_logs(repo, jobs)
         return {
             "head_sha": head,
             "cohort_id": identity,
@@ -484,18 +583,24 @@ class GhVerificationClient:
             "expected_workflows": expected,
             "jobs": jobs,
             "skipped_jobs": skipped_jobs,
-            "logs": [],
+            **log_sample,
             "run_attempt_ids": run_attempt_ids,
             "lane": lane,
             "lane_runs_30d": lane_runs,
+            "head_branch": (str(runs[0].get("head_branch") or "")
+                            if len({str(row.get("head_branch") or "")
+                                    for row in runs}) == 1 else ""),
         }
 
-    def completed_cohort(self, repo: str, head: str) -> dict[str, Any] | None:
+    def completed_cohort(self, repo: str, head: str,
+                         branch: str) -> dict[str, Any] | None:
         all_rows = self._paged_rows(
             f"repos/{repo}/actions/runs?head_sha={quote(head)}&per_page=100",
             "workflow_runs")
-        rows = [row for row in all_rows or []
+        branch_rows = [row for row in all_rows or []
                 if str(row.get("head_sha") or "") == head
+                if str(row.get("head_branch") or "") == branch]
+        rows = [row for row in branch_rows
                 if int(row.get("run_attempt") or 1) == 1]
         if not rows:
             return None
@@ -527,7 +632,10 @@ class GhVerificationClient:
             if match
         }
         selected_ids = {int(row.get("id") or 0) for row in selected}
-        if expected_run_ids and not expected_run_ids.issubset(selected_ids):
+        branch_run_ids = {int(row.get("id") or 0) for row in branch_rows}
+        expected_run_ids &= branch_run_ids
+        if (not expected_run_ids
+                or not expected_run_ids.issubset(selected_ids)):
             return None
         expected = [self._workflow_identity(row) for row in selected]
         return self._cohort(repo, head, selected,
@@ -540,6 +648,19 @@ class GhVerificationClient:
         if not members:
             return None
         if trigger:
+            info = self._api(f"repos/{repo}")
+            default_branch = (str(info.get("default_branch") or "")
+                              if isinstance(info, dict) else "")
+            cohort_branch = str(cohort.get("head_branch") or "")
+            if not default_branch or not cohort_branch or cohort_branch == default_branch:
+                return {"_rerun_status": "preflight-refused"}
+            for member in members:
+                run = self._api(
+                    f"repos/{repo}/actions/runs/{int(member['run_id'])}")
+                if (not isinstance(run, dict)
+                        or str(run.get("head_branch") or "") != cohort_branch
+                        or str(run.get("head_branch") or "") == default_branch):
+                    return {"_rerun_status": "preflight-refused"}
             for member in members:
                 if self._api(
                         f"repos/{repo}/actions/runs/{int(member['run_id'])}/rerun",
@@ -642,6 +763,7 @@ def _baseline_for_lane(cohorts: list[dict[str, Any]], lane: str
 
 def _baseline_from_findings(
     doc: dict[str, Any], *, lane: str | None = None,
+    client: Any = None, repo: str = "",
 ) -> list[dict[str, Any]]:
     clock = ((doc.get("default_branch_push_lane") or {})
              if lane == "push" else
@@ -689,6 +811,21 @@ def _baseline_from_findings(
                                             and not isinstance(value, bool)
                                             for value in lane_values)
                      else None)
+        embedded_logs = _bounded_logs(
+            fact.get("logs"),
+            *(row.get("logs") for row in raw_jobs),
+            *(row.get("log") for row in raw_jobs),
+        )
+        log_sample: dict[str, Any] = {
+            "logs": embedded_logs,
+            "log_api_calls": 0,
+            "log_jobs_unreadable": 0,
+            "log_jobs_omitted": 0,
+            "log_jobs_truncated": 0,
+        }
+        read_logs = getattr(client, "_job_logs", None)
+        if not embedded_logs and repo and callable(read_logs):
+            log_sample = read_logs(repo, raw_jobs)
         cohorts.append({
             "head_sha": sha,
             "cohort_id": f"baseline:{sha}",
@@ -698,7 +835,7 @@ def _baseline_from_findings(
             "workflows": workflows,
             "expected_workflows": workflows,
             "jobs": jobs,
-            "logs": [],
+            **log_sample,
             "lane": str(fact.get("event") or "push"),
             "lane_runs_30d": lane_runs,
         })
@@ -719,11 +856,26 @@ def _summary(samples: list[dict[str, Any]], *, values: bool = False) -> dict[str
 
 def _cache_class(cohort: dict[str, Any]) -> tuple[str, str]:
     log = "\n".join(str(v) for v in cohort.get("logs") or [])
+    unreadable = int(cohort.get("log_jobs_unreadable") or 0)
+    omitted = int(cohort.get("log_jobs_omitted") or 0)
+    truncated = int(cohort.get("log_jobs_truncated") or 0)
+    calls = int(cohort.get("log_api_calls") or 0)
+    if unreadable:
+        return ("unknown", f"{unreadable} job log"
+                f"{'s' if unreadable != 1 else ''} unreadable")
+    if omitted:
+        return ("unknown", f"{omitted} job log"
+                f"{'s' if omitted != 1 else ''} omitted by cap")
+    if truncated:
+        return ("unknown", f"{truncated} job log"
+                f"{'s' if truncated != 1 else ''} truncated by cap")
     cold = _COLD.search(log)
     if cold:
         return "cold", cold.group(0)
     if _WARM.search(log):
         return "warm", "log cache hit"
+    if calls:
+        return "unknown", "no cache marker in sampled job logs"
     return (("cold", "first run") if int(cohort.get("position") or 0) == 1
             else ("warm", "later run"))
 
@@ -958,6 +1110,7 @@ def compare_push_cohorts(
             for prefix in ci_paths) for path in changed_files)
     warm = [s for s in after_samples if s["cache_class"] == "warm"]
     cold = [s for s in after_samples if s["cache_class"] == "cold"]
+    unknown = [s for s in after_samples if s["cache_class"] == "unknown"]
     headline = warm or after_samples
     values = [float(s["wall_s"]) for s in after_samples]
     median = float(statistics.median(values))
@@ -1008,9 +1161,12 @@ def compare_push_cohorts(
     }
     no_change = bool(repeated_attempts
                      and before_success_heads & after_success_heads)
+    cache_evidence_complete = all(
+        sample["cache_class"] != "unknown"
+        for sample in [*before_samples, *after_samples])
     clean = (comparable and ci_only and state == "same" and enough_samples
              and not sampling_pending and not noisy_at_cap and not no_change
-             and step is not None)
+             and step is not None and cache_evidence_complete)
     before_med = _median(float(s["wall_s"]) for s in before_samples)
     after_med = _median(float(s["wall_s"]) for s in headline)
     saving = round(float(before_med) - float(after_med), 3) if clean else None
@@ -1034,13 +1190,23 @@ def compare_push_cohorts(
     comparison_shape = (
         f"{len(after_samples)} distinct default-branch push cohorts"
         if allow_distinct_after_heads else "one exact-head branch cohort")
+    log_calls = sum(int(s.get("log_api_calls") or 0)
+                    for s in [*before_samples, *after_samples])
+    log_unreadable = sum(int(s.get("log_jobs_unreadable") or 0)
+                         for s in [*before_samples, *after_samples])
+    log_omitted = sum(int(s.get("log_jobs_omitted") or 0)
+                      for s in [*before_samples, *after_samples])
+    log_truncated = sum(int(s.get("log_jobs_truncated") or 0)
+                        for s in [*before_samples, *after_samples])
     report = "\n".join([
         f"Sample size: {len(after_samples)} {sample_label}.",
         f"Asymmetry: {len(before_samples)} historical push cohorts versus "
         f"{comparison_shape}.",
         f"CI-only scope: {'passed' if ci_only else 'product files also changed'}; workload is {state} ({workload_evidence}).",
         f"Variance: {min(values):.1f}s-{max(values):.1f}s; {sampling['reason']}.",
-        f"Cache state: {len(cold)} cold and {len(warm)} warm; warm reruns are optimistic.",
+        f"Cache state: {len(cold)} cold, {len(warm)} warm and {len(unknown)} unknown; warm reruns are optimistic.",
+        f"Cache log coverage: {log_calls} API calls; {log_unreadable} unreadable; "
+        f"{log_omitted} omitted and {log_truncated} truncated by cap.",
         "Environment: CI wall-clock depends on runner tier, load, queue and concurrency.",
         queue_line,
         (f"Total job duration: {float(before_total):.1f}s before, "
@@ -1059,6 +1225,7 @@ def compare_push_cohorts(
         **base, "available": comparable, "reason": reason,
         "before": _summary(before_samples, values=True),
         "after": {"warm": _summary(warm), "cold": _summary(cold, values=True),
+                  "unknown": _summary(unknown),
                   "all_complete": _summary(after_samples, values=True),
                   "headline": _summary(headline)},
         "sampling": sampling, "workload_state": state,

@@ -7171,6 +7171,25 @@ def test_legacy_opt66_artifact_still_excluded_from_appendix_on_drilled_pole(tmp_
     assert chk.ok and not chk.skipped, chk
 
 
+def test_unmeasured_path_filter_must_render_even_without_a_drilled_pole(tmp_path: Path):
+    vr = _load_verify_report()
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps({"findings": [{
+        "id": "path-filter", "pattern": "OPT32",
+        "path_filter_measurement": {
+            "status": "unmeasured",
+            "reason": "changed-file list unavailable or incomplete",
+            "sampled_prs": 60,
+        },
+    }]}), encoding="utf-8")
+
+    chk = vr.check_pole_not_reframed_as_hygiene(
+        "# CI speed audit\n\nNo drilled poles in this report.\n", findings_path)
+
+    assert not chk.ok
+    assert "unmeasured path-filter finding vanished" in chk.detail
+
+
 def test_tier2_total_deoverlapped_counts_deduped_collection(tmp_path: Path):
     """Issue #4 regression (artifact-level: producer → renderer → verify). When the
     renderer's `_dedupe_findings` collapses an exact-duplicate occurrence, the section

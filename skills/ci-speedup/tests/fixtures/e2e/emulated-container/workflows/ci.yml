@@ -15,6 +15,11 @@ jobs:
         with:
           arch: aarch64
           distro: ubuntu22.04
+          run: make all $EXTRA
+      - uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: aarch64
+          distro: ubuntu22.04
           run: |
             cd $GITHUB_WORKSPACE
             ./configure
