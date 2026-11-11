@@ -12700,18 +12700,25 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
                 continue
             sampled_runs = measurement.get("sampled_runs")
             numbered_runs = measurement.get("runs_with_pr_number")
+            sampled_prs = measurement.get("sampled_prs")
             if (not isinstance(sampled_runs, int) or isinstance(sampled_runs, bool)
                     or sampled_runs <= 0
                     or not isinstance(numbered_runs, int) or isinstance(numbered_runs, bool)
-                    or not 0 <= numbered_runs <= sampled_runs):
+                    or not 0 <= numbered_runs <= sampled_runs
+                    or not isinstance(sampled_prs, int) or isinstance(sampled_prs, bool)
+                    or not 0 <= sampled_prs <= numbered_runs):
                 return Check(name, False,
                              "an OPT32 measurement has an invalid sampled-run coverage stamp")
             if measurement.get("status") == "unmeasured":
                 reason = measurement.get("reason")
-                if reason == "no PR number on sampled runs" and numbered_runs != 0:
+                if (reason == "no PR number on sampled runs"
+                        and (numbered_runs != 0 or sampled_prs != 0)):
                     return Check(name, False,
                                  "OPT32 says no sampled run had a PR number, but its coverage "
                                  "stamp says otherwise")
+            elif sampled_prs <= 0:
+                return Check(name, False,
+                             "a measured OPT32 finding has no sampled pull requests")
             elif numbered_runs < sampled_runs:
                 disclosure = f"Measured on {numbered_runs} of {sampled_runs} sampled runs"
                 if disclosure not in str(finding.get("evidence") or "") or disclosure not in report:

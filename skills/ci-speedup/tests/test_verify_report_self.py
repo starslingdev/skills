@@ -341,7 +341,8 @@ def test_measured_opt32_is_the_only_new_pole_hygiene_exception(tmp_path: Path):
     partial = finding(skipped=0, rate=0.0)
     stamp = partial["findings"][0]["path_filter_measurement"]
     stamp["runs_with_pr_number"] = 30
-    assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
+    partial["findings"][0]["evidence"] = "Measured on 30 of 60 sampled runs"
+    assert _tag_for(rep + sect + "\nMeasured on 30 of 60 sampled runs", _DOUBLE_FRAME, tmp_path,
                     findings=partial) == "FAIL"
     # FAIL: an inconsistent stamp or positive result without its modeled value
     # cannot use the exception. Other patterns remain covered by the discriminator above.
