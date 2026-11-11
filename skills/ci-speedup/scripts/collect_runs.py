@@ -10199,7 +10199,8 @@ def _detect_opt25_shard_imbalance(
 
     def _is_universal_housekeeping_step(name: str) -> bool:
         return not name.strip() or bool(_re.search(
-            r"(?i)\b(?:artifact|cleanup|tear\s*down|upload)\b", name))
+            r"(?i)(?:\b(?:artifact|cleanup|tear\s*down|upload)\b|"
+            r"^run\s+[\w.-]+/setup-[\w.-]+@)", name.strip()))
 
     dominant_step_by_base: dict[str, str] = {}
     step_seconds_by_base: dict[str, dict[str, float]] = {}
