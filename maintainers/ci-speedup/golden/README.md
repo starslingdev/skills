@@ -23,13 +23,18 @@ filenames. The relationship between runs, jobs, workflows, and endpoints stays
 intact while the public fixture follows the repository's identifier policy.
 
 The recorder also removes contributor identities. Every person's login becomes
-a stable `contributor-NNNN` alias (in URLs, fork `owner/name` values and merge
-messages too, so "same author" and "fork differs from this repository" still
-hold); commit author and committer names and emails, commit trailers, signature
-payloads and any other email address become fixed placeholders. Bots and
-organisations keep their logins. The engine and the oracle read none of these
-fields, and `test_golden_recordings_carry_no_contributor_identity` fails if one
-comes back.
+a stable `contributor-NNNN` alias (in URLs, fork `owner/name` values, merge
+messages, branch names such as `login/topic`, and `@login` mentions in any
+field too, so "same author", "same branch" and "fork differs from this
+repository" still hold); commit author and committer names and emails, commit
+trailers, signature payloads and any other email address become fixed
+placeholders, including in copied checkout files and text logs. Bots,
+organisations and the audited repository's own owner keep their logins. Step
+names such as `Run owner/action@sha` stay as recorded: they name a public
+action, and the engine recognises it by that text. The engine and the oracle
+read none of the replaced fields, and
+`test_golden_recordings_carry_no_contributor_identity` fails if a login, a
+name paired with an email, or an email address comes back.
 
 Checkout snapshots are structural fixtures rather than byte-for-byte source
 archives. Repository URL targets, long decimal runs, and absolute environment
