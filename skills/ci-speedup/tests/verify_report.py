@@ -12832,6 +12832,18 @@ def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
     return counts, n, dropped
 
 
+def _stamped_pole_counts(cp: dict) -> tuple[dict[str, int], int]:
+    """Fallback for non-bimodal samples where populations were not persisted."""
+    rows = [row for row in _as_list(cp.get("checks")) if isinstance(row, dict)]
+    total = int(cp.get("check_present_n_pr") or 0)
+    if not rows or total <= 0 or any(row.get("pole_n") is None for row in rows):
+        return {}, 0
+    return {
+        str(row.get("name") or row.get("check") or ""): int(row.get("pole_n") or 0)
+        for row in rows
+    }, total
+
+
 def check_workflow_gate_frequency_matches(report: str, findings_path: Path | None) -> Check:
     """**The per-workflow gate-frequency class (Phase 0, Class A #2).** Each rendered
     "`<workflow>` gates N/M PRs" claim must equal the populations re-derivation: N = how often ANY
@@ -12854,11 +12866,14 @@ def check_workflow_gate_frequency_matches(report: str, findings_path: Path | Non
         return Check(name, True, "no rendered '`wf` gates N/M PRs' claim", skipped=True)
     pole_count, npop, dropped = _populations_pole_counts(cp)
     if not npop:
-        return Check(name, False,
-                     f"{len(claims)} rendered '`wf` gates N/M PRs' claim(s) but no per-PR "
-                     "populations to re-derive them from — per-PR data "
-                     + ("present but not readable" if _vr_per_pr_data_present(cp)
-                        else "absent, so the claim has no basis"))
+        pole_count, npop = _stamped_pole_counts(cp)
+        if not npop:
+            return Check(name, False,
+                         f"{len(claims)} rendered '`wf` gates N/M PRs' claim(s) but no per-PR "
+                         "populations or complete stamped pole counts to re-derive them from — "
+                         "per-PR data "
+                         + ("present but not readable" if _vr_per_pr_data_present(cp)
+                            else "absent, so the claim has no basis"))
     wf_freq: dict[str, int] = {}
     for c in _as_list(cp.get("checks")):
         if not isinstance(c, dict):
@@ -12867,6 +12882,7 @@ def check_workflow_gate_frequency_matches(report: str, findings_path: Path | Non
         if wf.endswith((".yml", ".yaml")):
             wf_freq[wf] = wf_freq.get(wf, 0) + pole_count.get(
                 str(c.get("name") or c.get("check") or ""), 0)
+    wf_freq = {wf: min(count, npop) for wf, count in wf_freq.items()}
     bad: list[str] = []
     checked = 0
     unjoinable = 0
@@ -12908,6 +12924,8 @@ def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> 
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
     if "gate_min_count_for_ranking" not in cp:
         return Check(name, True, "legacy findings lack the gate-confidence contract", skipped=True)
+    if "gate_interval_z" not in cp:
+        return Check(name, True, "legacy findings lack the recorded interval constant", skipped=True)
     claim_matches = list(_GATE_FREQ_RE.finditer(report))
     warning = "pole order is not supported" in report and "unordered set" in report
     if not claim_matches:
@@ -12917,6 +12935,8 @@ def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> 
         return Check(name, True, "no ranked gate-frequency claims", skipped=True)
 
     pole_count, npop, _dropped = _populations_pole_counts(cp)
+    if not npop:
+        pole_count, npop = _stamped_pole_counts(cp)
     wf_freq: dict[str, int] = {}
     for row in _as_list(cp.get("checks")):
         if not isinstance(row, dict):
@@ -12925,6 +12945,7 @@ def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> 
         if wf.endswith((".yml", ".yaml")):
             check_name = str(row.get("name") or row.get("check") or "")
             wf_freq[wf] = wf_freq.get(wf, 0) + pole_count.get(check_name, 0)
+    wf_freq = {wf: min(count, npop) for wf, count in wf_freq.items()}
 
     def interval(count: int, total: int) -> tuple[float, float]:
         if total <= 0:

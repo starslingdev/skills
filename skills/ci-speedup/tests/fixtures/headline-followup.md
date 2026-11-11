@@ -29,7 +29,7 @@ not measured: lifecycle data was not collected
 
 **🐌 Critical path** - the checks that gate your merge, each linking to its long-pole drill-down (waterfall → biggest lever → agent prompt):
 
-1. 🔴 [tests](#pole-1) - 10m 00s (the gate)
+1. 🔴 [tests](#pole-1) - 10m 00s (the gate) · `test.yml` gates 4/4 PRs
 
 **🧹 Also noticed** - 1 finding (mostly off-path runner-minute savings; **one or more flagged DO sit on the critical path** and cut wall-clock): [see below](#also-noticed).
 
@@ -70,7 +70,7 @@ REPO: example/project (audited at commit abcdef1)
 
 THE GATE
 - Workflow `test.yml`, job `tests`.
-- Slowest check a typical PR waits on: P50 10m 00s.
+- Slowest check a typical PR waits on: P50 10m 00s; its workflow `test.yml` gates 4/4 sampled PRs.
 
 WHERE THE TIME GOES
 - No per-step breakdown was captured for this job; profile its slowest step in the repo.

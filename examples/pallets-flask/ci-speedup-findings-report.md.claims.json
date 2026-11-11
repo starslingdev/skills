@@ -62,11 +62,11 @@
       "subject": "Windows",
       "fields": {
         "dur": "34s",
-        "gate_count": 0,
+        "gate_count": 18,
         "npop": 20,
         "demoted": false
       },
-      "rendered": "Slowest check a typical PR waits on: P50 34s."
+      "rendered": "Slowest check a typical PR waits on: P50 34s; its workflow `tests.yaml` gates 18/20 sampled PRs."
     },
     {
       "kind": "pole_role_line",
@@ -82,11 +82,11 @@
       "subject": "main",
       "fields": {
         "dur": "19s",
-        "gate_count": 0,
+        "gate_count": 2,
         "npop": 20,
         "demoted": false
       },
-      "rendered": "Slowest check a typical PR waits on: P50 19s."
+      "rendered": "Slowest check a typical PR waits on: P50 19s; its workflow `pre-commit.yaml` gates 2/20 sampled PRs."
     },
     {
       "kind": "pole_role_line",
@@ -104,7 +104,7 @@
       "subject": "PyPy",
       "fields": {
         "dur": "26s",
-        "gate_count": 0,
+        "gate_count": 18,
         "npop": 20,
         "demoted": true
       },
@@ -126,7 +126,7 @@
       "subject": "3.14t",
       "fields": {
         "dur": "25s",
-        "gate_count": 0,
+        "gate_count": 18,
         "npop": 20,
         "demoted": true
       },
@@ -148,7 +148,7 @@
       "subject": "3.9",
       "fields": {
         "dur": "24s",
-        "gate_count": 0,
+        "gate_count": 18,
         "npop": 20,
         "demoted": true
       },

@@ -7652,7 +7652,9 @@ def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], in
     (the actual pole) and how often it is PRESENT at all, across the sampled PRs.
     Returns (pole_count, present_count, n_populations). A slow check that only
     runs on a few PRs has a low pole_count and must NOT be crowned over a check
-    that gates almost every PR. ({}, {}, 0) when populations weren't recorded."""
+    that gates almost every PR. When full populations were unnecessary, use the
+    collector's per-check `pole_n`/`present_on` stamps and shared denominator.
+    ({}, {}, 0) only when neither complete representation is recorded."""
     pole_count: dict[str, int] = {}
     present: dict[str, int] = {}
     unconfirmed = {
@@ -7674,6 +7676,21 @@ def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], in
             present[nm] = present.get(nm, 0) + 1
         winner = max(pos, key=lambda kv: kv[1])[0]
         pole_count[winner] = pole_count.get(winner, 0) + 1
+    if n == 0:
+        checks = [row for row in (cp.get("checks") or []) if isinstance(row, dict)]
+        denom = int(cp.get("check_present_n_pr") or 0)
+        if denom and checks and all(row.get("pole_n") is not None for row in checks):
+            pole_count = {
+                str(row.get("name") or ""): int(row.get("pole_n") or 0)
+                for row in checks
+                if str(row.get("name") or "") not in unconfirmed
+            }
+            present = {
+                str(row.get("name") or ""): int(row.get("present_on") or 0)
+                for row in checks
+                if str(row.get("name") or "") not in unconfirmed
+            }
+            n = denom
     return pole_count, present, n
 
 
@@ -14146,6 +14163,12 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             if _is_file_pole(p):
                 wf = str(p.get("workflow_file", ""))
                 wf_gate[wf] = wf_gate.get(wf, 0) + _gatef(p)
+    # `pole_n` deliberately credits every co-slowest check. Several tied matrix
+    # legs in one workflow can therefore sum above the number of sampled PRs,
+    # while the workflow itself can gate a PR only once. Keep the public
+    # workflow frequency inside its physical denominator.
+    if npop:
+        wf_gate = {wf: min(count, npop) for wf, count in wf_gate.items()}
 
     _gate_span_first = str(cp.get("sample_span_first") or "")[:10]
     _gate_span_last = str(cp.get("sample_span_last") or "")[:10]

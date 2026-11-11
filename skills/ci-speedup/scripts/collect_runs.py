@@ -30094,6 +30094,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # meant to remove), and a confirmed required/needs-reachable chain remains
     # real developer wait even when its stages are fast.
     _bookkeeping_last_finishers: set[str] = set()
+    _bookkeeping_last_freq: dict[str, int] = defaultdict(int)
     for _intervals in _era_sha_intervals.values():
         _completed_by_wf: dict[str, dict[str, datetime]] = defaultdict(dict)
         for _name, (_start, _end) in _intervals.items():
@@ -30104,14 +30105,36 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _completed_by_wf[_wf_key][_name] = _ended
         for _completed in _completed_by_wf.values():
             _latest = max(_completed.values())
-            _bookkeeping_last_finishers.update(
-                name for name, ended in _completed.items() if ended == _latest)
+            for _name, _ended in _completed.items():
+                if _ended == _latest:
+                    _bookkeeping_last_finishers.add(_name)
+                    _bookkeeping_last_freq[_name] += 1
     _bookkeeping_checks = {
         name for name, span in pr_check_p50.items()
         if float(_span_caps.get(name, span)) < _GATE_BOOKKEEPING_CUTOFF_S
         and name in _bookkeeping_last_finishers
         and (_confirmed_gate_checks is None or name not in _confirmed_gate_checks)
     }
+    _protected_short_gates: set[str] = set()
+    if _confirmed_gate_checks is None and _bookkeeping_checks:
+        _remaining = set(pr_check_p50) - _bookkeeping_checks
+        _remaining_has_substantive = any(
+            float(_span_caps.get(name, pr_check_p50[name]))
+            >= _GATE_BOOKKEEPING_CUTOFF_S
+            for name in _remaining)
+        if (not _remaining_has_substantive
+                and not any(_bookkeeping_last_freq.get(name, 0) > 0
+                            for name in _remaining)):
+            # With no readable required set, duration alone must not erase the
+            # only observed gate and crown a faster check that finished last on
+            # zero sampled PRs. Preserve the most frequent last finisher; ties
+            # remain ties rather than depending on insertion order.
+            _best = max(_bookkeeping_last_freq.get(name, 0)
+                        for name in _bookkeeping_checks)
+            _protected_short_gates = {
+                name for name in _bookkeeping_checks
+                if _bookkeeping_last_freq.get(name, 0) == _best}
+            _bookkeeping_checks.difference_update(_protected_short_gates)
     _short_required_aggregators: set[str] = set()
     if spine_required_scoped and req_names and _job_graph:
         for _name, _span in pr_check_p50.items():
@@ -30141,8 +30164,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         {name: span for name, span in row.items() if name not in _short_pole_exclusions}
         for row in _era_per_sha_checks
     ]
+    _rank_span_caps = {
+        name: span for name, span in _span_caps.items()
+        if name not in _protected_short_gates
+    }
     pr_checks_tuple, check_present, present_n_pr, check_pole_freq = _rank_spine_present_first(
-        pr_check_p50, _gate_per_sha_checks, req_names, _span_caps,
+        pr_check_p50, _gate_per_sha_checks, req_names, _rank_span_caps,
         _confirmed_gate_checks)
     # Headline-crown recovery. The crowned `critical_path_check` (pr_checks_tuple[0]) is what the
     # report HEADLINES as the merge gate. When it maps to a workflow that run-list triage skipped

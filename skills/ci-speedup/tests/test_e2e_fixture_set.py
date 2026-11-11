@@ -2030,6 +2030,14 @@ def test_gate_frequency_confidence_discloses_bookkeeping_and_withholds_order(
     assert "pole order is not supported" in report
     assert not [check for check in checks if not check.skipped and not check.ok]
 
+    legacy = json.loads(json.dumps(doc))
+    legacy["pr_critical_path"].pop("gate_interval_z")
+    legacy_path = run_root / fixture.name / "legacy-findings.json"
+    legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+    legacy_check = vr.check_gate_frequency_confidence(report, legacy_path)
+    assert legacy_check.ok and legacy_check.skipped
+    assert "recorded interval constant" in legacy_check.detail
+
     two_workflow_doc = json.loads(json.dumps(doc))
     for row in two_workflow_doc["pr_critical_path"]["checks"]:
         if row.get("name") == "build":
@@ -2101,5 +2109,45 @@ def test_all_short_file_backed_gates_do_not_become_external_floor_fallback(
     assert [row["name"] for row in cp["checks"]] == ["gate"]
     assert cp["bookkeeping_checks"] == []
     assert "external/managed" not in report
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_all_short_unscoped_sample_keeps_its_most_frequent_last_finisher(
+        monkeypatch, tmp_path):
+    """Whole pipeline: an unreadable required set does not crown a zero-frequency check."""
+    fixture = tmp_path / "fixtures" / "all-short-unscoped-gate"
+    fixture.parent.mkdir()
+    shutil.copytree(FIXTURE_ROOT / "bookkeeping-last-job", fixture)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["required_checks"] = []
+    durations = {"build": 45, "cleanup": 30, "gate": 51}
+
+    def shorten(rows):
+        for row in rows:
+            seconds = durations[row["name"]]
+            day = str(row["completed_at"])[:10]
+            row["started_at"] = f"{day}T00:00:00Z"
+            row["completed_at"] = f"{day}T00:00:{seconds:02d}Z"
+            for step in row.get("steps") or []:
+                step["started_at"] = row["started_at"]
+                step["completed_at"] = row["completed_at"]
+
+    for rows in recorded["jobs"].values():
+        shorten(rows)
+    for rows in recorded["checks"].values():
+        shorten(rows)
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+
+    doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    cp = doc["pr_critical_path"]
+    assert cp["critical_path_check"] == "gate"
+    assert cp["checks"][0]["name"] == "gate"
+    assert cp["checks"][0]["pole_n"] > 0
+    assert cp["checks"][0]["pole_n"] == max(
+        row["pole_n"] for row in cp["checks"])
+    assert "gate" not in cp["bookkeeping_checks"]
+    assert "`gate`" in report
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
