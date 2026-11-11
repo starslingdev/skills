@@ -2247,13 +2247,28 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     rendered = f"{sampled} of {target} PRs sampled: {expected.replace('_', ' ')}"
     if rendered not in report:
         problems.append("rendered report omits or changes the re-derived sample statement")
-    if span_first and span_last:
+    if sampled and (not span_first or not span_last):
+        problems.append("nonempty sample omits its first-to-last commit span")
+    elif span_first and span_last:
+        try:
+            from datetime import datetime as _sample_datetime
+            first_dt = _sample_datetime.fromisoformat(span_first.replace("Z", "+00:00"))
+            last_dt = _sample_datetime.fromisoformat(span_last.replace("Z", "+00:00"))
+            if first_dt > last_dt:
+                problems.append("sample commit span is reversed")
+        except ValueError:
+            problems.append("sample commit span is not ISO-8601")
         rendered_span = f"{span_first[:10]} to {span_last[:10]}"
         if rendered_span not in report:
             problems.append("rendered report omits the sampled commit span")
-    if sampled and partial_count * 2 > sampled:
+    unreliable = sampled and (partial_count * 2 > sampled or distinct_days < 5)
+    if unreliable:
         if "gate frequency and pole order are unreliable" not in report:
-            problems.append("mostly-partial sample headlines gate frequency without an unreliable label")
+            problems.append("thin sample omits the gate-frequency reliability warning")
+        if "Which checks gate (the critical-path ordering)" in report:
+            problems.append("thin sample still headlines gate frequency and pole order")
+        if "PR gate sample (ordering withheld)" not in report:
+            problems.append("thin sample omits the neutral gate-sample heading")
     return Check(name, not problems, "; ".join(problems) if problems else rendered)
 
 

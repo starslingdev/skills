@@ -6847,14 +6847,23 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "figures are run-list-only, not job-level.")
     stop_reason = str(cp.get("sample_stop_reason") or (
         "target_met" if complete else "candidates_exhausted")).replace("_", " ")
-    gate = (f"> - **Which checks gate (the critical-path ordering):** measured from "
-            f"**{spr}/{tgt} sampled PRs** — **{spr} of {tgt} PRs sampled: "
-            f"{stop_reason}**")
     partial_commits = cp.get("sample_partial_count")
-    if (isinstance(partial_commits, int) and spr
-            and partial_commits * 2 > spr):
+    distinct_days = cp.get("sample_distinct_days")
+    unreliable = (
+        (isinstance(partial_commits, int) and spr and partial_commits * 2 > spr)
+        or (isinstance(distinct_days, int) and distinct_days < 5))
+    heading = ("PR gate sample (ordering withheld)" if unreliable
+               else "Which checks gate (the critical-path ordering)")
+    gate = (f"> - **{heading}:** measured from **{spr}/{tgt} sampled PRs** — "
+            f"**{spr} of {tgt} PRs sampled: {stop_reason}**")
+    if unreliable:
+        reasons = []
+        if isinstance(partial_commits, int) and spr and partial_commits * 2 > spr:
+            reasons.append(f"{partial_commits}/{spr} sampled commits are partial")
+        if isinstance(distinct_days, int) and distinct_days < 5:
+            reasons.append(f"the sample spans only {distinct_days} distinct day(s)")
         gate += (" — ⚠️ **gate frequency and pole order are unreliable** because "
-                 f"{partial_commits}/{spr} sampled commits are partial")
+                 + " and ".join(reasons))
     if not complete:
         short_reasons = {
             "fetch failures": "some candidate or check-run history was unreadable",

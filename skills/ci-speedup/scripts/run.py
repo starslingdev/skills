@@ -179,7 +179,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target", type=int, default=10,
                         help="Render target (orchestration knob). NOTE: does NOT change "
                              "sampling DEPTH — the gh pass always runs, the PR gate sample "
-                             "is fixed at 20 PRs and the run sample at collect_runs' "
+                             "aims for 100 completed PR commits across five days and the "
+                             "run sample stays at collect_runs' "
                              "--max-runs. Raising it will not recover an empty spine "
                              "(issue #81).")
     parser.add_argument("--with-logs", action="store_true",

@@ -30206,13 +30206,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # and its reason must be post-door too. Keeping the pre-door `complete=True`
     # would render a short 12/20 population as complete.
     sample_diag["kept"] = len(_era_repr_shas)
+    _era_sample_ts = [str(_rep_ts.get(sha) or "") for sha in _era_repr_shas
+                      if _rep_ts.get(sha)]
+    sample_diag["distinct_days"] = len({ts[:10] for ts in _era_sample_ts})
+    sample_diag["span_first"] = min(_era_sample_ts, default="")
+    sample_diag["span_last"] = max(_era_sample_ts, default="")
     sample_diag["partial_count"] = sum(
         sha in _partial_sample_shas for sha in _era_repr_shas)
     sample_diag["complete"] = (
         len(_era_repr_shas) >= _REPR_PR_TARGET
         and int(sample_diag.get("distinct_days") or 0) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
         and not sample_diag.get("required_suite_unsatisfiable"))
-    if _era_dropped_pr_count and len(_era_repr_shas) < _REPR_PR_TARGET:
+    if _era_dropped_pr_count and not sample_diag["complete"]:
         sample_diag["stop_reason"] = "era_door"
         sample_diag["candidate_era_door"] = True
     _era_check_runs_complete = [

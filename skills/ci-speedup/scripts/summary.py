@@ -376,7 +376,8 @@ def _rerun_command(repo: str | None, root: str | None,
                    findings_path: str) -> str:
     """The exact `run.py` invocation to re-run, computed from what we know. Deliberately
     NOT a raised `--target`: `--target` does not change sampling depth (the PR gate sample
-    is fixed at 20 PRs and the run sample at `--max-runs`), so raising it is the very
+    aims for 100 completed PR commits across five days and the run sample stays at
+    `--max-runs`), so raising it is the very
     mislead issue #81 documents."""
     if not repo:
         return ""
@@ -459,7 +460,8 @@ def empty_spine_diagnostics(doc: dict[str, Any], findings_path: str,
                    "property of the repo; a plain re-run once it clears recovers the full "
                    "spine.")
         out.append("Do NOT raise --target: it does NOT change sampling depth (the PR gate "
-                   "sample is fixed at 20 PRs and the run sample at --max-runs). The live "
+                   "sample aims for 100 completed PR commits across five days and the run "
+                   "sample stays at --max-runs). The live "
                    "'--target 100 recovered it' was coincidental with the block clearing "
                    "(issue #81).")
         cmd = _rerun_command(doc.get("repo"), root, findings_path)

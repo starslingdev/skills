@@ -1793,7 +1793,7 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
     return fixture
 
 
-def _busy_pr_sample_fixture(tmp_path: Path) -> Path:
+def _busy_pr_sample_fixture(tmp_path: Path, *, extended: bool = False) -> Path:
     """A busy first page plus older completed PRs and an unrelated config era."""
     fixture = tmp_path / "busy-pr-sample"
     workflows = fixture / "workflows"
@@ -1822,7 +1822,16 @@ def _busy_pr_sample_fixture(tmp_path: Path) -> Path:
         }
 
     inflight = [run(i, completed=False) for i in range(100)]
-    completed = [run(100 + i, completed=True) for i in range(100)]
+    completed = [run(100 + i, completed=True)
+                 for i in range(154 if extended else 100)]
+    if extended:
+        for index, row in enumerate(completed):
+            day = 21 if index == 153 else 25 - min(index // 39, 3)
+            hour = index % 24
+            minute = (index // 24) % 60
+            start = f"2026-01-{day:02d}T{hour:02d}:{minute:02d}:00Z"
+            end = f"2026-01-{day:02d}T{hour:02d}:{minute + 1:02d}:00Z"
+            row.update(created_at=start, run_started_at=start, updated_at=end)
     nightly = [{
         "id": 40_001, "event": "schedule", "head_sha": "nightly-new",
         "status": "completed", "conclusion": "success",
@@ -1859,7 +1868,9 @@ def _busy_pr_sample_fixture(tmp_path: Path) -> Path:
         "required_checks": ["gate"], "shallow_runs": 2,
         "workflows": [{
             "id": 310, "path": ".github/workflows/ci.yml", "name": "CI",
-            "runs_30d": 200, "run_pages": [inflight, completed],
+            "runs_30d": len(inflight) + len(completed),
+            "run_pages": ([inflight, completed[:100], completed[100:]]
+                          if extended else [inflight, completed]),
         }, {
             "id": 311, "path": ".github/workflows/nightly.yml", "name": "Nightly",
             "runs_30d": 2, "run_pages": [nightly],
@@ -1897,6 +1908,34 @@ def test_busy_pr_sample_uses_completed_commits_across_days_despite_non_pr_era(
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
+def test_pr_sample_recomputes_span_after_workflow_era_scope(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path, extended=True)
+    original_scope = cr._era_scope_pr_spine_sample
+
+    def drop_oldest_day(repr_shas, per_sha_checks, sha_intervals, *args, **kwargs):
+        scoped = original_scope(
+            repr_shas, per_sha_checks, sha_intervals, *args, **kwargs)
+        kept_shas, kept_checks, kept_intervals, _dropped = scoped
+        return (kept_shas[:-1], kept_checks[:-1],
+                {sha: kept_intervals.get(sha, {}) for sha in kept_shas[:-1]}, 1)
+
+    monkeypatch.setattr(cr, "_era_scope_pr_spine_sample", drop_oldest_day)
+    run_root = tmp_path / "run-era-span"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 153
+    assert cp["sample_distinct_days"] == 4
+    assert cp["sample_span_first"].startswith("2026-01-22")
+    assert cp["sample_span_last"].startswith("2026-01-25")
+    assert cp["sample_complete"] is False
+    assert cp["sample_stop_reason"] == "era_door"
+    assert "2026-01-22 to 2026-01-25" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
 def test_mostly_partial_pr_sample_marks_gate_order_unreliable_and_verifies(
         monkeypatch, tmp_path):
     fixture = _busy_pr_sample_fixture(tmp_path)
@@ -1915,18 +1954,35 @@ def test_mostly_partial_pr_sample_marks_gate_order_unreliable_and_verifies(
     assert cp["sample_partial_count"] * 2 > cp["sampled_pr_count"]
     label = "gate frequency and pole order are unreliable"
     assert label in report
+    neutral = "PR gate sample (ordering withheld)"
+    headline = "Which checks gate (the critical-path ordering)"
+    assert neutral in report
+    assert headline not in report
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
     findings_path = run_root / fixture.name / "findings.json"
     rejected = vr.check_pr_sample_stop_reason(
         report.replace(label, "gate ordering"), findings_path)
     assert not rejected.ok
-    assert "mostly-partial" in rejected.detail
+    assert "reliability warning" in rejected.detail
+
+    rejected_headline = vr.check_pr_sample_stop_reason(
+        report.replace(neutral, headline), findings_path)
+    assert not rejected_headline.ok
+    assert "still headlines" in rejected_headline.detail
+
+    tampered = json.loads(findings_path.read_text(encoding="utf-8"))
+    tampered["pr_critical_path"]["sample_span_first"] = ""
+    tampered["pr_critical_path"]["sample_span_last"] = ""
+    findings_path.write_text(json.dumps(tampered), encoding="utf-8")
+    rejected_span = vr.check_pr_sample_stop_reason(report, findings_path)
+    assert not rejected_span.ok
+    assert "omits its first-to-last commit span" in rejected_span.detail
 
 
 def test_busy_pr_job_population_orders_gates_by_month_like_share(
         monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path)
+    fixture = _busy_pr_sample_fixture(tmp_path, extended=True)
     (fixture / "workflows" / "ci.yml").write_text(
         "name: CI\non: [pull_request]\njobs:\n"
         + "".join(f"  {name.lower()}:\n    name: {name}\n"
@@ -1936,11 +1992,16 @@ def test_busy_pr_job_population_orders_gates_by_month_like_share(
     responses_path = fixture / "responses.json"
     recorded = json.loads(responses_path.read_text(encoding="utf-8"))
     recorded["required_checks"] = []
+
+    # Use the smallest integer population that represents D's 0.65% share:
+    # 1/154 = 0.649%.
     pr_ids = sorted(int(run_id) for run_id in recorded["jobs"]
                     if int(run_id) < 40_000)
-    completed_ids = sorted(pr_ids, reverse=True)[:100]
-    winners = ((["A"] * 21) + (["B"] * 11) + (["C"] * 9) + ["D"]
-               + (["Background"] * 58))
+    completed_ids = [int(row["id"])
+                     for page in recorded["workflows"][0]["run_pages"][1:]
+                     for row in page]
+    winners = ((["A"] * 32) + (["B"] * 17) + (["C"] * 14) + ["D"]
+               + (["Background"] * 90))
     winner_by_id = dict(zip(completed_ids, winners))
     for run_id in pr_ids:
         winner = winner_by_id.get(run_id, "A")
@@ -1964,7 +2025,8 @@ def test_busy_pr_job_population_orders_gates_by_month_like_share(
 
     poles = {row["name"]: row["pole_n"]
              for row in doc["pr_critical_path"]["checks"]}
-    assert [poles[name] for name in ("A", "B", "C", "D")] == [21, 11, 9, 1]
+    assert doc["pr_critical_path"]["sampled_pr_count"] == 154
+    assert [poles[name] for name in ("A", "B", "C", "D")] == [32, 17, 14, 1]
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
