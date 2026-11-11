@@ -242,6 +242,58 @@ jobs:
     assert "OPT61" not in _patterns(rows)
 
 
+def test_opt61_ignores_an_unused_job_sccache_dir_when_builds_override_it(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: cargo test
+        env:
+          SCCACHE_DIR: /build/sccache
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_checks_job_sccache_dir_used_by_cargo_doc_after_an_override(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  mismatched-sccache-doc:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: cargo doc --no-deps
+""")
+
+    findings = [row for row in rows if row.get("pattern") == "OPT61"]
+    assert findings
+    assert "mismatched-sccache-doc" in findings[0]["affected_jobs"]
+
+
 def test_opt61_checks_declared_sccache_directory_for_unlisted_consumers(
         tmp_path) -> None:
     commands = (
