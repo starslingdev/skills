@@ -4867,6 +4867,16 @@ def _detect_opt61(
                         declared_dirs.append((name, value))
             inherited_env.update(github_env_updates)
         declared_dirs = list(dict.fromkeys(declared_dirs))
+        if not any(name in {"ccache_dir", "sccache_dir"}
+                   for name, _value in declared_dirs):
+            # A compiler wrapper can be invoked through an arbitrary project
+            # script or Cargo subcommand.  When no known command gives us a
+            # narrower step-scoped directory, keep the job/workflow declaration
+            # as the path the configured compiler cache is expected to use.
+            declared_dirs.extend(
+                (name, value) for name, value in base_env.items()
+                if name in {"ccache_dir", "sccache_dir"} and value)
+            declared_dirs = list(dict.fromkeys(declared_dirs))
         declared_compiler_dirs = [
             value for name, value in declared_dirs
             if name in {"ccache_dir", "sccache_dir"}

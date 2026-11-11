@@ -242,6 +242,63 @@ jobs:
     assert "OPT61" not in _patterns(rows)
 
 
+def test_opt61_checks_declared_sccache_directory_for_unlisted_consumers(
+        tmp_path) -> None:
+    commands = (
+        "cargo doc --no-deps",
+        "cargo bench --no-run",
+        "cargo check --all-targets",
+        "cargo hack check",
+        "cargo llvm-cov nextest",
+        "cross build --target aarch64-unknown-linux-gnu",
+        "just build",
+        "./scripts/build.sh",
+        "python scripts/build.py",
+        "bash ci/compile.sh",
+        "task build",
+    )
+    undetected: list[str] = []
+    for index, command in enumerate(commands):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: {command}
+""")
+
+        if "OPT61" not in _patterns(rows):
+            undetected.append(command)
+
+    assert undetected == []
+
+    matching = _scan_workflow(tmp_path / "matching", """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /var/cache/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo doc --no-deps
+""")
+
+    assert "OPT61" not in _patterns(matching)
+
+
 def test_opt61_accepts_a_persisted_temporary_analysis_cache(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:

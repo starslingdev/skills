@@ -51,6 +51,17 @@ jobs:
           path: ~/.cache/sccache
           key: sccache-clippy-${{ github.sha }}
       - run: cargo clippy --all-targets
+  mismatched-sccache-doc:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-doc-${{ github.sha }}
+      - run: cargo doc --no-deps
   matching-sccache-nextest:
     runs-on: ubuntu-latest
     env:
