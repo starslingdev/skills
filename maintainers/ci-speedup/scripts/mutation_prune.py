@@ -17,14 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-E2E_FILES = (
-    "skills/ci-speedup/tests/test_e2e_fixture_set.py",
-    "skills/ci-speedup/tests/test_offline_pipeline_e2e.py",
-)
+E2E_FILES = ("skills/ci-speedup/tests/test_e2e_fixture_set.py",
+             "skills/ci-speedup/tests/test_offline_pipeline_e2e.py")
 TEST_ROOTS = ("skills/ci-speedup/tests", "maintainers/ci-speedup/tests", "tests")
-PROTECTED_WORDS = (
-    "e2e", "install_surface", "privacy", "public_output", "repo_guard", "verify_report",
-)
+PROTECTED_WORDS = ("e2e", "install_surface", "privacy", "public_output",
+                   "repo_guard", "verify_report")
 
 
 @dataclass(frozen=True)

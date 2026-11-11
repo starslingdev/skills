@@ -21,10 +21,9 @@ def _module() -> dict:
 
 def _commit_repo(root: Path) -> None:
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
-    subprocess.run(["git", "config", "user.email", "audit@example.invalid"], cwd=root, check=True)
-    subprocess.run(["git", "config", "user.name", "Audit Test"], cwd=root, check=True)
     subprocess.run(["git", "add", "."], cwd=root, check=True)
-    subprocess.run(["git", "commit", "-qm", "fixture"], cwd=root, check=True)
+    subprocess.run(["git", "-c", "user.email=audit@example.invalid", "-c",
+                    "user.name=Audit Test", "commit", "-qm", "fixture"], cwd=root, check=True)
 
 
 def test_committed_mutation_report_records_the_reproducible_baseline() -> None:
@@ -37,27 +36,18 @@ def test_committed_mutation_report_records_the_reproducible_baseline() -> None:
     assert report["baseline"]["local_suite_wall_seconds"] > 0
     assert report["baseline"]["ci_suite_wall_seconds"] > 0
     assert {row["module"] for row in report["mutants"]} == {
-        "blocking_path.py",
-        "collect_runs.py",
-        "scan.py",
-        "wall_clock.py",
-    }
+        "blocking_path.py", "collect_runs.py", "scan.py", "wall_clock.py"}
     assert all(row["killers"] for row in report["mutants"])
-    assert report["e2e_test_files"] == [
+    assert report["e2e_test_files"] == list((
         "skills/ci-speedup/tests/test_e2e_fixture_set.py",
-        "skills/ci-speedup/tests/test_offline_pipeline_e2e.py",
-    ]
+        "skills/ci-speedup/tests/test_offline_pipeline_e2e.py"))
     assert isinstance(report["overlap_candidates"], list)
     assert isinstance(report["phrase_pin_clusters"], list)
     assert report["deletion_candidates"] == [{
-        "delete": (
-            "skills/ci-speedup/tests/test_blocking_path.py::"
-            "test_render_no_poles_is_graceful"
-        ),
-        "keep": (
-            "skills/ci-speedup/tests/test_blocking_path.py::"
-            "test_render_no_poles_no_findings_still_dead_ends_gracefully"
-        ),
+        "delete": ("skills/ci-speedup/tests/test_blocking_path.py::"
+                   "test_render_no_poles_is_graceful"),
+        "keep": ("skills/ci-speedup/tests/test_blocking_path.py::"
+                 "test_render_no_poles_no_findings_still_dead_ends_gracefully"),
         "mutants": [],
         "phrase": "No measured critical path",
         "prerequisite": "fold both input shapes into the kept test",
@@ -103,11 +93,10 @@ def _assert_interrupted_run_preserves_source(tmp_path: Path) -> None:
     )
     _commit_repo(tmp_path)
     marker = tmp_path / "started"
-    command = (
-        "import runpy; from pathlib import Path; m=runpy.run_path(%r); "
-        "x=m['Mutant']('disable-engine','engine.py','True','False'); "
-        "m['_run_mutant'](Path(%r),x,['test_engine.py::test_engine_stays_enabled'])"
-    ) % (str(SCRIPT), str(tmp_path))
+    command = ("import runpy; from pathlib import Path; m=runpy.run_path(%r); "
+               "x=m['Mutant']('disable-engine','engine.py','True','False'); "
+               "m['_run_mutant'](Path(%r),x,['test_engine.py::test_engine_stays_enabled'])"
+               ) % (str(SCRIPT), str(tmp_path))
     env = {**os.environ, "MUTATION_MARKER": str(marker)}
     process = subprocess.Popen(
         [sys.executable, "-c", command], env=env, start_new_session=True)
