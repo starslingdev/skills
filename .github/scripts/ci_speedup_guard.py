@@ -521,6 +521,7 @@ def main(argv: list[str] | None = None) -> int:
                 warnings += 1
 
         # An aggregate workflow finding can keep its key while covering more jobs.
+        new_finding_ids = {id(f) for f in unpaired}
         base_aggregates: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
         merge_aggregates: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
         for f in base_doc["findings"]:
@@ -539,7 +540,7 @@ def main(argv: list[str] | None = None) -> int:
                             if old is not None else all_old_jobs)
                 grew = sorted(set(f.get("affected_jobs", []))
                               - old_jobs)
-                if grew and old_findings:
+                if grew and old_findings and id(f) not in new_finding_ids:
                     message = f"{f['pattern']} scope grew to jobs: {', '.join(grew)}"
                     annotation("warning", message, f)
                     aggregate_warning_messages.append(message)
