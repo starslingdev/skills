@@ -40,6 +40,28 @@ jobs:
           path: ${{ env.CCACHE_DIR }}
           key: env-ccache-${{ hashFiles('CMakeLists.txt') }}
       - run: cmake --build build
+  mismatched-sccache-clippy:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-clippy-${{ github.sha }}
+      - run: cargo clippy --all-targets
+  matching-sccache-nextest:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /var/cache/sccache
+          key: sccache-nextest-${{ github.sha }}
+      - run: cargo nextest run
   export-only:
     runs-on: ubuntu-latest
     steps:
