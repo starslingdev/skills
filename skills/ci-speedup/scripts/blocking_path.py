@@ -40,6 +40,10 @@ from typing import Any, Callable, Literal, NamedTuple
 import pr_lifecycle
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
+from gate_frequency_contract import (
+    GATE_INTERVAL_Z as _GATE_INTERVAL_Z,
+    GATE_MIN_COUNT_FOR_RANKING as _GATE_MIN_COUNT_FOR_RANKING,
+)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
 from shell_prefix import SHELL_PREFIX_SRC  # same-skill module; one source for three detectors
 from workflow_steps import (  # same-skill module; step walker
@@ -125,6 +129,31 @@ _RARE_PRESENCE_FRAC = 0.5
 # so the rendered typical/rare split agrees with `critical_path_check` (a present>half cutoff
 # wrongly demoted every heavy suite on a path-partitioned monorepo — see collect_runs).
 _POLE_RECUR_FLOOR = 2
+
+def _gate_interval(count: int, total: int) -> tuple[float, float]:
+    """Wilson 95% interval as percentages; stable for small and zero counts."""
+    if total <= 0:
+        return 0.0, 100.0
+    p = count / total
+    z2 = _GATE_INTERVAL_Z ** 2
+    den = 1.0 + z2 / total
+    centre = (p + z2 / (2.0 * total)) / den
+    margin = (_GATE_INTERVAL_Z / den) * math.sqrt(
+        p * (1.0 - p) / total + z2 / (4.0 * total * total))
+    return max(0.0, 100.0 * (centre - margin)), min(100.0, 100.0 * (centre + margin))
+
+
+def _gate_order_supported(counts: list[int], total: int, cp: dict[str, Any]) -> bool:
+    """Whether adjacent frequency estimates support a ranked order."""
+    if int(cp.get("sample_distinct_days") or 0) <= 1:
+        return False
+    positive = [count for count in counts if count > 0]
+    if positive and min(positive) < int(cp.get(
+            "gate_min_count_for_ranking") or _GATE_MIN_COUNT_FOR_RANKING):
+        return False
+    intervals = sorted((_gate_interval(count, total) for count in positive), reverse=True)
+    return all(intervals[i][0] > intervals[i + 1][1]
+               for i in range(len(intervals) - 1))
 # A magnitude bracket wider than this (range / median) reads as "wide" - the fix's
 # payoff varies run to run. Mirrors collect_runs' escalation threshold so the
 # rendered verdict agrees with the sampling decision (kept independent to avoid a
@@ -5191,7 +5220,8 @@ def _pole_gate_prompt_claim(check: str, wf: str, dur: str, gate_count: int, npop
         fields={"dur": dur, "gate_count": gate_count, "npop": npop, "demoted": False},
         rendered=_strip_emdashes(
             f"Slowest check a typical PR waits on: P50 {dur}"
-            + (f"; its workflow `{wf}` gates {gate_count}/{npop} sampled PRs."
+            + (f"; its workflow `{wf}` gates {gate_count}/{npop} sampled PRs"
+               f"{pole.get('_gate_frequency_suffix') or ''}."
                if gate_count and npop else ".")))
     _demoted_claim = claims.Claim(
         kind="pole_gate_prompt", subject=check,
@@ -7711,7 +7741,8 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
         elif p.get("_demoted_gate_framing"):
             gates = " · rarely the merge pole"
         elif gc and npop:
-            gates = f" · `{wf_base}` gates {gc}/{npop} PRs"
+            gates = (f" · `{wf_base}` gates {gc}/{npop} PRs"
+                     + str(p.get("_gate_frequency_suffix") or ""))
         else:
             gates = ""
         # Plain-text anchor label (owner UX edit 2026-07-19): a backticked `check`
@@ -8795,7 +8826,10 @@ def _metadata_table(doc: dict[str, Any], repo: str) -> list[str]:
         reason = str(cp.get("sample_stop_reason") or (
             "target_met" if cp.get("sample_complete", True)
             else "candidates_exhausted")).replace("_", " ")
-        rows.append(("PR gate sample", f"{spr} of {tgt} PRs sampled: {reason}"))
+        first = str(cp.get("sample_span_first") or "")[:10]
+        last = str(cp.get("sample_span_last") or "")[:10]
+        span = f"; {first} to {last}" if first and last else ""
+        rows.append(("PR gate sample", f"{spr} of {tgt} PRs sampled: {reason}{span}"))
     if skill.startswith("installed:"):
         # Content-hash provenance for an installed skill copy (issue #2): not a
         # commit, so a plain identity string with NO commit permalink to fabricate.
@@ -14104,6 +14138,20 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 wf = str(p.get("workflow_file", ""))
                 wf_gate[wf] = wf_gate.get(wf, 0) + _gatef(p)
 
+    # Every displayed frequency carries the uncertainty and the exact time span
+    # of the sample that produced it. Store the suffix on the pole so the TOC
+    # and agent prompt cannot drift.
+    for p in poles:
+        wf = str(p.get("workflow_file") or "")
+        count = wf_gate.get(wf, 0)
+        if count and npop:
+            lo, hi = _gate_interval(count, npop)
+            first = str(cp.get("sample_span_first") or "")[:10]
+            last = str(cp.get("sample_span_last") or "")[:10]
+            span = f"; {first} to {last}" if first and last else ""
+            p["_gate_frequency_suffix"] = (
+                f" (rough 95% interval {lo:.0f}-{hi:.0f}%{span})")
+
     # A pole is part of the TYPICAL merge path only if it ran on a MAJORITY of sampled
     # PRs. A slow but rarely-run FILE pole — a label-gated / opt-in benchmark that ran on
     # a handful of PRs — must not headline "why is the merge slow?" just because it's long
@@ -14816,6 +14864,34 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     out[_i] = out[_i].rstrip() + " " + _queue_bottom[len(_prefix):]
                 else:
                     out[_i] = _queue_bottom
+                break
+    _confidence_notes: list[str] = []
+    _gate_counts_for_order = [
+        int(row.get("pole_n") or 0) for row in (cp.get("checks") or [])
+        if int(row.get("pole_n") or 0) > 0
+    ]
+    if (npop and _gate_counts_for_order
+            and not _gate_order_supported(_gate_counts_for_order, npop, cp)):
+        _confidence_notes.append(
+            "**Gate-frequency confidence:** this sample's pole order is not supported - "
+            "the rough intervals overlap, a positive count is below the minimum of "
+            f"{int(cp.get('gate_min_count_for_ranking') or _GATE_MIN_COUNT_FOR_RANKING)}, "
+            "or the sample spans only one day. Treat these poles as an unordered set; "
+            "the chat close must not rank them.")
+    _bookkeeping = [str(name) for name in (cp.get("bookkeeping_checks") or []) if str(name)]
+    if _bookkeeping:
+        _cutoff = int(_num(cp.get("gate_bookkeeping_cutoff_s")) or 60)
+        _shown = ", ".join(f"`{_lbl(name)}`" for name in _bookkeeping[:8])
+        _more = f" and {len(_bookkeeping) - 8} more" if len(_bookkeeping) > 8 else ""
+        _confidence_notes.append(
+            "**Short bookkeeping jobs (disclosed, excluded from developer-wait poles):** "
+            + _shown + _more
+            + f". Each measured under {_cutoff}s, so finishing last does not make it a "
+              "meaningful merge-wait pole.")
+    if _confidence_notes:
+        for _i in range(len(out) - 1, -1, -1):
+            if out[_i].startswith("> **Bottom line.**"):
+                out[_i] += " " + " ".join(_confidence_notes)
                 break
     # Owner UX edit (2026-07-19): TOP MATTER = metadata table → ONE Bottom-line blockquote
     # → Contents, nothing else. Everything that used to render as its own blockquote between

@@ -46,6 +46,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from gate_frequency_contract import (
+    GATE_BOOKKEEPING_CUTOFF_S as _GATE_BOOKKEEPING_CUTOFF_S,
+    GATE_MIN_COUNT_FOR_RANKING as _GATE_MIN_COUNT_FOR_RANKING,
+)
+
 # Module logger — inherits the entry point's logging config (WARNING by default,
 # DEBUG under STARSLING_LOG_LEVEL). Used for diagnosable-but-non-fatal gh paths
 # (e.g. an expected-absent rulesets endpoint) so a real collection failure is
@@ -2757,10 +2762,15 @@ def _pole_frequencies(per_sha_checks: list[dict[str, float]],
     The sum can therefore exceed the PR count (it is a per-check gate rate, not a partition). Kept
     behaviour-coupled to `verify_report._vr_pole_frequencies` by a self-test."""
     freq: dict[str, int] = {c: 0 for c in candidates}
+    eligible = {
+        c for c in candidates
+        if caps is None or c not in caps
+        or float(caps[c]) >= _GATE_BOOKKEEPING_CUTOFF_S
+    }
     for m in per_sha_checks:
         scoped: dict[str, float] = {}
         for c, v in m.items():
-            if c in candidates and isinstance(v, (int, float)):
+            if c in eligible and isinstance(v, (int, float)):
                 # Round to 0.1s to match `_segment_pr_populations`'s `round(eff, 1)` EXACTLY, so the
                 # engine's argmax and the verifier's re-derivation from `populations` can never
                 # disagree on a sub-decisecond tie (a no-op on real second-granularity data, but the
@@ -4309,7 +4319,6 @@ def _all_status_runs(client: GhClient, repo: str, wf_id: int,
 
 
 _PR_CANDIDATE_PAGE_CAP = 3
-
 
 def _all_status_run_page(client: GhClient, repo: str, wf_id: int,
                          page: int, created_before: str | None = None
@@ -18940,6 +18949,23 @@ def _pole_is_required_reachable(
         return True
     node = _check_to_job_node(pole_check, job_graph, crit_by_wf)
     if node is None:
+        # A short required aggregation job can be excluded as bookkeeping while
+        # its matrix dependencies remain the real developer wait. Their sampled
+        # display names do not always map through timing data, so preserve the
+        # required `needs:` proof through the scanned graph fallback.
+        node = _check_to_job_node_scanned(pole_check, job_graph)
+    if node is None:
+        matrix_matches = [
+            (str(wf), str(jid))
+            for wf, jobs in job_graph.items()
+            for jid, meta in (jobs or {}).items()
+            if isinstance(meta, dict) and meta.get("matrix")
+            and any(pole_check.casefold().startswith(label.casefold() + " (")
+                    for label in {str(jid), str(meta.get("name") or "")}
+                    if label)
+        ]
+        node = matrix_matches[0] if len(matrix_matches) == 1 else None
+    if node is None:
         return False
     reachable = _required_reachable_jobs(req_names, job_graph, crit_by_wf)
     nested = _nested_caller_path_is_reachable(
@@ -30038,6 +30064,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # and its reason must be post-door too. Keeping the pre-door `complete=True`
     # would render a short 12/20 population as complete.
     sample_diag["kept"] = len(_era_repr_shas)
+    _gate_sample_times = sorted(
+        str(_rep_ts.get(sha) or "") for sha in _era_repr_shas if _rep_ts.get(sha))
+    sample_diag.update({
+        "distinct_days": len({stamp[:10] for stamp in _gate_sample_times if stamp}),
+        "span_first": _gate_sample_times[0] if _gate_sample_times else "",
+        "span_last": _gate_sample_times[-1] if _gate_sample_times else "",
+    })
     sample_diag["complete"] = (
         len(_era_repr_shas) >= _REPR_PR_TARGET
         and not sample_diag.get("required_suite_unsatisfiable"))
@@ -30055,8 +30088,20 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _confirmed_gate_checks = frozenset(
             name for name in pr_check_p50
             if _pole_is_required_reachable(name, req_names, _job_graph, crit_by_wf))
+    _bookkeeping_checks = {
+        name for name, span in _span_caps.items()
+        if float(span) < _GATE_BOOKKEEPING_CUTOFF_S
+    }
+    pr_check_p50 = {
+        name: span for name, span in pr_check_p50.items()
+        if name not in _bookkeeping_checks
+    }
+    _gate_per_sha_checks = [
+        {name: span for name, span in row.items() if name not in _bookkeeping_checks}
+        for row in _era_per_sha_checks
+    ]
     pr_checks_tuple, check_present, present_n_pr, check_pole_freq = _rank_spine_present_first(
-        pr_check_p50, _era_per_sha_checks, req_names, _span_caps,
+        pr_check_p50, _gate_per_sha_checks, req_names, _span_caps,
         _confirmed_gate_checks)
     # Headline-crown recovery. The crowned `critical_path_check` (pr_checks_tuple[0]) is what the
     # report HEADLINES as the merge gate. When it maps to a workflow that run-list triage skipped
@@ -30156,7 +30201,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # that population instead of being zeroed by a gate it never runs alongside.
     pr_check_population_complete: list[bool] = []
     pr_check_populations = _segment_pr_populations(
-        _era_per_sha_checks, pr_check_p50, job_p50_all, job_bimodal_all,
+        _gate_per_sha_checks, pr_check_p50, job_p50_all, job_bimodal_all,
         per_sha_check_runs_complete=_era_check_runs_complete,
         population_completeness_out=pr_check_population_complete)
     # Map each spine check to its producing workflow file (when it maps to a sampled job),
@@ -31150,6 +31195,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # degraded critical path is never presented as a complete one. Mapped via
         # the pure helper so the diag -> doc key-mapping is unit-testable.
         **_sampling_provenance_fields(sample_diag),
+        "sample_distinct_days": sample_diag.get("distinct_days", 0),
+        "sample_span_first": sample_diag.get("span_first", ""),
+        "sample_span_last": sample_diag.get("span_last", ""),
+        "gate_min_count_for_ranking": _GATE_MIN_COUNT_FOR_RANKING,
+        "gate_bookkeeping_cutoff_s": _GATE_BOOKKEEPING_CUTOFF_S,
+        "bookkeeping_checks": sorted(_bookkeeping_checks),
         "critical_path_check": pr_checks_tuple[0][0] if pr_checks_tuple else None,
         "critical_path_s": pr_checks_tuple[0][1] if pr_checks_tuple else 0.0,
         # Per-PR presence behind the rare-pole demotion (denominator = PRs that ran >=1

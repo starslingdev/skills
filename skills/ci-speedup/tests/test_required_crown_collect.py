@@ -189,7 +189,9 @@ def test_collect_crowns_slowest_confirmed_gate_and_verifier_agrees(monkeypatch, 
     poles = cp["poles"]
     pole_names = [pole["check"] for pole in poles]
     assert pole_names[0] == "unit"
-    assert pole_names.index("mystery matrix") > pole_names.index("merge-gate")
+    assert "merge-gate" not in pole_names
+    assert "merge-gate" in cp["bookkeeping_checks"]
+    assert pole_names.index("mystery matrix") > pole_names.index("unit")
     assert poles[0]["required_reachable"] is True
     assert next(p for p in poles if p["check"] == "mystery matrix")[
         "required_reachable"] is False

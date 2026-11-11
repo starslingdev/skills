@@ -12893,6 +12893,59 @@ def check_workflow_gate_frequency_matches(report: str, findings_path: Path | Non
     return Check(name, True, f"all {checked} gate-frequency claim(s) match populations{tail}")
 
 
+def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> Check:
+    """Ranked gate frequencies need enough events, a multi-day span, and separated intervals."""
+    name = "gate-frequency ordering has enough events, span, and non-overlapping intervals"
+    if not findings_path or _is_static_only(report):
+        return Check(name, True, "no findings / static-only", skipped=True)
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings unreadable", skipped=True)
+    cp = _as_dict(_as_dict(data).get("pr_critical_path"))
+    if "gate_min_count_for_ranking" not in cp:
+        return Check(name, True, "legacy findings lack the gate-confidence contract", skipped=True)
+    claims = _GATE_FREQ_RE.findall(report)
+    if not claims:
+        return Check(name, True, "no ranked gate-frequency claims", skipped=True)
+    counts = [int(row.get("pole_n") or 0) for row in _as_list(cp.get("checks"))
+              if isinstance(row, dict) and int(row.get("pole_n") or 0) > 0]
+    if not counts:
+        counts = [int(n) for _wf, n, _m in claims]
+    minimum = int(cp["gate_min_count_for_ranking"])
+    days = int(cp.get("sample_distinct_days") or 0)
+
+    def interval(count: int, total: int) -> tuple[float, float]:
+        if total <= 0:
+            return 0.0, 100.0
+        p, z = count / total, 1.96
+        den = 1.0 + z * z / total
+        centre = (p + z * z / (2.0 * total)) / den
+        margin = z / den * math.sqrt(
+            p * (1.0 - p) / total + z * z / (4.0 * total * total))
+        return centre - margin, centre + margin
+
+    total = max(int(cp.get("check_present_n_pr") or 0), int(claims[0][2]), max(counts))
+    ivs = sorted((interval(count, total) for count in counts if count > 0), reverse=True)
+    overlap = any(ivs[i][0] <= ivs[i + 1][1] for i in range(len(ivs) - 1))
+    unsupported = days <= 1 or any(0 < count < minimum for count in counts) or overlap
+    warning = "pole order is not supported" in report and "chat close must not rank" in report
+    first = str(cp.get("sample_span_first") or "")[:10]
+    last = str(cp.get("sample_span_last") or "")[:10]
+    interval_claims = report.count("rough 95% interval")
+    if interval_claims < len(claims) or not first or not last or f"{first} to {last}" not in report:
+        return Check(name, False,
+                     "every gate frequency must carry a rough interval and the collected sample span")
+    if unsupported and not warning:
+        return Check(name, False,
+                     f"ranked gate frequencies are unsupported (minimum={minimum}, days={days}, "
+                     f"counts={counts}, overlapping_intervals={overlap}) but the report/chat close "
+                     "does not withhold the order")
+    return Check(name, True,
+                 "frequency intervals and sample span are disclosed; unsupported order is withheld"
+                 if unsupported else "frequency intervals are separated on a sufficient sample")
+
+
 def check_spine_heavy_check_disclosed(report: str, findings_path: Path | None) -> Check:
     """**The spine-drop disclosure class (Phase 0, Class A #6).** Every drilled pole's BINDING floor
     — the slowest concurrent check that co-occurs with it on a MAJORITY of its own gating PRs,
@@ -16732,6 +16785,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_headline_wait_is_divergence_correct(report, findings_path, report_path),  # issue #115
         check_spine_heavy_check_disclosed(report, findings_path),
         check_workflow_gate_frequency_matches(report, findings_path),
+        check_gate_frequency_confidence(report, findings_path),
         check_pole_not_reframed_as_hygiene(report, findings_path),
         check_toc_also_noticed_label_honest(report),
         check_cache_claim_backed_by_distribution(report, findings_path),

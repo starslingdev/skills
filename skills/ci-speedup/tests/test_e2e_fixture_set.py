@@ -974,10 +974,13 @@ def test_sharded_floor_runs_through_collection_and_full_verifier(
     assert stamp["n_shards"] == 4
     # One bounded representative-log probe is part of this qualifying path. Pin
     # the complete offline call budget so it cannot silently fan out per shard.
-    assert doc["data_sources"]["gh_query_count"] == 18
+    # The 30-second aggregation gate is disclosed as bookkeeping and no longer
+    # consumes a pole-log read; the representative shard probe remains bounded.
+    assert doc["data_sources"]["gh_query_count"] == 17
     sentence = "Observed on the sampled runs, not a shard-count recommendation"
     assert report.count(sentence) == 2
-    pole_section = report.split("## 🟠 Long pole 2", 1)[1].split("\n## ", 1)[0]
+    # The meaningful shard is pole 1 once the 30-second aggregator is removed.
+    pole_section = report.split("## 🟠 Long pole 1", 1)[1].split("\n## ", 1)[0]
     assert "#### 🤖 Prompt for your coding agent" in pole_section
     assert sentence in pole_section.split("#### 🤖 Prompt for your coding agent", 1)[1]
     assert sentence not in report.split("## 📋 Contents", 1)[0]
@@ -1990,3 +1993,44 @@ def test_fixture_set_catches_unconfirmed_gate_credit_regression(
             AssertionError,
             match=r"unpinnable-slow-check: credited_findings\.length changed"):
         assert_fixture_facts(fixture, fixture_facts(doc, checks))
+
+
+def test_gate_frequency_confidence_discloses_bookkeeping_and_withholds_order(
+        monkeypatch, tmp_path):
+    """Whole pipeline: a 30s last job is disclosed, never ranked as developer wait."""
+    fixture = FIXTURE_ROOT / "bookkeeping-last-job"
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+    cp = doc["pr_critical_path"]
+
+    assert cp["bookkeeping_checks"] == ["cleanup"]
+    assert cp["critical_path_check"] != "cleanup"
+    assert "cleanup" in report and "under 60s" in report
+    assert "rough 95% interval" in report
+    assert "2026-01-24 to 2026-01-28" in report
+    assert "pole order is not supported" in report
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+    mutant = json.loads(json.dumps(doc))
+    mutant_cp = mutant["pr_critical_path"]
+    mutant_cp["sample_distinct_days"] = 1
+    mutant_cp["sample_span_first"] = mutant_cp["sample_span_last"]
+    positive = [row for row in mutant_cp["checks"] if row.get("pole_n")]
+    assert len(positive) >= 2
+    positive[0]["pole_n"], positive[1]["pole_n"] = 3, 2
+    ranked_report = re.sub(
+        r" \*\*Gate-frequency confidence:\*\*.*?(?= \*\*Short bookkeeping jobs)",
+        "", report)
+    out = run_root / fixture.name
+    findings_path = out / "findings.json"
+    report_path = out / "report.md"
+    findings_path.write_text(json.dumps(mutant), encoding="utf-8")
+    report_path.write_text(ranked_report, encoding="utf-8")
+    mutant_checks = vr.run_checks(
+        ranked_report, report_path, findings_path, skill_repo=None)
+    assert any(
+        check.name == (
+            "gate-frequency ordering has enough events, span, and "
+            "non-overlapping intervals") and not check.ok
+        for check in mutant_checks)
