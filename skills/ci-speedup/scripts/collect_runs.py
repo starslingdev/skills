@@ -10197,6 +10197,10 @@ def _detect_opt25_shard_imbalance(
             r"save cache|install (?:dependencies|deps|packages)(?:\s|$))",
             name.strip()))
 
+    def _is_universal_housekeeping_step(name: str) -> bool:
+        return not name.strip() or bool(_re.search(
+            r"(?i)\b(?:artifact|cleanup|tear\s*down|upload)\b", name))
+
     dominant_step_by_base: dict[str, str] = {}
     step_seconds_by_base: dict[str, dict[str, float]] = {}
     always_run_by_run: list[dict[str, set[str]]] = []
@@ -10287,7 +10291,9 @@ def _detect_opt25_shard_imbalance(
                 step for step in active_work_steps
                 if (str(step.get("name") or "") == dominant_name
                     or str(step.get("name") or "")
-                    not in always_run_by_base.get(base, set()))]
+                    not in always_run_by_base.get(base, set())
+                    or not _is_universal_housekeeping_step(
+                        str(step.get("name") or "")))]
             dominant_steps = [step for step in work_steps
                               if str(step.get("name") or "") == dominant_name]
             # A differently named active step is positive evidence that this

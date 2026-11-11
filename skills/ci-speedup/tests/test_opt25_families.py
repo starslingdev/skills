@@ -207,6 +207,35 @@ def test_always_run_upload_cannot_become_the_dominant_step():
         "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 90}) == []
 
 
+def test_shared_test_work_keeps_working_legs_in_the_matrix():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((900, 100, 100)):
+        integration = index == 0
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"name": "Run tests", "conclusion": "success",
+                 "started_at": start.isoformat(),
+                 "completed_at": (start + timedelta(seconds=100)).isoformat()},
+                {"name": "Run integration tests",
+                 "conclusion": "success" if integration else "skipped",
+                 "started_at": (start + timedelta(seconds=100)).isoformat()
+                 if integration else None,
+                 "completed_at": (start + timedelta(seconds=900)).isoformat()
+                 if integration else None},
+            ],
+        })
+
+    findings = cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900})
+    assert findings
+    assert findings[0]["legs_excluded_no_work"] == 0
+
+
 def test_a_working_leg_with_a_different_step_name_is_not_discarded():
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     jobs = []
