@@ -320,8 +320,16 @@ def fixture_facts(doc: dict, checks: list) -> dict:
     }
 
 
-def test_pr_sample_day_floor_stays_coupled_to_the_standalone_verifier():
-    assert cr._PR_SAMPLE_MIN_DISTINCT_DAYS == vr._VR_PR_SAMPLE_MIN_DISTINCT_DAYS
+def test_pr_sample_day_floor_stays_coupled_through_the_findings_contract(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path)
+    run_root = tmp_path / "run-day-floor-contract"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    assert (doc["pr_critical_path"]["sample_min_distinct_days"]
+            == cr._PR_SAMPLE_MIN_DISTINCT_DAYS)
+    assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
 def _first_fact_difference(expected, actual, path: str = "") -> tuple[str, object, object]:
@@ -1908,10 +1916,38 @@ def test_busy_pr_sample_uses_completed_commits_across_days_despite_non_pr_era(
     assert cp["sampled_pr_count"] >= 100
     assert cp["sample_distinct_days"] >= 5
     assert cp["sample_partial_count"] == 0
+    # Page 1 is the in-flight burst; page 2 already supplies the complete
+    # 100-commit/five-day suite. Do not crawl the remaining ten pages.
+    assert cp["sample_candidate_pages_fetched"] == 2
     assert doc["_fixture_check_reads"] == 0
     assert cp["sample_span_first"].startswith("2026-01-21")
     assert cp["sample_span_last"].startswith("2026-01-25")
     assert "2026-01-21" in report and "2026-01-25" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_pr_sample_preserves_observable_required_suite_scope(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    completed = recorded["workflows"][0]["run_pages"][1]
+    # Nine docs-only commits completed their workflow without the required gate.
+    # They are valid completed PR commits, but not members of the required-suite
+    # population used to rank merge gates.
+    for row in completed[:9]:
+        recorded["jobs"][str(row["id"])] = []
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-required-suite-scope"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 91
+    assert cp["required_suite_scoped"] is True
+    assert cp["sample_job_list_scoped"] is True
+    assert cp["sample_stop_reason"] == "candidates_exhausted"
+    assert "91 of 100 PRs sampled: candidates exhausted" in report
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
@@ -1927,7 +1963,7 @@ def test_pr_sample_discloses_required_check_missing_from_job_lists(
     doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
 
     assert doc["pr_critical_path"]["required_checks_unobservable"] == ["external-review"]
-    assert doc["pr_critical_path"]["required_suite_scoped"] is False
+    assert doc["pr_critical_path"]["required_suite_scoped"] is True
     assert doc["pr_critical_path"]["sample_job_list_scoped"] is True
     assert "Status-only required check(s) excluded from the suite test" in report
     assert "Required-suite coverage comes from run/job lists" in report
@@ -2008,8 +2044,7 @@ def test_mostly_partial_pr_sample_marks_gate_order_unreliable_and_verifies(
     recorded = json.loads(responses_path.read_text(encoding="utf-8"))
     completed_ids = sorted(
         int(row["id"]) for row in recorded["workflows"][0]["run_pages"][1])
-    for run_id in completed_ids[:60]:
-        recorded["jobs"][str(run_id)] = []
+    recorded["failed_job_ids"] = [str(run_id) for run_id in completed_ids[:60]]
     responses_path.write_text(json.dumps(recorded), encoding="utf-8")
     run_root = tmp_path / "run-mostly-partial"
     run_root.mkdir()
@@ -2211,7 +2246,7 @@ def test_pr_sample_does_not_treat_fallback_as_target_through_full_pipeline(
     assert cp["sampled_pr_count"] == 100
     assert cp["sample_stop_reason"] == "target_met"
     assert cp["required_suite_unsatisfiable"] is False
-    assert cp["sample_candidate_pages_fetched"] == 3
+    assert cp["sample_candidate_pages_fetched"] == 2
     assert [c for c in checks if not c.skipped and not c.ok] == []
     assert "100 of 100 PRs sampled: target met" in report
 
@@ -2228,7 +2263,7 @@ def test_pr_sample_stops_after_job_population_reaches_target(
     cp = doc["pr_critical_path"]
     assert cp["sampled_pr_count"] == 100
     assert cp["sample_stop_reason"] == "target_met"
-    assert cp["sample_candidate_pages_fetched"] == 4
+    assert cp["sample_candidate_pages_fetched"] == 2
     assert [c for c in checks if not c.skipped and not c.ok] == []
     assert "100 of 100 PRs sampled: target met" in report
 
@@ -2258,7 +2293,7 @@ def test_pr_sample_uses_completed_job_rows_without_check_row_filter(
     cp = doc["pr_critical_path"]
     assert cp["sampled_pr_count"] == 100
     assert cp["sample_stop_reason"] == "target_met"
-    assert cp["sample_candidate_pages_fetched"] == 4
+    assert cp["sample_candidate_pages_fetched"] == 2
     assert cp["sample_candidate_page_cap"] == cr._PR_CANDIDATE_PAGE_CAP == 12
     assert [c for c in checks if not c.skipped and not c.ok] == []
     assert "100 of 100 PRs sampled: target met" in report

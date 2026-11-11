@@ -1141,7 +1141,7 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
     # sample_fetched to the wrong diag key, say) would silently zero a coverage
     # caveat — and nothing else fails, since collect() makes live gh calls and is
     # never exercised in the suite. Lock the mapping on the pure helper.
-    from collect_runs import (_PR_CANDIDATE_PAGE_CAP,
+    from collect_runs import (_PR_CANDIDATE_PAGE_CAP, _PR_SAMPLE_MIN_DISTINCT_DAYS,
                               _sampling_provenance_fields, _select_repr_shas)
     diag = {"target": 20, "kept": 16, "fetched": 160, "fetch_failures": 3,
             "complete": False, "required_suite_scoped": True,
@@ -1160,6 +1160,7 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
         "sample_candidate_era_door": False,
         "sample_candidate_selection_limited": False,
         "sample_distinct_days": 0,
+        "sample_min_distinct_days": _PR_SAMPLE_MIN_DISTINCT_DAYS,
         "sample_span_first": "",
         "sample_span_last": "",
         "sample_partial_count": 0,
@@ -1185,7 +1186,8 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
                            "sample_candidate_era_door",
                            "sample_candidate_selection_limited",
                            "sample_job_list_scoped",
-                           "sample_distinct_days", "sample_span_first",
+                           "sample_distinct_days", "sample_min_distinct_days",
+                           "sample_span_first",
                            "sample_span_last", "sample_partial_count",
                            "required_suite_scoped", "required_suite_unsatisfiable",
                            "required_checks_unobservable"}

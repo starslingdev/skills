@@ -5042,6 +5042,7 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
         "sample_candidate_selection_limited": sample_diag.get(
             "selection_limited", False),
         "sample_distinct_days": sample_diag.get("distinct_days", 0),
+        "sample_min_distinct_days": _PR_SAMPLE_MIN_DISTINCT_DAYS,
         "sample_span_first": sample_diag.get("span_first", ""),
         "sample_span_last": sample_diag.get("span_last", ""),
         "sample_partial_count": sample_diag.get("partial_count", 0),
@@ -29675,11 +29676,106 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 for row in page_rows)
         and (wf_by_path.get(wf_path) or {}).get("id") is not None
     }
+
+    _candidate_scoped_ts: dict[str, str] = {}
+    _candidate_observable_required: frozenset[str] = frozenset()
+    _candidate_unobservable_required: frozenset[str] = frozenset()
+
+    def _candidate_snapshot() -> tuple[
+            list[dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, str]]:
+        rows = [
+            row
+            for page_rows in all_status_runs_by_wf.values() for row in page_rows
+            if str(row.get("event") or "") in _DEVELOPER_EVENTS
+            and row.get("head_sha")
+        ] + [
+            row
+            for page_rows in _candidate_runs_by_wf.values() for row in page_rows
+            if str(row.get("event") or "") in _DEVELOPER_EVENTS
+            and row.get("head_sha")
+        ]
+        by_sha: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            by_sha[str(row["head_sha"])].append(row)
+        eligible_reps = {
+            rep for rep, members in _rep_members.items()
+            if all(by_sha.get(member) for member in members)
+            and all(str(row.get("status") or "") == "completed"
+                    for member in members for row in by_sha[member])
+        }
+        return rows, by_sha, {
+            sha: ts for sha, ts in _rep_ts.items() if sha in eligible_reps
+        }
+
+    def _candidate_sample_ready() -> bool:
+        """Whether the observed run/job population already satisfies the sample.
+
+        Count only completed identities first. When a readable required suite is
+        present, use the job lists already required for timing to keep commits that
+        ran every observable required check. A failed job read remains eligible and
+        is disclosed later as partial; silently replacing it with an older commit
+        would turn an I/O gap into a clean suite decision.
+        """
+        nonlocal _candidate_scoped_ts, _candidate_observable_required
+        nonlocal _candidate_unobservable_required
+        _rows, rows_by_sha, eligible_ts = _candidate_snapshot()
+        raw_days = {str(ts or "")[:10] for ts in eligible_ts.values()}
+        if (len(eligible_ts) < _REPR_PR_TARGET
+                or len(raw_days) < _PR_SAMPLE_MIN_DISTINCT_DAYS):
+            return False
+        if not req_names:
+            _candidate_scoped_ts = eligible_ts
+            return True
+
+        run_rep: dict[Any, str] = {}
+        selected_runs: list[dict[str, Any]] = []
+        for rep in sorted(eligible_ts, key=lambda sha: eligible_ts[sha], reverse=True):
+            for member in _rep_members.get(rep, [rep]):
+                for row in rows_by_sha.get(member, []):
+                    rid = row.get("id")
+                    if rid in run_rep:
+                        continue
+                    run_rep[rid] = rep
+                    selected_runs.append(row)
+        kept_jobs, _failures = _gather_run_jobs(
+            client, repo, selected_runs, keep_empty=True, memo=job_memo)
+        fetched_ids = {run.get("id") for run, _jobs in kept_jobs}
+        failed_reps = {
+            run_rep.get(run.get("id"), "") for run in selected_runs
+            if run.get("id") not in fetched_ids
+        }
+        names_by_rep: dict[str, set[str]] = defaultdict(set)
+        observed: set[str] = set()
+        for run, jobs in kept_jobs:
+            rep = run_rep.get(run.get("id"), "")
+            for job in jobs:
+                name = str(job.get("name") or "")
+                if name:
+                    names_by_rep[rep].add(name)
+                    observed.add(name)
+        observable = frozenset(set(req_names) & observed)
+        _candidate_observable_required = observable
+        _candidate_unobservable_required = frozenset(set(req_names) - observed)
+        if not observable:
+            # Preserve the established external-gate fallback. There is no
+            # observable in-repo suite with which to scope individual commits.
+            _candidate_scoped_ts = eligible_ts
+            return True
+        _candidate_scoped_ts = {
+            rep: ts for rep, ts in eligible_ts.items()
+            if rep in failed_reps or observable <= names_by_rep.get(rep, set())
+        }
+        scoped_days = {str(ts or "")[:10]
+                       for ts in _candidate_scoped_ts.values()}
+        return (len(_candidate_scoped_ts) >= _REPR_PR_TARGET
+                and len(scoped_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS)
+
     # Apply the completed-only eligibility after every bounded workflow walk.
     # Stopping on the aggregate count first can strand clean commits on older
     # pages when the apparent target is later removed by an in-flight sibling.
     while (_candidate_active
-           and _candidate_page < _PR_CANDIDATE_PAGE_CAP):
+           and _candidate_page < _PR_CANDIDATE_PAGE_CAP
+           and not _candidate_sample_ready()):
         _candidate_page += 1
         _next_active: set[str] = set()
         for wf_path in sorted(_candidate_active):
@@ -29736,29 +29832,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # a commit is eligible only when every developer-event run we observed for its
     # identity has completed. The memo makes jobs already used by the workflow drill
     # free here; deeper candidate pages pay one jobs read per selected run.
-    _candidate_rows = [
-        row
-        for rows in all_status_runs_by_wf.values() for row in rows
-        if str(row.get("event") or "") in _DEVELOPER_EVENTS and row.get("head_sha")
-    ] + [
-        row
-        for rows in _candidate_runs_by_wf.values() for row in rows
-        if str(row.get("event") or "") in _DEVELOPER_EVENTS and row.get("head_sha")
-    ]
-    _rows_by_sha: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    for _row in _candidate_rows:
-        _rows_by_sha[str(_row["head_sha"])].append(_row)
-    _eligible_reps = {
-        rep for rep, members in _rep_members.items()
-        if all(_rows_by_sha.get(member) for member in members)
-        and all(str(row.get("status") or "") == "completed"
-                for member in members for row in _rows_by_sha[member])
-    }
-    _eligible_ts = {sha: ts for sha, ts in _rep_ts.items() if sha in _eligible_reps}
+    _candidate_rows, _rows_by_sha, _eligible_ts = _candidate_snapshot()
+    _candidate_sample_ready()
+    _raw_eligible_days = {str(ts or "")[:10] for ts in _eligible_ts.values()}
+    _job_population_read = (
+        len(_eligible_ts) >= _REPR_PR_TARGET
+        and len(_raw_eligible_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
+        and (not req_names or bool(_candidate_observable_required)))
+    if _candidate_scoped_ts:
+        _eligible_ts = _candidate_scoped_ts
     _selection_target = _spread_target(_eligible_ts)
     _eligible_days = {str(ts or "")[:10] for ts in _eligible_ts.values()}
-    if (len(_eligible_ts) >= _REPR_PR_TARGET
-            and len(_eligible_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS):
+    if _job_population_read:
         repr_shas = sorted(
             _eligible_ts, key=lambda sha: _eligible_ts[sha], reverse=True
         )[:_selection_target]
@@ -29767,9 +29852,17 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         sample_diag = {
             "target": _REPR_PR_TARGET, "kept": len(repr_shas),
             "fetched": len(repr_shas), "fetch_failures": 0,
-            "complete": True, "required_suite_scoped": False,
-            "required_suite_unsatisfiable": False,
-            "required_checks_unobservable": [], "selection_limited": False,
+            "complete": (
+                len(repr_shas) >= _REPR_PR_TARGET
+                and len(_eligible_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
+                and not (req_names and not _candidate_observable_required)),
+            "required_suite_scoped": bool(
+                req_names and _candidate_observable_required),
+            "required_suite_unsatisfiable": bool(
+                req_names and not _candidate_observable_required),
+            "required_checks_unobservable": sorted(
+                _candidate_unobservable_required),
+            "selection_limited": False,
             "job_list_scoped": True,
         }
         _rep_ts = _eligible_ts
@@ -29791,7 +29884,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     continue
                 _run_rep[_rid] = _rep
                 _selected_runs.append(_row)
-    if len(repr_shas) < _REPR_PR_TARGET:
+    if len(repr_shas) < _REPR_PR_TARGET and not _job_population_read:
         # A short history keeps the established check-run population. Its ordinary
         # workflow job sample has already been read; do not retry failed job pages
         # merely to decorate a sample that cannot meet the representative contract.
@@ -29827,17 +29920,16 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             if _started and _completed:
                 _iv[_name] = (_started, _completed)
         if ((not _m or _rep in _sample_failed_reps)
-                and len(repr_shas) >= _REPR_PR_TARGET):
+                and _job_population_read):
             _partial_reps += 1
             _partial_sample_shas.add(_rep)
         for _name, _duration in _m.items():
             _job_durs[_name].append(_duration)
         _job_maps.append(_m)
-        if len(repr_shas) >= _REPR_PR_TARGET:
+        if _job_population_read:
             sha_check_intervals[_rep] = _iv
             check_runs_complete_by_sha[_rep] = bool(_m) and _rep not in _sample_failed_reps
-    if (len(repr_shas) >= _REPR_PR_TARGET
-            and _job_maps and any(_job_maps)):
+    if _job_population_read and _job_maps and any(_job_maps):
         per_sha_checks = _job_maps
         check_durs = dict(_job_durs)
         _observed_job_names = set(_job_durs)
