@@ -24504,7 +24504,7 @@ _CACHE_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 
 def _cache_keywords_for_finding(finding: dict[str, Any]) -> tuple[str, ...]:
-    """Scope a static compiler-cache lint to the cache family it predicts."""
+    """Scope a static cache lint to the cache family it predicts."""
     pattern = str(finding.get("pattern") or "")
     keywords = _CACHE_KEYWORDS.get(pattern, ())
     if not finding.get("static_cache_lint"):
@@ -24512,12 +24512,16 @@ def _cache_keywords_for_finding(finding: dict[str, Any]) -> tuple[str, ...]:
     explicit = str(finding.get("cache_family") or "").strip().lower()
     if explicit:
         return (explicit,)
-    evidence = " ".join(str(finding.get(key) or "")
-                        for key in ("evidence", "subject", "evidence_snippet")).lower()
-    compiler_families = tuple(
-        family for family in ("sccache", "ccache", "staticcheck", "golangci", "buildkit", "go")
-        if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", evidence))
-    return compiler_families or keywords
+    explicit_path = str(
+        finding.get("cache_path") or finding.get("cache_key") or ""
+    ).strip().lower()
+    if explicit_path:
+        return (explicit_path,)
+    # An unscoped static lint must not borrow an unrelated cache line. Current
+    # scanners stamp one of the fields above; this sentinel keeps older or
+    # malformed findings unconfirmed instead of treating an empty tuple as
+    # "any cache".
+    return ("__unscoped_static_cache_lint__",)
 
 
 def _clean_log_line(line: str) -> str:

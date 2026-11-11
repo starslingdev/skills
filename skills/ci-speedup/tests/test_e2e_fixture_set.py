@@ -540,6 +540,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for row in cache_rows)
     static_cache_rows = [row for row in cache_rows if row.get("static_cache_lint")]
     assert static_cache_rows
+    assert all(row.get("cache_family") for row in static_cache_rows)
     assert all(not (row.get("cache_log_confirmation") or {}).get("misses")
                for row in static_cache_rows)
     assert all(
