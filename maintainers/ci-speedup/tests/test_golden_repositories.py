@@ -409,3 +409,131 @@ def test_real_repository_report_matches_independent_expectation(
         pytest.fail(f"known open bug no longer reproduces: {known_open_bug[0]}")
 
     assert not differences, "\n".join(differences)
+
+
+def _golden_files() -> list[Path]:
+    return sorted(path for path in (_ROOT / "repositories").rglob("*") if path.is_file())
+
+
+def _decoded(path: Path) -> str:
+    raw = gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_bytes()
+    return raw.decode("utf-8", errors="replace")
+
+
+def test_identity_leak_detector_flags_people_and_spares_bots_and_placeholders() -> None:
+    record = _load("record")
+    person = {"login": "someone", "type": "User", "id": 1}
+    commit = {"author": {"name": "Some One", "email": "someone@example.com"}}
+    trailer = "fix\n\nCo-authored-by: Some One <someone@example.com>"
+    assert record.identity_leaks(person) == ["$.login"]
+    assert record.identity_leaks(commit) == ["$.author.name", "$.author.email (email)"]
+    assert record.identity_leaks({"message": trailer}) == ["$.message (email)"]
+    assert record.identity_leaks({"login": "dependabot[bot]", "type": "Bot"}) == []
+    assert record.identity_leaks({"login": "SomeOrg", "type": "Organization"}) == []
+    assert record.identity_leaks({"login": "contributor-0001", "type": "User"}) == []
+    assert record.identity_leaks(
+        {"name": "contributor", "email": "contributor@example.invalid"}
+    ) == []
+    assert record.identity_leaks({"ssh_url": "git@github.com:o/r.git"}) == []
+    assert record.email_addresses("taskr@1.1.0.patch") == []
+
+
+def test_golden_recordings_carry_no_contributor_identity() -> None:
+    record = _load("record")
+    leaks: list[str] = []
+    for path in _golden_files():
+        text = _decoded(path)
+        relative = path.relative_to(_ROOT).as_posix()
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            leaks.extend(f"{relative}: {address}" for address in record.email_addresses(text))
+            continue
+        owner = record.audited_owner(_ROOT / "repositories" / path.relative_to(_ROOT).parts[1])
+        keep = frozenset({owner}) if owner else frozenset()
+        leaks.extend(f"{relative}: {leak}" for leak in record.identity_leaks(payload, keep=keep))
+    assert not leaks, f"{len(leaks)} contributor identities, e.g.:\n" + "\n".join(leaks[:10])
+
+
+# Dependency manifests Dependabot scans for version and security updates.  A
+# golden checkout is a frozen third-party snapshot: a bump would change the
+# input its expected report was derived from.
+_DEPENDABOT_MANIFESTS = frozenset({
+    "package.json", "package-lock.json", "npm-shrinkwrap.json", "yarn.lock",
+    "pnpm-lock.yaml", "pnpm-workspace.yaml", "bun.lockb", "bun.lock",
+    "pyproject.toml", "poetry.lock", "Pipfile", "Pipfile.lock", "setup.py", "setup.cfg",
+    "uv.lock", "Cargo.toml", "Cargo.lock", "go.mod", "go.sum", "Gemfile", "Gemfile.lock",
+    "composer.json", "composer.lock", "pom.xml", "build.gradle", "build.gradle.kts",
+    "mix.exs", "mix.lock", "pubspec.yaml", "Package.swift", "Dockerfile",
+})
+
+
+def test_golden_checkouts_hold_no_file_dependabot_would_update() -> None:
+    offenders = [
+        path.relative_to(_ROOT).as_posix()
+        for path in _golden_files()
+        if "checkout" in path.relative_to(_ROOT).parts
+        and (path.name in _DEPENDABOT_MANIFESTS or path.name.startswith("requirements"))
+    ]
+    assert not offenders, "rename to <name>.golden: " + ", ".join(offenders)
+
+
+def test_scrub_replaces_people_consistently_and_keeps_bots(tmp_path: Path) -> None:
+    record = _load("record")
+    run = {
+        "actor": {"login": "someone", "type": "User", "html_url": "https://github.com/someone"},
+        "triggering_actor": {"login": "dependabot[bot]", "type": "Bot"},
+        "head_repository": {"full_name": "someone/project",
+                            "owner": {"login": "someone", "type": "User"}},
+        "head_commit": {
+            "author": {"name": "Some One", "email": "someone@example.com"},
+            "committer": {"name": "Some One", "email": "12+someone@users.noreply.github.com"},
+            "message": "Merge pull request #1 from someone/fix\n\nSigned-off-by: Some One <someone@example.com>",
+        },
+        "commit": {"verification": {"payload": "author Some One <someone@example.com>", "signature": "x"}},
+        "display_title": "Thanks @someone for the fix",
+        "head_branch": "someone/fix-cache",
+        "repository": {"full_name": "owner/project", "owner": {"login": "owner", "type": "User"}},
+    }
+    recording = tmp_path / "recording"
+    (recording / "api").mkdir(parents=True)
+    path = recording / "api" / "runs.json.gz"
+    path.write_bytes(gzip.compress(json.dumps({"workflow_runs": [run]}).encode()))
+
+    (recording / "manifest.json").write_text(json.dumps({"origin": "public-github:owner/project"}))
+    (recording / "checkout").mkdir()
+    pyproject = recording / "checkout" / "pyproject.toml.golden"
+    pyproject.write_text('authors = [{email = "someone@example.com"}]\n', encoding="utf-8")
+
+    assert record.audited_owner(recording) == "owner"
+    assert record.scrub_recording(recording) == 2
+    scrubbed = json.loads(gzip.decompress(path.read_bytes()))["workflow_runs"][0]
+
+    # The audited repository's owner is a person here, and keeps its login so
+    # upstream runs do not turn into forks.
+    assert record.identity_leaks(scrubbed) == ["$.repository.owner.login"]
+    assert record.identity_leaks(scrubbed, keep=frozenset({"owner"})) == []
+    assert scrubbed["repository"]["full_name"] == "owner/project"
+    assert scrubbed["display_title"] == "Thanks @contributor-0001 for the fix"
+    assert scrubbed["head_branch"] == "contributor-0001/fix-cache"
+    assert "someone@example.com" not in pyproject.read_text(encoding="utf-8")
+    assert scrubbed["actor"]["login"] == scrubbed["head_repository"]["owner"]["login"] == "contributor-0001"
+    assert scrubbed["actor"]["html_url"] == "https://github.com/contributor-0001"
+    assert scrubbed["head_repository"]["full_name"] == "contributor-0001/project"
+    assert scrubbed["triggering_actor"]["login"] == "dependabot[bot]"
+    assert "someone" not in json.dumps(scrubbed) and "Some One" not in json.dumps(scrubbed)
+    assert scrubbed["commit"]["verification"] == {"payload": None, "signature": None}
+    assert record.scrub_recording(recording) == 0  # idempotent
+
+
+def test_replay_restores_snapshot_manifest_names(tmp_path: Path) -> None:
+    record = _load("record")
+    compare = _load("compare")
+    assert {name + record.SNAPSHOT_SUFFIX for name in record.SNAPSHOT_MANIFESTS}.isdisjoint(
+        _DEPENDABOT_MANIFESTS
+    )
+    for name in record.SNAPSHOT_MANIFESTS:
+        (tmp_path / (name + record.SNAPSHOT_SUFFIX)).write_text(name, encoding="utf-8")
+    compare.restore_snapshot_names(tmp_path)
+    assert sorted(path.name for path in tmp_path.iterdir()) == sorted(record.SNAPSHOT_MANIFESTS)
+    assert (tmp_path / "package.json").read_text(encoding="utf-8") == "package.json"
