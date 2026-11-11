@@ -153,6 +153,8 @@ def test_real_imbalance_stamps_excluded_legs_without_work():
 @pytest.mark.parametrize("housekeeping", [
     ["Run actions/checkout@v4"],
     ["Post Run actions/checkout@v4", "Run actions/upload-artifact@v4"],
+    ["Upload test results"],
+    [""],
 ])
 def test_pr_light_legs_with_github_step_names_do_not_create_an_imbalance(
         housekeeping):
@@ -163,7 +165,10 @@ def test_pr_light_legs_with_github_step_names_do_not_create_an_imbalance(
         steps = [{"name": name, "conclusion": "success"}
                  for name in housekeeping]
         steps.append({"name": "Run divided tests",
-                      "conclusion": "success" if ran else "skipped"})
+                      "conclusion": "success" if ran else "skipped",
+                      "started_at": start.isoformat() if ran else None,
+                      "completed_at": ((start + timedelta(seconds=duration)).isoformat()
+                                       if ran else None)})
         jobs.append({
             "name": f"Test (Shard {index + 1})",
             "started_at": start.isoformat(),

@@ -10228,6 +10228,27 @@ def _detect_opt25_shard_imbalance(
                 totals, key=lambda step_name: (totals[step_name], step_name))
 
     for run_jobs in jobs_per_run:
+        active_names_by_base: dict[str, list[set[str]]] = {}
+        for job in run_jobs:
+            job_name = str(job.get("name", ""))
+            matrix_base = _matrix_base_name(job_name)
+            if matrix_base != job_name:
+                base = matrix_base
+            elif job_name in suffix_base:
+                base = suffix_base[job_name]
+            else:
+                continue
+            active_names_by_base.setdefault(base, []).append({
+                str(step.get("name") or "")
+                for step in job.get("steps") or []
+                if (isinstance(step, dict)
+                    and not _is_preparation_step(str(step.get("name") or ""))
+                    and str(step.get("conclusion") or "").lower() != "skipped")
+            })
+        always_run_by_base = {
+            base: set.intersection(*names) if names else set()
+            for base, names in active_names_by_base.items()
+        }
         for j in run_jobs:
             name = str(j.get("name", ""))
             mbase = _matrix_base_name(name)
@@ -10248,13 +10269,18 @@ def _detect_opt25_shard_imbalance(
                 step for step in work_steps
                 if str(step.get("conclusion") or "").lower() != "skipped"]
             dominant_name = dominant_step_by_base.get(base)
+            distinctive_active_steps = [
+                step for step in active_work_steps
+                if (str(step.get("name") or "") == dominant_name
+                    or str(step.get("name") or "")
+                    not in always_run_by_base.get(base, set()))]
             dominant_steps = [step for step in work_steps
                               if str(step.get("name") or "") == dominant_name]
             # A differently named active step is positive evidence that this
             # leg did real work (for example platform-specific test steps).
             # Only use the dominant sibling step to confirm an otherwise
             # workless leg; never discard that alternate work.
-            skipped_dominant = bool(dominant_name) and not active_work_steps and (
+            skipped_dominant = bool(dominant_name) and not distinctive_active_steps and (
                 not dominant_steps or all(
                     str(step.get("conclusion") or "").lower() == "skipped"
                     for step in dominant_steps))
