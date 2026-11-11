@@ -95,6 +95,17 @@ The one non-scripted field. Written once per pattern group and merged onto
   found. Its file is not listed in `workflows` unless it also holds counted
   steps. Parallel steps are a github.com / GitHub Enterprise Cloud feature;
   the scan reads the syntax wherever it appears.
+- `action_lockfile` — the GitHub Actions workflow lockfile
+  (`.github/workflows/actions.lock`): `path`, `state` (`absent`, `valid`, or
+  `invalid` for a file that is not exactly that name, a symbolic link,
+  unreadable, unparseable, an undocumented format version, or holding any
+  malformed entry — invalid credits nothing), `covered_references` (tag-pinned
+  `uses:` references, in scanned workflows the lockfile lists, that it locks
+  to a commit) and `covered_workflows`. The key is always present.
+  Informational, never a coverage gap: GitHub verifies each locked commit at
+  run time, and P14.11 checks only commit pins written in `uses:`, so these
+  are the references P14.11 leaves to GitHub. The report states them on its
+  **Action lockfile** row.
 - `security_score` — present in the JSON and **never rendered**. Phase 3
   forbids a score, ratio or `N/100` anywhere the user sees. It is listed here
   so it is recognized as out of bounds rather than mistaken for a summary

@@ -367,6 +367,17 @@ reason the check earns its place. Closing the fork gap needs a
 ref-reachability test the REST API does not offer; until then, read a clean
 P14.11 as "not dangling", not as "provably the maintainer's commit".
 
+**Workflow lockfiles.** A repository that adopts GitHub's workflow lockfile
+(`.github/workflows/actions.lock`, written by `gh actions-lock`) keeps a tag in
+the `uses:` line and records the commit only in the lockfile. This check reads
+commit pins written in `uses:` and does not check locked commits; for a
+workflow the lockfile lists, GitHub verifies the locked commit at run time
+(reachable from its recorded ref, same repository). The scan counts those
+references in `action_lockfile` and the report states them on its **Action
+lockfile** row, so a locked repository never reads as a silent pass. A
+lockfile that is not readable and well-formed is named and credited with
+nothing.
+
 **Fix recipe**: Re-pin to a SHA from the upstream's own history — typically
 the commit the latest release tag points at:
 

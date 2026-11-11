@@ -305,6 +305,19 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-11** — A repository that adopts GitHub's workflow lockfile no
+  longer loses the impostor-SHA check (P14.11) in silence. With a lockfile,
+  `uses:` lines carry tags and the commit lives only in
+  `.github/workflows/actions.lock`, so P14.11 had nothing to check and the
+  report gave no sign of it. The scan now reads the lockfile (fail-closed: an
+  unreadable or malformed one credits nothing) and records an informational
+  `action_lockfile` block; the report adds an **Action lockfile** row naming
+  how many references in how many workflows are locked, that GitHub verifies
+  each locked commit at run time, and that P14.11 checks only commit pins
+  written in `uses:`. Coverage is unchanged: a locked repository still reads
+  complete. The reader's accept/reject verdict is pinned against ci-score's
+  by a repo-root parity test.
+
 - **2026-11-09** — A crafted workflow line can no longer freeze the scan. The
   install-command matcher (dependency install scripts in a job that holds
   secrets) offered two readings of the same text in four places: an
