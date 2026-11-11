@@ -184,6 +184,20 @@ def validate_scan(doc: Any, engine_module: Any) -> None:
     parallel = doc.get("parallel_steps", {})
     if not isinstance(parallel, dict) or not isinstance(parallel.get("held_back", []), list):
         raise OperationalFailure("parallel_steps.held_back is malformed")
+    matrix_facts = doc.get("matrix_setup_facts", {})
+    if not isinstance(matrix_facts, dict):
+        raise OperationalFailure("matrix_setup_facts is malformed")
+    for workflow, jobs in matrix_facts.items():
+        if not isinstance(workflow, str) or not workflow or not isinstance(jobs, dict):
+            raise OperationalFailure("matrix_setup_facts workflow is malformed")
+        for job, fact in jobs.items():
+            if not isinstance(job, str) or not job or not isinstance(fact, dict):
+                raise OperationalFailure("matrix_setup_facts job is malformed")
+            legs, repeated = fact.get("legs"), fact.get("repeated")
+            if (type(legs) is not int or legs < 2 or not isinstance(repeated, list)
+                    or not repeated
+                    or any(not isinstance(name, str) or not name for name in repeated)):
+                raise OperationalFailure("matrix_setup_facts entry is malformed")
 
 
 def workflow_files(root: Path) -> dict[str, bytes]:
@@ -573,7 +587,7 @@ def main(argv: list[str] | None = None) -> int:
             after, work = merge_matrix[key]
             if after <= before or not ({"install", "build"} & set(work)):
                 continue
-            _workflow, job = key
+            workflow, job = key
             repeated_text = ", ".join(work[:-1])
             if len(work) > 1:
                 repeated_text += f" and {work[-1]}"
@@ -583,7 +597,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"OPT14 job {job}: {before} -> {after} legs; each leg "
                 f"repeats {repeated_text}; try running the work in parallel on "
                 "one machine first (see OPT88)")
-            annotation("warning", message)
+            annotation("warning", message, {
+                "workflow_file": workflow,
+                "line": 1,
+            })
             aggregate_warning_messages.append(message)
             warnings += 1
 
