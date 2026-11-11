@@ -2172,6 +2172,9 @@ def check_coverage_disclosed(report: str, findings_path: Path | None = None) -> 
                  + gh_note + skip_note)
 
 
+_VR_PR_SAMPLE_MIN_DISTINCT_DAYS = 5
+
+
 def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) -> Check:
     """Re-derive the PR-sample stop reason and bind it to rendered provenance."""
     name = "PR gate sample stop reason matches its bounded collection facts"
@@ -2224,7 +2227,7 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
             or partial_count > sampled):
         return Check(name, False, "candidate-page stop facts are malformed")
     strict_complete = (
-        sampled >= target and distinct_days >= 5
+        sampled >= target and distinct_days >= _VR_PR_SAMPLE_MIN_DISTINCT_DAYS
         and not cp.get("required_suite_unsatisfiable"))
     if complete != strict_complete:
         return Check(
@@ -2244,7 +2247,9 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     problems: list[str] = []
     if actual != expected:
         problems.append(f"sample_stop_reason={actual!r}, expected {expected!r}")
-    rendered = f"{sampled} of {target} PRs sampled: {expected.replace('_', ' ')}"
+    sample_size = (f"{sampled} PRs sampled (minimum target {target})"
+                   if sampled > target else f"{sampled} of {target} PRs sampled")
+    rendered = f"{sample_size}: {expected.replace('_', ' ')}"
     if rendered not in report:
         problems.append("rendered report omits or changes the re-derived sample statement")
     if sampled and (not span_first or not span_last):

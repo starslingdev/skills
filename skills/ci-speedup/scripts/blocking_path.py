@@ -6854,8 +6854,13 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
         or (isinstance(distinct_days, int) and distinct_days < 5))
     heading = ("PR gate sample (ordering withheld)" if unreliable
                else "Which checks gate (the critical-path ordering)")
-    gate = (f"> - **{heading}:** measured from **{spr}/{tgt} sampled PRs** — "
-            f"**{spr} of {tgt} PRs sampled: {stop_reason}**")
+    overshoot = isinstance(spr, int) and isinstance(tgt, int) and spr > tgt
+    sample_population = (f"{spr} PRs sampled (minimum target {tgt})" if overshoot
+                         else f"{spr}/{tgt} sampled PRs")
+    sample_status = (f"{spr} PRs sampled (minimum target {tgt})" if overshoot
+                     else f"{spr} of {tgt} PRs sampled")
+    gate = (f"> - **{heading}:** measured from **{sample_population}** — "
+            f"**{sample_status}: {stop_reason}**")
     if unreliable:
         reasons = []
         if isinstance(partial_commits, int) and spr and partial_commits * 2 > spr:
@@ -6920,6 +6925,13 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "sampled PRs, so there's no required-check critical path. The spine "
                    "is the measured **PR-floor** — the file-backed work a normal PR "
                    "runs — not the branch-protection gate.")
+    elif cp.get("sample_job_list_scoped"):
+        out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "
+                   "representative population avoids one check-run request per commit, "
+                   "so it includes completed PR commits even when a path-conditional "
+                   "required check did not run. Required checks absent from the job "
+                   "lists are named separately; gate frequency is observed, not proof "
+                   "that every sampled commit ran the full required suite.")
     elif cp.get("required_suite_scoped") is False:
         out.append("> - ⚠️ **Required checks were unreadable** (no admin / branch "
                    "protection 404), so 'gate' here means the **slowest check on a "
@@ -8813,8 +8825,9 @@ def _metadata_table(doc: dict[str, Any], repo: str) -> list[str]:
         span_last = str(cp.get("sample_span_last") or "")[:10]
         span = (f"; {span_first} to {span_last}"
                 if span_first and span_last else "")
-        rows.append(("PR gate sample",
-                     f"{spr} of {tgt} PRs sampled: {reason}{span}"))
+        sample_size = (f"{spr} PRs sampled (minimum target {tgt})"
+                       if spr > tgt else f"{spr} of {tgt} PRs sampled")
+        rows.append(("PR gate sample", f"{sample_size}: {reason}{span}"))
     if skill.startswith("installed:"):
         # Content-hash provenance for an installed skill copy (issue #2): not a
         # commit, so a plain identity string with NO commit permalink to fabricate.

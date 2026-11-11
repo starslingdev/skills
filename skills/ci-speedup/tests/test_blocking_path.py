@@ -2658,7 +2658,7 @@ def test_provenance_omits_deep_scan_note_for_a_shallow_walk():
     block = "\n".join(bp._provenance_block(
         _prov_doc(sampled_pr_count=20, sample_fetched=50), "o/r", "2026-06-08"))
     assert "recent PRs**" not in block
-    assert "20/20 sampled PRs" in block          # the plain honest baseline
+    assert "20 of 20 PRs sampled" in block       # the plain honest baseline
 
 
 def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():

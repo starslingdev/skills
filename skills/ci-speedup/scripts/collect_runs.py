@@ -4309,8 +4309,9 @@ def _all_status_runs(client: GhClient, repo: str, wf_id: int,
 
 
 # The gate population is a statistical sample, rather than the smaller run sample
-# used to drill individual workflows. Keep these public defaults together so the
-# defaults review can change one decision without hunting through the collector.
+# used to drill individual workflows. These values are provisional until the report
+# defaults are reviewed; keep them together so that review can change one decision
+# without hunting through the collector.
 _PR_SAMPLE_TARGET = 100
 _PR_SAMPLE_MIN_DISTINCT_DAYS = 5
 _PR_CANDIDATE_PAGE_CAP = 12
@@ -5044,6 +5045,7 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
         "sample_span_first": sample_diag.get("span_first", ""),
         "sample_span_last": sample_diag.get("span_last", ""),
         "sample_partial_count": sample_diag.get("partial_count", 0),
+        "sample_job_list_scoped": sample_diag.get("job_list_scoped", False),
         "sample_fetch_failures": sample_diag["fetch_failures"],
         "sample_fetched": sample_diag["fetched"],
         "required_suite_scoped": sample_diag["required_suite_scoped"],
@@ -29637,37 +29639,34 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
     # The workflow timing pass intentionally visits only workflows tied to a
     # finding. Gate-frequency sampling has a different denominator: every
-    # workflow that ran on the PR commit. If the seeded workflows cannot form a
-    # representative population, read the other workflows' first run-list pages
-    # too. Pages with no developer event contribute nothing and incur no job read.
-    if (len(_rep_ts) < _REPR_PR_TARGET
-            or len({str(ts or "")[:10] for ts in _rep_ts.values()})
-               < _PR_SAMPLE_MIN_DISTINCT_DAYS):
-        for _wf_path in sorted(wf_by_path):
-            if _wf_path in all_status_runs_by_wf:
+    # workflow that ran on the PR commit. Always read every workflow's first
+    # run-list page so a clean workflow cannot disappear merely because a
+    # finding-bearing sibling already filled the commit target.
+    for _wf_path in sorted(wf_by_path):
+        if _wf_path in all_status_runs_by_wf:
+            continue
+        _wf_id = (wf_by_path.get(_wf_path) or {}).get("id")
+        if _wf_id is None:
+            continue
+        _page_rows = _all_status_page(_wf_path, _wf_id)
+        if _page_rows is None:
+            continue
+        for _row in _page_rows:
+            if (str(_row.get("event") or "") not in _DEVELOPER_EVENTS
+                    or not _row.get("head_sha")
+                    or str(_row.get("status") or "") != "completed"):
                 continue
-            _wf_id = (wf_by_path.get(_wf_path) or {}).get("id")
-            if _wf_id is None:
-                continue
-            _page_rows = _all_status_page(_wf_path, _wf_id)
-            if _page_rows is None:
-                continue
-            for _row in _page_rows:
-                if (str(_row.get("event") or "") not in _DEVELOPER_EVENTS
-                        or not _row.get("head_sha")
-                        or str(_row.get("status") or "") != "completed"):
-                    continue
-                _sha = str(_row["head_sha"])
-                _ts = str(_row.get("created_at") or _row.get("updated_at") or "")
-                if _ts > pr_sha_ts.get(_sha, ""):
-                    pr_sha_ts[_sha] = _ts
-                _prev = sha_meta.get(_sha)
-                if _prev is None or _ts > str(_prev.get("ts") or ""):
-                    sha_meta[_sha] = {
-                        "event": str(_row.get("event") or ""),
-                        "pr_num": _run_pr_number(_row), "ts": _ts,
-                    }
-            _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+            _sha = str(_row["head_sha"])
+            _ts = str(_row.get("created_at") or _row.get("updated_at") or "")
+            if _ts > pr_sha_ts.get(_sha, ""):
+                pr_sha_ts[_sha] = _ts
+            _prev = sha_meta.get(_sha)
+            if _prev is None or _ts > str(_prev.get("ts") or ""):
+                sha_meta[_sha] = {
+                    "event": str(_row.get("event") or ""),
+                    "pr_num": _run_pr_number(_row), "ts": _ts,
+                }
+        _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
     _candidate_active = {
         wf_path
         for wf_path, page_rows in all_status_runs_by_wf.items()
@@ -29676,10 +29675,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 for row in page_rows)
         and (wf_by_path.get(wf_path) or {}).get("id") is not None
     }
-    while ((len(_rep_ts) < _REPR_PR_TARGET
-            or len({str(ts or "")[:10] for ts in _rep_ts.values()})
-               < _PR_SAMPLE_MIN_DISTINCT_DAYS)
-           and _candidate_active
+    # Apply the completed-only eligibility after every bounded workflow walk.
+    # Stopping on the aggregate count first can strand clean commits on older
+    # pages when the apparent target is later removed by an in-flight sibling.
+    while (_candidate_active
            and _candidate_page < _PR_CANDIDATE_PAGE_CAP):
         _candidate_page += 1
         _next_active: set[str] = set()
@@ -29768,9 +29767,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         sample_diag = {
             "target": _REPR_PR_TARGET, "kept": len(repr_shas),
             "fetched": len(repr_shas), "fetch_failures": 0,
-            "complete": True, "required_suite_scoped": bool(req_names),
+            "complete": True, "required_suite_scoped": False,
             "required_suite_unsatisfiable": False,
             "required_checks_unobservable": [], "selection_limited": False,
+            "job_list_scoped": True,
         }
         _rep_ts = _eligible_ts
     else:
