@@ -305,7 +305,7 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
-- **2026-11-11** — A repository that adopts GitHub's workflow lockfile no
+- **2026-11-11** (#329) — A repository that adopts GitHub's workflow lockfile no
   longer loses the impostor-SHA check (P14.11) in silence. With a lockfile,
   `uses:` lines carry tags and the commit lives only in
   `.github/workflows/actions.lock`, so P14.11 had nothing to check and the
