@@ -325,11 +325,19 @@ def test_pr_sample_day_floor_stays_coupled_through_the_findings_contract(
     fixture = _busy_pr_sample_fixture(tmp_path)
     run_root = tmp_path / "run-day-floor-contract"
     run_root.mkdir()
-    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
 
     assert (doc["pr_critical_path"]["sample_min_distinct_days"]
             == cr._PR_SAMPLE_MIN_DISTINCT_DAYS)
     assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    findings_path = run_root / fixture.name / "findings.json"
+    tampered = json.loads(findings_path.read_text(encoding="utf-8"))
+    tampered["pr_critical_path"]["sample_min_distinct_days"] = 1
+    findings_path.write_text(json.dumps(tampered), encoding="utf-8")
+    rejected = vr.check_pr_sample_stop_reason(report, findings_path)
+    assert not rejected.ok
+    assert "candidate-page stop facts are malformed" in rejected.detail
 
 
 def _first_fact_difference(expected, actual, path: str = "") -> tuple[str, object, object]:
@@ -1968,6 +1976,56 @@ def test_pr_sample_discloses_required_check_missing_from_job_lists(
     assert "Status-only required check(s) excluded from the suite test" in report
     assert "Required-suite coverage comes from run/job lists" in report
     assert "external-review" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_pr_sample_keeps_empty_observable_required_suite_empty(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path, extended=True)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["required_checks"] = ["gate", "lint"]
+    completed = [
+        row for page in recorded["workflows"][0]["run_pages"][1:]
+        for row in page
+    ]
+    for index, row in enumerate(completed):
+        recorded["jobs"][str(row["id"])][0]["name"] = (
+            "gate" if index % 2 == 0 else "lint")
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-empty-required-suite"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 0
+    assert cp["required_suite_scoped"] is True
+    assert cp["required_suite_unsatisfiable"] is False
+    assert cp["sample_job_list_scoped"] is True
+    assert cp["sample_stop_reason"] == "candidates_exhausted"
+    assert "0 of 100 PRs sampled: candidates exhausted" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_pr_sample_preserves_external_only_required_check_and_wall_bound(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path, extended=True)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["required_checks"] = ["external-review"]
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-external-only-required"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["required_checks_unobservable"] == ["external-review"]
+    assert cp["required_suite_scoped"] is False
+    assert cp["required_suite_unsatisfiable"] is True
+    wall_check = next(
+        check for check in checks
+        if check.name == "per-commit wall-clock projections are physically bounded")
+    assert wall_check.ok
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 

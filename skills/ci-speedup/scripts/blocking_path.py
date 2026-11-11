@@ -41,6 +41,7 @@ import pr_lifecycle
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
+from pr_sample_contract import pr_sample_is_mostly_partial
 from shell_prefix import SHELL_PREFIX_SRC  # same-skill module; one source for three detectors
 from workflow_steps import (  # same-skill module; step walker
     parallel_steps_disclosure, parallel_steps_used, parallel_steps_used_for)
@@ -6851,7 +6852,8 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
     distinct_days = cp.get("sample_distinct_days")
     min_distinct_days = cp.get("sample_min_distinct_days")
     unreliable = (
-        (isinstance(partial_commits, int) and spr and partial_commits * 2 > spr)
+        (isinstance(partial_commits, int) and isinstance(spr, int)
+         and pr_sample_is_mostly_partial(partial_commits, spr))
         or (isinstance(distinct_days, int)
             and isinstance(min_distinct_days, int)
             and distinct_days < min_distinct_days))
@@ -6866,7 +6868,8 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
             f"**{sample_status}: {stop_reason}**")
     if unreliable:
         reasons = []
-        if isinstance(partial_commits, int) and spr and partial_commits * 2 > spr:
+        if (isinstance(partial_commits, int) and isinstance(spr, int)
+                and pr_sample_is_mostly_partial(partial_commits, spr)):
             reasons.append(f"{partial_commits}/{spr} sampled commits are partial")
         if (isinstance(distinct_days, int)
                 and isinstance(min_distinct_days, int)
@@ -11099,6 +11102,74 @@ def _commit_wait_bottom_line(commit_clock: dict[str, Any],
     return bottom
 
 
+def _commit_wall_disclosure_lines(commit_clock: dict[str, Any]) -> list[str]:
+    """Render the verifier-pinned per-commit wait even when no pole resolves."""
+    p50 = _num(commit_clock.get("p50_s"))
+    p90 = _num(commit_clock.get("p90_s"))
+    facts = [f for f in (commit_clock.get("facts") or []) if isinstance(f, dict)]
+
+    def duration(seconds: float) -> str:
+        whole = max(0, round(seconds))
+        hours, rem = divmod(whole, 3600)
+        minutes, secs = divmod(rem, 60)
+        return (f"{hours}h {minutes:02d}m {secs:02d}s" if hours
+                else f"{minutes}m {secs:02d}s")
+
+    lines: list[str] = []
+    if p50 is not None and p90 is not None:
+        complete = [f for f in facts if _num(f.get("wall_s")) is not None]
+        basis = (min(complete, key=lambda f: abs(
+            (_num(f.get("wall_s")) or 0.0) - p50)) if complete else None)
+        p4 = basis.get("projection_4x") if isinstance(basis, dict) else None
+        clause = ""
+        if isinstance(p4, dict):
+            projected = _num(p4.get("projected_s"))
+            multiple = _num(p4.get("multiple"))
+            if projected is not None and multiple is not None:
+                clause = (
+                    " At the sampled p50 commit, a 4x speedup to its slowest job "
+                    f"projects to **{duration(projected)}** (**{multiple:.2f}x**).")
+                median = _num(commit_clock.get("median_projection_multiple"))
+                worst = commit_clock.get("worst_commit") or {}
+                worst_wall = _num(worst.get("wall_s")) if isinstance(worst, dict) else None
+                worst_sha = (str(worst.get("sha") or "")[:7]
+                             if isinstance(worst, dict) else "")
+                worst_wf = (str(worst.get("workflow_file") or "")
+                            if isinstance(worst, dict) else "")
+                if median is not None:
+                    clause += f" Across commits, the median projection is **{median:.2f}x**."
+                if worst_wall is not None and worst_sha:
+                    held = (f"; `{_wf_base(worst_wf)}` holds its slowest job"
+                            if median is not None and median < multiple / 2.0 and worst_wf
+                            else "")
+                    clause += (
+                        f" The worst sampled commit is `{worst_sha}` at "
+                        f"**{duration(worst_wall)}**{held}.")
+        lines.append(
+            "> **Per-commit PR wait:** p50 "
+            f"**{duration(p50)}**, p90 **{duration(p90)}**, from the earliest "
+            "workflow run created to the last job completed across every workflow "
+            "on that commit." + clause)
+    partial = [f for f in facts if f.get("partial") is True]
+    if partial:
+        missing = sorted({str(wf) for f in partial
+                          for wf in (f.get("missing_workflows") or []) if wf})
+        reruns = sorted({str(wf) for f in partial
+                         for wf in (f.get("rerun_workflows") or []) if wf})
+        reasons = []
+        if missing:
+            reasons.append("missing " + ", ".join(
+                f"`{_clean_label(wf)}`" for wf in missing))
+        if reruns:
+            reasons.append("re-run " + ", ".join(
+                f"`{_clean_label(wf)}`" for wf in reruns))
+        lines.append(
+            f"> {len(partial)} sampled commit(s) were partial"
+            + (f" ({'; '.join(reasons)})" if reasons else "")
+            + "; their observed spans were excluded from these percentiles.")
+    return lines
+
+
 _WORKFLOW_LANE_EVENTS = frozenset({
     "branch_protection_rule", "check_run", "check_suite", "create", "delete",
     "deployment", "deployment_status", "discussion", "discussion_comment",
@@ -13713,6 +13784,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *queue_lines]
     if tier2_lines:
         out += ["---", "", *tier2_lines]
+    _commit_lines = _commit_wall_disclosure_lines(
+        cp.get("commit_wall_clock") or {})
+    if _commit_lines:
+        out += ["---", "", *_commit_lines]
     # No pole is drilled here, so every OPT80 tail line renders in the off-pole
     # section, after the runner-minute cards and before Also noticed. This is
     # the static-only path (no measured poles); the block is empty unless some

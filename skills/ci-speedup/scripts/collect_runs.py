@@ -46,6 +46,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from pr_sample_contract import (
+    PR_SAMPLE_CANDIDATE_PAGE_CAP as _PR_CANDIDATE_PAGE_CAP,
+    PR_SAMPLE_MIN_DISTINCT_DAYS as _PR_SAMPLE_MIN_DISTINCT_DAYS,
+    PR_SAMPLE_TARGET as _PR_SAMPLE_TARGET,
+)
+
 # Module logger — inherits the entry point's logging config (WARNING by default,
 # DEBUG under STARSLING_LOG_LEVEL). Used for diagnosable-but-non-fatal gh paths
 # (e.g. an expected-absent rulesets endpoint) so a real collection failure is
@@ -4306,15 +4312,6 @@ def _all_status_runs(client: GhClient, repo: str, wf_id: int,
         client,
         f"repos/{repo}/actions/workflows/{wf_id}/runs"
         f"?per_page={max_runs}{pin}")
-
-
-# The gate population is a statistical sample, rather than the smaller run sample
-# used to drill individual workflows. These values are provisional until the report
-# defaults are reviewed; keep them together so that review can change one decision
-# without hunting through the collector.
-_PR_SAMPLE_TARGET = 100
-_PR_SAMPLE_MIN_DISTINCT_DAYS = 5
-_PR_CANDIDATE_PAGE_CAP = 12
 
 
 def _all_status_run_page(client: GhClient, repo: str, wf_id: int,
@@ -29678,6 +29675,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     }
 
     _candidate_scoped_ts: dict[str, str] = {}
+    _candidate_scope_evaluated = False
     _candidate_observable_required: frozenset[str] = frozenset()
     _candidate_unobservable_required: frozenset[str] = frozenset()
 
@@ -29717,7 +29715,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         would turn an I/O gap into a clean suite decision.
         """
         nonlocal _candidate_scoped_ts, _candidate_observable_required
-        nonlocal _candidate_unobservable_required
+        nonlocal _candidate_unobservable_required, _candidate_scope_evaluated
         _rows, rows_by_sha, eligible_ts = _candidate_snapshot()
         raw_days = {str(ts or "")[:10] for ts in eligible_ts.values()}
         if (len(eligible_ts) < _REPR_PR_TARGET
@@ -29754,6 +29752,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     names_by_rep[rep].add(name)
                     observed.add(name)
         observable = frozenset(set(req_names) & observed)
+        _candidate_scope_evaluated = True
         _candidate_observable_required = observable
         _candidate_unobservable_required = frozenset(set(req_names) - observed)
         if not observable:
@@ -29838,8 +29837,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _job_population_read = (
         len(_eligible_ts) >= _REPR_PR_TARGET
         and len(_raw_eligible_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
-        and (not req_names or bool(_candidate_observable_required)))
-    if _candidate_scoped_ts:
+        and (not req_names or _candidate_scope_evaluated))
+    if _candidate_scope_evaluated and _candidate_observable_required:
         _eligible_ts = _candidate_scoped_ts
     _selection_target = _spread_target(_eligible_ts)
     _eligible_days = {str(ts or "")[:10] for ts in _eligible_ts.values()}

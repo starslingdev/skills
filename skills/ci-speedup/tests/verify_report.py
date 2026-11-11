@@ -126,6 +126,23 @@ def _load_untrusted_wrap():
 uw = _load_untrusted_wrap()
 
 
+def _load_pr_sample_contract():
+    """Load the shipped pure PR-sample defaults without importing the renderer."""
+    path = Path(__file__).resolve().parents[1] / "scripts" / "pr_sample_contract.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "ci_speedup_pr_sample_contract_for_verify", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("PR-sample contract module is unavailable")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_PR_SAMPLE_CONTRACT = _load_pr_sample_contract()
+
+
 @dataclass(frozen=True)
 class Check:
     name: str
@@ -2184,6 +2201,8 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     cp = _as_dict(data.get("pr_critical_path"))
     if "sample_stop_reason" not in cp:
         return Check(name, True, "artifact predates the stop-reason contract", skipped=True)
+    if _PR_SAMPLE_CONTRACT is None:
+        return Check(name, False, "PR-sample contract module is unavailable")
     required = (
         "sample_candidate_pages_fetched", "sample_candidate_page_cap",
         "sample_candidate_pages_exhausted", "sample_candidate_page_fetch_failures",
@@ -2221,7 +2240,8 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
             or not isinstance(exhausted, bool) or not isinstance(era_door, bool)
             or not isinstance(selection_limited, bool)
             or not isinstance(distinct_days, int) or distinct_days < 0
-            or not isinstance(min_distinct_days, int) or min_distinct_days < 1
+            or not isinstance(min_distinct_days, int)
+            or min_distinct_days != _PR_SAMPLE_CONTRACT.PR_SAMPLE_MIN_DISTINCT_DAYS
             or not isinstance(span_first, str) or not isinstance(span_last, str)
             or not isinstance(partial_count, int) or partial_count < 0
             or partial_count > sampled):
@@ -2267,7 +2287,8 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
         if rendered_span not in report:
             problems.append("rendered report omits the sampled commit span")
     unreliable = sampled and (
-        partial_count * 2 > sampled or distinct_days < min_distinct_days)
+        _PR_SAMPLE_CONTRACT.pr_sample_is_mostly_partial(partial_count, sampled)
+        or distinct_days < min_distinct_days)
     if unreliable:
         if "gate frequency and pole order are unreliable" not in report:
             problems.append("thin sample omits the gate-frequency reliability warning")

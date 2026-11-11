@@ -52,6 +52,7 @@ _DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DIR))
 from summary import build_summary  # noqa: E402  (sibling module; needs _DIR on path)
 from before_after import advance_verification, GhVerificationClient  # noqa: E402
+from pr_sample_contract import pr_sample_goal_text  # noqa: E402
 
 
 def _git_short_sha(repo_dir: Path, short: bool = True) -> str | None:
@@ -179,7 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--target", type=int, default=10,
                         help="Render target (orchestration knob). NOTE: does NOT change "
                              "sampling DEPTH — the gh pass always runs, the PR gate sample "
-                             "aims for 100 completed PR commits across five days and the "
+                             f"aims for {pr_sample_goal_text()} and the "
                              "run sample stays at collect_runs' "
                              "--max-runs. Raising it will not recover an empty spine "
                              "(issue #81).")

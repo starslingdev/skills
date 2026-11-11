@@ -20,6 +20,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+_DIR = Path(__file__).resolve().parent
+if str(_DIR) not in sys.path:
+    sys.path.insert(0, str(_DIR))
+from pr_sample_contract import pr_sample_goal_text
+
 def _clock(s: Any) -> str:
     if s is None:
         return "?"
@@ -376,7 +381,7 @@ def _rerun_command(repo: str | None, root: str | None,
                    findings_path: str) -> str:
     """The exact `run.py` invocation to re-run, computed from what we know. Deliberately
     NOT a raised `--target`: `--target` does not change sampling depth (the PR gate sample
-    aims for 100 completed PR commits across five days and the run sample stays at
+    aims for the configured completed-PR population and the run sample stays at
     `--max-runs`), so raising it is the very
     mislead issue #81 documents."""
     if not repo:
@@ -460,7 +465,7 @@ def empty_spine_diagnostics(doc: dict[str, Any], findings_path: str,
                    "property of the repo; a plain re-run once it clears recovers the full "
                    "spine.")
         out.append("Do NOT raise --target: it does NOT change sampling depth (the PR gate "
-                   "sample aims for 100 completed PR commits across five days and the run "
+                   f"sample aims for {pr_sample_goal_text()} and the run "
                    "sample stays at --max-runs). The live "
                    "'--target 100 recovered it' was coincidental with the block clearing "
                    "(issue #81).")
@@ -787,8 +792,6 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     # This directory first, so the sibling import below resolves even under
     # PYTHONSAFEPATH / `python -P` (the script's directory is not on sys.path).
-    if str(Path(__file__).resolve().parent) not in sys.path:
-        sys.path.insert(0, str(Path(__file__).resolve().parent))
     from log_level import configure_logging  # STARSLING_LOG_LEVEL opt-in
     configure_logging()
     sys.exit(main())
