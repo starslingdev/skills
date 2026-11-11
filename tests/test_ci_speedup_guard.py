@@ -140,6 +140,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: npm ci
+      - run: npm run build
       - run: npx playwright test --shard=${{{{ matrix.index }}}}/{shard_legs}
       - uses: actions/upload-artifact@v4
         with:
@@ -156,6 +157,18 @@ jobs:
           path: all-blob-reports
       - run: npx playwright merge-reports --reporter html ./all-blob-reports
 """
+
+
+def playwright_include_report_matrix(*, shard_legs: int) -> str:
+    """The same report layout with shard indexes supplied by include rows."""
+    workflow = playwright_report_matrix(shard_legs=shard_legs)
+    values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    include = "\n".join(
+        f"          - index: {value}" for value in range(1, shard_legs + 1))
+    return workflow.replace(
+        f"        index: [{values}]",
+        f"        include:\n{include}",
+    )
 
 
 def index_metadata_matrix(*, matrix_legs: int) -> str:
@@ -293,6 +306,20 @@ def test_playwright_blob_report_handoff_does_not_hide_shard_growth(
         tmp_path,
         playwright_report_matrix(shard_legs=8),
         playwright_report_matrix(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_playwright_include_indexes_feed_shard_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        playwright_include_report_matrix(shard_legs=8),
+        playwright_include_report_matrix(shard_legs=16),
     )
 
     code, output = run(guard, base, merge, capsys, monkeypatch)

@@ -3750,6 +3750,22 @@ _MATRIX_SETUP_BUILD_RE = re.compile(
     r"gradle\w*\s+build|bazel\s+build)\b", re.I)
 
 
+def _matrix_axis_feeds_shard(job: dict, key: object) -> bool:
+    """Whether one matrix key describes the shard selected by the command."""
+    key_text = str(key)
+    if _SHARD_AXIS_RE.search(key_text):
+        return True
+    if key_text.casefold() != "index":
+        return False
+    return re.search(
+        rf"--shard(?:=|\s+)[\"']?[^\s\"']*"
+        rf"\$\{{\{{\s*matrix\.{re.escape(key_text)}\s*\}}\}}"
+        rf"[^\s\"']*[\"']?",
+        _job_run_blob(job),
+        re.IGNORECASE,
+    ) is not None
+
+
 def _matrix_shard_leg_count(job: dict) -> int | None:
     """Count distinct effective shard configurations, ignoring diagnostics.
 
@@ -3762,27 +3778,18 @@ def _matrix_shard_leg_count(job: dict) -> int | None:
     matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
     if not isinstance(matrix, dict):
         return None
-    run_blob = _job_run_blob(job)
     shard_keys = set()
     for key in matrix:
         key_text = str(key)
         if key_text in {"include", "exclude"}:
             continue
-        if _SHARD_AXIS_RE.search(key_text) or (
-                key_text.casefold() == "index"
-                and re.search(
-                    rf"--shard(?:=|\s+)[\"']?[^\s\"']*"
-                    rf"\$\{{\{{\s*matrix\.{re.escape(key_text)}\s*\}}\}}"
-                    rf"[^\s\"']*[\"']?",
-                    run_blob,
-                    re.IGNORECASE,
-                )):
+        if _matrix_axis_feeds_shard(job, key_text):
             shard_keys.add(key_text)
     include = matrix.get("include")
     if isinstance(include, list):
         shard_keys.update(
             str(key) for row in include if isinstance(row, dict) for key in row
-            if _SHARD_AXIS_RE.search(str(key)))
+            if _matrix_axis_feeds_shard(job, key))
     if not shard_keys:
         return None
     legs = _opt102_matrix_legs(job)
