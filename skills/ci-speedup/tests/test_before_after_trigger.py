@@ -668,6 +668,22 @@ def test_renamed_cache_actions_without_a_marker_stay_unknown():
         assert _cache_class({"position": 2, **sample}) == (
             "unknown", "no cache marker in sampled job logs"), action
 
+    client = AdapterFixture({
+        "actions/jobs/": (
+            "2026-11-11T08:14:03.1234567Z ##[group]Run actions/setup-node@v4\n"
+            "2026-11-11T08:14:03.1235678Z with:\n"
+            "2026-11-11T08:14:03.1236789Z   cache: npm\n"
+            "2026-11-11T08:14:04.2345678Z npm cache is not found\n"),
+    })
+    job = _api_job()
+    job["steps"][0]["name"] = "Set up Node.js"
+
+    sample = client._job_logs("o/r", [job])
+
+    assert sample["log_has_cache_step"] is True
+    assert _cache_class({"position": 2, **sample}) == (
+        "unknown", "no cache marker in sampled job logs")
+
 
 def test_unreadable_renamed_step_cannot_prove_cache_absence():
     client = AdapterFixture({})

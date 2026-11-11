@@ -32,7 +32,8 @@ _CACHE_CAPABLE_SETUP_LOG = re.compile(
     r"(?i)(?:actions/setup-(?:go|java|node|python)|setup-gradle|setup-ruby|"
     r"setup-uv)@")
 _SETUP_CACHE_INPUT = re.compile(
-    r"(?im)^\s*(?:cache|bundler-cache|enable-cache)\s*:\s*"
+    r"(?im)^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+)?"
+    r"\s*(?:cache|bundler-cache|enable-cache)\s*:\s*"
     r"(?!false\s*$|none\s*$)\S+")
 
 # Job logs are the largest verification responses.  Bound both the number of
