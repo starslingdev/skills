@@ -103,7 +103,7 @@
         "npop": 20,
         "demoted": false
       },
-      "rendered": "Slowest check a typical PR waits on: P50 41m 21s; its workflow `tests_primary.yml` gates 7/20 sampled PRs (rough 95% interval 18-57%)."
+      "rendered": "Slowest check a typical PR waits on: P50 41m 21s; its workflow `tests_primary.yml` gates 7/20 sampled PRs."
     },
     {
       "kind": "pole_gate_prompt",
@@ -114,7 +114,7 @@
         "npop": 20,
         "demoted": false
       },
-      "rendered": "Slowest check a typical PR waits on: P50 72m 57s; its workflow `tests_secondary.yml` gates 5/20 sampled PRs (rough 95% interval 11-47%)."
+      "rendered": "Slowest check a typical PR waits on: P50 72m 57s; its workflow `tests_secondary.yml` gates 5/20 sampled PRs."
     },
     {
       "kind": "pole_role_line",
@@ -134,7 +134,7 @@
         "npop": 20,
         "demoted": false
       },
-      "rendered": "Slowest check a typical PR waits on: P50 40m 15s; its workflow `tests_mcp.yml` gates 6/20 sampled PRs (rough 95% interval 15-52%)."
+      "rendered": "Slowest check a typical PR waits on: P50 40m 15s; its workflow `tests_mcp.yml` gates 6/20 sampled PRs."
     },
     {
       "kind": "pole_role_line",

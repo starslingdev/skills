@@ -2006,11 +2006,35 @@ def test_gate_frequency_confidence_discloses_bookkeeping_and_withholds_order(
 
     assert cp["bookkeeping_checks"] == ["cleanup"]
     assert cp["critical_path_check"] != "cleanup"
+    assert all(row.get("name") != "cleanup" for row in cp["checks"])
     assert "cleanup" in report and "under 60s" in report
     assert "rough 95% interval" in report
     assert "2026-01-24 to 2026-01-28" in report
-    assert "pole order is not supported" in report
+    confidence_claims = [
+        claim for claim in bp._LAST_CLAIMS.to_json()["claims"]
+        if claim["kind"] == "pole_gate_prompt"
+        and "gate_interval_lo" in claim["fields"]]
+    assert confidence_claims
+    assert all(
+        {"gate_interval_lo", "gate_interval_hi", "sample_span_first", "sample_span_last"}
+        <= claim["fields"].keys()
+        for claim in confidence_claims)
+    # Both visible poles belong to one workflow, so they are one displayed
+    # frequency estimate and must not be compared as if they were competitors.
+    assert "pole order is not supported" not in report
     assert not [check for check in checks if not check.skipped and not check.ok]
+
+    two_workflow_doc = json.loads(json.dumps(doc))
+    for row in two_workflow_doc["pr_critical_path"]["checks"]:
+        if row.get("name") == "build":
+            row["workflow_file"] = ".github/workflows/build.yml"
+    for pole in two_workflow_doc["pr_critical_path"]["poles"]:
+        if pole.get("check") == "build":
+            pole["workflow_file"] = ".github/workflows/build.yml"
+    two_workflow_report = bp.render(two_workflow_doc, captured_at="2026-01-31T00:00:00Z")
+    assert "`ci.yml` gates 10/20" in two_workflow_report
+    assert "`build.yml` gates 10/20" in two_workflow_report
+    assert "pole order is not supported" in two_workflow_report
 
     mutant = json.loads(json.dumps(doc))
     mutant_cp = mutant["pr_critical_path"]
@@ -2034,3 +2058,15 @@ def test_gate_frequency_confidence_discloses_bookkeeping_and_withholds_order(
             "gate-frequency ordering has enough events, span, and "
             "non-overlapping intervals") and not check.ok
         for check in mutant_checks)
+
+
+    for bad_report in (
+            re.sub(r"rough 95% interval \d+-\d+%", "rough 95% interval 99-100%", report),
+            re.sub(r"; 2026-01-24 to 2026-01-28(?=\))", "", report)):
+        report_path.write_text(bad_report, encoding="utf-8")
+        bad_checks = vr.run_checks(bad_report, report_path, out / "findings.json", skill_repo=None)
+        assert any(
+            check.name == (
+                "gate-frequency ordering has enough events, span, and "
+                "non-overlapping intervals") and not check.ok
+            for check in bad_checks)

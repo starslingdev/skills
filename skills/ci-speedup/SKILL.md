@@ -325,11 +325,11 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    or narrate phases/verification. Then ask which pole to fix **via the interaction
    contract above (AskUserQuestion where available) — ONE question, ONE page, never
    multiple questions** (extra questions render as hidden tabs — a real run buried the
-   save option in one). If the report says **pole order is not supported**, the close calls the frequencies an unordered set and lists options alphabetically, never as first/top/biggest; otherwise slots 1..3 are fix options: **per-pole, top pole first** — each
+   save option in one). If the report says **pole order is not supported**, the close calls the frequencies an unordered set and lists the **per-pole fix options** alphabetically by check name, never as first/top/biggest (the always-last save rule still applies); otherwise slots 1..3 are fix options: **per-pole, top pole first** — each
    **label is the plain check name + its measured wait** (`Fix the test check (8m36s
    wait)`), **never** "pole" or an OPT-id in a user-facing label. With exactly TWO gating poles, **both get their own slot** plus "Fix both" —
    the bill option folds out to the close prose instead (a user who already fixed pole 1
-   must be able to pick pole 2 alone — live miss 2026-07-30). With ≥3 poles: top pole, then **"Fix all gating checks"**. Then
+   must be able to pick pole 2 alone — live miss 2026-07-30). With ≥3 poles: when order is supported, top pole; when it is unsupported, the alphabetically first check; then **"Fix all gating checks"**. Then
    **"Take the bill savings (~N min/mo)"** when a slot remains, offered only when the
    Runner-minute reductions section renders a source-backed R-row (or, with zero
    admitted rows, its Bottom line carries the "modeled bill opportunities remain in

@@ -30089,8 +30089,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             name for name in pr_check_p50
             if _pole_is_required_reachable(name, req_names, _job_graph, crit_by_wf))
     _bookkeeping_checks = {
-        name for name, span in _span_caps.items()
-        if float(span) < _GATE_BOOKKEEPING_CUTOFF_S
+        name for name, span in pr_check_p50.items()
+        if float(_span_caps.get(name, span)) < _GATE_BOOKKEEPING_CUTOFF_S
     }
     pr_check_p50 = {
         name: span for name, span in pr_check_p50.items()

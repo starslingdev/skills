@@ -12800,6 +12800,9 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
 # all of the workflow's checks, how often each is the per-PR slowest — and assert the rendered N/M
 # matches EXACTLY (a deterministic integer count, no aggregation fuzziness). M must be npop.
 _GATE_FREQ_RE = re.compile(r"`([^`]+\.ya?ml)`\s+gates\s+(\d+)/(\d+)\s+(?:sampled\s+)?PRs")
+_GATE_FREQ_CONF_SUFFIX_RE = re.compile(
+    r"^\s+\(rough 95% interval (\d+)-(\d+)%; "
+    r"(\d{4}-\d{2}-\d{2}) to (\d{4}-\d{2}-\d{2})\)")
 
 
 def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
@@ -12894,7 +12897,7 @@ def check_workflow_gate_frequency_matches(report: str, findings_path: Path | Non
 
 
 def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> Check:
-    """Ranked gate frequencies need enough events, a multi-day span, and separated intervals."""
+    """Ranked workflow frequencies need bound intervals, enough events, and a real span."""
     name = "gate-frequency ordering has enough events, span, and non-overlapping intervals"
     if not findings_path or _is_static_only(report):
         return Check(name, True, "no findings / static-only", skipped=True)
@@ -12905,15 +12908,23 @@ def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> 
     cp = _as_dict(_as_dict(data).get("pr_critical_path"))
     if "gate_min_count_for_ranking" not in cp:
         return Check(name, True, "legacy findings lack the gate-confidence contract", skipped=True)
-    claims = _GATE_FREQ_RE.findall(report)
-    if not claims:
+    claim_matches = list(_GATE_FREQ_RE.finditer(report))
+    warning = "pole order is not supported" in report and "chat close must not rank" in report
+    if not claim_matches:
+        if warning:
+            return Check(name, False,
+                         "the report withholds a gate-frequency order but renders no frequency rows")
         return Check(name, True, "no ranked gate-frequency claims", skipped=True)
-    counts = [int(row.get("pole_n") or 0) for row in _as_list(cp.get("checks"))
-              if isinstance(row, dict) and int(row.get("pole_n") or 0) > 0]
-    if not counts:
-        counts = [int(n) for _wf, n, _m in claims]
-    minimum = int(cp["gate_min_count_for_ranking"])
-    days = int(cp.get("sample_distinct_days") or 0)
+
+    pole_count, npop, _dropped = _populations_pole_counts(cp)
+    wf_freq: dict[str, int] = {}
+    for row in _as_list(cp.get("checks")):
+        if not isinstance(row, dict):
+            continue
+        wf = Path(str(row.get("workflow_file") or "")).name
+        if wf.endswith((".yml", ".yaml")):
+            check_name = str(row.get("name") or row.get("check") or "")
+            wf_freq[wf] = wf_freq.get(wf, 0) + pole_count.get(check_name, 0)
 
     def interval(count: int, total: int) -> tuple[float, float]:
         if total <= 0:
@@ -12923,27 +12934,51 @@ def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> 
         centre = (p + z * z / (2.0 * total)) / den
         margin = z / den * math.sqrt(
             p * (1.0 - p) / total + z * z / (4.0 * total * total))
-        return centre - margin, centre + margin
+        return 100.0 * (centre - margin), 100.0 * (centre + margin)
 
-    total = max(int(cp.get("check_present_n_pr") or 0), int(claims[0][2]), max(counts))
+    first = str(cp.get("sample_span_first") or "")[:10]
+    last = str(cp.get("sample_span_last") or "")[:10]
+    rendered_counts: dict[str, int] = {}
+    suffix_errors: list[str] = []
+    for match in claim_matches:
+        wf, n_text, m_text = match.groups()
+        suffix = _GATE_FREQ_CONF_SUFFIX_RE.match(report[match.end():])
+        if suffix is None:
+            suffix_errors.append(f"`{wf}` has no interval/span suffix")
+            continue
+        lo_text, hi_text, shown_first, shown_last = suffix.groups()
+        count = wf_freq.get(wf, int(n_text))
+        total = npop or int(m_text)
+        expected_lo, expected_hi = interval(count, total)
+        if (int(lo_text), int(hi_text)) != (round(expected_lo), round(expected_hi)):
+            suffix_errors.append(
+                f"`{wf}` renders {lo_text}-{hi_text}% but Wilson is "
+                f"{expected_lo:.0f}-{expected_hi:.0f}%")
+        if not first or not last or (shown_first, shown_last) != (first, last):
+            suffix_errors.append(
+                f"`{wf}` renders span {shown_first} to {shown_last}, expected {first} to {last}")
+        rendered_counts.setdefault(wf, count)
+    if suffix_errors:
+        return Check(name, False, "every gate frequency must carry its re-derived rough interval "
+                     "and collected sample span: " + "; ".join(suffix_errors))
+
+    counts = list(rendered_counts.values())
+    total = npop or max(int(cp.get("check_present_n_pr") or 0),
+                        max(int(match.group(3)) for match in claim_matches), max(counts))
+    minimum = int(cp["gate_min_count_for_ranking"])
+    days = int(cp.get("sample_distinct_days") or 0)
     ivs = sorted((interval(count, total) for count in counts if count > 0), reverse=True)
     overlap = any(ivs[i][0] <= ivs[i + 1][1] for i in range(len(ivs) - 1))
     unsupported = days <= 1 or any(0 < count < minimum for count in counts) or overlap
-    warning = "pole order is not supported" in report and "chat close must not rank" in report
-    first = str(cp.get("sample_span_first") or "")[:10]
-    last = str(cp.get("sample_span_last") or "")[:10]
-    interval_claims = report.count("rough 95% interval")
-    if interval_claims < len(claims) or not first or not last or f"{first} to {last}" not in report:
-        return Check(name, False,
-                     "every gate frequency must carry a rough interval and the collected sample span")
     if unsupported and not warning:
         return Check(name, False,
                      f"ranked gate frequencies are unsupported (minimum={minimum}, days={days}, "
-                     f"counts={counts}, overlapping_intervals={overlap}) but the report/chat close "
-                     "does not withhold the order")
+                     f"workflow_counts={counts}, overlapping_intervals={overlap}) but the "
+                     "report/chat close does not withhold the order")
     return Check(name, True,
-                 "frequency intervals and sample span are disclosed; unsupported order is withheld"
-                 if unsupported else "frequency intervals are separated on a sufficient sample")
+                 "each workflow frequency has its re-derived interval and span; unsupported "
+                 "order is withheld" if unsupported else
+                 "each workflow frequency has its re-derived interval/span and separated estimates")
 
 
 def check_spine_heavy_check_disclosed(report: str, findings_path: Path | None) -> Check:

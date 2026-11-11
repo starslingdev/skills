@@ -11,7 +11,7 @@ not measured: lifecycle data was not collected
 | **PR gate sample** | 4 of 4 PRs sampled: target met |
 | **Audit** | ran 2026-11-02 · ci-speedup skill commit [`abcdef1`](https://github.com/starslingdev/skills/commit/abcdef1234567890) |
 
-> **Bottom line.** A typical PR waits **10m 00s** for all checks to finish. The biggest single measured win is **~4m 10s** off the slowest fixable check, `tests` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever. **Gate-frequency confidence:** this sample's pole order is not supported - the rough intervals overlap, a positive count is below the minimum of 5, or the sample spans only one day. Treat these poles as an unordered set; the chat close must not rank them.
+> **Bottom line.** A typical PR waits **10m 00s** for all checks to finish. The biggest single measured win is **~4m 10s** off the slowest fixable check, `tests` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
 >
 > **10m 00s until all checks finish** - `tests` is the slowest check a typical PR waits on.
 >

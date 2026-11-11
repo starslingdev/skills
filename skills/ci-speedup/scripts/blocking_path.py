@@ -5215,9 +5215,16 @@ def _pole_gate_prompt_claim(check: str, wf: str, dur: str, gate_count: int, npop
     _pres = _num(pole.get("_present"))
     _freq = f", on only {int(_pn)}/{npop} sampled PRs" if (_pn is not None and npop) else ""
     _prestxt = f" (present on {int(_pres)}/{npop})" if (_pres is not None and npop) else ""
+    _confidence_fields = ({
+        "gate_interval_lo": pole["_gate_interval_lo"],
+        "gate_interval_hi": pole["_gate_interval_hi"],
+        "sample_span_first": pole["_gate_span_first"],
+        "sample_span_last": pole["_gate_span_last"],
+    } if "_gate_interval_lo" in pole else {})
     _gate_claim = claims.Claim(
         kind="pole_gate_prompt", subject=check,
-        fields={"dur": dur, "gate_count": gate_count, "npop": npop, "demoted": False},
+        fields={"dur": dur, "gate_count": gate_count, "npop": npop, "demoted": False,
+                **_confidence_fields},
         rendered=_strip_emdashes(
             f"Slowest check a typical PR waits on: P50 {dur}"
             + (f"; its workflow `{wf}` gates {gate_count}/{npop} sampled PRs"
@@ -14138,19 +14145,42 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 wf = str(p.get("workflow_file", ""))
                 wf_gate[wf] = wf_gate.get(wf, 0) + _gatef(p)
 
-    # Every displayed frequency carries the uncertainty and the exact time span
-    # of the sample that produced it. Store the suffix on the pole so the TOC
-    # and agent prompt cannot drift.
+    _gate_span_first = str(cp.get("sample_span_first") or "")[:10]
+    _gate_span_last = str(cp.get("sample_span_last") or "")[:10]
+    _gate_confidence_contract = (
+        "gate_min_count_for_ranking" in cp
+        and "sample_distinct_days" in cp
+        and bool(_gate_span_first and _gate_span_last)
+    )
+    # Every new-contract displayed frequency carries the uncertainty and exact
+    # sample span. Legacy findings keep their prior frequency prose instead of
+    # publishing a partial claim that the confidence verifier cannot check.
+    # Store the suffix on the pole so the TOC and agent prompt cannot drift.
     for p in poles:
         wf = str(p.get("workflow_file") or "")
         count = wf_gate.get(wf, 0)
-        if count and npop:
+        if count and npop and _gate_confidence_contract:
             lo, hi = _gate_interval(count, npop)
-            first = str(cp.get("sample_span_first") or "")[:10]
-            last = str(cp.get("sample_span_last") or "")[:10]
-            span = f"; {first} to {last}" if first and last else ""
+            pole_lo, pole_hi = round(lo), round(hi)
             p["_gate_frequency_suffix"] = (
-                f" (rough 95% interval {lo:.0f}-{hi:.0f}%{span})")
+                f" (rough 95% interval {pole_lo}-{pole_hi}%; "
+                f"{_gate_span_first} to {_gate_span_last})")
+            p["_gate_interval_lo"] = pole_lo
+            p["_gate_interval_hi"] = pole_hi
+            p["_gate_span_first"] = _gate_span_first
+            p["_gate_span_last"] = _gate_span_last
+
+    # Confidence applies to the rows a reader sees: one frequency per workflow.
+    # Per-check counts are an internal detail (and matrix sibling legs share one
+    # rendered workflow count), so comparing those legs against one another would
+    # manufacture overlap that is absent from the displayed estimates.
+    _displayed_gate_counts_by_wf: dict[str, int] = {}
+    for p in poles:
+        wf = str(p.get("workflow_file") or "")
+        count = wf_gate.get(wf, 0)
+        if _is_file_pole(p) and count > 0:
+            _displayed_gate_counts_by_wf.setdefault(wf, count)
+    _displayed_gate_counts = list(_displayed_gate_counts_by_wf.values())
 
     # A pole is part of the TYPICAL merge path only if it ran on a MAJORITY of sampled
     # PRs. A slow but rarely-run FILE pole — a label-gated / opt-in benchmark that ran on
@@ -14866,12 +14896,8 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     out[_i] = _queue_bottom
                 break
     _confidence_notes: list[str] = []
-    _gate_counts_for_order = [
-        int(row.get("pole_n") or 0) for row in (cp.get("checks") or [])
-        if int(row.get("pole_n") or 0) > 0
-    ]
-    if (npop and _gate_counts_for_order
-            and not _gate_order_supported(_gate_counts_for_order, npop, cp)):
+    if (_gate_confidence_contract and npop and _displayed_gate_counts
+            and not _gate_order_supported(_displayed_gate_counts, npop, cp)):
         _confidence_notes.append(
             "**Gate-frequency confidence:** this sample's pole order is not supported - "
             "the rough intervals overlap, a positive count is below the minimum of "
