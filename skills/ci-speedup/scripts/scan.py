@@ -4749,8 +4749,10 @@ def _detect_opt61(
             continue
         cache_steps = _cache_action_steps(job)
         cache_paths: list[str] = []
+        cache_paths_by_step: dict[int, list[str]] = {}
         unknown_env_cache_names: set[str] = set()
         for cache_step in cache_steps:
+            step_cache_paths: list[str] = []
             values = (cache_step.get("with")
                       if isinstance(cache_step.get("with"), dict) else {})
             for raw_path in str(values.get("path") or "").splitlines():
@@ -4762,14 +4764,16 @@ def _detect_opt61(
                     # `${{ env.CACHE_ROOT }}/ccache`.  A value written through
                     # GITHUB_ENV is unavailable to the static YAML parser, but
                     # the suffix still proves which cache the action saves.
-                    cache_paths.append(raw_path.strip().casefold())
+                    step_cache_paths.append(raw_path.strip().casefold())
                     unknown_env_cache_names.update(
                         name.casefold()
                         for name in _CACHE_ENV_PATH_RE.findall(raw_path))
                 else:
-                    cache_paths.extend(
+                    step_cache_paths.extend(
                         line.strip().casefold()
                         for line in resolved.splitlines() if line.strip())
+            cache_paths.extend(step_cache_paths)
+            cache_paths_by_step[id(cache_step)] = step_cache_paths
         blob = "\n".join((_job_run_blob(job), _job_env_blob(job, doc)))
         reasons: list[tuple[str, str, str]] = []
 
@@ -4786,7 +4790,8 @@ def _detect_opt61(
                     "restore-keys",
                     "none of its `restore-keys` can restore the rolling saved-key "
                     "family on a later edit",
-                    _static_cache_family(key, *restore, *cache_paths),
+                    _static_cache_family(
+                        key, *restore, *cache_paths_by_step.get(id(step), [])),
                 ))
             size = values.get("max-size") or values.get("max_size")
             mib = _size_mib(str(size)) if size is not None else None
@@ -4795,7 +4800,8 @@ def _detect_opt61(
                     str(size),
                     f"its compiler-cache size limit is only {size} and may churn before "
                     "the next reuse",
-                    _static_cache_family(_uses(step), key, *cache_paths),
+                    _static_cache_family(
+                        _uses(step), key, *cache_paths_by_step.get(id(step), [])),
                 ))
 
         for match in re.finditer(
@@ -4919,7 +4925,7 @@ def _detect_opt61(
             reasons.append((
                 temp.group(0),
                 "a compiler or analysis cache lives in temporary storage and is not saved",
-                _static_cache_family(temp.group(0), blob),
+                _static_cache_family(temp.group(0)),
             ))
         uses_compiler_cache = bool(_COMPILER_CACHE_RE.search(blob))
         supplied_by_cache_action = any(

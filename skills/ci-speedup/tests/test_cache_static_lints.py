@@ -35,14 +35,19 @@ def _scan_workflow(tmp_path: Path, workflow: str) -> list[dict]:
 def test_opt61_flags_restore_prefix_that_cannot_match_saved_key(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:
-          path: .cache/tool
-          key: tool-${{ runner.os }}-${{ github.sha }}
+          path: .cache/pnpm
+          key: pnpm-${{ runner.os }}-${{ github.sha }}
           restore-keys: other-${{ runner.os }}-
-      - run: tool build
+      - uses: actions/cache@v4
+        with:
+          path: .cache/ccache
+          key: ccache-${{ runner.os }}
+      - run: pnpm build
 """)
     assert "OPT61" in _patterns(rows)
-    assert any("restore" in row["evidence"].lower() for row in rows
-               if row["pattern"] == "OPT61")
+    restore_row = next(row for row in rows if row["pattern"] == "OPT61"
+                       and "restore" in row["evidence"].lower())
+    assert restore_row["cache_family"] == "pnpm"
 
 
 def test_opt61_accepts_a_matching_rolling_restore_prefix(tmp_path) -> None:
@@ -159,6 +164,15 @@ def test_opt61_flags_unpersisted_compiler_and_analysis_caches(tmp_path) -> None:
     )):
         rows = _scan(tmp_path / str(index), f"      - run: {command}\n")
         assert "OPT61" in _patterns(rows), command
+    mixed = _scan(tmp_path / "mixed", """      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}
+      - run: STATICCHECK_CACHE=/tmp/staticcheck staticcheck ./...
+""")
+    temp_row = next(row for row in mixed if row["pattern"] == "OPT61"
+                    and "temporary storage" in row["evidence"])
+    assert temp_row["cache_family"] == "staticcheck"
 
 
 def test_opt61_accepts_a_persisted_sccache_directory(tmp_path) -> None:
