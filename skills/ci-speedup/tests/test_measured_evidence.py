@@ -506,6 +506,11 @@ def test_static_cache_family_keywords_do_not_include_substring_families(
     })
     assert keywords == expected
     assert _cache_status_from_log(unrelated_log, keywords) == ("unknown", "")
+    unscoped = _cache_keywords_for_finding({
+        "pattern": "OPT61", "static_cache_lint": True,
+    })
+    assert unscoped
+    assert _cache_status_from_log(unrelated_log, unscoped) == ("unknown", "")
 
 
 def test_attach_cache_log_evidence_quotes_the_real_miss(tmp_path: Path):
