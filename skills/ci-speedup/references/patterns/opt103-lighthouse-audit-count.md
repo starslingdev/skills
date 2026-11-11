@@ -82,8 +82,8 @@ one command with one pass.
    Lighthouse passes at the same time on one runner. Concurrent audits
    compete for the same cores, which skews the scores the budget gates on, and
    each collect clears the shared `.lighthouseci/` report folder when it
-   starts. OPT83 holds back two Lighthouse CI steps in one tree for that
-   reason.
+   starts. OPT83 never suggests running a Lighthouse step side by side with
+   any other step, for that reason.
 
 **Required-checks caveat**: a split into matrix legs creates new check names.
 If the Lighthouse job is a required status check, add the new jobs to branch

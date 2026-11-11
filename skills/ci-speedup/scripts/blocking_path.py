@@ -1753,6 +1753,16 @@ _LHCI_CMD_RE = re.compile(
 _LHCI_PASS_NAME_RE = re.compile(
     r"--(?:config|collect\.settings\.preset|settings\.preset)[= ]([^\s;&|]{1,200})")
 _LHCI_CONFIG_EXT_RE = re.compile(r"\.(?:json|js|cjs|mjs|yml|yaml)$")
+# `--static-dist-dir` serves the build on a random free port for each collect, so one
+# page prints as a different loopback URL in every pass. A loopback origin is dropped so
+# the page counts once.
+_LHCI_LOOPBACK_ORIGIN_RE = re.compile(
+    r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?=/|$)", re.IGNORECASE)
+
+
+def _lhci_page_key(url: str) -> str:
+    """The page a `Running Lighthouse` URL audits: a loopback origin and its port removed."""
+    return _LHCI_LOOPBACK_ORIGIN_RE.sub("", url) or "/"
 
 
 def _lhci_pass_tag(flag_value: str) -> str:
@@ -1794,13 +1804,22 @@ def _lighthouse_audit_leaf(lines: list[str]) -> dict[str, Any] | None:
     passes: list[dict[str, Any]] = []
     cur: dict[str, Any] | None = None
     for i, line in enumerate(lines):
+        if line.startswith("##[group]Run "):
+            # A new step: a pass still open never finished and is not counted.
+            cur = None
+            continue
         if "Lighthouse" not in line:
             continue
         running = _LHCI_RUNNING_RE.match(line)
         if running:
+            page = _lhci_page_key(running.group(2))
+            if cur is not None and any(url == page for url, _n, _i in cur["urls"]):
+                # A pass audits each URL once, so a URL the open pass already has means
+                # a new collect started and the open one never finished.
+                cur = None
             if cur is None:
                 cur = {"urls": [], "start": i}
-            cur["urls"].append((running.group(2), int(running.group(1)), i))
+            cur["urls"].append((page, int(running.group(1)), i))
         elif _LHCI_PASS_DONE_RE.match(line):
             if cur is not None:
                 cur["end"] = i
@@ -1834,6 +1853,9 @@ def _lighthouse_audit_leaf(lines: list[str]) -> dict[str, Any] | None:
         if tags.get(k):
             label += f" ({tags[k]})"
         rows.append((label, float(audits), str(audits)))
+    # Largest pass first: the lever marker hangs from row 0. The sort is stable and each
+    # label keeps its log-order pass number.
+    rows.sort(key=lambda row: -(row[1] or 0.0))
     n_pass, n_url = len(passes), len(urls)
     runs_all = sorted({n for p in passes for _url, n, _i in p["urls"]})
     uniform = (len(runs_all) == 1

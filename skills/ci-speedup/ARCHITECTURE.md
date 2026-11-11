@@ -3267,9 +3267,10 @@ closed. The pole is held back when any of these holds:
 - a candidate carries a step-level `if:` or sets `continue-on-error` (a step
   allowed to fail changes what a failing parallel child does to the job);
 - the steps share tool state: `services:` containers, two Docker-driving
-  steps, or two candidates in one tree running the same Cargo, Maven, Gradle,
-  .NET, sbt, Swift, Mix or Xcode build, both running a recognised coverage
-  tool, or both running Lighthouse CI (one `.lighthouseci/` report folder);
+  steps, any Lighthouse-running candidate (an audit shares the runner's cores
+  with its siblings, which skews its score), or two candidates in one tree
+  running the same Cargo, Maven, Gradle, .NET, sbt, Swift, Mix or Xcode build,
+  or both running a recognised coverage tool;
 - a Docker / Podman / Compose command or container action sits in any step up
   to the last candidate, or a background step runs before the first;
 - the job holds a malformed `parallel:` group (`job_has_an_unreadable_parallel_group`,

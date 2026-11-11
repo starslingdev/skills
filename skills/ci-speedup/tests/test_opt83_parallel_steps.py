@@ -598,6 +598,22 @@ def test_two_steps_of_one_tool_in_one_tree_are_held_back(a, b):
     _held(y, "siblings_share_tool_state")
 
 
+def test_two_lighthouse_steps_in_separate_trees_are_held_back():
+    # Separate report folders do not help: two audits on one runner compete for the same
+    # cores and skew the scores the budget gates on (OPT103 forbids it).
+    y = _BASE_YAML.replace("run: npx biome check .",
+                           "run: npx lhci autorun\n        working-directory: apps/shop").replace(
+        "run: npx tsc --noEmit", "run: npx lhci autorun\n        working-directory: apps/docs"
+    ).replace("run: npm test", "run: npm test\n        working-directory: web")
+    _held(y, "siblings_share_tool_state")
+
+
+def test_a_lighthouse_step_beside_other_checks_is_held_back():
+    # One audit beside a type check and a test suite: the siblings' load skews its score.
+    y = _BASE_YAML.replace("run: npx biome check .", "run: npx lhci autorun")
+    _held(y, "siblings_share_tool_state")
+
+
 def test_two_steps_of_one_tool_in_separate_trees_still_fire():
     y = _BASE_YAML.replace("run: npx biome check .",
                            "run: cargo test\n        working-directory: crates/a").replace(

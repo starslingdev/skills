@@ -616,6 +616,11 @@ def test_named_fixtures_exercise_their_defining_interactions(
         row.get("pattern") for row in lighthouse["findings"]}
     assert [row["gate"] for row in lighthouse["opt83_withheld_candidates"]] == [
         "siblings_share_tool_state"]
+    # OPT103 credits no saving, so the generic OPT75 route on the pole it owns does not
+    # credit one either (the OPT102 precedent for OPT72).
+    opt75 = [row for row in lighthouse["findings"] if row.get("pattern") == "OPT75"
+             and "gate" in (row.get("affected_jobs") or [])]
+    assert opt75 and all(row["wall_clock_p50_s"] == 0.0 for row in opt75), opt75
     assert "test-isolated-serial" in fixture_facts(
         docs["vitest-isolated-serial"], [])["leaves"]
     assert "describe.concurrent" in reports["vitest-isolated-serial"]

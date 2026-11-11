@@ -118,6 +118,29 @@ def test_unfinished_pass_is_not_counted():
     assert len(leaf["deeper"][0]["rows"]) == 1
 
 
+def test_static_dist_dir_passes_on_new_ports_audit_the_same_pages():
+    # `--static-dist-dir` serves the build on a random free port per collect, so the same
+    # page prints as a different loopback URL in each pass.
+    pages = [f"/p{i}.html" for i in range(10)]
+    first = _lhci_pass(_PHONE, [f"http://localhost:41237{p}" for p in pages], 1)
+    second = _lhci_pass(_WIDE, [f"http://127.0.0.1:38811{p}" for p in pages], 1)
+    leaf = bp._parse_log("\n".join(first + second))
+    assert leaf is not None and leaf["fix_key"] == "lighthouse-serial-audits"
+    assert "2 collect pass(es) x 10 URL(s) x 1 run(s) per URL" in leaf["unit_label"]
+    assert leaf["magnitude"]["value"] == 50.0
+
+
+def test_crashed_pass_does_not_merge_into_the_next_finished_pass():
+    # 4 URLs x 3 runs = 12 audits per pass, below the floor on its own. A crashed collect
+    # followed by a finished one is one finished pass of 12, never one pass of 24.
+    crashed = _lhci_pass(_PHONE, _URLS, 3, closed=False)
+    # The next collect in a later step.
+    assert bp._parse_log("\n".join(crashed + _lhci_pass(_WIDE, _URLS, 3))) is None
+    # The next collect in the same step: it starts over on a URL the open pass had.
+    assert bp._parse_log(
+        "\n".join(crashed + _lhci_pass(_WIDE, _URLS, 3, header=False))) is None
+
+
 def test_uneven_passes_are_summed_and_named_from_the_preset_flag():
     six = [f"http://localhost:8080/s{i}/" for i in range(6)]
     first = [line for line in _lhci_pass(
@@ -173,6 +196,31 @@ def test_prose_that_mentions_the_lines_does_not_fire():
     prose = [f"note: Running Lighthouse 9 time(s) on http://localhost/{i}" for i in range(9)]
     prose.append("log says Done running Lighthouse!")
     assert bp._parse_log("\n".join(prose)) is None
+    # Prose `Running` lines stay uncounted even when a real pass end follows them.
+    assert bp._parse_log("\n".join(prose[:-1] + ["Done running Lighthouse!"])) is None
+
+
+def test_a_space_separated_config_flag_names_the_pass():
+    log = _lhci_pass("lhci autorun --config ./ci/lighthouserc.mobile.json", _URLS, 6)
+    leaf = bp._parse_log("\n".join(log))
+    assert leaf["deeper"][0]["rows"][0][0] == "pass 1: 4 URLs x 6 runs (mobile)"
+
+
+def test_the_lever_marker_lands_on_the_largest_pass():
+    # The marker hangs from row 0, so the bigger second pass must come first.
+    log = _lhci_pass(_PHONE, _URLS[:2], 5) + _lhci_pass(_WIDE, _URLS, 5)
+    rows = bp._parse_log("\n".join(log))["deeper"][0]["rows"]
+    assert [row[0] for row in rows] == [
+        "pass 2: 4 URLs x 5 runs (wide)", "pass 1: 2 URLs x 5 runs (phone)"]
+
+
+def test_passes_over_different_url_sets_do_not_claim_a_uniform_product():
+    # Same run count everywhere, different URL sets: 4 x 5 + 2 x 5 = 30 audits, which is
+    # not "2 x 4 x 5".
+    log = _lhci_pass(_PHONE, _URLS, 5) + _lhci_pass(_WIDE, _URLS[:2], 5)
+    leaf = bp._parse_log("\n".join(log))
+    assert "30 full page audits" in leaf["unit_label"]
+    assert "2 collect pass(es) over 4 distinct URL(s)" in leaf["unit_label"]
 
 
 def test_a_cache_line_elsewhere_in_the_job_does_not_hide_the_audits():

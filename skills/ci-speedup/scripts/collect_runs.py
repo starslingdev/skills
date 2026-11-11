@@ -20128,10 +20128,12 @@ _OPT83_TOOL_STATE_RES = (
     _re.compile(r"\bxcodebuild\b"),
     _re.compile(r"--cov\b|--coverage\b|-coverprofile\b|\bcoverage run\b|\bnyc\b"
                 r"|\bc8\b"),
-    # Lighthouse CI keeps its reports in one `.lighthouseci/` folder and clears it when
-    # a collect starts, so two passes in one tree would erase each other's results.
-    _re.compile(r"\blhci\b"),
 )
+# A Lighthouse audit shares the runner's cores with whatever runs beside it, which skews
+# the scores its budget gates on (OPT103), and each `lhci collect` also clears the shared
+# `.lighthouseci/` folder. So any candidate set with a Lighthouse step is held back,
+# whatever the other steps are and whatever their trees.
+_OPT83_LIGHTHOUSE_RE = _re.compile(r"\blhci\b|\blighthouse\b", _re.I)
 _OPT83_DOCKER_RE = _re.compile(r"(^|[\s;&|(])(docker|podman|docker-compose)\b")
 # An action that starts or drives containers (`docker://` images, docker/*
 # actions, compose actions): treated like a `docker` command.
@@ -20500,12 +20502,13 @@ def _detect_opt83_parallel_steps(
         runs_txt = [str(s.get("run") or "") for s in cands]
         if (spec.get("services")
                 or sum(bool(_OPT83_DOCKER_RE.search(t)) for t in runs_txt) >= 2
+                or any(_OPT83_LIGHTHOUSE_RE.search(t) for t in runs_txt)
                 or any(rx.search(runs_txt[a]) and rx.search(runs_txt[b])
                        and _opt83_same_tree(wds[a], wds[b])
                        for rx in _OPT83_TOOL_STATE_RES
                        for a in range(len(cands)) for b in range(a + 1, len(cands)))):
-            # Service containers, one Docker daemon, or one tool's target/ or
-            # coverage file in one tree: state the workflow file does not show
+            # Service containers, one Docker daemon, a Lighthouse audit sharing the
+            # runner's cores, or one tool's target/ or coverage file in one tree: state the workflow file does not show
             # as a dependency, but that side-by-side steps would share.
             _no("siblings_share_tool_state", wf, job, cand_names)
             continue
@@ -22674,6 +22677,19 @@ def _detect_structural_candidates(
                 f["size_note"] = (
                     "The emulated-image compile leaf owns this pole; OPT72 receives no "
                     "separate saving.")
+            if (pat == "OPT75" and (
+                    wf_path, job_name, "lighthouse-serial-audits") in log_leaf_owners):
+                # OPT103 credits no saving: its three dials trade score stability or runner
+                # minutes for wall time, which only the owner can price. The generic route
+                # on the same pole must not credit what the specific cause withholds.
+                f["wall_clock_p50_s"] = 0.0
+                f.pop("wall_clock_uncapped_p50_s", None)
+                f.pop("wall_clock_derivation", None)
+                f["realization"] = "none"
+                f["tier"] = 2
+                f["size_note"] = (
+                    "The Lighthouse audit-count leaf (OPT103) owns this pole; OPT75 "
+                    "receives no separate saving.")
             out.append(f)
         if mapping is not None:
             seen_jobs.add((wf_path, job_name))
