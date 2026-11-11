@@ -4230,10 +4230,6 @@ def test_render_handles_pole_with_no_captured_log():
     assert "no captured log" in md
 
 
-def test_render_no_poles_is_graceful():
-    assert "No measured critical path" in bp.render({"pr_critical_path": {}})
-
-
 def test_jest_provider_note_keeps_a_static_only_report_visible():
     doc = {
         "repo": "demo/repo",
@@ -4381,9 +4377,10 @@ def test_render_pr_workflow_without_pr_runs_keeps_hedged_banner(tmp_path):
 
 def test_render_no_poles_no_findings_still_dead_ends_gracefully():
     # The truly-empty case (no poles AND no static findings) keeps the one-line note —
-    # there is genuinely nothing to report.
-    md = bp.render({"pr_critical_path": {"poles": []}, "findings": []})
-    assert "No measured critical path" in md
+    # there is genuinely nothing to report — whether the fields are missing or empty.
+    for doc in ({"pr_critical_path": {}},
+                {"pr_critical_path": {"poles": []}, "findings": []}):
+        assert "No measured critical path" in bp.render(doc), doc
 
 
 def test_primary_section_invariant_flags_measured_pole_dropped_to_static(tmp_path):
