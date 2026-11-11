@@ -29665,12 +29665,20 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "pr_num": _run_pr_number(_row), "ts": _ts,
                 }
         _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+    _workflow_triggers = findings_doc.get("workflow_triggers") or {}
+    _pr_candidate_workflows = {
+        str(path) for path, events in _workflow_triggers.items()
+        if isinstance(events, list)
+        and set(str(event) for event in events) & set(_DEVELOPER_EVENTS)
+    }
     _candidate_active = {
         wf_path
         for wf_path, page_rows in all_status_runs_by_wf.items()
         if len(page_rows) >= _COST_RUNLIST_MAX
-        and any(str(row.get("event") or "") in _DEVELOPER_EVENTS
-                for row in page_rows)
+        and (wf_path in _pr_candidate_workflows
+             or (not _workflow_triggers and any(
+                 str(row.get("event") or "") in _DEVELOPER_EVENTS
+                 for row in page_rows)))
         and (wf_by_path.get(wf_path) or {}).get("id") is not None
     }
 
@@ -29678,6 +29686,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _candidate_scope_evaluated = False
     _candidate_observable_required: frozenset[str] = frozenset()
     _candidate_unobservable_required: frozenset[str] = frozenset()
+    _candidate_evaluated_count = 0
+    _candidate_repo_published_required = frozenset(_repo_published_required(
+        req_names, findings_doc.get("workflow_status_publishers")))
 
     def _candidate_snapshot() -> tuple[
             list[dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, str]]:
@@ -29716,6 +29727,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         """
         nonlocal _candidate_scoped_ts, _candidate_observable_required
         nonlocal _candidate_unobservable_required, _candidate_scope_evaluated
+        nonlocal _candidate_evaluated_count
         _rows, rows_by_sha, eligible_ts = _candidate_snapshot()
         raw_days = {str(ts or "")[:10] for ts in eligible_ts.values()}
         if (len(eligible_ts) < _REPR_PR_TARGET
@@ -29762,7 +29774,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 rep = run_rep.get(run.get("id"), "")
                 for job in jobs:
                     name = str(job.get("name") or "")
-                    if name:
+                    if name and str(job.get("conclusion") or "") != "skipped":
                         names_by_rep[rep].add(name)
                         observed.add(name)
 
@@ -29774,6 +29786,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             evaluated_ts = {
                 rep: eligible_ts[rep] for rep in ordered_reps
                 if rep in evaluated_reps}
+            _candidate_evaluated_count = max(
+                _candidate_evaluated_count, len(evaluated_ts))
             if not observable:
                 # No Actions job in the newest sufficient population implements
                 # the readable required names. Preserve the external-gate fallback
@@ -29877,17 +29891,20 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         check_durs = {}
         _required_suite_unsatisfiable = bool(
             req_names and (
-                not _candidate_observable_required
-                or not _candidate_scoped_ts))
+                (not _candidate_observable_required
+                 and not _candidate_repo_published_required)
+                or (_candidate_observable_required
+                    and not _candidate_scoped_ts)))
         sample_diag = {
             "target": _REPR_PR_TARGET, "kept": len(repr_shas),
-            "fetched": len(repr_shas), "fetch_failures": 0,
+            "fetched": _candidate_evaluated_count, "fetch_failures": 0,
             "complete": (
                 len(repr_shas) >= _REPR_PR_TARGET
                 and len(_eligible_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
                 and not _required_suite_unsatisfiable),
             "required_suite_scoped": bool(
-                req_names and _candidate_observable_required),
+                req_names and _candidate_observable_required
+                and not _candidate_repo_published_required),
             "required_suite_unsatisfiable": _required_suite_unsatisfiable,
             "required_checks_unobservable": sorted(
                 _candidate_unobservable_required),
@@ -29971,7 +29988,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             sample_diag["required_checks_repo_published"] = sorted(
                 _missing_required & _repo_published)
         if req_names and not (set(req_names) & _observed_job_names):
-            sample_diag["required_suite_unsatisfiable"] = True
+            sample_diag["required_suite_unsatisfiable"] = not bool(
+                _missing_required and _missing_required <= _repo_published)
             sample_diag["required_suite_scoped"] = False
 
     _sample_dates = sorted({str(_rep_ts.get(sha) or "")[:10] for sha in repr_shas
@@ -30363,7 +30381,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         len(_era_repr_shas) >= _REPR_PR_TARGET
         and int(sample_diag.get("distinct_days") or 0) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
         and not sample_diag.get("required_suite_unsatisfiable"))
-    if _era_dropped_pr_count and not sample_diag["complete"]:
+    if (_era_dropped_pr_count and not sample_diag["complete"]
+            and sample_diag.get("stop_reason") not in {
+                "fetch_failures", "required_checks_unobservable",
+                "required_suite_empty"}):
         sample_diag["stop_reason"] = "era_door"
         sample_diag["candidate_era_door"] = True
     _era_check_runs_complete = [

@@ -1952,12 +1952,91 @@ def test_pr_sample_preserves_observable_required_suite_scope(
 
     cp = doc["pr_critical_path"]
     assert cp["sampled_pr_count"] == 91
+    assert cp["sample_fetched"] == 100
     assert cp["required_suite_scoped"] is True
     assert cp["sample_job_list_scoped"] is True
     assert cp["sample_stop_reason"] == "candidates_exhausted"
     assert "91 of 100 PRs sampled: candidates exhausted" in report
     assert "includes only completed PR commits where every observable required check ran" in report
     assert "includes completed PR commits even when a path-conditional required check did not run" not in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_pr_sample_excludes_skipped_required_jobs(monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    completed = recorded["workflows"][0]["run_pages"][1]
+    for row in completed[:9]:
+        recorded["jobs"][str(row["id"])][0]["conclusion"] = "skipped"
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-skipped-required-suite"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 91
+    assert cp["sample_stop_reason"] == "candidates_exhausted"
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_pr_sample_pages_past_a_full_push_only_front_page(monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    front = recorded["workflows"][0]["run_pages"][0]
+    for row in front:
+        row.update(event="push", status="completed", conclusion="success")
+        job = recorded["jobs"][str(row["id"])][0]
+        job.update(conclusion="success", completed_at=row["updated_at"])
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-push-front-page"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 100
+    assert cp["sample_candidate_pages_fetched"] == 2
+    assert cp["sample_stop_reason"] == "target_met"
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_pr_sample_keeps_repo_published_required_status_unscoped(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path)
+    (fixture / "workflows" / "nightly.yml").unlink()
+    real_scan = scan.scan
+
+    def scan_with_publisher(*args, **kwargs):
+        scanned = real_scan(*args, **kwargs)
+        scanned["workflow_status_publishers"] = {
+            ".github/workflows/ci.yml": {
+                "sources": [".github/workflows/ci.yml"],
+                "contexts": ["All CI"],
+            }}
+        return scanned
+
+    monkeypatch.setattr(scan, "scan", scan_with_publisher)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["workflows"] = recorded["workflows"][:1]
+    recorded["commits_by_workflow"].pop(".github/workflows/nightly.yml", None)
+    recorded["required_checks"] = ["All CI"]
+    recorded["logs"] = {
+        str(job["id"]): "2026-01-30T00:00:00Z completed\n"
+        for jobs in recorded["jobs"].values() for job in jobs
+    }
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-repo-published-required"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["required_suite_unsatisfiable"] is False
+    assert cp["required_suite_scoped"] is False
+    assert cp["required_checks_repo_published"] == ["All CI"]
+    assert cp["sample_stop_reason"] == "target_met"
+    assert "required suite empty" not in report
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
@@ -2008,6 +2087,10 @@ def test_pr_sample_keeps_empty_observable_required_suite_empty(
     assert "0 of 100 PRs sampled: required suite empty" in report
     assert "no commit ran every observable required check" in report
     assert "No run history to measure" not in report
+    agent_summary = summary.build_summary(doc)
+    assert "0 PR / merge-queue candidates ran a timed check" not in agent_summary
+    assert "recency-only (external required suite, no PR carried it)" not in agent_summary
+    assert "no commit ran every observable required check" in agent_summary
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
@@ -2071,6 +2154,8 @@ def test_pr_sample_marks_commit_partial_when_any_run_job_fetch_fails(
     assert cp["sample_partial_count"] == 60
     assert "PR gate sample (ordering withheld)" in report
     assert "gate frequency and pole order are unreliable" in report
+    assert "failed job-list reads remain partial and unverified" in report
+    assert "includes only completed PR commits where every observable required check ran" not in report
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
@@ -2482,6 +2567,21 @@ def test_pr_sample_verifier_rejects_doctored_stop_reason(monkeypatch, tmp_path):
     check = vr.check_pr_sample_stop_reason(report, findings_path)
     assert not check.ok
     assert "expected 'candidates_exhausted'" in check.detail
+
+    cp = doc["pr_critical_path"]
+    cp["sample_stop_reason"] = "candidates_exhausted"
+    cp["sample_target"] = 1
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    tampered_report = report.replace("of 100 PRs sampled", "of 1 PRs sampled")
+    check = vr.check_pr_sample_stop_reason(tampered_report, findings_path)
+    assert not check.ok and "sample contract" in check.detail
+
+    cp["sample_target"] = cr._PR_SAMPLE_TARGET
+    cp["sample_candidate_pages_fetched"] = 2
+    cp["sample_candidate_page_cap"] = 1
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    check = vr.check_pr_sample_stop_reason(report, findings_path)
+    assert not check.ok and "page cap" in check.detail
 
 
 def test_fixture_set_catches_required_crown_regression(monkeypatch, tmp_path):

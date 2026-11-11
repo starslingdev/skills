@@ -6935,18 +6935,26 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "jobs while claiming required-suite scope.")
     elif cp.get("required_suite_unsatisfiable"):
         out.append("> - ⚠️ **No file-backed required gate** — the required checks were "
-                   "read, but they're external/managed (a CLA bot, enterprise CI, "
-                   "label-gated e2e, a mergeability gate) and ran on **none** of the "
-                   "sampled PRs, so there's no required-check critical path. The spine "
+                   "read, but they were not observable in the sampled Actions job lists "
+                   "(a CLA bot, enterprise CI, label-gated e2e, or mergeability gate), "
+                   "so their per-commit presence and timing could not be established. The spine "
                    "is the measured **PR-floor** — the file-backed work a normal PR "
                    "runs — not the branch-protection gate.")
     elif cp.get("sample_job_list_scoped"):
-        out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "
-                   "representative population avoids one check-run request per commit, "
-                   "and includes only completed PR commits where every observable "
-                   "required check ran. Required checks absent from the job lists are "
-                   "named separately and excluded from that suite test; gate frequency "
-                   "is observed from the resulting scoped population.")
+        if cp.get("sample_partial_count"):
+            out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "
+                       "population excludes commits known to have skipped an observable "
+                       "required check. Commits with failed job-list reads remain partial "
+                       "and unverified rather than being called clean; the reliability "
+                       "label above reflects their share. Required checks absent from all "
+                       "job lists are named separately.")
+        else:
+            out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "
+                       "representative population avoids one check-run request per commit, "
+                       "and includes only completed PR commits where every observable "
+                       "required check ran. Required checks absent from the job lists are "
+                       "named separately and excluded from that suite test; gate frequency "
+                       "is observed from the resulting scoped population.")
     elif cp.get("required_suite_scoped") is False:
         out.append("> - ⚠️ **Required checks were unreadable** (no admin / branch "
                    "protection 404), so 'gate' here means the **slowest check on a "
@@ -6983,8 +6991,9 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
         shown = ", ".join(f"`{_clean_label(n)}`" for n in unobs[:4])
         more = f" +{len(unobs) - 4} more" if len(unobs) > 4 else ""
         out.append(f"> - ⚠️ **Status-only required check(s) excluded from the suite test:** "
-                   f"{shown}{more} — never posted as a check-run in the sampled window (a "
-                   "GitHub-App commit status / external gate), so they can't be timed. The "
+                   f"{shown}{more} — absent from the sampled Actions job lists (for example "
+                   "a GitHub-App commit status or external gate), so this bounded job-list "
+                   "sample cannot establish their per-commit presence or timing. The "
                    "gate was measured on the **observable** required subset; these aren't on "
                    "the critical path and aren't confirmed satisfied here, just unmeasurable.")
     # Issue #119: a required status a workflow in THIS repo posts itself (an aggregate that

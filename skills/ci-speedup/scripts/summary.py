@@ -290,7 +290,11 @@ def funnel_reason_chain(doc: dict[str, Any]) -> tuple[list[str], str | None]:
     # Stage 3 — PR / merge-queue candidates fetched for the gate sample.
     fetched = cp.get("sample_fetched") or 0
     sff = cp.get("sample_fetch_failures") or 0
-    if fetched == 0:
+    stop_reason = str(cp.get("sample_stop_reason") or "")
+    if fetched == 0 and stop_reason == "required_suite_empty":
+        lines.append(_OK + "completed PR candidates were evaluated, but no commit ran "
+                     "every observable required check")
+    elif fetched == 0:
         lines.append(_BRK + "0 PR / merge-queue candidates ran a timed check in the "
                      "window — the sampled runs may all be push/schedule (no "
                      "developer-event runs to build a merge-wait spine from)")
@@ -303,7 +307,9 @@ def funnel_reason_chain(doc: dict[str, Any]) -> tuple[list[str], str | None]:
     kept = cp.get("sampled_pr_count") or 0
     if kept == 0:
         rc = doc.get("required_checks")
-        if cp.get("required_suite_unsatisfiable"):
+        if stop_reason == "required_suite_empty":
+            why = "no commit ran every observable required check"
+        elif cp.get("required_suite_unsatisfiable"):
             why = ("the required suite is external/managed — no sampled PR carried it, "
                    "and the recency-only fallback pool was also empty")
         elif rc:
@@ -320,7 +326,11 @@ def funnel_reason_chain(doc: dict[str, Any]) -> tuple[list[str], str | None]:
             lines.append(f"     (note: {sff} of those fetches FAILED — a transient gh "
                          "gap, NOT a clean 'no PR qualified')")
         return lines, "pr_kept"
-    lines.append(_OK + f"{kept}/{fetched} PR(s) carried the gate suite")
+    if cp.get("required_suite_unsatisfiable"):
+        lines.append(_OK + f"{kept}/{fetched} recent PR row(s) retained for the "
+                     "measured PR-floor; the required gate was not observable")
+    else:
+        lines.append(_OK + f"{kept}/{fetched} PR(s) carried the gate suite")
 
     # Stage 5 — config-era partition (informational; a thin-flip can wipe a spine).
     eras = cp.get("config_eras") or []
@@ -739,8 +749,10 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
         gap = f", {ff} fetch failure(s)" if ff else ""
         # When the required suite was unsatisfiable, the sample is the recency-only
         # fallback (no PR carried the external gate) — say so, not just the count.
+        stop_reason = str(cp.get("sample_stop_reason") or "")
         scope = (" — recency-only (external required suite, no PR carried it)"
-                 if cp.get("required_suite_unsatisfiable") else "")
+                 if (cp.get("required_suite_unsatisfiable")
+                     and stop_reason != "required_suite_empty") else "")
         reason = str(cp.get("sample_stop_reason") or (
             "target_met" if cp.get("sample_complete") else "candidates_exhausted"
         )).replace("_", " ")

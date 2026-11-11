@@ -2246,6 +2246,11 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
             or not isinstance(partial_count, int) or partial_count < 0
             or partial_count > sampled):
         return Check(name, False, "candidate-page stop facts are malformed")
+    if (target != _PR_SAMPLE_CONTRACT.PR_SAMPLE_TARGET
+            or cap != _PR_SAMPLE_CONTRACT.PR_SAMPLE_CANDIDATE_PAGE_CAP):
+        return Check(name, False, "sample contract target or page cap drifted")
+    if pages > cap:
+        return Check(name, False, "candidate pages exceed the page cap")
     strict_complete = (
         sampled >= target and distinct_days >= min_distinct_days
         and not cp.get("required_suite_unsatisfiable"))

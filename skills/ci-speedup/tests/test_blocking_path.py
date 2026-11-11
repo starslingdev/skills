@@ -2662,7 +2662,8 @@ def test_provenance_omits_deep_scan_note_for_a_shallow_walk():
 
 
 def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():
-    # P2 regression: an external required suite that was READ but ran on no sampled PR
+    # P2 regression: an external required suite that was READ but was not observable
+    # in the sampled Actions job lists
     # sets required_suite_scoped=False AND required_suite_unsatisfiable=True. The
     # provenance must report the PR-floor cause, NOT the "unreadable (no admin / 404)"
     # cause — the two share the scoped=False flag but are different failures.
@@ -2670,7 +2671,8 @@ def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():
         _prov_doc(required_suite_scoped=False, required_suite_unsatisfiable=True),
         "o/r", "2026-06-08"))
     assert "No file-backed required gate" in block
-    assert "ran on **none** of the sampled PRs" in block
+    assert "per-commit presence and timing could not be established" in block
+    assert "ran on **none** of the sampled PRs" not in block
     assert "Required checks were unreadable" not in block      # the wrong cause
 
 

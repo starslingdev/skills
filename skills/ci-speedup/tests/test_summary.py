@@ -177,6 +177,7 @@ def test_pr_floor_fallback_note_states_the_demotion():
     assert "do NOT re-probe gh or hand-write it" in s
     # The recency-only fallback scope is surfaced on the sample line, not just a count.
     assert "recency-only (external required suite, no PR carried it)" in s
+    assert "carried the gate suite" not in s
 
 
 def test_fileless_check_flagged_as_auto_demoted():
