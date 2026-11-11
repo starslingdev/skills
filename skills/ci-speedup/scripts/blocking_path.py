@@ -2553,7 +2553,7 @@ def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
                      re.IGNORECASE):
             finish_block()
             break
-        if re.search(r"\bName:\s+\S+", line):
+        if re.match(r"^Name:\s+\S+", line):
             nodes.append({"name": line, "platforms": "", "native": ""})
             awaiting_platform = True
             continue

@@ -563,6 +563,32 @@ Platforms:             linux/amd64, linux/amd64/v2, linux/arm64
     assert "builder_topology_unconfirmed" not in leaf
 
 
+def test_builder_parser_does_not_count_indented_metadata_names_as_nodes():
+    trailing_metadata_cases = (
+        """Server:
+ Name: runner-engine
+ Server Version: 27.5.1
+""",
+        """Devices:
+ Name: nvidia.com/gpu
+ Automatically allowed: false
+""",
+    )
+    build = """#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+"""
+
+    for trailing_metadata in trailing_metadata_cases:
+        leaf = bp._parse_log(_SINGLE_AMD64_BUILDER + trailing_metadata + build)
+
+        assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+        assert leaf["magnitude"] == {
+            "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
+        assert "builder_topology_unconfirmed" not in leaf
+
+
 def test_builder_parser_uses_the_last_complete_inspect_block():
     log = """docker buildx inspect
 Name:          builder
