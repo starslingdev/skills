@@ -9377,6 +9377,10 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     matrix_setup_facts: dict[str, dict[str, dict[str, Any]]] = {}
     for rel, doc, _raw in parsed:
         _jobs, leg_counts, repeated_work, has_handoff = _opt14_setup_state(doc)
+        leg_counts = {
+            job: legs for job, legs in leg_counts.items()
+            if (rel, job) not in unreadable_jobs
+        }
         if leg_counts and not has_handoff:
             matrix_setup_facts[rel] = {
                 job: {"legs": legs, "repeated": repeated_work.get(job, [])}

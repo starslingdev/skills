@@ -89,6 +89,15 @@ jobs:
         }
     }
 
+    workflow = root / ".github" / "workflows" / "ci.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8")
+        + "      - parallel:\n          run: echo unreadable\n",
+        encoding="utf-8",
+    )
+    unreadable = scan.scan(root, CATALOG)
+    assert ".github/workflows/ci.yml" not in unreadable.get("matrix_setup_facts", {})
+
 
 def test_opt14_ignores_a_single_effective_shard_leg(tmp_path):
     root = _repo(tmp_path, """on: pull_request
