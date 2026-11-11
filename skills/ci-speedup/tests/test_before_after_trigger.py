@@ -629,13 +629,24 @@ def test_real_adapter_caps_and_counts_job_log_calls():
 
 
 def test_real_adapter_bounds_total_retained_log_text():
-    client = AdapterFixture({"actions/jobs/": "x" * 60_000})
+    client = AdapterFixture({"actions/jobs/": "cache hit " + "x" * 60_000})
     sample = client._job_logs("o/r", [_api_job(job_id) for job_id in range(1, 4)])
 
     assert sum(len(log) for log in sample["logs"]) == 100_000
     assert sample["log_api_calls"] == 2
     assert sample["log_jobs_omitted"] == 1
     assert sample["log_jobs_truncated"] == 1
+
+
+def test_real_adapter_finds_cache_markers_after_a_long_log_prefix():
+    log = "ordinary output\n" * 11_000 + "Cache restored from key: node-v1\n"
+    client = AdapterFixture({"actions/jobs/": log})
+
+    sample = client._job_logs("o/r", [_api_job()])
+
+    assert sample["logs"] == ["Cache restored from key: node-v1"]
+    assert sample["log_jobs_truncated"] == 0
+    assert _cache_class({"position": 1, **sample})[0] == "warm"
 
 
 def test_real_adapter_discloses_jobs_without_readable_ids():

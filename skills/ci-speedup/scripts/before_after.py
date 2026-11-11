@@ -24,12 +24,27 @@ _WARM = re.compile(
 _CACHED_COUNT = re.compile(
     r"(?i)\b(\d+)\s+(?:(?:packages?|tests?|steps?|lines?).{0,20}\(cached\)|"
     r"(?:go\s+)?cached(?:\s+lines?)?)")
+_CACHE_STEP_NAME = re.compile(r"(?i)\bcach(?:e|ed|ing)\b")
 
 # Job logs are the largest verification responses.  Bound both the number of
 # API reads per cohort and the amount of each response retained in the
 # persisted verification context.
 _VERIFY_LOG_JOB_CAP = 20
 _VERIFY_LOG_TOTAL_CHAR_CAP = 100_000
+
+
+def _cache_marker_lines(text: str) -> str:
+    """Keep cache-state evidence without spending the budget on other output."""
+    return "\n".join(
+        line for line in text.splitlines()
+        if _COLD.search(line) or _WARM.search(line) or _CACHED_COUNT.search(line))
+
+
+def _job_has_cache_step(job: dict[str, Any]) -> bool:
+    return any(
+        isinstance(step, dict)
+        and _CACHE_STEP_NAME.search(str(step.get("name") or ""))
+        for step in job.get("steps") or [])
 
 
 def _bounded_logs(*values: Any) -> list[str]:
@@ -426,10 +441,13 @@ class GhVerificationClient:
             calls += 1
             text = self._text(f"repos/{repo}/actions/jobs/{job_id}/logs")
             if text:
-                if len(text) > remaining:
+                evidence = _cache_marker_lines(text)
+                if len(evidence) > remaining:
                     truncated += 1
-                logs.append(text[:remaining])
-                remaining -= len(logs[-1])
+                retained = evidence[:remaining]
+                if retained:
+                    logs.append(retained)
+                remaining -= len(retained)
             else:
                 unreadable += 1
         return {
@@ -438,6 +456,7 @@ class GhVerificationClient:
             "log_jobs_unreadable": unreadable,
             "log_jobs_omitted": omitted,
             "log_jobs_truncated": truncated,
+            "log_has_cache_step": any(_job_has_cache_step(job) for job in jobs),
         }
 
     def remote_head(self, repo: str, branch: str) -> str | None:
@@ -860,6 +879,16 @@ def _cache_class(cohort: dict[str, Any]) -> tuple[str, str]:
     omitted = int(cohort.get("log_jobs_omitted") or 0)
     truncated = int(cohort.get("log_jobs_truncated") or 0)
     calls = int(cohort.get("log_api_calls") or 0)
+    cold = _COLD.search(log)
+    warm = _WARM.search(log)
+    if cohort.get("log_has_cache_step") is False:
+        if cold:
+            return "cold", cold.group(0)
+        if warm:
+            return "warm", "log cache hit"
+        return (("cold", "first run")
+                if int(cohort.get("position") or 0) == 1
+                else ("warm", "later run"))
     if unreadable:
         return ("unknown", f"{unreadable} job log"
                 f"{'s' if unreadable != 1 else ''} unreadable")
@@ -869,10 +898,9 @@ def _cache_class(cohort: dict[str, Any]) -> tuple[str, str]:
     if truncated:
         return ("unknown", f"{truncated} job log"
                 f"{'s' if truncated != 1 else ''} truncated by cap")
-    cold = _COLD.search(log)
     if cold:
         return "cold", cold.group(0)
-    if _WARM.search(log):
+    if warm:
         return "warm", "log cache hit"
     if calls:
         return "unknown", "no cache marker in sampled job logs"
