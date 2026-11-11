@@ -4798,8 +4798,9 @@ def _detect_opt61(
             r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
             r"\s*=\s*([^\s;&]+)", re.IGNORECASE)
         build_command_re = re.compile(
-            r"\b(?:cmake\s+--build|make|ninja|meson\s+compile|cargo\s+(?:build|test)|"
-            r"go\s+(?:build|test))\b", re.IGNORECASE)
+            r"\b(?:cmake\s+--build|make|ninja|meson\s+compile|"
+            r"cargo\s+(?:build|test|clippy|nextest)|go\s+(?:build|test))\b",
+            re.IGNORECASE)
         direct_compiler_re = re.compile(
             r"(?:^|[\s;&|])(ccache|sccache)(?=\s|$)", re.IGNORECASE)
         analysis_command_re = re.compile(
