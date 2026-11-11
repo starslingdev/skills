@@ -100,19 +100,23 @@ def _is_person(user: dict[str, Any]) -> bool:
     )
 
 
-def identity_leaks(payload: Any, path: str = "$") -> list[str]:
-    """Every contributor identity left in a decoded JSON payload."""
+def identity_leaks(payload: Any, path: str = "$", *, keep: frozenset[str] = frozenset()) -> list[str]:
+    """Every contributor identity left in a decoded JSON payload.
+
+    *keep* names logins that stay as recorded: the audited repository's owner.
+    """
     leaks: list[str] = []
     if isinstance(payload, dict):
-        if _is_person(payload) and not CONTRIBUTOR_LOGIN.fullmatch(payload["login"]):
+        login = payload.get("login")
+        if _is_person(payload) and login not in keep and not CONTRIBUTOR_LOGIN.fullmatch(login):
             leaks.append(f"{path}.login")
         if "email" in payload and "name" in payload and payload.get("name") != CONTRIBUTOR_NAME:
             leaks.append(f"{path}.name")
         for key, value in payload.items():
-            leaks.extend(identity_leaks(value, f"{path}.{key}"))
+            leaks.extend(identity_leaks(value, f"{path}.{key}", keep=keep))
     elif isinstance(payload, list):
         for index, value in enumerate(payload):
-            leaks.extend(identity_leaks(value, f"{path}[{index}]"))
+            leaks.extend(identity_leaks(value, f"{path}[{index}]", keep=keep))
     elif isinstance(payload, str) and email_addresses(payload):
         leaks.append(f"{path} (email)")
     return leaks
@@ -135,18 +139,24 @@ def _person_logins(payload: Any, found: set[str]) -> None:
             _person_logins(value, found)
 
 
-def _login_pattern(mapping: dict[str, str]) -> re.Pattern[str] | None:
+def _login_pattern(mapping: dict[str, str], *, mention: bool = False) -> re.Pattern[str] | None:
+    """Whole-token logins; with *mention*, only ``@login`` mentions (any field)."""
     if not mapping:
         return None
     alternatives = "|".join(re.escape(login) for login in mapping)  # longest first
-    return re.compile(rf"(?<![A-Za-z0-9-])(?:{alternatives})(?![A-Za-z0-9-])")
+    if mention:
+        return re.compile(rf"(?<![A-Za-z0-9_.-])@(?P<login>{alternatives})(?![A-Za-z0-9-])")
+    return re.compile(rf"(?<![A-Za-z0-9-])(?P<login>{alternatives})(?![A-Za-z0-9-])")
 
 
 def _replace_logins(text: str, mapping: dict[str, str], pattern: re.Pattern[str] | None) -> str:
     """Swap whole-token logins inside a URL, ``owner/name`` or commit message."""
     if pattern is None:
         return text
-    return pattern.sub(lambda match: mapping[match.group(0)], text)
+    return pattern.sub(
+        lambda match: match.group(0).replace(match.group("login"), mapping[match.group("login")]),
+        text,
+    )
 
 
 def _scrub_string(text: str) -> str:
@@ -158,7 +168,8 @@ def _scrub_string(text: str) -> str:
 
 
 def scrub_identities(payload: Any, mapping: dict[str, str], key: str = "",
-                     pattern: re.Pattern[str] | None = None) -> Any:
+                     pattern: re.Pattern[str] | None = None,
+                     mentions: re.Pattern[str] | None = None) -> Any:
     """Return *payload* with every contributor identity replaced by a placeholder.
 
     People's logins map to stable ``contributor-NNNN`` aliases (so "same author"
@@ -169,7 +180,8 @@ def scrub_identities(payload: Any, mapping: dict[str, str], key: str = "",
     """
     if isinstance(payload, dict):
         result = {
-            name: scrub_identities(value, mapping, name, pattern) for name, value in payload.items()
+            name: scrub_identities(value, mapping, name, pattern, mentions)
+            for name, value in payload.items()
         }
         if _is_person(payload):
             result["login"] = mapping.get(payload["login"], payload["login"])
@@ -182,11 +194,12 @@ def scrub_identities(payload: Any, mapping: dict[str, str], key: str = "",
                     result[field] = None
         return result
     if isinstance(payload, list):
-        return [scrub_identities(value, mapping, key, pattern) for value in payload]
+        return [scrub_identities(value, mapping, key, pattern, mentions) for value in payload]
     if isinstance(payload, str):
         if _URL_KEY.search(key) or key in {"full_name", "message"}:
             payload = _replace_logins(payload, mapping, pattern)
-        return _scrub_string(payload)
+        # ``@login`` mentions in titles, bodies and annotations, in any field.
+        return _scrub_string(_replace_logins(payload, mapping, mentions))
     return payload
 
 
@@ -198,12 +211,48 @@ def _json_files(recording: Path) -> list[Path]:
     )
 
 
-def scrub_recording(recording: Path) -> int:
+def audited_owner(recording: Path) -> str | None:
+    """The audited repository's owner, from the manifest's ``public-github:`` origin."""
+    try:
+        origin = json.loads((recording / "manifest.json").read_text(encoding="utf-8"))["origin"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    prefix = "public-github:"
+    if not isinstance(origin, str) or not origin.startswith(prefix) or "/" not in origin:
+        return None
+    return origin.removeprefix(prefix).split("/", 1)[0]
+
+
+def _scrub_text_files(recording: Path) -> int:
+    """Replace contributor email addresses in copied checkout files and text logs."""
+    rewritten = 0
+    for folder in ("checkout", "logs"):
+        for path in sorted((recording / folder).rglob("*")):
+            if not path.is_file() or path.suffix == ".gz":
+                continue
+            text = path.read_text(encoding="utf-8", errors="replace")
+            if not email_addresses(text):
+                continue
+            path.write_text(
+                _EMAIL.sub(
+                    lambda m: CONTRIBUTOR_EMAIL if email_addresses(m.group(0)) else m.group(0), text
+                ),
+                encoding="utf-8",
+            )
+            rewritten += 1
+    return rewritten
+
+
+def scrub_recording(recording: Path, owner: str | None = None) -> int:
     """Rewrite every recorded payload under *recording* without contributor identities.
 
+    *owner* (default: read from the manifest) is the audited repository's owner.
+    Its login stays as recorded even when it is a person, so the engine's
+    "head repository differs from the audited one" fork test still holds.
     Returns the number of files rewritten.  Files whose content does not change
     are left byte-for-byte alone.
     """
+    owner = owner or audited_owner(recording)
     decoded: dict[Path, Any] = {}
     logins: set[str] = set()
     for path in _json_files(recording):
@@ -214,15 +263,17 @@ def scrub_recording(recording: Path) -> int:
             continue
         _person_logins(decoded[path], logins)
     # Already-scrubbed aliases stay as they are, so a second pass is a no-op.
+    logins.discard(owner or "")
     taken = {login for login in logins if CONTRIBUTOR_LOGIN.fullmatch(login)}
     fresh = sorted(logins - taken, key=lambda value: (-len(value), value))
     numbers = (number for number in range(1, 10_000) if f"contributor-{number:04d}" not in taken)
     # Longest first, so a login that contains another is replaced whole.
     mapping = {login: f"contributor-{next(numbers):04d}" for login in fresh}
     pattern = _login_pattern(mapping)
-    rewritten = 0
+    mentions = _login_pattern(mapping, mention=True)
+    rewritten = _scrub_text_files(recording)
     for path, payload in decoded.items():
-        scrubbed = scrub_identities(payload, mapping, pattern=pattern)
+        scrubbed = scrub_identities(payload, mapping, pattern=pattern, mentions=mentions)
         if scrubbed == payload:
             continue
         text = json.dumps(scrubbed, indent=2 if path.name == "manifest.json" else None, sort_keys=False)
@@ -651,7 +702,7 @@ def record(repository: str, checkout: Path, output: Path, *, captured_at: dateti
         public_history = _public_history(history)
         _write_compressed_json(output / "month-wide.json.gz", public_history)
         (output / "month-wide.json").unlink(missing_ok=True)
-        scrub_recording(output)
+        scrub_recording(output, repository.split("/", 1)[0])
         _write_manifest(repository, checkout, output, captured_at, log_cap_bytes, [], public_history)
         state_path.unlink(missing_ok=True)
         return
@@ -707,7 +758,7 @@ def record(repository: str, checkout: Path, output: Path, *, captured_at: dateti
     history = _month_history(repository, captured_at, state_path)
     public_history = _public_history(history)
     _write_compressed_json(output / "month-wide.json.gz", public_history)
-    scrub_recording(output)
+    scrub_recording(output, repository.split("/", 1)[0])
     public_commit = _LONG_NUMBER.sub(
         lambda match: identifier_mapping[match.group(0)], commit.stdout.strip()
     )

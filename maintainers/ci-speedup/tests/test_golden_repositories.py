@@ -449,7 +449,9 @@ def test_golden_recordings_carry_no_contributor_identity() -> None:
         except ValueError:
             leaks.extend(f"{relative}: {address}" for address in record.email_addresses(text))
             continue
-        leaks.extend(f"{relative}: {leak}" for leak in record.identity_leaks(payload))
+        owner = record.audited_owner(_ROOT / "repositories" / path.relative_to(_ROOT).parts[1])
+        keep = frozenset({owner}) if owner else frozenset()
+        leaks.extend(f"{relative}: {leak}" for leak in record.identity_leaks(payload, keep=keep))
     assert not leaks, f"{len(leaks)} contributor identities, e.g.:\n" + "\n".join(leaks[:10])
 
 
@@ -489,16 +491,30 @@ def test_scrub_replaces_people_consistently_and_keeps_bots(tmp_path: Path) -> No
             "message": "Merge pull request #1 from someone/fix\n\nSigned-off-by: Some One <someone@example.com>",
         },
         "commit": {"verification": {"payload": "author Some One <someone@example.com>", "signature": "x"}},
+        "display_title": "Thanks @someone for the fix",
+        "repository": {"full_name": "owner/project", "owner": {"login": "owner", "type": "User"}},
     }
     recording = tmp_path / "recording"
     (recording / "api").mkdir(parents=True)
     path = recording / "api" / "runs.json.gz"
     path.write_bytes(gzip.compress(json.dumps({"workflow_runs": [run]}).encode()))
 
-    assert record.scrub_recording(recording) == 1
+    (recording / "manifest.json").write_text(json.dumps({"origin": "public-github:owner/project"}))
+    (recording / "checkout").mkdir()
+    pyproject = recording / "checkout" / "pyproject.toml.golden"
+    pyproject.write_text('authors = [{email = "someone@example.com"}]\n', encoding="utf-8")
+
+    assert record.audited_owner(recording) == "owner"
+    assert record.scrub_recording(recording) == 2
     scrubbed = json.loads(gzip.decompress(path.read_bytes()))["workflow_runs"][0]
 
-    assert record.identity_leaks(scrubbed) == []
+    # The audited repository's owner is a person here, and keeps its login so
+    # upstream runs do not turn into forks.
+    assert record.identity_leaks(scrubbed) == ["$.repository.owner.login"]
+    assert record.identity_leaks(scrubbed, keep=frozenset({"owner"})) == []
+    assert scrubbed["repository"]["full_name"] == "owner/project"
+    assert scrubbed["display_title"] == "Thanks @contributor-0001 for the fix"
+    assert "someone@example.com" not in pyproject.read_text(encoding="utf-8")
     assert scrubbed["actor"]["login"] == scrubbed["head_repository"]["owner"]["login"] == "contributor-0001"
     assert scrubbed["actor"]["html_url"] == "https://github.com/contributor-0001"
     assert scrubbed["head_repository"]["full_name"] == "contributor-0001/project"
