@@ -77,13 +77,17 @@ jobs:
       - run: npm test -- --shard=${{ matrix.shardIndex }}/4
 """)
 
-    finding = next(
-        row for row in scan.scan(root, CATALOG)["findings"]
-        if row["pattern"] == "OPT14")
+    doc = scan.scan(root, CATALOG)
 
-    assert finding["matrix_setup_legs"] == {"shards": 4}
-    assert finding["matrix_setup_repeated"] == {
-        "shards": ["checkout", "install", "build"]}
+    assert not [row for row in doc["findings"] if row["pattern"] == "OPT14"]
+    assert doc["matrix_setup_facts"] == {
+        ".github/workflows/ci.yml": {
+            "shards": {
+                "legs": 4,
+                "repeated": ["checkout", "install", "build"],
+            }
+        }
+    }
 
 
 def test_opt14_ignores_a_single_effective_shard_leg(tmp_path):
