@@ -1,4 +1,5 @@
 # Changelog
+
 - Recognize replayed Go, Bazel, Gradle, and Turbo test results in fetched logs, exclude replay-heavy samples from pole drills and cross-run magnitude baselines, and disclose the exclusion in the report.
 - Keep literal compile targets visible beside unknown Make targets, and preserve the environment boundary of single-quoted Docker payloads when detecting emulated builds.
 - Credit static cache findings only after sampled job logs confirm the predicted miss and the existing budget, invalidation, and transfer-cost guards all pass.
