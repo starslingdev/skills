@@ -1189,8 +1189,9 @@ def test_builder_topology_and_foreign_only_shapes_run_through_collection(
 
     docker_info = (
         "##[group]Docker info\n"
-        "Name: runner-engine\n"
-        "Server Version: 27.5.1\n"
+        "Server:\n"
+        " Name: runner-engine\n"
+        " Server Version: 27.5.1\n"
         "##[endgroup]\n")
     _doc, _report, after_info = _run_multiarch_log_variant(
         "multiarch-docker-info", monkeypatch, tmp_path,
