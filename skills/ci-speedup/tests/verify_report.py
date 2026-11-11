@@ -2188,6 +2188,8 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
         "sample_candidate_pages_fetched", "sample_candidate_page_cap",
         "sample_candidate_pages_exhausted", "sample_candidate_page_fetch_failures",
         "sample_candidate_era_door", "sample_candidate_selection_limited",
+        "sample_distinct_days", "sample_span_first", "sample_span_last",
+        "sample_partial_count",
     )
     missing = [key for key in required if key not in cp]
     if missing:
@@ -2206,15 +2208,24 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     exhausted = cp.get("sample_candidate_pages_exhausted")
     era_door = cp.get("sample_candidate_era_door")
     selection_limited = cp.get("sample_candidate_selection_limited")
+    distinct_days = cp.get("sample_distinct_days")
+    span_first = cp.get("sample_span_first")
+    span_last = cp.get("sample_span_last")
+    partial_count = cp.get("sample_partial_count")
     if (not isinstance(failures, int) or failures < 0
             or not isinstance(page_failures, int) or page_failures < 0
             or not isinstance(pages, int) or pages < 1
             or not isinstance(cap, int) or cap < 1
             or not isinstance(exhausted, bool) or not isinstance(era_door, bool)
-            or not isinstance(selection_limited, bool)):
+            or not isinstance(selection_limited, bool)
+            or not isinstance(distinct_days, int) or distinct_days < 0
+            or not isinstance(span_first, str) or not isinstance(span_last, str)
+            or not isinstance(partial_count, int) or partial_count < 0
+            or partial_count > sampled):
         return Check(name, False, "candidate-page stop facts are malformed")
     strict_complete = (
-        sampled >= target and not cp.get("required_suite_unsatisfiable"))
+        sampled >= target and distinct_days >= 5
+        and not cp.get("required_suite_unsatisfiable"))
     if complete != strict_complete:
         return Check(
             name, False,
@@ -2236,6 +2247,13 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     rendered = f"{sampled} of {target} PRs sampled: {expected.replace('_', ' ')}"
     if rendered not in report:
         problems.append("rendered report omits or changes the re-derived sample statement")
+    if span_first and span_last:
+        rendered_span = f"{span_first[:10]} to {span_last[:10]}"
+        if rendered_span not in report:
+            problems.append("rendered report omits the sampled commit span")
+    if sampled and partial_count * 2 > sampled:
+        if "gate frequency and pole order are unreliable" not in report:
+            problems.append("mostly-partial sample headlines gate frequency without an unreliable label")
     return Check(name, not problems, "; ".join(problems) if problems else rendered)
 
 

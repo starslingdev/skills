@@ -1159,6 +1159,10 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
         "sample_candidate_page_fetch_failures": 0,
         "sample_candidate_era_door": False,
         "sample_candidate_selection_limited": False,
+        "sample_distinct_days": 0,
+        "sample_span_first": "",
+        "sample_span_last": "",
+        "sample_partial_count": 0,
         "required_suite_scoped": True,
         "required_suite_unsatisfiable": False,
         "required_checks_unobservable": ["Devin Review"],
@@ -1179,6 +1183,8 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
                            "sample_candidate_page_fetch_failures",
                            "sample_candidate_era_door",
                            "sample_candidate_selection_limited",
+                           "sample_distinct_days", "sample_span_first",
+                           "sample_span_last", "sample_partial_count",
                            "required_suite_scoped", "required_suite_unsatisfiable",
                            "required_checks_unobservable"}
     assert mapped["sample_fetched"] == real_diag["fetched"]

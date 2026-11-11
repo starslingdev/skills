@@ -6850,6 +6850,11 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
     gate = (f"> - **Which checks gate (the critical-path ordering):** measured from "
             f"**{spr}/{tgt} sampled PRs** — **{spr} of {tgt} PRs sampled: "
             f"{stop_reason}**")
+    partial_commits = cp.get("sample_partial_count")
+    if (isinstance(partial_commits, int) and spr
+            and partial_commits * 2 > spr):
+        gate += (" — ⚠️ **gate frequency and pole order are unreliable** because "
+                 f"{partial_commits}/{spr} sampled commits are partial")
     if not complete:
         short_reasons = {
             "fetch failures": "some candidate or check-run history was unreadable",
@@ -8795,7 +8800,12 @@ def _metadata_table(doc: dict[str, Any], repo: str) -> list[str]:
         reason = str(cp.get("sample_stop_reason") or (
             "target_met" if cp.get("sample_complete", True)
             else "candidates_exhausted")).replace("_", " ")
-        rows.append(("PR gate sample", f"{spr} of {tgt} PRs sampled: {reason}"))
+        span_first = str(cp.get("sample_span_first") or "")[:10]
+        span_last = str(cp.get("sample_span_last") or "")[:10]
+        span = (f"; {span_first} to {span_last}"
+                if span_first and span_last else "")
+        rows.append(("PR gate sample",
+                     f"{spr} of {tgt} PRs sampled: {reason}{span}"))
     if skill.startswith("installed:"):
         # Content-hash provenance for an installed skill copy (issue #2): not a
         # commit, so a plain identity string with NO commit permalink to fabricate.
