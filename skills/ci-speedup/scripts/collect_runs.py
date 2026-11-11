@@ -30309,6 +30309,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 } for _step in _job.get("steps") or []
                     if isinstance(_step, dict) and _step.get("name")]
                 _job_intervals.append({
+                    "id": _job.get("id"),
                     "name": str(_job.get("name") or ""),
                     "workflow_file": _wf,
                     "duration_s": round(_duration, 3),

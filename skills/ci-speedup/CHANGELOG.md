@@ -1295,6 +1295,7 @@ unversioned and updates by reinstall from `main`.
 - **2026-11-10** — Warn when a shard-like matrix grows while each leg repeats checkout and dependency setup, naming the job and effective before/after shard counts while honoring matrix include/exclude rules and ignoring diagnostic dimensions.
 - **2026-11-10** — Keep path-filter findings visible when sampled pull-request file lists are incomplete, label their hit rate as unmeasured with the reason, and withhold numeric credit.
 - **2026-11-10** — Recognize GitHub's generated checkout, post-action, and always-run upload step names when excluding pull-request-light matrix legs from imbalance measurements, and count excluded legs once across repeated runs.
+- **2026-11-10** — Read a bounded, counted set of sampled job logs during before/after verification and recognize the documented `actions/cache` hit and miss lines when separating warm and cold samples.
 - **2026-11-10** — Bind post-fix verification cohorts to the requested branch as well as the commit, refuse default-branch reruns, and name the unavailable baseline lane when its facts are missing.
 - **2026-11-10** — Compare repeated aggregate guard findings by their affected jobs, so an unchanged workflow with multiple same-pattern groups stays quiet while a real expansion names only newly covered jobs.
 - **2026-11-09** — Recognize Playwright's documented camel-case `shardIndex`/`shardTotal` matrix when those dimensions feed `--shard=`, and keep the path-partitioned monorepo fixture focused on package and runtime routing.

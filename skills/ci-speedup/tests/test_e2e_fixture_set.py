@@ -374,6 +374,18 @@ def test_serial_chain_sizes_removed_edge_and_failure_path_compute(
     assert not [check for check in checks if not check.skipped and not check.ok]
 
 
+def test_serial_chain_commit_wall_facts_retain_job_ids_for_verification_logs(
+        monkeypatch, tmp_path):
+    doc, _report, checks = run_fixture(
+        FIXTURE_ROOT / "serial-chain", monkeypatch, tmp_path)
+    facts = doc["pr_critical_path"]["commit_wall_clock"]["facts"]
+    jobs = [job for fact in facts for job in fact.get("jobs", [])]
+
+    assert jobs
+    assert all(isinstance(job.get("id"), int) for job in jobs)
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
 def test_serial_chain_keeps_a_go_script_lint_as_a_gate(monkeypatch, tmp_path):
     fixture = FIXTURE_ROOT / "serial-chain"
     doc, _report, checks = run_fixture(fixture, monkeypatch, tmp_path)
