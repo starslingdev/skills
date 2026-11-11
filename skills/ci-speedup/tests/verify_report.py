@@ -12692,9 +12692,15 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
     if not _is_static_only(report):
-        for finding in findings:
-            if not isinstance(finding, dict) or finding.get("pattern") != "OPT32":
-                continue
+        opt32_block = next((
+            block for block in appendix.split("<details>")
+            if re.search(r"<summary><strong>OPT32(?:\s|-)", block)
+        ), "")
+        opt32_findings = [
+            finding for finding in findings
+            if isinstance(finding, dict) and finding.get("pattern") == "OPT32"
+        ]
+        for index, finding in enumerate(opt32_findings):
             measurement = finding.get("path_filter_measurement")
             if not isinstance(measurement, dict):
                 continue
@@ -12721,7 +12727,8 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
                              "a measured OPT32 finding has no sampled pull requests")
             elif numbered_runs < sampled_runs:
                 disclosure = f"Measured on {numbered_runs} of {sampled_runs} sampled runs"
-                if disclosure not in str(finding.get("evidence") or "") or disclosure not in report:
+                if (disclosure not in str(finding.get("evidence") or "")
+                        or (opt32_block and index < 8 and disclosure not in opt32_block)):
                     return Check(name, False,
                                  "a partially measured OPT32 finding does not disclose its "
                                  "sampled-run coverage")

@@ -352,6 +352,35 @@ def test_measured_opt32_is_the_only_new_pole_hygiene_exception(tmp_path: Path):
                     findings=finding(skipped=3, rate=0.05)) == "FAIL"
 
 
+def test_opt32_coverage_check_respects_the_rendered_member_cap(tmp_path: Path):
+    disclosures = [f"Measured on {30 + i} of {60 + i} sampled runs" for i in range(9)]
+    findings = []
+    for i, disclosure in enumerate(disclosures):
+        numbered = 30 + i
+        findings.append({
+            "pattern": "OPT32",
+            "runner_min_saving": None,
+            "wall_clock_p50_s": 0.0,
+            "job": f"test-{i}",
+            "affected_jobs": [f"test-{i}"],
+            "workflow_file": f".github/workflows/ci-{i}.yml",
+            "evidence": disclosure,
+            "path_filter_measurement": {
+                "sampled_prs": numbered,
+                "sampled_runs": 60 + i,
+                "runs_with_pr_number": numbered,
+                "would_skip_prs": 0,
+                "hit_rate": 0.0,
+            },
+        })
+    report = (_good() + _also_noticed_section("ci-0.yml", "test-0",
+                                              "OPT32 - Add path filters")
+              + "\n" + "\n".join(disclosures[:8]))
+
+    assert _tag_for(report, _DOUBLE_FRAME, tmp_path,
+                    findings={"findings": findings}) == "PASS"
+
+
 def _struct_findings(*findings: dict) -> dict:
     return {"pr_critical_path": {}, "findings": list(findings)}
 
