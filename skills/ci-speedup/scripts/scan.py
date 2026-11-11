@@ -4720,16 +4720,21 @@ def _uses_persistent_remote_builder(job: dict) -> bool:
 
 def _static_cache_family(*values: object) -> str:
     """Return a stable cache-family token for log confirmation."""
-    text = " ".join(str(value or "") for value in values).casefold()
-    for family in (
-        "sccache", "ccache", "staticcheck", "golangci", "buildkit",
-        "jest", "playwright", "pnpm", "turbo", "go",
-    ):
-        if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", text):
-            return family
+    texts = [str(value or "").casefold() for value in values]
+    for text in texts:
+        for family in (
+            "sccache", "ccache", "staticcheck", "golangci", "buildkit",
+            "jest", "playwright", "pnpm", "turbo", "go",
+        ):
+            if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", text):
+                return family
+    text = " ".join(texts)
     without_expressions = re.sub(r"\$\{\{.*?\}\}", " ", text)
-    tokens = re.findall(r"[a-z][a-z0-9_.-]{1,}", without_expressions)
-    ignored = {"cache", "restore", "keys", "key", "runner", "github", "sha"}
+    tokens = re.findall(r"[a-z][a-z0-9_.]*", without_expressions)
+    ignored = {
+        "build", "cache", "dependencies", "deps", "github", "key", "keys",
+        "linux", "restore", "runner", "sha", "shared",
+    }
     for token in tokens:
         token = token.strip("._-")
         if (token and token not in ignored
@@ -4792,7 +4797,7 @@ def _detect_opt61(
                     "none of its `restore-keys` can restore the rolling saved-key "
                     "family on a later edit",
                     _static_cache_family(
-                        key, *restore, *cache_paths_by_step.get(id(step), [])),
+                        *cache_paths_by_step.get(id(step), []), key, *restore),
                 ))
             size = values.get("max-size") or values.get("max_size")
             mib = _size_mib(str(size)) if size is not None else None
@@ -4802,7 +4807,7 @@ def _detect_opt61(
                     f"its compiler-cache size limit is only {size} and may churn before "
                     "the next reuse",
                     _static_cache_family(
-                        _uses(step), key, *cache_paths_by_step.get(id(step), [])),
+                        *cache_paths_by_step.get(id(step), []), _uses(step), key),
                 ))
 
         for match in re.finditer(

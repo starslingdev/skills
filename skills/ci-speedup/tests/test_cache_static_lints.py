@@ -49,20 +49,21 @@ def test_opt61_flags_restore_prefix_that_cannot_match_saved_key(tmp_path) -> Non
     restore_row = next(row for row in rows if row["pattern"] == "OPT61"
                        and "restore" in row["evidence"].lower())
     assert restore_row["cache_family"] == "pnpm"
-    versioned = _scan(tmp_path / "versioned", """      - uses: actions/cache@v4
+    for index, prefix in enumerate(("v1", "cache-v2", "shared", "build", "deps", "linux")):
+        prefixed = _scan(tmp_path / f"prefixed-{index}", f"""      - uses: actions/cache@v4
         with:
           path: .cache/tool
-          key: v1-${{ runner.os }}-tool-${{ github.sha }}
-          restore-keys: other-${{ runner.os }}-
+          key: {prefix}-${{{{ runner.os }}}}-tool-${{{{ github.sha }}}}
+          restore-keys: other-${{{{ runner.os }}}}-
       - run: tool build
 """)
-    versioned_row = next(row for row in versioned if row["pattern"] == "OPT61"
-                         and "restore" in row["evidence"].lower())
-    status, _line = collect_runs._cache_status_from_log(
-        "Cache not found for input keys: v1-Linux-pnpm-other",
-        collect_runs._cache_keywords_for_finding(versioned_row),
-    )
-    assert status != "miss"
+        prefixed_row = next(row for row in prefixed if row["pattern"] == "OPT61"
+                            and "restore" in row["evidence"].lower())
+        status, _line = collect_runs._cache_status_from_log(
+            f"Cache not found for input keys: {prefix}-Linux-pnpm-other",
+            collect_runs._cache_keywords_for_finding(prefixed_row),
+        )
+        assert status != "miss"
 
 
 def test_opt61_accepts_a_matching_rolling_restore_prefix(tmp_path) -> None:
