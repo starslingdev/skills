@@ -306,7 +306,7 @@ entries are dated (UTC). Format loosely follows
 ### Fixed
 
 - **2026-11-11** — Unverified remote code execution now covers a GitHub CLI
-  extension installed at a mutable reference (PR #TBD). A job that runs
+  extension installed at a mutable reference (#330). A job that runs
   `gh extension install OWNER/REPO` with no `--pin` (the latest release) or
   with `--pin` set to a tag, branch or abbreviated commit, and then runs that
   extension in the same job (`gh <name> …` or `gh extension exec <name>`),
