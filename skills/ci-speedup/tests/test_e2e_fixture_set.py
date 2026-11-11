@@ -46,7 +46,6 @@ class FixtureClient:
         self.errors = 0
         self.job_reads: dict[str, int] = {}
         self.log_reads: dict[str, int] = {}
-        self.check_reads = 0
 
     def available(self) -> bool:
         return not self.gave_up
@@ -127,14 +126,10 @@ class FixtureClient:
         if match:
             run_id = match.group(1)
             self.job_reads[run_id] = self.job_reads.get(run_id, 0) + 1
-            if run_id in set(self.recorded.get("failed_job_ids") or []):
-                self._bump(error=True)
-                return None
             return {"jobs": self.recorded.get("jobs", {}).get(run_id, [])}
         match = re.match(
             rf"repos/{re.escape(repo)}/commits/([^/]+)/check-runs", endpoint)
         if match:
-            self.check_reads += 1
             return {"check_runs": self.recorded.get("checks", {}).get(
                 match.group(1), [])}
         if endpoint == f"repos/{repo}/rulesets?includes_parents=true":
@@ -144,10 +139,7 @@ class FixtureClient:
                 "/protection/required_status_checks"):
             return {"contexts": self.recorded.get("required_checks", ["gate"])}
         if "/commits?path=" in endpoint:
-            query = parse_qs(endpoint.split("?", 1)[1])
-            path = (query.get("path") or [""])[0]
-            by_workflow = self.recorded.get("commits_by_workflow") or {}
-            return by_workflow.get(path, self.recorded.get("commits_by_path", []))
+            return self.recorded.get("commits_by_path", [])
         match = re.match(
             rf"repos/{re.escape(repo)}/contents/(.+)\?ref=(.+)", endpoint)
         if match:
@@ -226,7 +218,6 @@ def run_fixture(path: Path, monkeypatch, tmp_path: Path, *,
     checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
     doc["_fixture_job_reads"] = dict(client.job_reads)
     doc["_fixture_log_reads"] = dict(client.log_reads)
-    doc["_fixture_check_reads"] = client.check_reads
     return doc, report, checks
 
 
@@ -318,26 +309,6 @@ def fixture_facts(doc: dict, checks: list) -> dict:
             "skip": sorted(check.name for check in checks if check.skipped),
         },
     }
-
-
-def test_pr_sample_day_floor_stays_coupled_through_the_findings_contract(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path)
-    run_root = tmp_path / "run-day-floor-contract"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    assert (doc["pr_critical_path"]["sample_min_distinct_days"]
-            == cr._PR_SAMPLE_MIN_DISTINCT_DAYS)
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-    findings_path = run_root / fixture.name / "findings.json"
-    tampered = json.loads(findings_path.read_text(encoding="utf-8"))
-    tampered["pr_critical_path"]["sample_min_distinct_days"] = 1
-    findings_path.write_text(json.dumps(tampered), encoding="utf-8")
-    rejected = vr.check_pr_sample_stop_reason(report, findings_path)
-    assert not rejected.ok
-    assert "candidate-page stop facts are malformed" in rejected.detail
 
 
 def _first_fact_difference(expected, actual, path: str = "") -> tuple[str, object, object]:
@@ -1744,19 +1715,18 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
             other_pages.append(page)
     other = [row for page in other_pages for row in page]
     second_count = (100 if third_page
-                    else (100 if second_page and zero_first_matches
-                          else (91 if second_page else 0)))
+                    else (20 if second_page and zero_first_matches
+                          else (12 if second_page else 0)))
     second = [run(100 + i) for i in range(second_count)]
     third = [run(200 + i) for i in range(100)] if third_page else []
     qualifying = (set() if zero_first_matches
                   else {f"sha-{i}" for i in range(9)})
     if matches_on_third:
-        qualifying.update(f"sha-{200 + i}" for i in range(100))
+        qualifying.update(f"sha-{200 + i}" for i in range(20))
     elif (second_page and not third_page and not fail_second_page
           and not era_boundary):
         qualifying.update(
-            f"sha-{100 + i}" for i in range(
-                100 if zero_first_matches else 91))
+            f"sha-{100 + i}" for i in range(20 if zero_first_matches else 12))
     checks = {
         row["head_sha"]: [{
             "name": "gate" if row["head_sha"] in qualifying else "optional",
@@ -1816,472 +1786,6 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
     return fixture
 
 
-def _busy_pr_sample_fixture(tmp_path: Path, *, extended: bool = False) -> Path:
-    """A busy first page plus older completed PRs and an unrelated config era."""
-    fixture = tmp_path / "busy-pr-sample"
-    workflows = fixture / "workflows"
-    workflows.mkdir(parents=True)
-    (workflows / "ci.yml").write_text(
-        "name: CI\non: [pull_request]\njobs:\n  gate:\n"
-        "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
-        encoding="utf-8")
-    (workflows / "nightly.yml").write_text(
-        "name: Nightly\non:\n  schedule:\n    - cron: '0 0 * * *'\n"
-        "jobs:\n  maintenance:\n    runs-on: ubuntu-latest\n"
-        "    steps:\n      - run: echo ok\n", encoding="utf-8")
-
-    def run(i: int, *, completed: bool) -> dict:
-        day = 30 - (i // 20)
-        hour = i % 20
-        start = f"2026-01-{day:02d}T{hour:02d}:00:00Z"
-        end = f"2026-01-{day:02d}T{hour:02d}:05:00Z"
-        return {
-            "id": 30_000 + i, "event": "pull_request",
-            "head_branch": f"feature-{i}", "head_sha": f"sha-{i}",
-            "status": "completed" if completed else "in_progress",
-            "conclusion": "success" if completed else None,
-            "created_at": start, "run_started_at": start,
-            "updated_at": end if completed else start,
-        }
-
-    inflight = [run(i, completed=False) for i in range(100)]
-    completed = [run(100 + i, completed=True)
-                 for i in range(154 if extended else 100)]
-    if extended:
-        for index, row in enumerate(completed):
-            day = 21 if index == 153 else 25 - min(index // 39, 3)
-            hour = index % 24
-            minute = (index // 24) % 60
-            start = f"2026-01-{day:02d}T{hour:02d}:{minute:02d}:00Z"
-            end = f"2026-01-{day:02d}T{hour:02d}:{minute + 1:02d}:00Z"
-            row.update(created_at=start, run_started_at=start, updated_at=end)
-    nightly = [{
-        "id": 40_001, "event": "schedule", "head_sha": "nightly-new",
-        "status": "completed", "conclusion": "success",
-        "created_at": "2026-01-29T00:00:00Z",
-        "run_started_at": "2026-01-29T00:00:00Z",
-        "updated_at": "2026-01-29T00:01:00Z",
-    }, {
-        "id": 40_002, "event": "schedule", "head_sha": "nightly-old",
-        "status": "completed", "conclusion": "success",
-        "created_at": "2026-01-20T00:00:00Z",
-        "run_started_at": "2026-01-20T00:00:00Z",
-        "updated_at": "2026-01-20T00:01:00Z",
-    }]
-    jobs = {
-        str(row["id"]): [{
-            "id": row["id"] + 100_000, "name": "gate",
-            "labels": ["ubuntu-latest"], "created_at": row["created_at"],
-            "started_at": row["run_started_at"],
-            "completed_at": row["updated_at"] if row["status"] == "completed" else None,
-            "conclusion": row["conclusion"], "steps": [],
-        }]
-        for row in inflight + completed + nightly
-    }
-    checks = {
-        row["head_sha"]: ([{
-            "name": "gate", "started_at": row["created_at"],
-            "completed_at": row["updated_at"],
-        }] if row["status"] == "completed" else [])
-        for row in inflight + completed
-    }
-    recorded = {
-        "repo": "fixture/busy-pr-sample",
-        "captured_at": "2026-01-31T00:00:00Z", "default_branch": "main",
-        "required_checks": ["gate"], "shallow_runs": 2,
-        "workflows": [{
-            "id": 310, "path": ".github/workflows/ci.yml", "name": "CI",
-            "runs_30d": len(inflight) + len(completed),
-            "run_pages": ([inflight, completed[:100], completed[100:]]
-                          if extended else [inflight, completed]),
-        }, {
-            "id": 311, "path": ".github/workflows/nightly.yml", "name": "Nightly",
-            "runs_30d": 2, "run_pages": [nightly],
-        }],
-        "jobs": jobs, "checks": checks,
-        "commits_by_workflow": {
-            ".github/workflows/nightly.yml": [{
-                "sha": "current-nightly",
-                "commit": {"committer": {"date": "2026-01-25T00:00:00Z"}},
-            }],
-            ".github/workflows/ci.yml": [],
-        },
-    }
-    (fixture / "responses.json").write_text(json.dumps(recorded), encoding="utf-8")
-    (fixture / "expected.json").write_text("{}\n", encoding="utf-8")
-    return fixture
-
-
-def test_busy_pr_sample_uses_completed_commits_across_days_despite_non_pr_era(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path)
-    run_root = tmp_path / "run-busy-pr-sample"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["sample_target"] >= 100
-    assert cp["sampled_pr_count"] >= 100
-    assert cp["sample_distinct_days"] >= 5
-    assert cp["sample_partial_count"] == 0
-    # Page 1 is the in-flight burst; page 2 already supplies the complete
-    # 100-commit/five-day suite. Do not crawl the remaining ten pages.
-    assert cp["sample_candidate_pages_fetched"] == 2
-    assert doc["_fixture_check_reads"] == 0
-    assert cp["sample_span_first"].startswith("2026-01-21")
-    assert cp["sample_span_last"].startswith("2026-01-25")
-    assert "2026-01-21" in report and "2026-01-25" in report
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_pr_sample_preserves_observable_required_suite_scope(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path)
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    completed = recorded["workflows"][0]["run_pages"][1]
-    # Nine docs-only commits completed their workflow without the required gate.
-    # They are valid completed PR commits, but not members of the required-suite
-    # population used to rank merge gates.
-    for row in completed[:9]:
-        recorded["jobs"][str(row["id"])] = []
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-required-suite-scope"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["sampled_pr_count"] == 91
-    assert cp["sample_fetched"] == 100
-    assert cp["required_suite_scoped"] is True
-    assert cp["sample_job_list_scoped"] is True
-    assert cp["sample_stop_reason"] == "candidates_exhausted"
-    assert "91 of 100 PRs sampled: candidates exhausted" in report
-    assert "includes only completed PR commits where every observable required check ran" in report
-    assert "includes completed PR commits even when a path-conditional required check did not run" not in report
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_pr_sample_excludes_skipped_required_jobs(monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path)
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    completed = recorded["workflows"][0]["run_pages"][1]
-    for row in completed[:9]:
-        recorded["jobs"][str(row["id"])][0]["conclusion"] = "skipped"
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-skipped-required-suite"
-    run_root.mkdir()
-    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["sampled_pr_count"] == 91
-    assert cp["sample_stop_reason"] == "candidates_exhausted"
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_pr_sample_pages_past_a_full_push_only_front_page(monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path)
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    front = recorded["workflows"][0]["run_pages"][0]
-    for row in front:
-        row.update(event="push", status="completed", conclusion="success")
-        job = recorded["jobs"][str(row["id"])][0]
-        job.update(conclusion="success", completed_at=row["updated_at"])
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-push-front-page"
-    run_root.mkdir()
-    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["sampled_pr_count"] == 100
-    assert cp["sample_candidate_pages_fetched"] == 2
-    assert cp["sample_stop_reason"] == "target_met"
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_pr_sample_keeps_repo_published_required_status_unscoped(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path)
-    (fixture / "workflows" / "nightly.yml").unlink()
-    real_scan = scan.scan
-
-    def scan_with_publisher(*args, **kwargs):
-        scanned = real_scan(*args, **kwargs)
-        scanned["workflow_status_publishers"] = {
-            ".github/workflows/ci.yml": {
-                "sources": [".github/workflows/ci.yml"],
-                "contexts": ["All CI"],
-            }}
-        return scanned
-
-    monkeypatch.setattr(scan, "scan", scan_with_publisher)
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    recorded["workflows"] = recorded["workflows"][:1]
-    recorded["commits_by_workflow"].pop(".github/workflows/nightly.yml", None)
-    recorded["required_checks"] = ["All CI"]
-    recorded["logs"] = {
-        str(job["id"]): "2026-01-30T00:00:00Z completed\n"
-        for jobs in recorded["jobs"].values() for job in jobs
-    }
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-repo-published-required"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["required_suite_unsatisfiable"] is False
-    assert cp["required_suite_scoped"] is False
-    assert cp["required_checks_repo_published"] == ["All CI"]
-    assert cp["sample_stop_reason"] == "target_met"
-    assert "required suite empty" not in report
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_pr_sample_discloses_required_check_missing_from_job_lists(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path)
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    recorded["required_checks"] = ["gate", "external-review"]
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-external-required"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    assert doc["pr_critical_path"]["required_checks_unobservable"] == ["external-review"]
-    assert doc["pr_critical_path"]["required_suite_scoped"] is True
-    assert doc["pr_critical_path"]["sample_job_list_scoped"] is True
-    assert "Status-only required check(s) excluded from the suite test" in report
-    assert "Required-suite coverage comes from run/job lists" in report
-    assert "external-review" in report
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_pr_sample_keeps_empty_observable_required_suite_empty(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path, extended=True)
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    recorded["required_checks"] = ["gate", "lint"]
-    completed = [
-        row for page in recorded["workflows"][0]["run_pages"][1:]
-        for row in page
-    ]
-    for index, row in enumerate(completed):
-        recorded["jobs"][str(row["id"])][0]["name"] = (
-            "gate" if index % 2 == 0 else "lint")
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-empty-required-suite"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["sampled_pr_count"] == 0
-    assert cp["required_suite_scoped"] is True
-    assert cp["required_suite_unsatisfiable"] is True
-    assert cp["sample_job_list_scoped"] is True
-    assert cp["sample_stop_reason"] == "required_suite_empty"
-    assert "0 of 100 PRs sampled: required suite empty" in report
-    assert "no commit ran every observable required check" in report
-    assert "No run history to measure" not in report
-    agent_summary = summary.build_summary(doc)
-    assert "0 PR / merge-queue candidates ran a timed check" not in agent_summary
-    assert "recency-only (external required suite, no PR carried it)" not in agent_summary
-    assert "no commit ran every observable required check" in agent_summary
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_pr_sample_preserves_external_only_required_check_and_wall_bound(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path, extended=True)
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    recorded["required_checks"] = ["external-review"]
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-external-only-required"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["required_checks_unobservable"] == ["external-review"]
-    assert cp["required_suite_scoped"] is False
-    assert cp["required_suite_unsatisfiable"] is True
-    assert cp["sample_stop_reason"] == "required_checks_unobservable"
-    assert "required checks unobservable" in report
-    assert "external-review" in report
-    wall_check = next(
-        check for check in checks
-        if check.name == "per-commit wall-clock projections are physically bounded")
-    assert wall_check.ok
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_pr_sample_marks_commit_partial_when_any_run_job_fetch_fails(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path)
-    (fixture / "workflows" / "sibling.yml").write_text(
-        "name: Sibling\non: [pull_request]\njobs:\n  sibling:\n"
-        "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
-        encoding="utf-8")
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    completed = recorded["workflows"][0]["run_pages"][1]
-    sibling_rows = []
-    failed_ids = []
-    for index, source in enumerate(completed):
-        row = dict(source)
-        row["id"] = 70_000 + index
-        sibling_rows.append(row)
-        job = dict(recorded["jobs"][str(source["id"])][0])
-        job.update(id=170_000 + index, name="sibling")
-        recorded["jobs"][str(row["id"])] = [job]
-        if index >= 40:
-            failed_ids.append(str(row["id"]))
-    recorded["failed_job_ids"] = failed_ids
-    recorded["workflows"].append({
-        "id": 710, "path": ".github/workflows/sibling.yml", "name": "Sibling",
-        "runs_30d": 100, "run_pages": [sibling_rows],
-    })
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-partial-job-fetch"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["sample_partial_count"] == 60
-    assert "PR gate sample (ordering withheld)" in report
-    assert "gate frequency and pole order are unreliable" in report
-    assert "failed job-list reads remain partial and unverified" in report
-    assert "includes only completed PR commits where every observable required check ran" not in report
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_pr_sample_recomputes_span_after_workflow_era_scope(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path, extended=True)
-    original_scope = cr._era_scope_pr_spine_sample
-
-    def drop_oldest_day(repr_shas, per_sha_checks, sha_intervals, *args, **kwargs):
-        scoped = original_scope(
-            repr_shas, per_sha_checks, sha_intervals, *args, **kwargs)
-        kept_shas, kept_checks, kept_intervals, _dropped = scoped
-        return (kept_shas[:-1], kept_checks[:-1],
-                {sha: kept_intervals.get(sha, {}) for sha in kept_shas[:-1]}, 1)
-
-    monkeypatch.setattr(cr, "_era_scope_pr_spine_sample", drop_oldest_day)
-    run_root = tmp_path / "run-era-span"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["sampled_pr_count"] == 153
-    assert cp["sample_distinct_days"] == 4
-    assert cp["sample_span_first"].startswith("2026-01-22")
-    assert cp["sample_span_last"].startswith("2026-01-25")
-    assert cp["sample_complete"] is False
-    assert cp["sample_stop_reason"] == "era_door"
-    assert "2026-01-22 to 2026-01-25" in report
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_mostly_partial_pr_sample_marks_gate_order_unreliable_and_verifies(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path)
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    completed_ids = sorted(
-        int(row["id"]) for row in recorded["workflows"][0]["run_pages"][1])
-    recorded["failed_job_ids"] = [str(run_id) for run_id in completed_ids[:60]]
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-mostly-partial"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["sample_partial_count"] * 2 > cp["sampled_pr_count"]
-    label = "gate frequency and pole order are unreliable"
-    assert label in report
-    neutral = "PR gate sample (ordering withheld)"
-    headline = "Which checks gate (the critical-path ordering)"
-    assert neutral in report
-    assert headline not in report
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-    findings_path = run_root / fixture.name / "findings.json"
-    rejected = vr.check_pr_sample_stop_reason(
-        report.replace(label, "gate ordering"), findings_path)
-    assert not rejected.ok
-    assert "reliability warning" in rejected.detail
-
-    rejected_headline = vr.check_pr_sample_stop_reason(
-        report.replace(neutral, headline), findings_path)
-    assert not rejected_headline.ok
-    assert "still headlines" in rejected_headline.detail
-
-    tampered = json.loads(findings_path.read_text(encoding="utf-8"))
-    tampered["pr_critical_path"]["sample_span_first"] = ""
-    tampered["pr_critical_path"]["sample_span_last"] = ""
-    findings_path.write_text(json.dumps(tampered), encoding="utf-8")
-    rejected_span = vr.check_pr_sample_stop_reason(report, findings_path)
-    assert not rejected_span.ok
-    assert "omits its first-to-last commit span" in rejected_span.detail
-
-
-def test_busy_pr_job_population_orders_gates_by_month_like_share(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path, extended=True)
-    (fixture / "workflows" / "ci.yml").write_text(
-        "name: CI\non: [pull_request]\njobs:\n"
-        + "".join(f"  {name.lower()}:\n    name: {name}\n"
-                  "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n"
-                  for name in ("A", "B", "C", "D", "Background")),
-        encoding="utf-8")
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    recorded["required_checks"] = []
-
-    # Use the smallest integer population that represents D's 0.65% share:
-    # 1/154 = 0.649%.
-    pr_ids = sorted(int(run_id) for run_id in recorded["jobs"]
-                    if int(run_id) < 40_000)
-    completed_ids = [int(row["id"])
-                     for page in recorded["workflows"][0]["run_pages"][1:]
-                     for row in page]
-    winners = ((["A"] * 32) + (["B"] * 17) + (["C"] * 14) + ["D"]
-               + (["Background"] * 90))
-    winner_by_id = dict(zip(completed_ids, winners))
-    for run_id in pr_ids:
-        winner = winner_by_id.get(run_id, "A")
-        base = recorded["jobs"][str(run_id)][0]
-        rows = []
-        for offset, name in enumerate(("A", "B", "C", "D", "Background"), 1):
-            row = dict(base)
-            row["id"] = run_id * 10 + offset
-            row["name"] = name
-            row["started_at"] = base["started_at"]
-            start = datetime.fromisoformat(base["started_at"].replace("Z", "+00:00"))
-            seconds = 600 if name == winner else 100
-            row["completed_at"] = datetime.fromtimestamp(
-                start.timestamp() + seconds, timezone.utc).isoformat().replace("+00:00", "Z")
-            rows.append(row)
-        recorded["jobs"][str(run_id)] = rows
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-gate-share-order"
-    run_root.mkdir()
-    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    poles = {row["name"]: row["pole_n"]
-             for row in doc["pr_critical_path"]["checks"]}
-    assert doc["pr_critical_path"]["sampled_pr_count"] == 154
-    assert [poles[name] for name in ("A", "B", "C", "D")] == [32, 17, 14, 1]
-    assert "154 PRs sampled (minimum target 100): target met" in report
-    assert "154 of 100" not in report
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
 def test_pr_sample_pages_until_target_through_collect_and_full_verifier(
         monkeypatch, tmp_path):
     fixture = _pr_sample_fixture(tmp_path, second_page=True)
@@ -2290,98 +1794,14 @@ def test_pr_sample_pages_until_target_through_collect_and_full_verifier(
     doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
 
     cp = doc["pr_critical_path"]
-    assert cp["sampled_pr_count"] == 100
+    assert cp["sampled_pr_count"] == 20
     assert cp["sample_stop_reason"] == "target_met"
-    assert cp["commit_wall_clock"]["n"] == 100
+    assert cp["commit_wall_clock"]["n"] == 20
     assert sum(
         fact.get("partial") is not True
-        for fact in cp["commit_wall_clock"]["facts"]) == 100
+        for fact in cp["commit_wall_clock"]["facts"]) == 20
     assert [c for c in checks if not c.skipped and not c.ok] == []
-    assert "100 of 100 PRs sampled: target met" in report
-
-
-def test_walk_continues_past_ineligible_candidates(monkeypatch, tmp_path):
-    fixture = _pr_sample_fixture(tmp_path, second_page=True, third_page=True)
-    (fixture / "workflows" / "sibling.yml").write_text(
-        "name: Sibling\non: [pull_request]\njobs:\n  sibling:\n"
-        "    runs-on: ubuntu-latest\n    steps:\n"
-        "      - run: pip install -r requirements.txt\n",
-        encoding="utf-8")
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    ci_pages = recorded["workflows"][0]["run_pages"]
-    sibling_pages = []
-    for page in ci_pages[:2]:
-        rows = []
-        for source in page:
-            row = dict(source)
-            row["id"] = 80_000 + int(source["id"])
-            row.update(status="in_progress", conclusion=None)
-            rows.append(row)
-        sibling_pages.append(rows)
-    recorded["workflows"].append({
-        "id": 810, "path": ".github/workflows/sibling.yml", "name": "Sibling",
-        "runs_30d": 200, "run_pages": sibling_pages,
-    })
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-ineligible-pages"
-    run_root.mkdir()
-    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["sampled_pr_count"] == 100
-    assert cp["sample_complete"] is True
-    assert cp["sample_candidate_pages_fetched"] >= 3
-    assert [check for check in checks if not check.skipped and not check.ok] == []
-
-
-def test_pr_sample_page_cap_and_offline_query_budget_are_pinned(
-        monkeypatch, tmp_path):
-    fixture = _pr_sample_fixture(tmp_path, second_page=False)
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    template_run = recorded["workflows"][0]["run_pages"][0][0]
-    template_job = recorded["jobs"][str(template_run["id"])][0]
-    pages = []
-    jobs = {}
-    checks = {}
-    for page_number in range(cr._PR_CANDIDATE_PAGE_CAP):
-        page = []
-        for offset in range(100):
-            number = page_number * 100 + offset
-            row = dict(template_run)
-            row.update(id=90_000 + number, head_branch=f"cap-{number}",
-                       head_sha=f"cap-sha-{number}",
-                       created_at=f"2026-01-25T{offset % 24:02d}:00:00Z",
-                       run_started_at=f"2026-01-25T{offset % 24:02d}:00:00Z",
-                       updated_at=f"2026-01-25T{offset % 24:02d}:05:00Z")
-            page.append(row)
-            job = dict(template_job)
-            job.update(id=190_000 + number, created_at=row["created_at"],
-                       started_at=row["run_started_at"], completed_at=row["updated_at"])
-            jobs[str(row["id"])] = [job]
-            checks[row["head_sha"]] = [{
-                "name": "gate", "started_at": row["run_started_at"],
-                "completed_at": row["updated_at"],
-            }]
-        pages.append(page)
-    recorded["workflows"][0]["run_pages"] = pages
-    recorded["workflows"][0]["runs_30d"] = 1200
-    recorded["jobs"] = jobs
-    recorded["checks"] = checks
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-page-cap"
-    run_root.mkdir()
-    doc, report, full_checks = run_fixture(fixture, monkeypatch, run_root)
-
-    cp = doc["pr_critical_path"]
-    assert cp["sample_candidate_pages_fetched"] == cr._PR_CANDIDATE_PAGE_CAP == 12
-    assert cp["sample_stop_reason"] == "page_cap"
-    # Deliberate offline budget: twelve run-list pages plus the selected job
-    # population and the ordinary repository/config probes.
-    assert doc["data_sources"]["gh_query_count"] == 243
-    assert "100 of 100 PRs sampled: page cap" in report
-    assert [check for check in full_checks if not check.skipped and not check.ok] == []
+    assert "20 of 20 PRs sampled: target met" in report
 
 
 def test_pr_sample_does_not_treat_fallback_as_target_through_full_pipeline(
@@ -2393,15 +1813,15 @@ def test_pr_sample_does_not_treat_fallback_as_target_through_full_pipeline(
     doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
 
     cp = doc["pr_critical_path"]
-    assert cp["sampled_pr_count"] == 100
+    assert cp["sampled_pr_count"] == 20
     assert cp["sample_stop_reason"] == "target_met"
     assert cp["required_suite_unsatisfiable"] is False
     assert cp["sample_candidate_pages_fetched"] == 2
     assert [c for c in checks if not c.skipped and not c.ok] == []
-    assert "100 of 100 PRs sampled: target met" in report
+    assert "20 of 20 PRs sampled: target met" in report
 
 
-def test_pr_sample_stops_after_job_population_reaches_target(
+def test_pr_sample_evaluates_third_page_candidates_through_full_pipeline(
         monkeypatch, tmp_path):
     fixture = _pr_sample_fixture(
         tmp_path, second_page=True, third_page=True,
@@ -2411,49 +1831,11 @@ def test_pr_sample_stops_after_job_population_reaches_target(
     doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
 
     cp = doc["pr_critical_path"]
-    assert cp["sampled_pr_count"] == 100
+    assert cp["sampled_pr_count"] == 20
     assert cp["sample_stop_reason"] == "target_met"
-    assert cp["sample_candidate_pages_fetched"] == 2
+    assert cp["sample_candidate_pages_fetched"] == 3
     assert [c for c in checks if not c.skipped and not c.ok] == []
-    assert "100 of 100 PRs sampled: target met" in report
-
-
-def test_pr_sample_reads_only_the_newest_population_needed_for_its_goal(
-        monkeypatch, tmp_path):
-    fixture = _busy_pr_sample_fixture(tmp_path, extended=True)
-    responses_path = fixture / "responses.json"
-    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
-    completed = [
-        row for page in recorded["workflows"][0]["run_pages"][1:]
-        for row in page
-    ]
-    recorded["workflows"][0]["run_pages"] = [
-        recorded["workflows"][0]["run_pages"][0], completed]
-    # The newest 100 already span five days; another 54 completed commits are
-    # visible on the same fetched pages but are unnecessary for the sample goal.
-    for index, row in enumerate(completed):
-        day = 25 - min(index // 20, 5)
-        hour = index % 20
-        start = f"2026-01-{day:02d}T{hour:02d}:00:00Z"
-        end = f"2026-01-{day:02d}T{hour:02d}:01:00Z"
-        row.update(created_at=start, run_started_at=start, updated_at=end)
-        job = recorded["jobs"][str(row["id"])][0]
-        job.update(created_at=start, started_at=start, completed_at=end)
-    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
-    run_root = tmp_path / "run-bounded-job-population"
-    run_root.mkdir()
-    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
-
-    completed_ids = {str(row["id"]) for row in completed}
-    read_completed = {
-        run_id: count for run_id, count in doc["_fixture_job_reads"].items()
-        if run_id in completed_ids
-    }
-    assert len(read_completed) == 100
-    assert set(read_completed.values()) == {1}
-    assert doc["pr_critical_path"]["sampled_pr_count"] == 100
-    assert doc["pr_critical_path"]["sample_distinct_days"] == 5
-    assert [check for check in checks if not check.skipped and not check.ok] == []
+    assert "20 of 20 PRs sampled: target met" in report
 
 
 def test_short_pr_sample_names_exhausted_candidates_through_full_pipeline(
@@ -2467,10 +1849,10 @@ def test_short_pr_sample_names_exhausted_candidates_through_full_pipeline(
     assert cp["sampled_pr_count"] == 9
     assert cp["sample_stop_reason"] == "candidates_exhausted"
     assert [c for c in checks if not c.skipped and not c.ok] == []
-    assert "9 of 100 PRs sampled: candidates exhausted" in report
+    assert "9 of 20 PRs sampled: candidates exhausted" in report
 
 
-def test_pr_sample_uses_completed_job_rows_without_check_row_filter(
+def test_pr_sample_three_page_cap_is_pinned_through_full_pipeline(
         monkeypatch, tmp_path):
     fixture = _pr_sample_fixture(
         tmp_path, second_page=True, third_page=True)
@@ -2479,15 +1861,18 @@ def test_pr_sample_uses_completed_job_rows_without_check_row_filter(
     doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
 
     cp = doc["pr_critical_path"]
-    assert cp["sampled_pr_count"] == 100
-    assert cp["sample_stop_reason"] == "target_met"
-    assert cp["sample_candidate_pages_fetched"] == 2
-    assert cp["sample_candidate_page_cap"] == cr._PR_CANDIDATE_PAGE_CAP == 12
+    assert cp["sampled_pr_count"] == 9
+    assert cp["sample_stop_reason"] == "page_cap"
+    assert cp["sample_candidate_pages_fetched"] == 3
+    assert cp["sample_candidate_page_cap"] == cr._PR_CANDIDATE_PAGE_CAP == 3
+    # Pin the bounded walk's offline API budget: three run-list pages, candidate
+    # checks, and jobs only for the nine selected commits.
+    assert doc["data_sources"]["gh_query_count"] == 254
     assert [c for c in checks if not c.skipped and not c.ok] == []
-    assert "100 of 100 PRs sampled: target met" in report
+    assert "9 of 20 PRs sampled: page cap" in report
 
 
-def test_pr_sample_large_exhausted_window_is_not_called_selector_limited(
+def test_pr_sample_selector_limit_is_not_called_exhaustion(
         monkeypatch, tmp_path):
     fixture = _pr_sample_fixture(
         tmp_path, second_page=False, wide_short_window=True)
@@ -2496,15 +1881,15 @@ def test_pr_sample_large_exhausted_window_is_not_called_selector_limited(
     doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
 
     cp = doc["pr_critical_path"]
-    assert 0 < cp["sampled_pr_count"] < 100
-    assert cp["sample_candidate_selection_limited"] is False, {
+    assert 0 < cp["sampled_pr_count"] < 20
+    assert cp["sample_candidate_selection_limited"] is True, {
         key: cp.get(key) for key in (
             "sample_fetched", "sampled_pr_count", "sample_stop_reason",
             "sample_candidate_pages_exhausted")}
-    assert cp["sample_stop_reason"] == "candidates_exhausted"
+    assert cp["sample_stop_reason"] == "page_cap"
     assert cp["sample_candidate_pages_exhausted"] is True
     assert [c for c in checks if not c.skipped and not c.ok] == []
-    assert "of 100 PRs sampled: candidates exhausted" in report
+    assert "of 20 PRs sampled: page cap" in report
 
 
 def test_pr_sample_page_failure_is_named_through_full_pipeline(
@@ -2520,7 +1905,7 @@ def test_pr_sample_page_failure_is_named_through_full_pipeline(
     assert cp["sample_stop_reason"] == "fetch_failures"
     assert cp["sample_candidate_page_fetch_failures"] == 1
     assert [c for c in checks if not c.skipped and not c.ok] == []
-    assert "9 of 100 PRs sampled: fetch failures" in report
+    assert "9 of 20 PRs sampled: fetch failures" in report
 
 
 def test_pr_sample_initial_page_failure_is_named_through_full_pipeline(
@@ -2552,7 +1937,7 @@ def test_pr_sample_stops_at_era_boundary_discovered_on_later_page(
     assert cp["sample_candidate_era_door"] is True
     assert cp["sample_complete"] is False
     assert [c for c in checks if not c.skipped and not c.ok] == []
-    assert "9 of 100 PRs sampled: era door" in report
+    assert "9 of 20 PRs sampled: era door" in report
 
 
 def test_pr_sample_verifier_rejects_doctored_stop_reason(monkeypatch, tmp_path):
@@ -2567,21 +1952,6 @@ def test_pr_sample_verifier_rejects_doctored_stop_reason(monkeypatch, tmp_path):
     check = vr.check_pr_sample_stop_reason(report, findings_path)
     assert not check.ok
     assert "expected 'candidates_exhausted'" in check.detail
-
-    cp = doc["pr_critical_path"]
-    cp["sample_stop_reason"] = "candidates_exhausted"
-    cp["sample_target"] = 1
-    findings_path.write_text(json.dumps(doc), encoding="utf-8")
-    tampered_report = report.replace("of 100 PRs sampled", "of 1 PRs sampled")
-    check = vr.check_pr_sample_stop_reason(tampered_report, findings_path)
-    assert not check.ok and "sample contract" in check.detail
-
-    cp["sample_target"] = cr._PR_SAMPLE_TARGET
-    cp["sample_candidate_pages_fetched"] = 2
-    cp["sample_candidate_page_cap"] = 1
-    findings_path.write_text(json.dumps(doc), encoding="utf-8")
-    check = vr.check_pr_sample_stop_reason(report, findings_path)
-    assert not check.ok and "page cap" in check.detail
 
 
 def test_fixture_set_catches_required_crown_regression(monkeypatch, tmp_path):

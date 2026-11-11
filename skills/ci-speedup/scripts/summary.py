@@ -20,11 +20,6 @@ import sys
 from pathlib import Path
 from typing import Any
 
-_DIR = Path(__file__).resolve().parent
-if str(_DIR) not in sys.path:
-    sys.path.insert(0, str(_DIR))
-from pr_sample_contract import pr_sample_goal_text
-
 def _clock(s: Any) -> str:
     if s is None:
         return "?"
@@ -290,11 +285,7 @@ def funnel_reason_chain(doc: dict[str, Any]) -> tuple[list[str], str | None]:
     # Stage 3 — PR / merge-queue candidates fetched for the gate sample.
     fetched = cp.get("sample_fetched") or 0
     sff = cp.get("sample_fetch_failures") or 0
-    stop_reason = str(cp.get("sample_stop_reason") or "")
-    if fetched == 0 and stop_reason == "required_suite_empty":
-        lines.append(_OK + "completed PR candidates were evaluated, but no commit ran "
-                     "every observable required check")
-    elif fetched == 0:
+    if fetched == 0:
         lines.append(_BRK + "0 PR / merge-queue candidates ran a timed check in the "
                      "window — the sampled runs may all be push/schedule (no "
                      "developer-event runs to build a merge-wait spine from)")
@@ -307,9 +298,7 @@ def funnel_reason_chain(doc: dict[str, Any]) -> tuple[list[str], str | None]:
     kept = cp.get("sampled_pr_count") or 0
     if kept == 0:
         rc = doc.get("required_checks")
-        if stop_reason == "required_suite_empty":
-            why = "no commit ran every observable required check"
-        elif cp.get("required_suite_unsatisfiable"):
+        if cp.get("required_suite_unsatisfiable"):
             why = ("the required suite is external/managed — no sampled PR carried it, "
                    "and the recency-only fallback pool was also empty")
         elif rc:
@@ -326,11 +315,7 @@ def funnel_reason_chain(doc: dict[str, Any]) -> tuple[list[str], str | None]:
             lines.append(f"     (note: {sff} of those fetches FAILED — a transient gh "
                          "gap, NOT a clean 'no PR qualified')")
         return lines, "pr_kept"
-    if cp.get("required_suite_unsatisfiable"):
-        lines.append(_OK + f"{kept}/{fetched} recent PR row(s) retained for the "
-                     "measured PR-floor; the required gate was not observable")
-    else:
-        lines.append(_OK + f"{kept}/{fetched} PR(s) carried the gate suite")
+    lines.append(_OK + f"{kept}/{fetched} PR(s) carried the gate suite")
 
     # Stage 5 — config-era partition (informational; a thin-flip can wipe a spine).
     eras = cp.get("config_eras") or []
@@ -391,8 +376,7 @@ def _rerun_command(repo: str | None, root: str | None,
                    findings_path: str) -> str:
     """The exact `run.py` invocation to re-run, computed from what we know. Deliberately
     NOT a raised `--target`: `--target` does not change sampling depth (the PR gate sample
-    aims for the configured completed-PR population and the run sample stays at
-    `--max-runs`), so raising it is the very
+    is fixed at 20 PRs and the run sample at `--max-runs`), so raising it is the very
     mislead issue #81 documents."""
     if not repo:
         return ""
@@ -475,8 +459,7 @@ def empty_spine_diagnostics(doc: dict[str, Any], findings_path: str,
                    "property of the repo; a plain re-run once it clears recovers the full "
                    "spine.")
         out.append("Do NOT raise --target: it does NOT change sampling depth (the PR gate "
-                   f"sample aims for {pr_sample_goal_text()} and the run "
-                   "sample stays at --max-runs). The live "
+                   "sample is fixed at 20 PRs and the run sample at --max-runs). The live "
                    "'--target 100 recovered it' was coincidental with the block clearing "
                    "(issue #81).")
         cmd = _rerun_command(doc.get("repo"), root, findings_path)
@@ -749,10 +732,8 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
         gap = f", {ff} fetch failure(s)" if ff else ""
         # When the required suite was unsatisfiable, the sample is the recency-only
         # fallback (no PR carried the external gate) — say so, not just the count.
-        stop_reason = str(cp.get("sample_stop_reason") or "")
         scope = (" — recency-only (external required suite, no PR carried it)"
-                 if (cp.get("required_suite_unsatisfiable")
-                     and stop_reason != "required_suite_empty") else "")
+                 if cp.get("required_suite_unsatisfiable") else "")
         reason = str(cp.get("sample_stop_reason") or (
             "target_met" if cp.get("sample_complete") else "candidates_exhausted"
         )).replace("_", " ")
@@ -804,6 +785,8 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     # This directory first, so the sibling import below resolves even under
     # PYTHONSAFEPATH / `python -P` (the script's directory is not on sys.path).
+    if str(Path(__file__).resolve().parent) not in sys.path:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
     from log_level import configure_logging  # STARSLING_LOG_LEVEL opt-in
     configure_logging()
     sys.exit(main())
