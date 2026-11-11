@@ -4105,12 +4105,6 @@ def _parse_log(text: str,
             duration /= 1000.0
         test_name = match.group("title").rsplit(" > ", 1)[-1].strip()
         vitest_rows.append((duration, match.group("file"), raw, when, test_name))
-    count_matches = [
-        int(match.group(1))
-        for _when, message, _raw, _stamp in stamped_tests
-        if (match := re.search(r"\b(\d+)\s+tests?\s+passed\b", message,
-                               re.IGNORECASE))
-    ]
     by_file: dict[str, list[tuple[float, str, datetime, str]]] = {}
     for duration, test_file, raw, when, test_name in vitest_rows:
         by_file.setdefault(test_file, []).append((duration, raw, when, test_name))
@@ -4128,8 +4122,6 @@ def _parse_log(text: str,
             max(row[2] for row in rows) - inferred_start).total_seconds()
         summed_runtime = sum(row[0] for row in rows)
         if not (summed_runtime * 0.95 <= measured_span <= summed_runtime * 1.2 + 1):
-            continue
-        if count_matches and len(by_file) == 1 and max(count_matches) != len(rows):
             continue
         completion_order = sorted(rows, key=lambda row: row[2])
         if any(
@@ -4155,8 +4147,7 @@ def _parse_log(text: str,
                     *(row[1] for row in cohort[:2]),
                 ],
                 "search": [test_file, "describe.concurrent", "maxConcurrency"],
-                "test_count": (max(count_matches)
-                               if count_matches and len(by_file) == 1 else len(rows)),
+                "test_count": len(rows),
                 "isolation_basis": "test source",
             }
     if isolated_test_leaf is not None:

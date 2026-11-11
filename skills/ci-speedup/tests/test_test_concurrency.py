@@ -158,7 +158,7 @@ def _vitest_verbose_log() -> str:
             f"{_stamp(at)} ✓ tests/accounts.test.ts > accounts > case {index} "
             f"{duration_ms}ms"
         )
-    lines.append(f"{_stamp(at)} 11 tests passed")
+    lines.append(f"{_stamp(at)} Tests  11 passed (11)")
     return "\n".join(lines)
 
 
@@ -262,15 +262,15 @@ def test_vitest_verbose_durations_use_source_proven_isolation() -> None:
     assert leaf["test_count"] == 11
 
 
-def _vitest_verbose_log_after_another_file(prior_ms: int) -> str:
+def _vitest_verbose_log_after_another_file(
+        prior_ms: int, *, prior_has_duration: bool = True) -> str:
     """One Vitest invocation whose serial candidate is one file in a larger run."""
     lines = _vitest_verbose_log().splitlines()
     started = datetime(2026, 11, 6, tzinfo=timezone.utc)
     prior_done = started + timedelta(milliseconds=prior_ms)
-    prior = (
-        f"{_stamp(prior_done)} ✓ tests/health.test.ts > health > responds "
-        f"{prior_ms}ms"
-    )
+    prior = f"{_stamp(prior_done)} ✓ tests/health.test.ts > health > responds"
+    if prior_has_duration:
+        prior += f" {prior_ms}ms"
     shifted = [lines[0], prior]
     last_when = prior_done
     for line in lines[1:-1]:
@@ -278,13 +278,16 @@ def _vitest_verbose_log_after_another_file(prior_ms: int) -> str:
         when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
         last_when = when + timedelta(milliseconds=prior_ms)
         shifted.append(f"{_stamp(last_when)} {message}")
-    shifted.append(f"{_stamp(last_when)} 12 tests passed")
+    shifted.append(f"{_stamp(last_when)} Tests  12 passed (12)")
     return "\n".join(shifted)
 
 
 def test_vitest_file_count_is_scoped_to_the_serial_candidate() -> None:
     leaf = bp._parse_log(
-        _vitest_verbose_log_after_another_file(100), _vitest_source_facts())
+        _vitest_verbose_log_after_another_file(
+            100, prior_has_duration=False),
+        _vitest_source_facts(),
+    )
     assert leaf is not None
     assert leaf["fix_key"] == "test-isolated-serial"
     assert leaf["test_count"] == 11
@@ -315,7 +318,8 @@ def test_vitest_verbose_rejects_overlapping_intervals_with_equal_total_span() ->
             f"{_stamp(at + timedelta(seconds=completed_s))} "
             f"✓ tests/accounts.test.ts > accounts > case {index} 60000ms"
         )
-    lines.append(f"{_stamp(at + timedelta(seconds=240))} 4 tests passed")
+    lines.append(
+        f"{_stamp(at + timedelta(seconds=240))} Tests  4 passed (4)")
     facts = {
         "isolated_test_files": {
             "tests/accounts.test.ts": {
