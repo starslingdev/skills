@@ -126,6 +126,38 @@ jobs:
 {handoff}{sibling}"""
 
 
+def playwright_report_matrix(*, shard_legs: int) -> str:
+    """The blob-report handoff shape from Playwright's sharding guide."""
+    values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    return f"""name: Playwright tests
+on: pull_request
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        index: [{values}]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npx playwright test --shard=${{{{ matrix.index }}}}/{shard_legs}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blob-report-${{{{ matrix.index }}}}
+          path: blob-report
+  merge-reports:
+    needs: shards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: blob-report-*
+          merge-multiple: true
+          path: all-blob-reports
+      - run: npx playwright merge-reports --reporter html ./all-blob-reports
+"""
+
+
 def trees(tmp_path: Path, base_text: str, merge_text: str):
     base, merge = tmp_path / "base", tmp_path / "merge"
     for root, text in ((base, base_text), (merge, merge_text)):
@@ -208,6 +240,20 @@ def test_removing_matrix_exclusions_warns_on_effective_shard_growth(
         repeated_setup_matrix(
             shard_legs=16, exclude_shards=tuple(range(9, 17))),
         repeated_setup_matrix(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_playwright_blob_report_handoff_does_not_hide_shard_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        playwright_report_matrix(shard_legs=8),
+        playwright_report_matrix(shard_legs=16),
     )
 
     code, output = run(guard, base, merge, capsys, monkeypatch)

@@ -3762,10 +3762,21 @@ def _matrix_shard_leg_count(job: dict) -> int | None:
     matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
     if not isinstance(matrix, dict):
         return None
-    shard_keys = {
-        str(key) for key in matrix
-        if key not in {"include", "exclude"} and _SHARD_AXIS_RE.search(str(key))
-    }
+    run_blob = _job_run_blob(job)
+    shard_keys = set()
+    for key in matrix:
+        key_text = str(key)
+        if key_text in {"include", "exclude"}:
+            continue
+        if _SHARD_AXIS_RE.search(key_text) or (
+                key_text.casefold() == "index"
+                and re.search(
+                    rf"--shard(?:=|\s+)[^\r\n]*\$\{{\{{\s*matrix\."
+                    rf"{re.escape(key_text)}\s*\}}\}}",
+                    run_blob,
+                    re.IGNORECASE,
+                )):
+            shard_keys.add(key_text)
     include = matrix.get("include")
     if isinstance(include, list):
         shard_keys.update(
@@ -3784,20 +3795,73 @@ def _matrix_shard_leg_count(job: dict) -> int | None:
     return len(projected) if projected else None
 
 
+def _artifact_selector(step: dict, *, upload: bool) -> tuple[str, str]:
+    """Return a literal artifact name or download pattern for one action."""
+    values = step.get("with") if isinstance(step.get("with"), dict) else {}
+    name = str(values.get("name") or ("artifact" if upload else "")).strip()
+    pattern = str(values.get("pattern") or "").strip() if not upload else ""
+    return name, pattern
+
+
+def _artifact_selector_matches(
+        upload_name: str, download_name: str, download_pattern: str) -> bool:
+    """Whether a download clearly selects an artifact another job uploads."""
+    if download_name:
+        return download_name == upload_name
+    if not download_pattern:
+        return True  # actions/download-artifact without a selector downloads all
+    pattern_re = re.escape(download_pattern).replace(r"\*", ".*").replace(r"\?", ".")
+    return re.fullmatch(pattern_re, upload_name) is not None
+
+
+def _jobs_in_build_handoff(jobs: dict[str, Any]) -> set[str]:
+    """Producer and consumer jobs in a confirmed build-artifact handoff."""
+    producers: list[tuple[str, str]] = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict) or not _MATRIX_SETUP_BUILD_RE.search(
+                _job_run_blob(job)):
+            continue
+        for step in _steps(job):
+            if "upload-artifact" not in _uses(step):
+                continue
+            upload_name, _ = _artifact_selector(step, upload=True)
+            if upload_name:
+                producers.append((job_name, upload_name))
+
+    participants: set[str] = set()
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        for step in _steps(job):
+            if "download-artifact" not in _uses(step):
+                continue
+            download_name, download_pattern = _artifact_selector(step, upload=False)
+            matched_producers = {
+                producer for producer, upload_name in producers
+                if producer != job_name and _artifact_selector_matches(
+                    upload_name, download_name, download_pattern)
+            }
+            if matched_producers:
+                participants.add(job_name)
+                participants.update(matched_producers)
+                break
+    return participants
+
+
 def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
     """Repeated checkout/setup with no artifact handoff (OPT14 heuristic).
 
     Repetition can be across at least two jobs or across the effective shard
-    configurations of one matrix job. An upload-only step (for example a
-    coverage report) or a download-only step is not a setup handoff, so both
-    actions must exist before this detector treats outputs as passed between
-    jobs.
+    configurations of one matrix job. Report uploads are not setup handoffs:
+    a handoff requires a setup job to download an artifact that a different
+    job built and uploaded.
     """
     setup_jobs: list[str] = []
     matrix_setup_legs: dict[str, int] = {}
     matrix_setup_repeated: dict[str, list[str]] = {}
-    has_upload = has_download = False
-    for job_name, job in _jobs_from_doc(doc).items():
+    jobs = _jobs_from_doc(doc)
+    handoff_jobs = _jobs_in_build_handoff(jobs)
+    for job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
         steps = _steps(job)
@@ -3805,11 +3869,6 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
         has_install = bool(_INSTALL_RE.search(_job_run_blob(job))) or any(
             _uses(s).startswith("actions/setup-node") and (s.get("with") or {}).get("cache")
             for s in steps)
-        for s in steps:
-            if "upload-artifact" in _uses(s):
-                has_upload = True
-            if "download-artifact" in _uses(s):
-                has_download = True
         if has_checkout and has_install:
             setup_jobs.append(job_name)
             conditioned_steps = _steps_with_if(job)
@@ -3832,13 +3891,12 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
                 if repeats_build:
                     repeated.append("build")
                 matrix_setup_repeated[job_name] = repeated
-    has_handoff = has_upload and has_download
     # Jobs that never co-run (provably exclusive `if:`) are not repeated work
     # with each other. A sharded job still repeats its own setup across legs,
     # so keep it even when it is the workflow's only setup job.
-    setup_jobs = sorted(set(_co_running(_jobs_from_doc(doc), setup_jobs))
-                        | set(matrix_setup_legs))
-    if setup_jobs and not has_handoff:
+    setup_jobs = sorted((set(_co_running(jobs, setup_jobs))
+                         | set(matrix_setup_legs)) - handoff_jobs)
+    if setup_jobs:
         if len(setup_jobs) >= 2:
             evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "
                         f"install with no `actions/upload-artifact` / "
