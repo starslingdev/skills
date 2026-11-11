@@ -492,6 +492,7 @@ def test_scrub_replaces_people_consistently_and_keeps_bots(tmp_path: Path) -> No
         },
         "commit": {"verification": {"payload": "author Some One <someone@example.com>", "signature": "x"}},
         "display_title": "Thanks @someone for the fix",
+        "head_branch": "someone/fix-cache",
         "repository": {"full_name": "owner/project", "owner": {"login": "owner", "type": "User"}},
     }
     recording = tmp_path / "recording"
@@ -514,6 +515,7 @@ def test_scrub_replaces_people_consistently_and_keeps_bots(tmp_path: Path) -> No
     assert record.identity_leaks(scrubbed, keep=frozenset({"owner"})) == []
     assert scrubbed["repository"]["full_name"] == "owner/project"
     assert scrubbed["display_title"] == "Thanks @contributor-0001 for the fix"
+    assert scrubbed["head_branch"] == "contributor-0001/fix-cache"
     assert "someone@example.com" not in pyproject.read_text(encoding="utf-8")
     assert scrubbed["actor"]["login"] == scrubbed["head_repository"]["owner"]["login"] == "contributor-0001"
     assert scrubbed["actor"]["html_url"] == "https://github.com/contributor-0001"

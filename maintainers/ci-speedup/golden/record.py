@@ -126,6 +126,9 @@ _TRAILER = re.compile(
     r"(?im)^(?P<key>(?:co-authored|signed-off|reviewed|acked|tested|reported|suggested|helped)-by):[^\n]*$"
 )
 _URL_KEY = re.compile(r"(?:^|_)url$")
+# Fields whose value embeds a login as a token: fork ``owner/name``, merge
+# messages, and branch names (many repositories name branches ``login/topic``).
+_LOGIN_BEARING_KEYS = frozenset({"full_name", "message", "head_branch", "ref", "headRefName", "summary"})
 
 
 def _person_logins(payload: Any, found: set[str]) -> None:
@@ -196,7 +199,7 @@ def scrub_identities(payload: Any, mapping: dict[str, str], key: str = "",
     if isinstance(payload, list):
         return [scrub_identities(value, mapping, key, pattern, mentions) for value in payload]
     if isinstance(payload, str):
-        if _URL_KEY.search(key) or key in {"full_name", "message"}:
+        if _URL_KEY.search(key) or key in _LOGIN_BEARING_KEYS:
             payload = _replace_logins(payload, mapping, pattern)
         # ``@login`` mentions in titles, bodies and annotations, in any field.
         return _scrub_string(_replace_logins(payload, mapping, mentions))
