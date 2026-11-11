@@ -127,6 +127,9 @@ class FixtureClient:
         if match:
             run_id = match.group(1)
             self.job_reads[run_id] = self.job_reads.get(run_id, 0) + 1
+            if run_id in set(self.recorded.get("failed_job_ids") or []):
+                self._bump(error=True)
+                return None
             return {"jobs": self.recorded.get("jobs", {}).get(run_id, [])}
         match = re.match(
             rf"repos/{re.escape(repo)}/commits/([^/]+)/check-runs", endpoint)
@@ -1905,6 +1908,61 @@ def test_busy_pr_sample_uses_completed_commits_across_days_despite_non_pr_era(
     assert cp["sample_span_first"].startswith("2026-01-21")
     assert cp["sample_span_last"].startswith("2026-01-25")
     assert "2026-01-21" in report and "2026-01-25" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_pr_sample_discloses_required_check_missing_from_job_lists(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["required_checks"] = ["gate", "external-review"]
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-external-required"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    assert doc["pr_critical_path"]["required_checks_unobservable"] == ["external-review"]
+    assert "Status-only required check(s) excluded from the suite test" in report
+    assert "external-review" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_pr_sample_marks_commit_partial_when_any_run_job_fetch_fails(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path)
+    (fixture / "workflows" / "sibling.yml").write_text(
+        "name: Sibling\non: [pull_request]\njobs:\n  sibling:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+        encoding="utf-8")
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    completed = recorded["workflows"][0]["run_pages"][1]
+    sibling_rows = []
+    failed_ids = []
+    for index, source in enumerate(completed):
+        row = dict(source)
+        row["id"] = 70_000 + index
+        sibling_rows.append(row)
+        job = dict(recorded["jobs"][str(source["id"])][0])
+        job.update(id=170_000 + index, name="sibling")
+        recorded["jobs"][str(row["id"])] = [job]
+        if index >= 40:
+            failed_ids.append(str(row["id"]))
+    recorded["failed_job_ids"] = failed_ids
+    recorded["workflows"].append({
+        "id": 710, "path": ".github/workflows/sibling.yml", "name": "Sibling",
+        "runs_30d": 100, "run_pages": [sibling_rows],
+    })
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-partial-job-fetch"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sample_partial_count"] == 60
+    assert "PR gate sample (ordering withheld)" in report
+    assert "gate frequency and pole order are unreliable" in report
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 

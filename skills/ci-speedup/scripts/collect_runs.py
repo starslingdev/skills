@@ -29799,6 +29799,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _sample_kept_jobs, _sample_job_failures = _gather_run_jobs(
         client, repo, _selected_runs, keep_empty=True, memo=job_memo)
     jobs_fetch_failures += _sample_job_failures
+    _sample_fetched_run_ids = {
+        run.get("id") for run, _jobs in _sample_kept_jobs}
+    _sample_failed_reps = {
+        _run_rep.get(run.get("id"), "") for run in _selected_runs
+        if run.get("id") not in _sample_fetched_run_ids
+    }
     _jobs_by_rep: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for _run, _jobs in _sample_kept_jobs:
         _jobs_by_rep[_run_rep.get(_run.get("id"), "")].extend(_jobs)
@@ -29820,7 +29826,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _completed = str(_job.get("completed_at") or "")
             if _started and _completed:
                 _iv[_name] = (_started, _completed)
-        if not _m and len(repr_shas) >= _REPR_PR_TARGET:
+        if ((not _m or _rep in _sample_failed_reps)
+                and len(repr_shas) >= _REPR_PR_TARGET):
             _partial_reps += 1
             _partial_sample_shas.add(_rep)
         for _name, _duration in _m.items():
@@ -29828,11 +29835,23 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _job_maps.append(_m)
         if len(repr_shas) >= _REPR_PR_TARGET:
             sha_check_intervals[_rep] = _iv
-            check_runs_complete_by_sha[_rep] = bool(_m)
+            check_runs_complete_by_sha[_rep] = bool(_m) and _rep not in _sample_failed_reps
     if (len(repr_shas) >= _REPR_PR_TARGET
             and _job_maps and any(_job_maps)):
         per_sha_checks = _job_maps
         check_durs = dict(_job_durs)
+        _observed_job_names = set(_job_durs)
+        _missing_required = set(req_names) - _observed_job_names
+        _repo_published = set(_repo_published_required(
+            req_names, findings_doc.get("workflow_status_publishers")))
+        sample_diag["required_checks_unobservable"] = sorted(
+            _missing_required - _repo_published)
+        if _missing_required & _repo_published:
+            sample_diag["required_checks_repo_published"] = sorted(
+                _missing_required & _repo_published)
+        if req_names and not (set(req_names) & _observed_job_names):
+            sample_diag["required_suite_unsatisfiable"] = True
+            sample_diag["required_suite_scoped"] = False
 
     _sample_dates = sorted({str(_rep_ts.get(sha) or "")[:10] for sha in repr_shas
                             if _rep_ts.get(sha)})
