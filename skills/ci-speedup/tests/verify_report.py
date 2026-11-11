@@ -12909,7 +12909,7 @@ def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> 
     if "gate_min_count_for_ranking" not in cp:
         return Check(name, True, "legacy findings lack the gate-confidence contract", skipped=True)
     claim_matches = list(_GATE_FREQ_RE.finditer(report))
-    warning = "pole order is not supported" in report and "chat close must not rank" in report
+    warning = "pole order is not supported" in report and "unordered set" in report
     if not claim_matches:
         if warning:
             return Check(name, False,
@@ -12929,7 +12929,10 @@ def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> 
     def interval(count: int, total: int) -> tuple[float, float]:
         if total <= 0:
             return 0.0, 100.0
-        p, z = count / total, 1.96
+        p = count / total
+        z = float(cp.get("gate_interval_z") or 0.0)
+        if z <= 0:
+            return 0.0, 100.0
         den = 1.0 + z * z / total
         centre = (p + z * z / (2.0 * total)) / den
         margin = z / den * math.sqrt(
@@ -12962,7 +12965,13 @@ def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> 
         return Check(name, False, "every gate frequency must carry its re-derived rough interval "
                      "and collected sample span: " + "; ".join(suffix_errors))
 
-    counts = list(rendered_counts.values())
+    toc = report.split("## 📋 Contents", 1)[-1].split("\n## ", 1)[0]
+    toc_counts = [wf_freq.get(match.group(1), int(match.group(2)))
+                  for match in _GATE_FREQ_RE.finditer(toc)]
+    # The Contents has one row per displayed pole, so repeated workflow
+    # frequencies remain repeated here: two ordered rows carrying the same
+    # estimate are a tie, not one estimate to deduplicate away.
+    counts = toc_counts or list(rendered_counts.values())
     total = npop or max(int(cp.get("check_present_n_pr") or 0),
                         max(int(match.group(3)) for match in claim_matches), max(counts))
     minimum = int(cp["gate_min_count_for_ranking"])

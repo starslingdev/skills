@@ -41,6 +41,7 @@ import pr_lifecycle
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 from gate_frequency_contract import (
+    GATE_BOOKKEEPING_CUTOFF_S as _GATE_BOOKKEEPING_CUTOFF_S,
     GATE_INTERVAL_Z as _GATE_INTERVAL_Z,
     GATE_MIN_COUNT_FOR_RANKING as _GATE_MIN_COUNT_FOR_RANKING,
 )
@@ -5220,6 +5221,7 @@ def _pole_gate_prompt_claim(check: str, wf: str, dur: str, gate_count: int, npop
         "gate_interval_hi": pole["_gate_interval_hi"],
         "sample_span_first": pole["_gate_span_first"],
         "sample_span_last": pole["_gate_span_last"],
+        "gate_order_supported": pole.get("_gate_order_supported"),
     } if "_gate_interval_lo" in pole else {})
     _gate_claim = claims.Claim(
         kind="pole_gate_prompt", subject=check,
@@ -14170,17 +14172,23 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             p["_gate_span_first"] = _gate_span_first
             p["_gate_span_last"] = _gate_span_last
 
-    # Confidence applies to the rows a reader sees: one frequency per workflow.
-    # Per-check counts are an internal detail (and matrix sibling legs share one
-    # rendered workflow count), so comparing those legs against one another would
-    # manufacture overlap that is absent from the displayed estimates.
-    _displayed_gate_counts_by_wf: dict[str, int] = {}
+    # Confidence applies to every ordered row a reader sees. Matrix siblings can
+    # share one workflow frequency, but two displayed rows carrying that same
+    # estimate are still tied and therefore do not support an order between
+    # those rows.
+    _displayed_gate_counts: list[int] = []
     for p in poles:
         wf = str(p.get("workflow_file") or "")
         count = wf_gate.get(wf, 0)
         if _is_file_pole(p) and count > 0:
-            _displayed_gate_counts_by_wf.setdefault(wf, count)
-    _displayed_gate_counts = list(_displayed_gate_counts_by_wf.values())
+            _displayed_gate_counts.append(count)
+    _gate_order_is_supported = (
+        _gate_order_supported(_displayed_gate_counts, npop, cp)
+        if _gate_confidence_contract and npop and _displayed_gate_counts else None)
+    if _gate_order_is_supported is not None:
+        for p in poles:
+            if "_gate_interval_lo" in p:
+                p["_gate_order_supported"] = _gate_order_is_supported
 
     # A pole is part of the TYPICAL merge path only if it ran on a MAJORITY of sampled
     # PRs. A slow but rarely-run FILE pole — a label-gated / opt-in benchmark that ran on
@@ -14896,17 +14904,16 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     out[_i] = _queue_bottom
                 break
     _confidence_notes: list[str] = []
-    if (_gate_confidence_contract and npop and _displayed_gate_counts
-            and not _gate_order_supported(_displayed_gate_counts, npop, cp)):
+    if _gate_order_is_supported is False:
         _confidence_notes.append(
             "**Gate-frequency confidence:** this sample's pole order is not supported - "
             "the rough intervals overlap, a positive count is below the minimum of "
             f"{int(cp.get('gate_min_count_for_ranking') or _GATE_MIN_COUNT_FOR_RANKING)}, "
-            "or the sample spans only one day. Treat these poles as an unordered set; "
-            "the chat close must not rank them.")
+            "or the sample spans only one day. Treat these poles as an unordered set.")
     _bookkeeping = [str(name) for name in (cp.get("bookkeeping_checks") or []) if str(name)]
     if _bookkeeping:
-        _cutoff = int(_num(cp.get("gate_bookkeeping_cutoff_s")) or 60)
+        _cutoff = int(_num(cp.get("gate_bookkeeping_cutoff_s"))
+                      or _GATE_BOOKKEEPING_CUTOFF_S)
         _shown = ", ".join(f"`{_lbl(name)}`" for name in _bookkeeping[:8])
         _more = f" and {len(_bookkeeping) - 8} more" if len(_bookkeeping) > 8 else ""
         _confidence_notes.append(

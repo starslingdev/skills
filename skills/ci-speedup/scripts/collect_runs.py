@@ -48,6 +48,7 @@ from typing import Any, Callable
 
 from gate_frequency_contract import (
     GATE_BOOKKEEPING_CUTOFF_S as _GATE_BOOKKEEPING_CUTOFF_S,
+    GATE_INTERVAL_Z as _GATE_INTERVAL_Z,
     GATE_MIN_COUNT_FOR_RANKING as _GATE_MIN_COUNT_FOR_RANKING,
 )
 
@@ -30088,25 +30089,56 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _confirmed_gate_checks = frozenset(
             name for name in pr_check_p50
             if _pole_is_required_reachable(name, req_names, _job_graph, crit_by_wf))
+    # Duration alone does not make a job bookkeeping. It must also have
+    # actually finished last on a sampled PR (the distortion this filter is
+    # meant to remove), and a confirmed required/needs-reachable chain remains
+    # real developer wait even when its stages are fast.
+    _bookkeeping_last_finishers: set[str] = set()
+    for _intervals in _era_sha_intervals.values():
+        _completed_by_wf: dict[str, dict[str, datetime]] = defaultdict(dict)
+        for _name, (_start, _end) in _intervals.items():
+            _ended = _parse_dt(_end)
+            if _name not in pr_check_p50 or _ended is None:
+                continue
+            _wf_key = _era_check_wf_of(_name) or f"<unmapped:{_name}>"
+            _completed_by_wf[_wf_key][_name] = _ended
+        for _completed in _completed_by_wf.values():
+            _latest = max(_completed.values())
+            _bookkeeping_last_finishers.update(
+                name for name, ended in _completed.items() if ended == _latest)
     _bookkeeping_checks = {
         name for name, span in pr_check_p50.items()
         if float(_span_caps.get(name, span)) < _GATE_BOOKKEEPING_CUTOFF_S
+        and name in _bookkeeping_last_finishers
+        and (_confirmed_gate_checks is None or name not in _confirmed_gate_checks)
     }
-    if (pr_check_p50 and len(_bookkeeping_checks) == len(pr_check_p50)
-            and _confirmed_gate_checks):
-        # A confirmed required chain is observable developer wait even when
-        # every one of its checks finishes quickly. Filtering that whole chain
-        # empties the file-backed spine and incorrectly sends the report through
-        # the external/managed PR-floor fallback. Preserve it only in this
-        # all-short case; when a substantive pole exists, short required
-        # aggregators remain disclosed bookkeeping as before.
-        _bookkeeping_checks.difference_update(_confirmed_gate_checks)
+    _short_required_aggregators: set[str] = set()
+    if spine_required_scoped and req_names and _job_graph:
+        for _name, _span in pr_check_p50.items():
+            if (_name not in req_names
+                    or _name not in _bookkeeping_last_finishers
+                    or float(_span_caps.get(_name, _span)) >= _GATE_BOOKKEEPING_CUTOFF_S):
+                continue
+            _node = _check_to_job_node(_name, _job_graph, crit_by_wf)
+            if _node is None:
+                _node = _check_to_job_node_scanned(_name, _job_graph)
+            if _node is None:
+                continue
+            _wf, _jid = _node
+            _meta = (_job_graph.get(_wf) or {}).get(_jid) or {}
+            if _meta.get("needs"):
+                # A tiny required aggregation job is not the work a developer
+                # waits to optimize; its `needs:` dependencies are. Exclude it
+                # from poles without calling it bookkeeping, because it remains
+                # part of the confirmed gate chain.
+                _short_required_aggregators.add(_name)
+    _short_pole_exclusions = _bookkeeping_checks | _short_required_aggregators
     pr_check_p50 = {
         name: span for name, span in pr_check_p50.items()
-        if name not in _bookkeeping_checks
+        if name not in _short_pole_exclusions
     }
     _gate_per_sha_checks = [
-        {name: span for name, span in row.items() if name not in _bookkeeping_checks}
+        {name: span for name, span in row.items() if name not in _short_pole_exclusions}
         for row in _era_per_sha_checks
     ]
     pr_checks_tuple, check_present, present_n_pr, check_pole_freq = _rank_spine_present_first(
@@ -31208,6 +31240,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "sample_span_first": sample_diag.get("span_first", ""),
         "sample_span_last": sample_diag.get("span_last", ""),
         "gate_min_count_for_ranking": _GATE_MIN_COUNT_FOR_RANKING,
+        "gate_interval_z": _GATE_INTERVAL_Z,
         "gate_bookkeeping_cutoff_s": _GATE_BOOKKEEPING_CUTOFF_S,
         "bookkeeping_checks": sorted(_bookkeeping_checks),
         "critical_path_check": pr_checks_tuple[0][0] if pr_checks_tuple else None,

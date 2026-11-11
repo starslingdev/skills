@@ -972,10 +972,13 @@ def test_sharded_floor_runs_through_collection_and_full_verifier(
     assert stamp["divided_work_s"] == 90.0
     assert stamp["in_step_floor_s"] == 125.0
     assert stamp["n_shards"] == 4
+    assert doc["pr_critical_path"]["critical_path_check"] != "gate"
+    assert "gate" not in doc["pr_critical_path"]["bookkeeping_checks"]
     # One bounded representative-log probe is part of this qualifying path. Pin
     # the complete offline call budget so it cannot silently fan out per shard.
-    # The 30-second aggregation gate is disclosed as bookkeeping and no longer
-    # consumes a pole-log read; the representative shard probe remains bounded.
+    # The 30-second required `needs:` aggregator is excluded without being
+    # mislabeled as bookkeeping, so it consumes no pole-log read; the
+    # representative shard probe remains bounded.
     assert doc["data_sources"]["gh_query_count"] == 17
     sentence = "Observed on the sampled runs, not a shard-count recommendation"
     assert report.count(sentence) == 2
@@ -2016,12 +2019,15 @@ def test_gate_frequency_confidence_discloses_bookkeeping_and_withholds_order(
         and "gate_interval_lo" in claim["fields"]]
     assert confidence_claims
     assert all(
-        {"gate_interval_lo", "gate_interval_hi", "sample_span_first", "sample_span_last"}
+        {"gate_interval_lo", "gate_interval_hi", "sample_span_first", "sample_span_last",
+         "gate_order_supported"}
         <= claim["fields"].keys()
         for claim in confidence_claims)
-    # Both visible poles belong to one workflow, so they are one displayed
-    # frequency estimate and must not be compared as if they were competitors.
-    assert "pole order is not supported" not in report
+    assert all(claim["fields"]["gate_order_supported"] is False
+               for claim in confidence_claims)
+    # Both visible poles carry the same workflow estimate, so their displayed
+    # rows are tied and must not be presented as a supported order.
+    assert "pole order is not supported" in report
     assert not [check for check in checks if not check.skipped and not check.ok]
 
     two_workflow_doc = json.loads(json.dumps(doc))
@@ -2082,13 +2088,17 @@ def test_all_short_file_backed_gates_do_not_become_external_floor_fallback(
     recorded = json.loads(responses_path.read_text(encoding="utf-8"))
     recorded["required_checks"] = ["gate"]
     responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    workflow_path = fixture / "workflows" / "ci.yml"
+    workflow_path.write_text(
+        workflow_path.read_text(encoding="utf-8").replace("    needs: build\n", ""),
+        encoding="utf-8")
     monkeypatch.setattr(cr, "_GATE_BOOKKEEPING_CUTOFF_S", 1_000.0)
     doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
     cp = doc["pr_critical_path"]
 
     assert cp.get("gate_kind") != "pr_floor_fallback"
-    assert [row["check"] for row in cp["poles"]] == ["build", "gate"]
-    assert {row["name"] for row in cp["checks"]} == {"build", "gate"}
+    assert [row["check"] for row in cp["poles"]] == ["gate"]
+    assert [row["name"] for row in cp["checks"]] == ["gate"]
     assert cp["bookkeeping_checks"] == []
     assert "external/managed" not in report
     failures = [check for check in checks if not check.skipped and not check.ok]
