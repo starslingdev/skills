@@ -294,6 +294,47 @@ jobs:
     assert "mismatched-sccache-doc" in findings[0]["affected_jobs"]
 
 
+def test_opt61_checks_inherited_sccache_dir_after_a_saved_build_override(
+        tmp_path) -> None:
+    commands = (
+        "cargo check --all-targets",
+        "cargo bench --no-run",
+        "cargo hack check",
+        "cargo llvm-cov nextest",
+        "cross build --target aarch64-unknown-linux-gnu",
+        "just build",
+        "./scripts/build.sh",
+        "python scripts/build.py",
+        "bash ci/compile.sh",
+        "task build",
+    )
+    undetected: list[str] = []
+    for index, command in enumerate(commands):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: {command}
+""")
+
+        if "OPT61" not in _patterns(rows):
+            undetected.append(command)
+
+    assert undetected == []
+
+
 def test_opt61_checks_declared_sccache_directory_for_unlisted_consumers(
         tmp_path) -> None:
     commands = (

@@ -4797,13 +4797,12 @@ def _detect_opt61(
         assignment_re = re.compile(
             r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
             r"\s*=\s*([^\s;&]+)", re.IGNORECASE)
-        build_command_re = re.compile(
-            r"\b(?:cmake\s+--build|make|ninja|meson\s+compile|"
-            r"cargo\s+(?:\+\S+\s+)?(?:build|test|clippy|doc|nextest\s+run)|"
-            r"go\s+(?:build|test))\b",
-            re.IGNORECASE)
         direct_compiler_re = re.compile(
             r"(?:^|[\s;&|])(ccache|sccache)(?=\s|$)", re.IGNORECASE)
+        metadata_query_re = re.compile(
+            r"^\s*(?:\S+\s+)*(?:--version|-V|--help|-h)\s*$")
+        unrelated_shell_re = re.compile(
+            r"^\s*(?:echo|printf)\b[^;&|]*$", re.IGNORECASE)
         analysis_command_re = re.compile(
             r"(?:^|[\s;&|])(?:staticcheck|golangci-lint)(?=\s|$)", re.IGNORECASE)
 
@@ -4816,7 +4815,13 @@ def _detect_opt61(
                 if direct:
                     return family == direct.group(1).casefold()
                 env_text = "\n".join(f"{key}={value}" for key, value in env.items())
-                return family in env_text.casefold() and bool(build_command_re.search(command))
+                if family not in env_text.casefold():
+                    return False
+                # A run step can dispatch the configured wrapper through any
+                # project command.  Only commands that are wholly metadata or
+                # shell-output operations prove they cannot compile anything.
+                return not (metadata_query_re.fullmatch(command)
+                            or unrelated_shell_re.fullmatch(command))
             family = "staticcheck" if name == "staticcheck_cache" else "golangci"
             match = analysis_command_re.search(command)
             return bool(match and family in match.group(0).casefold())
