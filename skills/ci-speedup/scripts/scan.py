@@ -4732,7 +4732,8 @@ def _static_cache_family(*values: object) -> str:
     ignored = {"cache", "restore", "keys", "key", "runner", "github", "sha"}
     for token in tokens:
         token = token.strip("._-")
-        if token and token not in ignored:
+        if (token and token not in ignored
+                and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
             return token
     return "declared-cache"
 
