@@ -26,7 +26,8 @@ _CACHED_COUNT = re.compile(
     r"(?:go\s+)?cached(?:\s+lines?)?)")
 _CACHE_STEP_NAME = re.compile(r"(?i)\bcach(?:e|ed|ing)\b")
 _DIRECT_CACHE_ACTION_LOG = re.compile(
-    r"(?i)(?:actions/cache|(?:ccache|sccache)-action|rust-cache)@")
+    r"(?i)(?:actions/cache(?:/(?:restore|save))?|"
+    r"(?:ccache|sccache)-action|rust-cache)@")
 _CACHE_CAPABLE_SETUP_LOG = re.compile(
     r"(?i)(?:actions/setup-(?:go|java|node|python)|setup-gradle|setup-ruby|"
     r"setup-uv)@")
@@ -900,9 +901,6 @@ def _cache_class(cohort: dict[str, Any]) -> tuple[str, str]:
     if unreadable:
         return ("unknown", f"{unreadable} job log"
                 f"{'s' if unreadable != 1 else ''} unreadable")
-    if omitted:
-        return ("unknown", f"{omitted} job log"
-                f"{'s' if omitted != 1 else ''} omitted by cap")
     if truncated:
         return ("unknown", f"{truncated} job log"
                 f"{'s' if truncated != 1 else ''} truncated by cap")
@@ -914,6 +912,9 @@ def _cache_class(cohort: dict[str, Any]) -> tuple[str, str]:
         return (("cold", "first run")
                 if int(cohort.get("position") or 0) == 1
                 else ("warm", "later run"))
+    if omitted:
+        return ("unknown", f"{omitted} job log"
+                f"{'s' if omitted != 1 else ''} omitted by cap")
     if cold:
         return "cold", cold.group(0)
     if warm:

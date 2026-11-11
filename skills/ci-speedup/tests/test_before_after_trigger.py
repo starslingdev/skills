@@ -626,6 +626,7 @@ def test_real_adapter_caps_and_counts_job_log_calls():
     assert len(client.text_gets) == 20
     assert cohort["log_api_calls"] == 20
     assert cohort["log_jobs_omitted"] == 2
+    assert _cache_class({**cohort, "position": 2}) == ("warm", "later run")
 
 
 def test_real_adapter_bounds_total_retained_log_text():
@@ -649,21 +650,23 @@ def test_real_adapter_finds_cache_markers_after_a_long_log_prefix():
     assert _cache_class({"position": 1, **sample})[0] == "warm"
 
 
-def test_renamed_cache_action_without_a_marker_stays_unknown():
-    client = AdapterFixture({
-        "actions/jobs/": (
-            "##[group]Run actions/cache@v4\n"
-            "with:\n"
-            "  path: node_modules\n"),
-    })
-    job = _api_job()
-    job["steps"][0]["name"] = "Restore dependencies"
+def test_renamed_cache_actions_without_a_marker_stay_unknown():
+    for action in ("actions/cache@v4", "actions/cache/restore@v4",
+                   "actions/cache/save@v4"):
+        client = AdapterFixture({
+            "actions/jobs/": (
+                f"##[group]Run {action}\n"
+                "with:\n"
+                "  path: node_modules\n"),
+        })
+        job = _api_job()
+        job["steps"][0]["name"] = "Restore dependencies"
 
-    sample = client._job_logs("o/r", [job])
+        sample = client._job_logs("o/r", [job])
 
-    assert sample["log_has_cache_step"] is True
-    assert _cache_class({"position": 2, **sample}) == (
-        "unknown", "no cache marker in sampled job logs")
+        assert sample["log_has_cache_step"] is True, action
+        assert _cache_class({"position": 2, **sample}) == (
+            "unknown", "no cache marker in sampled job logs"), action
 
 
 def test_unreadable_renamed_step_cannot_prove_cache_absence():
