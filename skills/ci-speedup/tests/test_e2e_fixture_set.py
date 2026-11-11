@@ -2000,10 +2000,11 @@ def test_pr_sample_keeps_empty_observable_required_suite_empty(
     cp = doc["pr_critical_path"]
     assert cp["sampled_pr_count"] == 0
     assert cp["required_suite_scoped"] is True
-    assert cp["required_suite_unsatisfiable"] is False
+    assert cp["required_suite_unsatisfiable"] is True
     assert cp["sample_job_list_scoped"] is True
-    assert cp["sample_stop_reason"] == "candidates_exhausted"
-    assert "0 of 100 PRs sampled: candidates exhausted" in report
+    assert cp["sample_stop_reason"] == "required_suite_empty"
+    assert "0 of 100 PRs sampled: required suite empty" in report
+    assert "no commit ran every observable required check" in report
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
@@ -2016,12 +2017,15 @@ def test_pr_sample_preserves_external_only_required_check_and_wall_bound(
     responses_path.write_text(json.dumps(recorded), encoding="utf-8")
     run_root = tmp_path / "run-external-only-required"
     run_root.mkdir()
-    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
 
     cp = doc["pr_critical_path"]
     assert cp["required_checks_unobservable"] == ["external-review"]
     assert cp["required_suite_scoped"] is False
     assert cp["required_suite_unsatisfiable"] is True
+    assert cp["sample_stop_reason"] == "required_checks_unobservable"
+    assert "required checks unobservable" in report
+    assert "external-review" in report
     wall_check = next(
         check for check in checks
         if check.name == "per-commit wall-clock projections are physically bounded")
@@ -2324,6 +2328,44 @@ def test_pr_sample_stops_after_job_population_reaches_target(
     assert cp["sample_candidate_pages_fetched"] == 2
     assert [c for c in checks if not c.skipped and not c.ok] == []
     assert "100 of 100 PRs sampled: target met" in report
+
+
+def test_pr_sample_reads_only_the_newest_population_needed_for_its_goal(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path, extended=True)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    completed = [
+        row for page in recorded["workflows"][0]["run_pages"][1:]
+        for row in page
+    ]
+    recorded["workflows"][0]["run_pages"] = [
+        recorded["workflows"][0]["run_pages"][0], completed]
+    # The newest 100 already span five days; another 54 completed commits are
+    # visible on the same fetched pages but are unnecessary for the sample goal.
+    for index, row in enumerate(completed):
+        day = 25 - min(index // 20, 5)
+        hour = index % 20
+        start = f"2026-01-{day:02d}T{hour:02d}:00:00Z"
+        end = f"2026-01-{day:02d}T{hour:02d}:01:00Z"
+        row.update(created_at=start, run_started_at=start, updated_at=end)
+        job = recorded["jobs"][str(row["id"])][0]
+        job.update(created_at=start, started_at=start, completed_at=end)
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-bounded-job-population"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    completed_ids = {str(row["id"]) for row in completed}
+    read_completed = {
+        run_id: count for run_id, count in doc["_fixture_job_reads"].items()
+        if run_id in completed_ids
+    }
+    assert len(read_completed) == 100
+    assert set(read_completed.values()) == {1}
+    assert doc["pr_critical_path"]["sampled_pr_count"] == 100
+    assert doc["pr_critical_path"]["sample_distinct_days"] == 5
+    assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
 def test_short_pr_sample_names_exhausted_candidates_through_full_pipeline(

@@ -6883,6 +6883,8 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
             "page cap": "the bounded candidate-page walk stopped before reaching the target",
             "era door": "older PRs from a different workflow configuration were excluded",
             "candidates exhausted": "the visible candidate history contained too few qualifying PRs",
+            "required suite empty": "no commit ran every observable required check",
+            "required checks unobservable": "the required checks were not present in Actions job lists",
         }
         gate += (f" — ⚠️ **short sample** ({short_reasons.get(stop_reason, 'the sample target was not reached')}), "
                  "so the gate ordering here is a floor, not the full picture")
@@ -6926,7 +6928,12 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
     # (the PR-floor fallback), vs. it couldn't be read at all (no admin / 404). Branch
     # on `required_suite_unsatisfiable` so an external-but-readable gate isn't reported
     # as a permissions failure.
-    if cp.get("required_suite_unsatisfiable"):
+    if cp.get("sample_stop_reason") == "required_suite_empty":
+        out.append("> - ⚠️ **No complete observable required suite** — completed PR "
+                   "commits were present, but no commit ran every observable required "
+                   "check. The sample stays empty rather than falling back to unrelated "
+                   "jobs while claiming required-suite scope.")
+    elif cp.get("required_suite_unsatisfiable"):
         out.append("> - ⚠️ **No file-backed required gate** — the required checks were "
                    "read, but they're external/managed (a CLA bot, enterprise CI, "
                    "label-gated e2e, a mergeability gate) and ran on **none** of the "
@@ -13632,6 +13639,23 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     out: list[str] = [_STATIC_ONLY_MARKER, "",
                       f"# {repo} — why is the merge slow?", ""]
     out += _metadata_table(doc, repo)
+    _static_stop = str(cp.get("sample_stop_reason") or "")
+    if _static_stop == "required_suite_empty":
+        out += ["> [!IMPORTANT]",
+                "> **No complete observable required suite.** Completed PR commits "
+                "were present, but no commit ran every observable required check. "
+                "The report keeps the scoped population empty rather than ranking "
+                "unrelated jobs.", ""]
+    _static_unobservable = cp.get("required_checks_unobservable") or []
+    if _static_unobservable:
+        _shown = ", ".join(
+            f"`{_clean_label(str(name))}`" for name in _static_unobservable[:4])
+        _more = (f" +{len(_static_unobservable) - 4} more"
+                 if len(_static_unobservable) > 4 else "")
+        out += ["> [!IMPORTANT]",
+                "> **Required checks are unobservable in Actions job lists:** "
+                f"{_shown}{_more}. They remain required-check coverage gaps; the "
+                "report does not silently drop them or claim they were timed.", ""]
     # An unscanned file must never read as clean — keep the coverage warning on top.
     out += _coverage_gap_banner(doc.get("scan_incomplete"))
     out += _unresolved_gate_lines(doc.get("pr_critical_path") or {})

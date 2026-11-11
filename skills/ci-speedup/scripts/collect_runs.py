@@ -29725,49 +29725,76 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _candidate_scoped_ts = eligible_ts
             return True
 
-        run_rep: dict[Any, str] = {}
-        selected_runs: list[dict[str, Any]] = []
-        for rep in sorted(eligible_ts, key=lambda sha: eligible_ts[sha], reverse=True):
-            for member in _rep_members.get(rep, [rep]):
-                for row in rows_by_sha.get(member, []):
-                    rid = row.get("id")
-                    if rid in run_rep:
-                        continue
-                    run_rep[rid] = rep
-                    selected_runs.append(row)
-        kept_jobs, _failures = _gather_run_jobs(
-            client, repo, selected_runs, keep_empty=True, memo=job_memo)
-        fetched_ids = {run.get("id") for run, _jobs in kept_jobs}
-        failed_reps = {
-            run_rep.get(run.get("id"), "") for run in selected_runs
-            if run.get("id") not in fetched_ids
-        }
+        ordered_reps = sorted(
+            eligible_ts, key=lambda sha: eligible_ts[sha], reverse=True)
+        # Read only the newest prefix that can satisfy both public sample goals.
+        # If path-conditional jobs remove too many commits, extend in bounded
+        # batches until the scoped population is ready or visible candidates end.
+        # This keeps a busy page with 200 eligible commits from paying 200 job-list
+        # requests when its newest 100 already span the configured date floor.
+        evaluation_count = min(len(ordered_reps), _spread_target(eligible_ts))
+        evaluated_reps: set[str] = set()
+        failed_reps: set[str] = set()
         names_by_rep: dict[str, set[str]] = defaultdict(set)
         observed: set[str] = set()
-        for run, jobs in kept_jobs:
-            rep = run_rep.get(run.get("id"), "")
-            for job in jobs:
-                name = str(job.get("name") or "")
-                if name:
-                    names_by_rep[rep].add(name)
-                    observed.add(name)
-        observable = frozenset(set(req_names) & observed)
-        _candidate_scope_evaluated = True
-        _candidate_observable_required = observable
-        _candidate_unobservable_required = frozenset(set(req_names) - observed)
-        if not observable:
-            # Preserve the established external-gate fallback. There is no
-            # observable in-repo suite with which to scope individual commits.
-            _candidate_scoped_ts = eligible_ts
-            return True
-        _candidate_scoped_ts = {
-            rep: ts for rep, ts in eligible_ts.items()
-            if rep in failed_reps or observable <= names_by_rep.get(rep, set())
-        }
-        scoped_days = {str(ts or "")[:10]
-                       for ts in _candidate_scoped_ts.values()}
-        return (len(_candidate_scoped_ts) >= _REPR_PR_TARGET
-                and len(scoped_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS)
+        while len(evaluated_reps) < len(ordered_reps):
+            batch_reps = ordered_reps[len(evaluated_reps):evaluation_count]
+            if not batch_reps:
+                break
+            run_rep: dict[Any, str] = {}
+            selected_runs: list[dict[str, Any]] = []
+            for rep in batch_reps:
+                evaluated_reps.add(rep)
+                for member in _rep_members.get(rep, [rep]):
+                    for row in rows_by_sha.get(member, []):
+                        rid = row.get("id")
+                        if rid in run_rep:
+                            continue
+                        run_rep[rid] = rep
+                        selected_runs.append(row)
+            kept_jobs, _failures = _gather_run_jobs(
+                client, repo, selected_runs, keep_empty=True, memo=job_memo)
+            fetched_ids = {run.get("id") for run, _jobs in kept_jobs}
+            failed_reps.update(
+                run_rep.get(run.get("id"), "") for run in selected_runs
+                if run.get("id") not in fetched_ids)
+            for run, jobs in kept_jobs:
+                rep = run_rep.get(run.get("id"), "")
+                for job in jobs:
+                    name = str(job.get("name") or "")
+                    if name:
+                        names_by_rep[rep].add(name)
+                        observed.add(name)
+
+            observable = frozenset(set(req_names) & observed)
+            _candidate_scope_evaluated = True
+            _candidate_observable_required = observable
+            _candidate_unobservable_required = frozenset(
+                set(req_names) - observed)
+            evaluated_ts = {
+                rep: eligible_ts[rep] for rep in ordered_reps
+                if rep in evaluated_reps}
+            if not observable:
+                # No Actions job in the newest sufficient population implements
+                # the readable required names. Preserve the external-gate fallback
+                # without paying to read older commits that cannot improve the
+                # count/date goal.
+                _candidate_scoped_ts = evaluated_ts
+                return True
+            _candidate_scoped_ts = {
+                rep: ts for rep, ts in evaluated_ts.items()
+                if (rep in failed_reps
+                    or observable <= names_by_rep.get(rep, set()))
+            }
+            scoped_days = {str(ts or "")[:10]
+                           for ts in _candidate_scoped_ts.values()}
+            if (len(_candidate_scoped_ts) >= _REPR_PR_TARGET
+                    and len(scoped_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS):
+                return True
+            if evaluation_count >= len(ordered_reps):
+                break
+            evaluation_count = min(len(ordered_reps), evaluation_count + 25)
+        return False
 
     # Apply the completed-only eligibility after every bounded workflow walk.
     # Stopping on the aggregate count first can strand clean commits on older
@@ -29848,17 +29875,20 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         )[:_selection_target]
         per_sha_checks = [{} for _sha in repr_shas]
         check_durs = {}
+        _required_suite_unsatisfiable = bool(
+            req_names and (
+                not _candidate_observable_required
+                or not _candidate_scoped_ts))
         sample_diag = {
             "target": _REPR_PR_TARGET, "kept": len(repr_shas),
             "fetched": len(repr_shas), "fetch_failures": 0,
             "complete": (
                 len(repr_shas) >= _REPR_PR_TARGET
                 and len(_eligible_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
-                and not (req_names and not _candidate_observable_required)),
+                and not _required_suite_unsatisfiable),
             "required_suite_scoped": bool(
                 req_names and _candidate_observable_required),
-            "required_suite_unsatisfiable": bool(
-                req_names and not _candidate_observable_required),
+            "required_suite_unsatisfiable": _required_suite_unsatisfiable,
             "required_checks_unobservable": sorted(
                 _candidate_unobservable_required),
             "selection_limited": False,
@@ -29960,6 +29990,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     elif (sample_diag.get("fetch_failures") or _candidate_page_failed
           or all_status_failed):
         sample_diag["stop_reason"] = "fetch_failures"
+    elif sample_diag.get("required_suite_unsatisfiable"):
+        sample_diag["stop_reason"] = (
+            "required_checks_unobservable"
+            if sample_diag.get("required_checks_unobservable")
+            and not sample_diag.get("required_suite_scoped")
+            else "required_suite_empty")
     elif _candidate_era_door:
         sample_diag["stop_reason"] = "era_door"
     elif (sample_diag.get("selection_limited")

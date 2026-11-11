@@ -2257,6 +2257,12 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
         expected = "target_met"
     elif failures or page_failures:
         expected = "fetch_failures"
+    elif cp.get("required_suite_unsatisfiable"):
+        expected = (
+            "required_checks_unobservable"
+            if cp.get("required_checks_unobservable")
+            and cp.get("required_suite_scoped") is False
+            else "required_suite_empty")
     elif era_door:
         expected = "era_door"
     elif selection_limited or (not exhausted and pages >= cap):
