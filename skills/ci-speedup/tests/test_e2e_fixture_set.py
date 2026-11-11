@@ -1956,6 +1956,8 @@ def test_pr_sample_preserves_observable_required_suite_scope(
     assert cp["sample_job_list_scoped"] is True
     assert cp["sample_stop_reason"] == "candidates_exhausted"
     assert "91 of 100 PRs sampled: candidates exhausted" in report
+    assert "includes only completed PR commits where every observable required check ran" in report
+    assert "includes completed PR commits even when a path-conditional required check did not run" not in report
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
@@ -2005,6 +2007,7 @@ def test_pr_sample_keeps_empty_observable_required_suite_empty(
     assert cp["sample_stop_reason"] == "required_suite_empty"
     assert "0 of 100 PRs sampled: required suite empty" in report
     assert "no commit ran every observable required check" in report
+    assert "No run history to measure" not in report
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 

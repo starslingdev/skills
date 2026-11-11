@@ -6943,10 +6943,10 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
     elif cp.get("sample_job_list_scoped"):
         out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "
                    "representative population avoids one check-run request per commit, "
-                   "so it includes completed PR commits even when a path-conditional "
-                   "required check did not run. Required checks absent from the job "
-                   "lists are named separately; gate frequency is observed, not proof "
-                   "that every sampled commit ran the full required suite.")
+                   "and includes only completed PR commits where every observable "
+                   "required check ran. Required checks absent from the job lists are "
+                   "named separately and excluded from that suite test; gate frequency "
+                   "is observed from the resulting scoped population.")
     elif cp.get("required_suite_scoped") is False:
         out.append("> - ⚠️ **Required checks were unreadable** (no admin / branch "
                    "protection 404), so 'gate' here means the **slowest check on a "
@@ -13640,7 +13640,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                       f"# {repo} — why is the merge slow?", ""]
     out += _metadata_table(doc, repo)
     _static_stop = str(cp.get("sample_stop_reason") or "")
-    if _static_stop == "required_suite_empty":
+    if _static_stop == "required_suite_empty" and not broken:
         out += ["> [!IMPORTANT]",
                 "> **No complete observable required suite.** Completed PR commits "
                 "were present, but no commit ran every observable required check. "
@@ -13696,6 +13696,11 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                 "**cloud bill** (runner-minutes), not measured developer wall-clock. "
                 "Re-run when the GitHub API is reachable again (e.g. once a rate limit "
                 "has reset) to get the measured wall-clock critical path.", ""]
+    elif _static_stop == "required_suite_empty":
+        # The specific banner above already explains why completed PR history produced
+        # no scoped population. Do not follow it with the generic no-run-history banner,
+        # which would falsely say that no PR-gating timing exists.
+        pass
     elif _static_commit_wall > 0:
         out += ["> [!IMPORTANT]",
                 "> **Commit-level developer wait was measured, but no per-check spine "
@@ -13769,6 +13774,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                   "pass failed), so this report can't rank what a PR waits on before "
                   "the merge — and that silence is a hole in the data, not a verdict "
                   "on your CI."]
+    elif _static_stop == "required_suite_empty":
+        bottom = ["> **Bottom line.** Completed PR timing was available, but no commit "
+                  "ran the whole observable required suite, so this report does not "
+                  "rank unrelated jobs as the merge gate."]
     elif no_pr_gating:
         bottom = ["> **Bottom line.** This repo's current workflows never run on PRs, "
                   "so there is no merge wait to rank — the findings below are about "
