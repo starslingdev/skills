@@ -1,0 +1,17 @@
+{
+  "api_fixture_count": 663,
+  "captured_at": "2026-11-11T09:50:00Z",
+  "commit": "3b438229c6a2ccdbe2d70007301d83c3",
+  "identifiers": "stable eight-digit fixture ids",
+  "log_cap_bytes": 200000,
+  "month_wide_completed_pr_commits": 650,
+  "month_wide_job_lists_recorded": 870,
+  "month_wide_pr_commits": 650,
+  "origin": "https://github.com/microsoft/playwright.git",
+  "pole_log_note": "the public API returned no pole logs for this recording",
+  "pole_logs_recorded": 0,
+  "repository": "microsoft/playwright",
+  "schema_version": 1,
+  "secret_scan": "passed",
+  "skipped_log_files": []
+}

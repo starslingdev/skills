@@ -1,0 +1,17 @@
+{
+  "api_fixture_count": 463,
+  "captured_at": "2026-11-11T09:50:00Z",
+  "commit": "63acadce60930ec54cdd96616a1542d605ea56da",
+  "identifiers": "stable eight-digit fixture ids",
+  "log_cap_bytes": 200000,
+  "month_wide_completed_pr_commits": 10626,
+  "month_wide_job_lists_recorded": 12108,
+  "month_wide_pr_commits": 10627,
+  "origin": "https://github.com/home-assistant/core.git",
+  "pole_log_note": "the public API returned no pole logs for this recording",
+  "pole_logs_recorded": 0,
+  "repository": "home-assistant/core",
+  "schema_version": 1,
+  "secret_scan": "passed",
+  "skipped_log_files": []
+}

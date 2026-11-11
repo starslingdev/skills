@@ -1,0 +1,17 @@
+{
+  "api_fixture_count": 1296,
+  "captured_at": "2026-11-11T09:50:00Z",
+  "commit": "bcf825f3534d71e8a9868c880f5eaf5763bc85ea",
+  "identifiers": "stable eight-digit fixture ids",
+  "log_cap_bytes": 200000,
+  "month_wide_completed_pr_commits": 3834,
+  "month_wide_job_lists_recorded": 4430,
+  "month_wide_pr_commits": 3834,
+  "origin": "https://github.com/vercel/next.js.git",
+  "pole_log_note": "the public API returned no pole logs for this recording",
+  "pole_logs_recorded": 0,
+  "repository": "vercel/next.js",
+  "schema_version": 1,
+  "secret_scan": "passed",
+  "skipped_log_files": []
+}
