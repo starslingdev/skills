@@ -2070,3 +2070,26 @@ def test_gate_frequency_confidence_discloses_bookkeeping_and_withholds_order(
                 "gate-frequency ordering has enough events, span, and "
                 "non-overlapping intervals") and not check.ok
             for check in bad_checks)
+
+
+def test_all_short_file_backed_gates_do_not_become_external_floor_fallback(
+        monkeypatch, tmp_path):
+    """Whole pipeline: an all-bookkeeping sample stays honest about its source."""
+    fixture = tmp_path / "fixtures" / "all-short-required-gate"
+    fixture.parent.mkdir()
+    shutil.copytree(FIXTURE_ROOT / "bookkeeping-last-job", fixture)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["required_checks"] = ["gate"]
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    monkeypatch.setattr(cr, "_GATE_BOOKKEEPING_CUTOFF_S", 1_000.0)
+    doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    cp = doc["pr_critical_path"]
+
+    assert cp.get("gate_kind") != "pr_floor_fallback"
+    assert [row["check"] for row in cp["poles"]] == ["build", "gate"]
+    assert {row["name"] for row in cp["checks"]} == {"build", "gate"}
+    assert cp["bookkeeping_checks"] == []
+    assert "external/managed" not in report
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]

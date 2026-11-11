@@ -30092,6 +30092,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         name for name, span in pr_check_p50.items()
         if float(_span_caps.get(name, span)) < _GATE_BOOKKEEPING_CUTOFF_S
     }
+    if (pr_check_p50 and len(_bookkeeping_checks) == len(pr_check_p50)
+            and _confirmed_gate_checks):
+        # A confirmed required chain is observable developer wait even when
+        # every one of its checks finishes quickly. Filtering that whole chain
+        # empties the file-backed spine and incorrectly sends the report through
+        # the external/managed PR-floor fallback. Preserve it only in this
+        # all-short case; when a substantive pole exists, short required
+        # aggregators remain disclosed bookkeeping as before.
+        _bookkeeping_checks.difference_update(_confirmed_gate_checks)
     pr_check_p50 = {
         name: span for name, span in pr_check_p50.items()
         if name not in _bookkeeping_checks
