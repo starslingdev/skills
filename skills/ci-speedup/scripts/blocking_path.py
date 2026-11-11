@@ -2549,7 +2549,7 @@ def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
         if re.search(r"#\d+\s+\[[^\]]+\]\s+(?:FROM|RUN|COPY|ADD)\b", line,
                      re.IGNORECASE):
             finish_block()
-            continue
+            break
         if re.search(r"\bName:\s+\S+", line):
             nodes.append({"name": line, "platforms": "", "native": ""})
             awaiting_platform = True
@@ -2578,6 +2578,8 @@ def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
             # BuildKit prints label entries indented below `Labels:`. They are
             # still part of this node, and may sit between its platform row
             # and the next node's `Name:` line.
+            continue
+        if not line.strip():
             continue
         finish_block()
     finish_block()

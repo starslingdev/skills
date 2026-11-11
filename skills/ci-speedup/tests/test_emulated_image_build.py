@@ -401,6 +401,7 @@ def test_emulated_leaf_requires_a_single_native_builder_node():
 GC Policy rule#0:
  All: false
  Keep Duration: 48h0m0s
+
 Name:                  native-arm0
 Endpoint:              tcp://native-arm.example:1234
 Status:                running
@@ -409,6 +410,23 @@ Platforms:             linux/arm64, linux/arm/v7
 """
     assert bp._emulated_image_compile_leaf(
         (_SINGLE_AMD64_BUILDER + second_node + compile_log).splitlines()) is None
+
+
+def test_an_inspect_after_the_build_does_not_relabel_earlier_layers():
+    native_arm_builder = _SINGLE_AMD64_BUILDER.replace(
+        "linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7",
+        "linux/arm64, linux/arm/v7, linux/amd64",
+    )
+    compile_log = """#10 [linux/amd64 4/8] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 4/8] RUN go build ./...
+#15 DONE 100.0s
+"""
+
+    leaf = bp._emulated_image_compile_leaf(
+        (native_arm_builder + compile_log + _SINGLE_AMD64_BUILDER).splitlines())
+
+    assert leaf is None
 
 
 def test_no_inspect_dominant_foreign_compile_is_an_uncredited_check():
