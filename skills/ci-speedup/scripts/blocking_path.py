@@ -2546,6 +2546,9 @@ def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
             continue
         if not in_nodes:
             continue
+        if re.search(r"##\[(?:group|endgroup)\]", line, re.IGNORECASE):
+            finish_block()
+            continue
         if re.search(r"#\d+\s+\[[^\]]+\]\s+(?:FROM|RUN|COPY|ADD)\b", line,
                      re.IGNORECASE):
             finish_block()
@@ -2566,18 +2569,10 @@ def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
             nodes[-1]["native"] = detected[0] if detected else ""
             awaiting_platform = False
             continue
-        if re.search(
-            r"^\s*(?:Endpoint|Status|BuildKit (?:daemon flags|version)|Labels|"
-            r"GC Policy rule#\d+|All|Filters|Keep Duration|Reserved Space|"
-            r"Max Used Space|Min Free Space):",
-            line,
-            re.IGNORECASE,
-        ):
-            continue
-        if re.search(r"^\s+[\w.-]+:\s*.*$", line):
-            # BuildKit prints label entries indented below `Labels:`. They are
-            # still part of this node, and may sit between its platform row
-            # and the next node's `Name:` line.
+        if re.search(r"^\s*[A-Za-z][A-Za-z0-9 ._#/-]*:\s*.*$", line):
+            # Buildx adds fields over time, and BuildKit label entries are
+            # indented below `Labels:`. Any key/value row is node metadata;
+            # structural group or build-step boundaries above end the block.
             continue
         if not line.strip():
             continue

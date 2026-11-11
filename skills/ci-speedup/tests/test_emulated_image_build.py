@@ -520,9 +520,35 @@ Name: release-artifact
 
 def test_builder_parser_stops_at_a_later_docker_info_group():
     log = _SINGLE_AMD64_BUILDER + """##[group]Docker info
-Name: runner-engine
-Server Version: 27.5.1
+Server:
+ Name: runner-engine
+ Server Version: 27.5.1
 ##[endgroup]
+#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+"""
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+    assert leaf["magnitude"] == {
+        "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
+    assert "builder_topology_unconfirmed" not in leaf
+
+
+def test_builder_parser_keeps_driver_options_before_platforms():
+    log = """docker buildx inspect --bootstrap
+Name:          builder
+Driver:        docker-container
+Nodes:
+Name:                  builder0
+Endpoint:              unix:///var/run/docker.sock
+Driver Options:        network=host
+Status:                running
+BuildKit version:      v0.24.0
+Platforms:             linux/amd64, linux/amd64/v2, linux/arm64
 #10 [linux/amd64 build 2/3] RUN go build ./...
 #10 DONE 20.0s
 #15 [linux/arm64 build 2/3] RUN go build ./...
