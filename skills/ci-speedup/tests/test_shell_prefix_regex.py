@@ -178,9 +178,10 @@ def test_every_detector_uses_the_shared_fragment_once() -> None:
         assert _OLD_SRC not in new.pattern, name
 
 
-@pytest.mark.parametrize("text", _CORPUS, ids=range(len(_CORPUS)))
-def test_new_pattern_matches_exactly_what_the_old_one_did(text: str) -> None:
-    _same(text)
+def test_new_pattern_matches_exactly_what_the_old_one_did() -> None:
+    # One test over the whole corpus: `_same` names the failing line.
+    for text in _CORPUS:
+        _same(text)
 
 
 def test_corpus_exercises_both_outcomes() -> None:

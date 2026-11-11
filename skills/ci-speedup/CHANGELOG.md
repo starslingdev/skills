@@ -28,6 +28,10 @@ unversioned and updates by reinstall from `main`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **2026-11-11** — Exclude matrix legs whose dominant test step was skipped when their only remaining steps ran on every leg, while preserving platform-specific legs as real work.
+
 ### Added
 
 - **2026-11-10** — Add OPT103 and the `lighthouse-serial-audits` log leaf for jobs whose time is Lighthouse CI audits run one after another. The leaf reads lhci's own `Running Lighthouse N time(s) on <url>` and `Done running Lighthouse!` lines, counts passes x URLs x runs over completed passes, and reports the share of audits beyond the first per URL. It fires at 20 or more audits with at least two per distinct URL, credits no saving, and hands off three dials: runs per URL, the URL list, and passes on separate runners. Step names carrying `lighthouse` or `lhci` now classify as `scan`, and OPT83 never suggests running a Lighthouse step side by side with another step, because the audit shares the runner's cores and its scores skew. A crashed collect is not merged into the next pass, and pages served on a random port per collect (`--static-dist-dir`) count once. The generic OPT75 route on a pole this leaf owns credits no saving either. Catalog: 97 → 98 entries.
