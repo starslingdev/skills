@@ -177,11 +177,59 @@ _SCENARIOS = {
 }
 
 
-@pytest.mark.parametrize("pattern", sorted(cr._SIZING))
+# `_size_finding` tells patterns apart only by their sizing model, the config
+# fields it reads, and membership in a few special-case sets. Patterns that agree
+# on all three take the same code path, so the battery checks the worst case of
+# each class (largest `default_s`, then `hit_rate`). A newly registered pattern
+# joins a class or forms a new one with no new test, which keeps the guard "by
+# construction"; `test_sizing_classes_cover_every_branch_input` fails if
+# `_size_finding` starts reading something the class key does not.
+_SPECIAL_SETS = ("_SERIAL_GATE_PATTERNS", "_PRESTART_AXIS_PATTERNS",
+                 "_EPHEMERAL_CACHE_SUSPECT", "_RUNNER_MIN_UPPER_BOUND",
+                 "_WALL_CLOCK_ONLY_NO_RUNNER_MIN")
+
+
+def _sizing_class(pattern: str) -> tuple:
+    cfg = cr._SIZING[pattern]
+    return (cfg.get("model"), tuple(sorted(cfg)),
+            tuple(pattern in getattr(cr, name) for name in _SPECIAL_SETS))
+
+
+def _worst_case(pattern: str) -> tuple:
+    cfg = cr._SIZING[pattern]
+    values = tuple(float(cfg[k]) if isinstance(cfg.get(k), (int, float)) else 0.0
+                   for k in ("default_s", "hit_rate"))
+    return values + (pattern,)
+
+
+def _sizing_representatives() -> list[str]:
+    classes: dict[tuple, list[str]] = {}
+    for pattern in sorted(cr._SIZING):
+        classes.setdefault(_sizing_class(pattern), []).append(pattern)
+    return sorted(max(members, key=_worst_case) for members in classes.values())
+
+
+def test_sizing_classes_cover_every_branch_input():
+    """The battery below is only complete while `_size_finding` reads nothing
+    beyond the class key: every pattern-set constant it names is in
+    `_SPECIAL_SETS`, and every pattern it names literally is a representative."""
+    import inspect
+    src = inspect.getsource(cr._size_finding) + inspect.getsource(cr._demote_runner_min)
+    pattern_sets = {
+        name for name in re.findall(r"\b(_[A-Z][A-Z0-9_]+)\b", src)
+        if isinstance(getattr(cr, name, None), (set, frozenset, tuple, list))
+        and all(isinstance(x, str) and x.startswith("OPT") for x in getattr(cr, name))
+    }
+    assert pattern_sets <= set(_SPECIAL_SETS), pattern_sets - set(_SPECIAL_SETS)
+    named = set(re.findall(r'"(OPT\d+)"', src))
+    assert named <= set(_sizing_representatives()), named - set(_sizing_representatives())
+
+
+@pytest.mark.parametrize("pattern", _sizing_representatives())
 @pytest.mark.parametrize("scenario", sorted(_SCENARIOS))
 def test_size_finding_never_overcredits(pattern: str, scenario: str):
-    """No pattern, in any affected-job position, may have `_size_finding` credit a
-    wall-clock saving beyond the physical ceiling. Measured patterns size INLINE
+    """No sizing class, in any affected-job position, may have `_size_finding`
+    credit a wall-clock saving beyond the physical ceiling. Measured patterns size INLINE
     (this layer leaves their wc as None) and are covered by the path-2 tests."""
     crit, jobs = _SCENARIOS[scenario]
     f = {"pattern": pattern, "affected_jobs": list(jobs)}

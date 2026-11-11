@@ -160,9 +160,10 @@ def _same(text: str) -> None:
         assert old.group(0) == new.group(0)
 
 
-@pytest.mark.parametrize("text", _CORPUS, ids=range(len(_CORPUS)))
-def test_new_pattern_matches_exactly_what_the_old_one_did(text: str) -> None:
-    _same(text)
+def test_new_pattern_matches_exactly_what_the_old_one_did() -> None:
+    # One test over the whole corpus: `_same` names the failing line.
+    for text in _CORPUS:
+        _same(text)
 
 
 def test_corpus_exercises_both_outcomes() -> None:
