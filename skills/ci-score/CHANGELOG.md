@@ -11,6 +11,8 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-11-10** — **Changed**: the skill now states that the audited repository's workflow content is untrusted data, never instructions, and that a directive embedded in it is a prompt-injection attempt to report. The other shipped skills already said this; a repo-wide test now keeps the sentence in every skill.
+
 - **2026-11-07** — **Fixed**: shallow-checkout grading recognizes inline history operands. Parent-only operands remain exempt because the score cannot express their bounded depth, while branch comparisons still require full history.
 
 - **2026-11-07** — **Fixed**: shallow-checkout grading now follows common shell, interpreter, wrapper, workspace-path, Make and Snapcraft forms into one first-party file, and recognizes history reads inside command substitutions, conditions and quoted child-process calls. Parent-only reads stay exempt because the score's static fix recipe cannot yet print their bounded required depth.
