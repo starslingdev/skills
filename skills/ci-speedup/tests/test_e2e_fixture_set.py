@@ -665,6 +665,22 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for fact in path_facts if fact.get("partial") is not True)
 
 
+def test_path_filter_fixture_without_pr_numbers_stays_unmeasured(
+        monkeypatch, tmp_path):
+    doc, report, checks = run_fixture(
+        FIXTURE_ROOT / "path-filter-unmeasured", monkeypatch, tmp_path)
+    measurement = next((
+        row.get("path_filter_measurement")
+        for row in doc["findings"] if row.get("pattern") == "OPT32"
+    ), None)
+
+    assert measurement is not None
+    assert measurement["status"] == "unmeasured"
+    assert measurement["reason"] == "no PR number on sampled runs"
+    assert "hit rate not measured (no PR number on sampled runs)" in report
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+
 @pytest.mark.parametrize(("family", "pattern", "miss", "hit", "credited"), [
     ("ccache", "OPT61", "Cache not found for input keys: ccache-linux-old",
      "Cache restored from key: ccache-linux-stable", True),

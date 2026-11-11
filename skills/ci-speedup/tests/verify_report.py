@@ -12691,6 +12691,33 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         findings = _as_list(_as_dict(json.loads(findings_path.read_text(encoding="utf-8"))).get("findings"))
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
+    if not _is_static_only(report):
+        for finding in findings:
+            if not isinstance(finding, dict) or finding.get("pattern") != "OPT32":
+                continue
+            measurement = finding.get("path_filter_measurement")
+            if not isinstance(measurement, dict):
+                continue
+            sampled_runs = measurement.get("sampled_runs")
+            numbered_runs = measurement.get("runs_with_pr_number")
+            if (not isinstance(sampled_runs, int) or isinstance(sampled_runs, bool)
+                    or sampled_runs <= 0
+                    or not isinstance(numbered_runs, int) or isinstance(numbered_runs, bool)
+                    or not 0 <= numbered_runs <= sampled_runs):
+                return Check(name, False,
+                             "an OPT32 measurement has an invalid sampled-run coverage stamp")
+            if measurement.get("status") == "unmeasured":
+                reason = measurement.get("reason")
+                if reason == "no PR number on sampled runs" and numbered_runs != 0:
+                    return Check(name, False,
+                                 "OPT32 says no sampled run had a PR number, but its coverage "
+                                 "stamp says otherwise")
+            elif numbered_runs < sampled_runs:
+                disclosure = f"Measured on {numbered_runs} of {sampled_runs} sampled runs"
+                if disclosure not in str(finding.get("evidence") or "") or disclosure not in report:
+                    return Check(name, False,
+                                 "a partially measured OPT32 finding does not disclose its "
+                                 "sampled-run coverage")
     has_unmeasured_opt32 = any(
         isinstance(f, dict) and f.get("pattern") == "OPT32"
         and isinstance(f.get("path_filter_measurement"), dict)
@@ -15836,6 +15863,15 @@ def check_default_branch_push_lane_isolated(
         ordered = sorted(lanes)
         label = ", ".join(ordered).replace("_", " ")
         label += " lane only" if len(ordered) == 1 else " lanes"
+        grouped_lanes = sorted({
+            str(value)
+            for finding in _as_list(data.get("findings"))
+            if isinstance(finding, dict) and finding.get("pattern") == pattern
+            for value in _as_list(finding.get("workflow_lanes"))
+            if str(value)
+        })
+        grouped_label = ", ".join(grouped_lanes).replace("_", " ")
+        grouped_label += " lane only" if len(grouped_lanes) == 1 else " lanes"
         matching_groups = [
             details for details in finding_details
             if (not pattern or f"<strong>{pattern} -" in details)
@@ -15845,7 +15881,9 @@ def check_default_branch_push_lane_isolated(
             and finding.get("pattern") == pattern
             and finding.get("lane") == "push"
             for finding in _as_list(data.get("findings")))
-        if (not any(label in details for details in matching_groups)
+        if (not any(
+                label in details or grouped_label in details
+                for details in matching_groups)
                 and not (push_route and f"**Catalog route:** {pattern}." in block)):
             failures.append(
                 f"report omits the static finding group's {label} tag")
