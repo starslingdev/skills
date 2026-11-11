@@ -3901,10 +3901,14 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
     # Jobs that never co-run (provably exclusive `if:`) are not repeated work
     # with each other. A sharded job still repeats its own setup across legs,
     # so keep it even when it is the workflow's only setup job.
-    setup_jobs_without_handoffs = [
-        job for job in setup_jobs if job not in handoff_jobs]
-    setup_jobs = sorted(set(_co_running(jobs, setup_jobs_without_handoffs))
-                        | (set(matrix_setup_legs) - handoff_jobs))
+    # Keep the established workflow-wide handoff exemption for ordinary job
+    # groups. Per-job attribution is needed only for shard facts: report merge
+    # jobs must not hide a sharded job, while a shard that downloads another
+    # job's build remains exempt.
+    ordinary_setup_jobs = (
+        set() if handoff_jobs else set(_co_running(jobs, setup_jobs)))
+    setup_jobs = sorted(
+        ordinary_setup_jobs | (set(matrix_setup_legs) - handoff_jobs))
     if setup_jobs:
         if len(setup_jobs) >= 2:
             evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "

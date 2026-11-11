@@ -140,7 +140,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: npm ci
-      - run: npm run build
       - run: npx playwright test --shard=${{{{ matrix.index }}}}/{shard_legs}
       - uses: actions/upload-artifact@v4
         with:
@@ -208,6 +207,36 @@ jobs:
         with:
           pattern: app-*
 """
+
+
+def build_once_with_lint(*, include_lint: bool) -> str:
+    """One job builds an artifact consumed by tests beside an ordinary lint."""
+    lint = """  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run lint
+""" if include_lint else ""
+    return f"""name: Build once
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with: {{name: app, path: dist}}
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {{name: app}}
+      - run: npm test
+{lint}"""
 
 
 def trees(tmp_path: Path, base_text: str, merge_text: str):
@@ -354,6 +383,20 @@ def test_sharded_producer_is_not_a_build_handoff_consumer(
 
     assert code == 0
     assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_build_once_handoff_keeps_ordinary_setup_group_silent(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        build_once_with_lint(include_lint=False),
+        build_once_with_lint(include_lint=True),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14" not in output
 
 
 @pytest.mark.parametrize("merge_text", [
