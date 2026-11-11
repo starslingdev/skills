@@ -325,6 +325,24 @@ def _sanitize_checkout_references(snapshot: Path, repository: str) -> None:
             path.write_text(sanitized, encoding="utf-8")
 
 
+def _reject_external_symlinks(checkout: Path, sources: list[Path]) -> None:
+    checkout_root = checkout.resolve(strict=True)
+    candidates: list[Path] = []
+    for source in sources:
+        candidates.append(source)
+        if source.is_dir() and not source.is_symlink():
+            candidates.extend(source.rglob("*"))
+    for path in candidates:
+        if not path.is_symlink():
+            continue
+        try:
+            resolved = path.resolve(strict=True)
+        except (OSError, RuntimeError) as error:
+            raise ValueError(f"unreadable checkout symlink: {path.relative_to(checkout)}") from error
+        if not resolved.is_relative_to(checkout_root):
+            raise ValueError(f"checkout symlink resolves outside checkout: {path.relative_to(checkout)}")
+
+
 def _write_compressed_json(path: Path, payload: dict[str, Any]) -> None:
     with gzip.open(path, "wt", encoding="utf-8", compresslevel=9) as stream:
         json.dump(payload, stream, indent=2, sort_keys=True)
@@ -465,6 +483,13 @@ def record(repository: str, checkout: Path, output: Path, *, captured_at: dateti
     workflows = checkout / ".github" / "workflows"
     if not workflows.is_dir():
         raise RuntimeError("checkout has no .github/workflows directory")
+    snapshot_sources = [workflows]
+    snapshot_sources.extend(
+        checkout / name
+        for name in ("package.json", "pnpm-workspace.yaml", "pyproject.toml", "Cargo.toml", "go.mod")
+        if (checkout / name).exists() or (checkout / name).is_symlink()
+    )
+    _reject_external_symlinks(checkout, snapshot_sources)
     shutil.copytree(workflows, snapshot / ".github" / "workflows")
     for name in ("package.json", "pnpm-workspace.yaml", "pyproject.toml", "Cargo.toml", "go.mod"):
         source = checkout / name

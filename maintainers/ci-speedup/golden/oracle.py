@@ -97,10 +97,15 @@ def compute(recording: dict[str, Any], *, bookkeeping_cutoff_s: int = DEFAULT_BO
         if not jobs:
             continue
         commits_with_jobs += 1
-        earliest = min(
+        earliest_job = min(
             instant for job in jobs
             if (instant := _instant(job.get("started_at"))) is not None
         )
+        run_starts = [
+            instant for run in commit.get("runs") or [] if isinstance(run, dict)
+            if (instant := _instant(run.get("created_at"))) is not None
+        ]
+        earliest = min([earliest_job, *run_starts])
         latest = max(
             instant for job in jobs
             if (instant := _instant(job.get("completed_at"))) is not None

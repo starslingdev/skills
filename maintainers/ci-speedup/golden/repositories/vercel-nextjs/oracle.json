@@ -1917,7 +1917,7 @@
     "total_pr_commits": 3834
   },
   "schema_version": 1,
-  "typical_pr_wait_s": 1516.0,
+  "typical_pr_wait_s": 1570.5,
   "window": {
     "end": "2026-11-11T09:50:00Z",
     "start": "2026-10-12T09:50:00Z"

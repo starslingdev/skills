@@ -40,6 +40,7 @@ _REPOSITORIES = {
             "sampled ",
             "full report verifier failed: the fetch plan matches its call sites",
             "forbidden finding present: OPT21",
+            "Bottom line does not contain reviewed text",
         ),
     ),
     "microsoft-playwright": (
@@ -98,6 +99,19 @@ def test_recorder_redacts_unrelated_repository_links_from_checkout(tmp_path: Pat
     assert "123" not in sanitized
 
 
+def test_recorder_rejects_a_workflow_link_outside_the_checkout(tmp_path: Path) -> None:
+    recorder = _load("record")
+    checkout = tmp_path / "checkout"
+    workflows = checkout / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    outside = tmp_path / "credential.yml"
+    outside.write_text("credential: should-not-be-copied\n", encoding="utf-8")
+    (workflows / "ci.yml").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="outside checkout"):
+        recorder._reject_external_symlinks(checkout, [workflows])
+
+
 def test_reference_oracle_does_not_import_the_engine() -> None:
     source = (_ROOT / "oracle.py").read_text(encoding="utf-8")
     imported = {
@@ -153,6 +167,31 @@ def test_reference_oracle_uses_month_wide_last_job_facts_and_ignores_bookkeeping
     assert facts["gate_order"] == ["CI / tests", "Lint / lint"]
     assert facts["gates"][0]["last_on"] == 3
     assert facts["bookkeeping_jobs"] == [{"check": "CI / cleanup", "excluded_on": 3}]
+
+
+def test_reference_wait_starts_at_the_earliest_recorded_run() -> None:
+    oracle = _load("oracle")
+    recording = {
+        "schema_version": 1,
+        "repository": "public/example",
+        "pr_commits": [{
+            "created_at": "2026-10-01T00:00:00Z",
+            "completed": True,
+            "runs": [
+                {"created_at": "2026-10-01T00:01:00Z"},
+                {"created_at": "2026-10-01T00:04:00Z"},
+            ],
+            "jobs": [{
+                "workflow": "CI", "name": "tests", "status": "completed",
+                "started_at": "2026-10-01T00:05:00Z",
+                "completed_at": "2026-10-01T00:11:00Z",
+            }],
+        }],
+    }
+
+    facts = oracle.compute(recording)
+
+    assert facts["typical_pr_wait_s"] == 600.0
 
 
 def test_comparison_rejects_a_small_or_misordered_engine_sample() -> None:
@@ -304,9 +343,13 @@ def test_comparison_rejects_wrong_month_wide_measurements() -> None:
         "oracle": {
             "sample": {"completed_with_eligible_jobs": 100},
             "typical_pr_wait_s": 100,
-            "gate_order": ["CI / tests"],
-            "gates": [{"check": "CI / tests", "last_on": 90, "out_of": 100,
-                       "share": 0.9, "p50_s": 100}],
+            "gate_order": ["CI / tests", "CI / lint"],
+            "gates": [
+                {"check": "CI / tests", "last_on": 90, "out_of": 100,
+                 "share": 0.9, "p50_s": 100},
+                {"check": "CI / lint", "last_on": 50, "out_of": 100,
+                 "share": 0.5, "p50_s": 80},
+            ],
         },
         "human_review": {},
     }
@@ -316,6 +359,23 @@ def test_comparison_rejects_wrong_month_wide_measurements() -> None:
     assert any("typical PR wait differs" in row for row in differences)
     assert any("gate share differs" in row for row in differences)
     assert any("gate p50 differs" in row for row in differences)
+    assert any("frequent gate absent" in row for row in differences)
+
+
+def test_bottom_line_expectation_does_not_match_a_later_section() -> None:
+    compare = _load("compare")
+    expected = {
+        "oracle": {"sample": {"completed_with_eligible_jobs": 0}},
+        "human_review": {"bottom_line_must_contain": "reviewed gate"},
+    }
+    report = (
+        "> **Bottom line.** A different gate controls this sample.\n\n"
+        "## Details\n\nThe reviewed gate appears only here.\n"
+    )
+
+    differences = compare.compare({"findings": []}, expected, report)
+
+    assert differences == ["Bottom line does not contain reviewed text: 'reviewed gate'"]
 
 
 def test_known_red_cannot_mask_an_unrelated_regression() -> None:

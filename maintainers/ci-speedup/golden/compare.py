@@ -48,6 +48,13 @@ def _matching_gate(expected_name: str, actual_gates: dict[str, Any]) -> str | No
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _bottom_line(report: str) -> str:
+    for line in report.splitlines():
+        if line.lstrip().startswith("> **Bottom line.**"):
+            return line
+    return ""
+
+
 def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = "") -> list[str]:
     oracle = expected.get("oracle") or {}
     actual = engine_facts(findings)
@@ -89,6 +96,8 @@ def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = ""
             expected_name = str(row.get("check") or "")
             actual_name = _matching_gate(expected_name, actual["gates"])
             if actual_name is None:
+                if float(row.get("share") or 0.0) >= 0.05 and expected_name != lead_name:
+                    differences.append(f"frequent gate absent: {expected_name!r}")
                 continue
             actual_gate = actual["gates"][actual_name]
             oracle_share = float(row.get("share") or 0.0)
@@ -114,7 +123,7 @@ def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = ""
         differences.append(f"forbidden finding present: {pattern}")
     review = expected.get("human_review") or {}
     bottom_line = str(review.get("bottom_line_must_contain") or "")
-    if bottom_line and bottom_line not in report:
+    if bottom_line and bottom_line not in _bottom_line(report):
         differences.append(f"Bottom line does not contain reviewed text: {bottom_line!r}")
     for text in review.get("report_must_contain") or []:
         if str(text) not in report:
