@@ -649,6 +649,34 @@ def test_real_adapter_finds_cache_markers_after_a_long_log_prefix():
     assert _cache_class({"position": 1, **sample})[0] == "warm"
 
 
+def test_renamed_cache_action_without_a_marker_stays_unknown():
+    client = AdapterFixture({
+        "actions/jobs/": (
+            "##[group]Run actions/cache@v4\n"
+            "with:\n"
+            "  path: node_modules\n"),
+    })
+    job = _api_job()
+    job["steps"][0]["name"] = "Restore dependencies"
+
+    sample = client._job_logs("o/r", [job])
+
+    assert sample["log_has_cache_step"] is True
+    assert _cache_class({"position": 2, **sample}) == (
+        "unknown", "no cache marker in sampled job logs")
+
+
+def test_unreadable_renamed_step_cannot_prove_cache_absence():
+    client = AdapterFixture({})
+    job = _api_job()
+    job["steps"][0]["name"] = "Restore dependencies"
+
+    sample = client._job_logs("o/r", [job])
+
+    assert _cache_class({"position": 2, **sample}) == (
+        "unknown", "1 job log unreadable")
+
+
 def test_real_adapter_discloses_jobs_without_readable_ids():
     sample = AdapterFixture({})._job_logs("o/r", [{"id": None}])
 
