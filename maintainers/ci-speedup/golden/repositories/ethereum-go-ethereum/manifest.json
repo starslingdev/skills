@@ -1,13 +1,19 @@
 {
   "api_fixture_count": 279,
   "captured_at": "2026-11-11T09:50:00Z",
+  "checkout_sanitization": {
+    "environment_paths": "absolute runner and account paths use neutral fixture paths",
+    "long_decimal_runs": "long decimal runs use same-length shape-preserving pseudonyms",
+    "repository_links": "repository URL targets and numbered references use a neutral placeholder",
+    "snapshot_sha256": "9728fdea-2a3ae5be-82e978c3-b8f64f11-8312969b-343e3054-1ebd8d22-817dc776"
+  },
   "commit": "edcd4053d1b1b66e304bdeed2aa26ffb4bcaf808",
   "identifiers": "stable eight-digit fixture ids",
   "log_cap_bytes": 200000,
   "month_wide_completed_pr_commits": 272,
   "month_wide_job_lists_recorded": 383,
   "month_wide_pr_commits": 272,
-  "origin": "https://github.com/ethereum/go-ethereum.git",
+  "origin": "public-github:ethereum/go-ethereum",
   "pole_log_note": "the public API returned no pole logs for this recording",
   "pole_logs_recorded": 0,
   "repository": "ethereum/go-ethereum",

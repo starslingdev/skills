@@ -1,13 +1,19 @@
 {
   "api_fixture_count": 463,
   "captured_at": "2026-11-11T09:50:00Z",
+  "checkout_sanitization": {
+    "environment_paths": "absolute runner and account paths use neutral fixture paths",
+    "long_decimal_runs": "long decimal runs use same-length shape-preserving pseudonyms",
+    "repository_links": "repository URL targets and numbered references use a neutral placeholder",
+    "snapshot_sha256": "a8f31a79-3eed713c-964ce2df-ebbb2d2c-eea8b598-14508f5e-8f0a7a1c-0bfc7d4f"
+  },
   "commit": "63acadce60930ec54cdd96616a1542d605ea56da",
   "identifiers": "stable eight-digit fixture ids",
   "log_cap_bytes": 200000,
   "month_wide_completed_pr_commits": 10626,
   "month_wide_job_lists_recorded": 12108,
   "month_wide_pr_commits": 10627,
-  "origin": "https://github.com/home-assistant/core.git",
+  "origin": "public-github:home-assistant/core",
   "pole_log_note": "the public API returned no pole logs for this recording",
   "pole_logs_recorded": 0,
   "repository": "home-assistant/core",

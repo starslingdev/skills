@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import hashlib
 import json
 import os
 import re
@@ -301,13 +302,10 @@ def _compress_api_fixtures(api_dir: Path) -> None:
 
 
 def _sanitize_checkout_references(snapshot: Path, repository: str) -> None:
-    """Redact links to repositories other than the recorded public source."""
-    source = repository.casefold()
+    """Redact repository links while retaining the source slug separately."""
+    del repository
 
     def replace(match: re.Match[str]) -> str:
-        referenced = (match.group("repository") or match.group("numbered") or "").casefold()
-        if referenced.rstrip("/.,;:!?)").removesuffix(".git") == source:
-            return match.group(0)
         return "<external-public-repository>"
 
     for path in snapshot.rglob("*"):
@@ -331,6 +329,17 @@ def _write_compressed_json(path: Path, payload: dict[str, Any]) -> None:
     with gzip.open(path, "wt", encoding="utf-8", compresslevel=9) as stream:
         json.dump(payload, stream, indent=2, sort_keys=True)
         stream.write("\n")
+
+
+def _tree_sha256(root: Path) -> str:
+    digest = hashlib.sha256()
+    for path in sorted(candidate for candidate in root.rglob("*") if candidate.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    value = digest.hexdigest()
+    return "-".join(value[offset:offset + 8] for offset in range(0, len(value), 8))
 
 
 def _sanitize_api_identifiers(api_dir: Path) -> dict[str, str]:
@@ -408,10 +417,16 @@ def _write_manifest(repository: str, checkout: Path, output: Path, captured_at: 
         "repository": repository,
         "captured_at": captured_at.isoformat().replace("+00:00", "Z"),
         "commit": commit_override or commit.stdout.strip(),
-        "origin": origin.stdout.strip(),
+        "origin": f"public-github:{repository}",
         "log_cap_bytes": log_cap_bytes,
         "secret_scan": "passed",
         "identifiers": "stable eight-digit fixture ids",
+        "checkout_sanitization": {
+            "repository_links": "repository URL targets and numbered references use a neutral placeholder",
+            "long_decimal_runs": "long decimal runs use same-length shape-preserving pseudonyms",
+            "environment_paths": "absolute runner and account paths use neutral fixture paths",
+            "snapshot_sha256": _tree_sha256(output / "checkout"),
+        },
         "skipped_log_files": skipped or list(prior.get("skipped_log_files") or []),
         "pole_logs_recorded": len(list((output / "logs").glob("*"))),
         "pole_log_note": (

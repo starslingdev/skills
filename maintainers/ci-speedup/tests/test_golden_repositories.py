@@ -16,19 +16,40 @@ _ROOT = Path(__file__).resolve().parents[1] / "golden"
 _REPOSITORIES = {
     "home-assistant-core": (
         "the busy PR stream can stop at the configuration-era door",
-        "sampled ",
+        (
+            "sampled ",
+            "full report verifier failed: the fetch plan matches its call sites",
+            "full report verifier failed: runner-minute cost spine source block is re-derivable",
+            "Bottom line does not contain reviewed text",
+        ),
     ),
     "vercel-nextjs": (
         "the current Bottom line does not lead with the independently selected long pole",
-        "Bottom line does not contain reviewed text",
+        (
+            "sampled ",
+            "full report verifier failed: the fetch plan matches its call sites",
+            "full report verifier failed: no spine-demoted pole carries the typical-gate framing",
+            "full report verifier failed: default-branch push lane is isolated",
+            "gate order differs:",
+            "Bottom line does not contain reviewed text",
+        ),
     ),
     "ethereum-go-ethereum": (
         "a true lint-to-test predecessor chain is currently reported as redundant setup",
-        "forbidden finding present: OPT21",
+        (
+            "sampled ",
+            "full report verifier failed: the fetch plan matches its call sites",
+            "forbidden finding present: OPT21",
+        ),
     ),
     "microsoft-playwright": (
         "the current Bottom line does not lead with the month-wide longest meaningful gate",
-        "Bottom line does not contain reviewed text",
+        (
+            "sampled ",
+            "full report verifier failed: headline reconciles a non-universal slowest check",
+            "gate order differs:",
+            "Bottom line does not contain reviewed text",
+        ),
     ),
 }
 
@@ -39,6 +60,11 @@ def _load(name: str) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _assert_only_known_differences(differences: list[str], allowed: tuple[str, ...]) -> None:
+    assert all(any(marker in row for marker in allowed) for row in differences), differences
+    assert all(any(marker in row for row in differences) for marker in allowed), differences
 
 
 def test_golden_harness_has_an_independent_oracle_and_recorder() -> None:
@@ -66,9 +92,9 @@ def test_recorder_redacts_unrelated_repository_links_from_checkout(tmp_path: Pat
     recorder._sanitize_checkout_references(snapshot, "public/source")
 
     sanitized = workflow.read_text(encoding="utf-8")
-    assert "https://github.com/public/source" in sanitized
+    assert "https://github.com/public/source" not in sanitized
     assert "another/public-repository" not in sanitized
-    assert sanitized.count("<external-public-repository>") == 2
+    assert sanitized.count("<external-public-repository>") == 3
     assert "123" not in sanitized
 
 
@@ -256,6 +282,48 @@ def test_every_proposed_expectation_waits_for_owner_signoff() -> None:
         assert payload["oracle"]
         oracle = json.loads(path.with_name("oracle.json").read_text(encoding="utf-8"))
         assert payload["oracle"] == oracle
+        manifest = json.loads(path.with_name("manifest.json").read_text(encoding="utf-8"))
+        sanitization = manifest["checkout_sanitization"]
+        assert len(sanitization["snapshot_sha256"].replace("-", "")) == 64
+        assert sanitization["repository_links"]
+        assert sanitization["long_decimal_runs"]
+        assert sanitization["environment_paths"]
+
+
+def test_comparison_rejects_wrong_month_wide_measurements() -> None:
+    compare = _load("compare")
+    findings = {
+        "pr_critical_path": {
+            "sampled_pr_count": 100,
+            "commit_wall_clock": {"p50_s": 900},
+            "checks": [{"name": "CI / tests", "pole_n": 10, "p50_s": 900}],
+        },
+        "findings": [],
+    }
+    expected = {
+        "oracle": {
+            "sample": {"completed_with_eligible_jobs": 100},
+            "typical_pr_wait_s": 100,
+            "gate_order": ["CI / tests"],
+            "gates": [{"check": "CI / tests", "last_on": 90, "out_of": 100,
+                       "share": 0.9, "p50_s": 100}],
+        },
+        "human_review": {},
+    }
+
+    differences = compare.compare(findings, expected)
+
+    assert any("typical PR wait differs" in row for row in differences)
+    assert any("gate share differs" in row for row in differences)
+    assert any("gate p50 differs" in row for row in differences)
+
+
+def test_known_red_cannot_mask_an_unrelated_regression() -> None:
+    with pytest.raises(AssertionError):
+        _assert_only_known_differences(
+            ["sampled 20 PR commits", "required finding absent: NEW"],
+            ("sampled ",),
+        )
 
 
 @pytest.mark.parametrize("recording_name,known_open_bug", _REPOSITORIES.items())
@@ -274,8 +342,8 @@ def test_real_repository_report_matches_independent_expectation(
     differences = compare.compare(findings, expected, report)
 
     if known_open_bug and differences:
-        reason, required_difference = known_open_bug
-        assert any(required_difference in row for row in differences), differences
+        reason, allowed_differences = known_open_bug
+        _assert_only_known_differences(differences, allowed_differences)
         pytest.xfail(reason + ":\n" + "\n".join(differences))
     if known_open_bug:
         pytest.fail(f"known open bug no longer reproduces: {known_open_bug[0]}")

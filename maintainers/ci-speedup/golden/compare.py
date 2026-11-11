@@ -29,18 +29,33 @@ def engine_facts(findings: dict[str, Any]) -> dict[str, Any]:
         "typical_pr_wait_s": float(typical or 0.0),
         "gate_order": [str(row.get("name") or "") for row in checks if int(row.get("pole_n") or 0) > 0],
         "gates": {
-            str(row.get("name") or ""): int(row.get("pole_n") or 0)
+            str(row.get("name") or ""): {
+                "last_on": int(row.get("pole_n") or 0),
+                "p50_s": float(row.get("p50_s") or 0.0),
+            }
             for row in checks if int(row.get("pole_n") or 0) > 0
         },
     }
+
+
+def _matching_gate(expected_name: str, actual_gates: dict[str, Any]) -> str | None:
+    if expected_name in actual_gates:
+        return expected_name
+    candidates = [
+        name for name in actual_gates
+        if expected_name.endswith(" / " + name) or name.endswith(" / " + expected_name)
+    ]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = "") -> list[str]:
     oracle = expected.get("oracle") or {}
     actual = engine_facts(findings)
     differences: list[str] = []
-    verifier_failure = findings.get("_golden_verifier_failure")
-    if verifier_failure:
+    verifier_failures = findings.get("_golden_verifier_failures") or []
+    if not verifier_failures and findings.get("_golden_verifier_failure"):
+        verifier_failures = [findings["_golden_verifier_failure"]]
+    for verifier_failure in verifier_failures:
         differences.append("full report verifier failed: " + str(verifier_failure))
     expected_completed = int((oracle.get("sample") or {}).get("completed_with_eligible_jobs") or 0)
     if actual["sampled_pr_count"] < min(100, expected_completed):
@@ -48,12 +63,48 @@ def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = ""
             f"sampled {actual['sampled_pr_count']} PR commits; independent recording has {expected_completed} completed commits"
         )
     expected_order = list(oracle.get("gate_order") or [])
-    comparable = [name for name in expected_order if name in actual["gates"]]
+    comparable = [
+        match for name in expected_order
+        if (match := _matching_gate(str(name), actual["gates"])) is not None
+    ]
     actual_order = [name for name in actual["gate_order"] if name in set(comparable)]
     if len(comparable) >= 2 and actual_order != comparable:
         differences.append(
             "gate order differs: engine=" + repr(actual_order) + ", oracle=" + repr(comparable)
         )
+    sample_target = min(100, expected_completed)
+    if sample_target and actual["sampled_pr_count"] >= sample_target:
+        expected_wait = float(oracle.get("typical_pr_wait_s") or 0.0)
+        actual_wait = float(actual["typical_pr_wait_s"] or 0.0)
+        if expected_wait and abs(actual_wait - expected_wait) > max(60.0, expected_wait * 0.35):
+            differences.append(
+                f"typical PR wait differs: engine={actual_wait:.1f}s, oracle={expected_wait:.1f}s"
+            )
+        expected_gates = [row for row in oracle.get("gates") or [] if isinstance(row, dict)]
+        if expected_gates:
+            lead_name = str(expected_gates[0].get("check") or "")
+            if lead_name and _matching_gate(lead_name, actual["gates"]) is None:
+                differences.append(f"independent leading gate absent: {lead_name!r}")
+        for row in expected_gates:
+            expected_name = str(row.get("check") or "")
+            actual_name = _matching_gate(expected_name, actual["gates"])
+            if actual_name is None:
+                continue
+            actual_gate = actual["gates"][actual_name]
+            oracle_share = float(row.get("share") or 0.0)
+            actual_share = float(actual_gate["last_on"]) / actual["sampled_pr_count"]
+            if abs(actual_share - oracle_share) > 0.15:
+                differences.append(
+                    f"gate share differs for {expected_name!r}: "
+                    f"engine={actual_share:.3f}, oracle={oracle_share:.3f}"
+                )
+            oracle_p50 = float(row.get("p50_s") or 0.0)
+            actual_p50 = float(actual_gate["p50_s"] or 0.0)
+            if oracle_p50 and abs(actual_p50 - oracle_p50) > max(120.0, oracle_p50 * 0.35):
+                differences.append(
+                    f"gate p50 differs for {expected_name!r}: "
+                    f"engine={actual_p50:.1f}s, oracle={oracle_p50:.1f}s"
+                )
     required = set((expected.get("human_review") or {}).get("findings_must_appear") or [])
     present = {str(row.get("pattern") or "") for row in findings.get("findings") or [] if isinstance(row, dict)}
     for pattern in sorted(required - present):
@@ -317,5 +368,5 @@ def replay(recording: Path, work: Path, *, repo_root: Path) -> tuple[dict[str, A
             for line in verify.stdout.splitlines()
             if line.startswith("FAIL  ")
         ]
-        findings["_golden_verifier_failure"] = "; ".join(failed) or "unknown verifier failure"
+        findings["_golden_verifier_failures"] = failed or ["unknown verifier failure"]
     return findings, report_path.read_text(encoding="utf-8")

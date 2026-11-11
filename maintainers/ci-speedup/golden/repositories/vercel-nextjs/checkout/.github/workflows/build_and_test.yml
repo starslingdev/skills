@@ -613,7 +613,7 @@ jobs:
 
   # Guards that Turbopack keeps compiling for wasm, so the wasm fallback Next.js loads when the
   # native bindings are unavailable can eventually support Turbopack and not just SWC.
-  # See https://github.com/vercel/next.js/issues/96960.
+  # See <external-public-repository>/issues/96960.
   #
   # This compiles the bindings and runs the wasm test suites with the pinned emnapi v2 prerelease.
   # A linked build is gated by the first stack layer that provides every required runtime hook.
@@ -1188,7 +1188,7 @@ jobs:
 
   # We block merging unless this job passes. This is enforced by a "require
   # status checks to pass" rule on the canary branch.
-  # <https://github.com/vercel/next.js/settings/rules/15507172>
+  # <<external-public-repository>/settings/rules/15507172>
   tests-pass:
     needs:
       # Note: Some of these jobs are dependencies of other test jobs. If they

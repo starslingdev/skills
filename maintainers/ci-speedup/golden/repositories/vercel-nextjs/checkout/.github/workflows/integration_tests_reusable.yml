@@ -86,7 +86,7 @@ jobs:
   # Refer build_and_test.yml for more details.
   #
   # We run tests in two parts. Legacy integration tests are run separately:
-  # https://github.com/vercel/next.js/blob/canary/contributing/core/testing.md#test-types-in-nextjs
+  # <external-public-repository>/blob/canary/contributing/core/testing.md#test-types-in-nextjs
   test-e2e:
     # Name must match `integrationTestJobs` in
     # `./.github/actions/next-integration-stat`

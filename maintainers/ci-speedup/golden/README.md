@@ -22,6 +22,12 @@ stable eight-digit fixture identifiers across both response bodies and replay
 filenames. The relationship between runs, jobs, workflows, and endpoints stays
 intact while the public fixture follows the repository's identifier policy.
 
+Checkout snapshots are structural fixtures rather than byte-for-byte source
+archives. Repository URL targets, long decimal runs, and absolute environment
+paths are replaced with shape-preserving public pseudonyms. Each manifest names
+these transformations and records a digest of the resulting checkout tree, so
+the exact normalized input used by replay remains auditable.
+
 Busy repositories can exceed the Actions API's 1,000-result cap. The recorder
 therefore reads the 30-day window in daily slices. For each PR commit it fetches
 the job list of the workflow run that completed last, walking backward only

@@ -1,4 +1,4 @@
-module github.com/ethereum/go-ethereum
+module <external-public-repository>
 
 go 1.25.0
 
