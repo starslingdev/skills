@@ -40,6 +40,11 @@ _GITHUB_REPOSITORY_REFERENCE = re.compile(
     r"(?P<numbered>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)"
     r"(?:#!|#|!)(?:pull/|issues/)?\d+\b"
 )
+# Dependency manifests copied into a checkout snapshot.  They are stored as
+# ``<name>.golden`` so Dependabot never proposes bumping a frozen third-party
+# snapshot; ``compare.replay`` restores the real name before the engine runs.
+SNAPSHOT_MANIFESTS = ("package.json", "pnpm-workspace.yaml", "pyproject.toml", "Cargo.toml", "go.mod")
+SNAPSHOT_SUFFIX = ".golden"
 _LONG_NUMBER = re.compile(r"(?<![0-9])[0-9]{9,}(?![0-9])")
 _PRIVATE_SHAPED_PARTS = (
     "sess" + "ion_",
@@ -56,6 +61,178 @@ _PRIVATE_SHAPED_REPLACEMENTS = dict(zip(
 _PRIVATE_SHAPED_PUBLIC_LITERAL = re.compile(
     "(?i)" + "|".join(re.escape(value) for value in _PRIVATE_SHAPED_PARTS)
 )
+
+# Contributor identities.  Recorded gh payloads carry the names, logins and
+# email addresses of third-party contributors (commit authors and committers,
+# run actors, commit trailers).  The engine and the oracle read none of them,
+# so the recorder replaces every one with a fixed placeholder.
+_EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+CONTRIBUTOR_NAME = "contributor"
+CONTRIBUTOR_EMAIL = "contributor@example.invalid"
+CONTRIBUTOR_LOGIN = re.compile(r"contributor-\d{4}")
+# Addresses that are not a person: git's SSH user, and role inboxes published
+# in the third-party manifests and workflows the golden checkouts copy.
+_ALLOWED_EMAILS = frozenset({
+    "git@github.com",
+    CONTRIBUTOR_EMAIL,
+    "infra+ci@vercel.com",
+    "hello@home-assistant.io",
+})
+
+
+def email_addresses(text: str) -> list[str]:
+    """Email-shaped tokens in *text* that are a contributor's, not a role address.
+
+    ``name@1.2.3.patch`` (pnpm patch file names) is not an address.
+    """
+    return [
+        match for match in _EMAIL.findall(text)
+        if match not in _ALLOWED_EMAILS and not match.endswith(".patch")
+    ]
+
+
+def _is_person(user: dict[str, Any]) -> bool:
+    login = user.get("login")
+    return (
+        isinstance(login, str)
+        and user.get("type") not in {"Bot", "Organization"}
+        and not login.endswith("[bot]")
+    )
+
+
+def identity_leaks(payload: Any, path: str = "$") -> list[str]:
+    """Every contributor identity left in a decoded JSON payload."""
+    leaks: list[str] = []
+    if isinstance(payload, dict):
+        if _is_person(payload) and not CONTRIBUTOR_LOGIN.fullmatch(payload["login"]):
+            leaks.append(f"{path}.login")
+        if "email" in payload and "name" in payload and payload.get("name") != CONTRIBUTOR_NAME:
+            leaks.append(f"{path}.name")
+        for key, value in payload.items():
+            leaks.extend(identity_leaks(value, f"{path}.{key}"))
+    elif isinstance(payload, list):
+        for index, value in enumerate(payload):
+            leaks.extend(identity_leaks(value, f"{path}[{index}]"))
+    elif isinstance(payload, str) and email_addresses(payload):
+        leaks.append(f"{path} (email)")
+    return leaks
+
+
+_TRAILER = re.compile(
+    r"(?im)^(?P<key>(?:co-authored|signed-off|reviewed|acked|tested|reported|suggested|helped)-by):[^\n]*$"
+)
+_URL_KEY = re.compile(r"(?:^|_)url$")
+
+
+def _person_logins(payload: Any, found: set[str]) -> None:
+    if isinstance(payload, dict):
+        if _is_person(payload):
+            found.add(payload["login"])
+        for value in payload.values():
+            _person_logins(value, found)
+    elif isinstance(payload, list):
+        for value in payload:
+            _person_logins(value, found)
+
+
+def _login_pattern(mapping: dict[str, str]) -> re.Pattern[str] | None:
+    if not mapping:
+        return None
+    alternatives = "|".join(re.escape(login) for login in mapping)  # longest first
+    return re.compile(rf"(?<![A-Za-z0-9-])(?:{alternatives})(?![A-Za-z0-9-])")
+
+
+def _replace_logins(text: str, mapping: dict[str, str], pattern: re.Pattern[str] | None) -> str:
+    """Swap whole-token logins inside a URL, ``owner/name`` or commit message."""
+    if pattern is None:
+        return text
+    return pattern.sub(lambda match: mapping[match.group(0)], text)
+
+
+def _scrub_string(text: str) -> str:
+    text = _TRAILER.sub(lambda m: f"{m.group('key')}: {CONTRIBUTOR_NAME} <{CONTRIBUTOR_EMAIL}>", text)
+    return _EMAIL.sub(
+        lambda m: m.group(0) if m.group(0) not in email_addresses(m.group(0)) else CONTRIBUTOR_EMAIL,
+        text,
+    )
+
+
+def scrub_identities(payload: Any, mapping: dict[str, str], key: str = "",
+                     pattern: re.Pattern[str] | None = None) -> Any:
+    """Return *payload* with every contributor identity replaced by a placeholder.
+
+    People's logins map to stable ``contributor-NNNN`` aliases (so "same author"
+    and "fork differs from the audited repository" still hold); commit
+    author/committer names and emails, trailer lines, signature payloads and any
+    other email address become fixed placeholders.  Bots and organisations keep
+    their logins: they are not people, and the engine recognises some bots.
+    """
+    if isinstance(payload, dict):
+        result = {
+            name: scrub_identities(value, mapping, name, pattern) for name, value in payload.items()
+        }
+        if _is_person(payload):
+            result["login"] = mapping.get(payload["login"], payload["login"])
+        if "email" in payload and "name" in payload:
+            result["name"] = CONTRIBUTOR_NAME
+            result["email"] = CONTRIBUTOR_EMAIL
+        if key == "verification":
+            for field in ("payload", "signature"):
+                if field in result:
+                    result[field] = None
+        return result
+    if isinstance(payload, list):
+        return [scrub_identities(value, mapping, key, pattern) for value in payload]
+    if isinstance(payload, str):
+        if _URL_KEY.search(key) or key in {"full_name", "message"}:
+            payload = _replace_logins(payload, mapping, pattern)
+        return _scrub_string(payload)
+    return payload
+
+
+def _json_files(recording: Path) -> list[Path]:
+    return sorted(
+        path for path in recording.rglob("*")
+        if path.is_file() and "checkout" not in path.relative_to(recording).parts
+        and (path.suffix == ".json" or path.name.endswith(".json.gz"))
+    )
+
+
+def scrub_recording(recording: Path) -> int:
+    """Rewrite every recorded payload under *recording* without contributor identities.
+
+    Returns the number of files rewritten.  Files whose content does not change
+    are left byte-for-byte alone.
+    """
+    decoded: dict[Path, Any] = {}
+    logins: set[str] = set()
+    for path in _json_files(recording):
+        raw = gzip.decompress(path.read_bytes()) if path.suffix == ".gz" else path.read_bytes()
+        try:
+            decoded[path] = json.loads(raw)
+        except ValueError:
+            continue
+        _person_logins(decoded[path], logins)
+    # Already-scrubbed aliases stay as they are, so a second pass is a no-op.
+    taken = {login for login in logins if CONTRIBUTOR_LOGIN.fullmatch(login)}
+    fresh = sorted(logins - taken, key=lambda value: (-len(value), value))
+    numbers = (number for number in range(1, 10_000) if f"contributor-{number:04d}" not in taken)
+    # Longest first, so a login that contains another is replaced whole.
+    mapping = {login: f"contributor-{next(numbers):04d}" for login in fresh}
+    pattern = _login_pattern(mapping)
+    rewritten = 0
+    for path, payload in decoded.items():
+        scrubbed = scrub_identities(payload, mapping, pattern=pattern)
+        if scrubbed == payload:
+            continue
+        text = json.dumps(scrubbed, indent=2 if path.name == "manifest.json" else None, sort_keys=False)
+        data = (text + "\n").encode("utf-8")
+        if path.suffix == ".gz":
+            path.write_bytes(gzip.compress(data, compresslevel=9, mtime=0))
+        else:
+            path.write_bytes(data)
+        rewritten += 1
+    return rewritten
 
 
 def _run(args: list[str], *, cwd: Path | None = None, env: dict[str, str] | None = None, timeout: int = 1800) -> subprocess.CompletedProcess[str]:
@@ -474,6 +651,7 @@ def record(repository: str, checkout: Path, output: Path, *, captured_at: dateti
         public_history = _public_history(history)
         _write_compressed_json(output / "month-wide.json.gz", public_history)
         (output / "month-wide.json").unlink(missing_ok=True)
+        scrub_recording(output)
         _write_manifest(repository, checkout, output, captured_at, log_cap_bytes, [], public_history)
         state_path.unlink(missing_ok=True)
         return
@@ -486,16 +664,18 @@ def record(repository: str, checkout: Path, output: Path, *, captured_at: dateti
     snapshot_sources = [workflows]
     snapshot_sources.extend(
         checkout / name
-        for name in ("package.json", "pnpm-workspace.yaml", "pyproject.toml", "Cargo.toml", "go.mod")
+        for name in SNAPSHOT_MANIFESTS
         if (checkout / name).exists() or (checkout / name).is_symlink()
     )
     _reject_external_symlinks(checkout, snapshot_sources)
     shutil.copytree(workflows, snapshot / ".github" / "workflows")
-    for name in ("package.json", "pnpm-workspace.yaml", "pyproject.toml", "Cargo.toml", "go.mod"):
+    for name in SNAPSHOT_MANIFESTS:
         source = checkout / name
         if source.is_file():
-            (snapshot / name).parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, snapshot / name)
+            # Stored under a name Dependabot does not scan; replay restores it.
+            target = snapshot / (name + SNAPSHOT_SUFFIX)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
     _sanitize_checkout_references(snapshot, repository)
     origin = _run(["git", "-C", str(checkout), "remote", "get-url", "origin"])
     commit = _run(["git", "-C", str(checkout), "rev-parse", "HEAD"])
@@ -527,6 +707,7 @@ def record(repository: str, checkout: Path, output: Path, *, captured_at: dateti
     history = _month_history(repository, captured_at, state_path)
     public_history = _public_history(history)
     _write_compressed_json(output / "month-wide.json.gz", public_history)
+    scrub_recording(output)
     public_commit = _LONG_NUMBER.sub(
         lambda match: identifier_mapping[match.group(0)], commit.stdout.strip()
     )

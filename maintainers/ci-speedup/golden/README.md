@@ -22,11 +22,25 @@ stable eight-digit fixture identifiers across both response bodies and replay
 filenames. The relationship between runs, jobs, workflows, and endpoints stays
 intact while the public fixture follows the repository's identifier policy.
 
+The recorder also removes contributor identities. Every person's login becomes
+a stable `contributor-NNNN` alias (in URLs, fork `owner/name` values and merge
+messages too, so "same author" and "fork differs from this repository" still
+hold); commit author and committer names and emails, commit trailers, signature
+payloads and any other email address become fixed placeholders. Bots and
+organisations keep their logins. The engine and the oracle read none of these
+fields, and `test_golden_recordings_carry_no_contributor_identity` fails if one
+comes back.
+
 Checkout snapshots are structural fixtures rather than byte-for-byte source
 archives. Repository URL targets, long decimal runs, and absolute environment
 paths are replaced with shape-preserving public pseudonyms. Each manifest names
 these transformations and records a digest of the resulting checkout tree, so
 the exact normalized input used by replay remains auditable.
+
+Dependency manifests in a snapshot (`package.json`, `pyproject.toml`,
+`Cargo.toml`, `go.mod`, `pnpm-workspace.yaml`) are stored as `<name>.golden`, so
+Dependabot never proposes bumping a frozen third-party snapshot; replay restores
+the real names before the engine runs.
 
 Busy repositories can exceed the Actions API's 1,000-result cap. The recorder
 therefore reads the 30-day window in daily slices. For each PR commit it fetches

@@ -5,7 +5,7 @@
     "environment_paths": "absolute runner and account paths use neutral fixture paths",
     "long_decimal_runs": "long decimal runs use same-length shape-preserving pseudonyms",
     "repository_links": "repository URL targets and numbered references use a neutral placeholder",
-    "snapshot_sha256": "9728fdea-2a3ae5be-82e978c3-b8f64f11-8312969b-343e3054-1ebd8d22-817dc776"
+    "snapshot_sha256": "8ce07aec-038eede9-fadbcc25-8fe579bd-76a2182c-46ff2c83-f124ddba-511d223b"
   },
   "commit": "edcd4053d1b1b66e304bdeed2aa26ffb4bcaf808",
   "identifiers": "stable eight-digit fixture ids",

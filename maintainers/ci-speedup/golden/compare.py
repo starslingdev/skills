@@ -318,11 +318,22 @@ def _dynamic_replay_copy(recording: Path, destination: Path) -> None:
     _synthesize_month_replay(recording, destination)
 
 
+def restore_snapshot_names(checkout: Path) -> None:
+    """Give ``<name>.golden`` snapshot manifests their real names back.
+
+    record.py stores them renamed so Dependabot never proposes bumping a frozen
+    third-party snapshot; the engine needs ``package.json`` and friends.
+    """
+    for stored in sorted(checkout.rglob("*.golden")):
+        stored.rename(stored.with_name(stored.name.removesuffix(".golden")))
+
+
 def replay(recording: Path, work: Path, *, repo_root: Path) -> tuple[dict[str, Any], str]:
     """Run scan, collect, render and the full verifier on one recording."""
     manifest = load(recording / "manifest.json")
     checkout = work / "checkout"
     shutil.copytree(recording / "checkout", checkout)
+    restore_snapshot_names(checkout)
     env = dict(os.environ)
     env.update({
         "GIT_AUTHOR_NAME": "golden-test",
