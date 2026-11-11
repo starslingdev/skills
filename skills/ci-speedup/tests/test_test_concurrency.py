@@ -262,6 +262,41 @@ def test_vitest_verbose_durations_use_source_proven_isolation() -> None:
     assert leaf["test_count"] == 11
 
 
+def _vitest_verbose_log_after_another_file(prior_ms: int) -> str:
+    """One Vitest invocation whose serial candidate is one file in a larger run."""
+    lines = _vitest_verbose_log().splitlines()
+    started = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    prior_done = started + timedelta(milliseconds=prior_ms)
+    prior = (
+        f"{_stamp(prior_done)} ✓ tests/health.test.ts > health > responds "
+        f"{prior_ms}ms"
+    )
+    shifted = [lines[0], prior]
+    last_when = prior_done
+    for line in lines[1:-1]:
+        stamp, message = line.split(" ", 1)
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        last_when = when + timedelta(milliseconds=prior_ms)
+        shifted.append(f"{_stamp(last_when)} {message}")
+    shifted.append(f"{_stamp(last_when)} 12 tests passed")
+    return "\n".join(shifted)
+
+
+def test_vitest_file_count_is_scoped_to_the_serial_candidate() -> None:
+    leaf = bp._parse_log(
+        _vitest_verbose_log_after_another_file(100), _vitest_source_facts())
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+    assert leaf["test_count"] == 11
+
+
+def test_vitest_file_span_starts_when_that_file_begins() -> None:
+    leaf = bp._parse_log(
+        _vitest_verbose_log_after_another_file(180_000), _vitest_source_facts())
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+
+
 def test_vitest_verbose_rejects_overlapping_duration_sum() -> None:
     lines = _vitest_verbose_log().splitlines()
     at = datetime(2026, 11, 6, tzinfo=timezone.utc)

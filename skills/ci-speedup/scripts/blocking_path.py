@@ -4096,11 +4096,6 @@ def _parse_log(text: str,
         re.IGNORECASE,
     )
     vitest_rows: list[tuple[float, str, str, datetime, str]] = []
-    vitest_started = next(
-        (when for when, message, _raw, _stamp in stamped_tests
-         if re.match(r"^RUN\s+v?\d", message, re.IGNORECASE)),
-        None,
-    )
     for when, message, raw, _stamp in stamped_tests:
         match = vitest_done.match(message)
         if match is None:
@@ -4127,12 +4122,14 @@ def _parse_log(text: str,
                 or len(set(str(marker).casefold() for marker in matched_markers))
                 != len(rows)):
             continue
-        measured_span = ((max(row[2] for row in rows) - vitest_started).total_seconds()
-                         if vitest_started is not None else 0.0)
+        inferred_start = min(
+            row[2] - timedelta(seconds=row[0]) for row in rows)
+        measured_span = (
+            max(row[2] for row in rows) - inferred_start).total_seconds()
         summed_runtime = sum(row[0] for row in rows)
         if not (summed_runtime * 0.95 <= measured_span <= summed_runtime * 1.2 + 1):
             continue
-        if count_matches and max(count_matches) != len(rows):
+        if count_matches and len(by_file) == 1 and max(count_matches) != len(rows):
             continue
         completion_order = sorted(rows, key=lambda row: row[2])
         if any(
@@ -4158,7 +4155,8 @@ def _parse_log(text: str,
                     *(row[1] for row in cohort[:2]),
                 ],
                 "search": [test_file, "describe.concurrent", "maxConcurrency"],
-                "test_count": max(count_matches) if count_matches else len(rows),
+                "test_count": (max(count_matches)
+                               if count_matches and len(by_file) == 1 else len(rows)),
                 "isolation_basis": "test source",
             }
     if isolated_test_leaf is not None:
