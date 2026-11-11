@@ -7407,6 +7407,57 @@ def test_poles_render_in_two_duration_ordered_groups_and_bottom_names_pole_one()
     assert "Long pole 1" in bottom and "`A`" in bottom
 
 
+def test_pole_groups_sort_by_the_p50_the_rows_display():
+    doc = _pole_order_agreement_doc()
+    a_check = next(row for row in doc["pr_critical_path"]["checks"]
+                   if row["name"] == "A")
+    a_pole = next(row for row in doc["pr_critical_path"]["poles"]
+                  if row["check"] == "A")
+    a_check["p50_s"] = a_pole["p50_s"] = 100.0
+    a_check["bimodal"] = a_pole["bimodal"] = {"high_p50_s": 500.0}
+
+    report = bp.render(doc)
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        "<a id=\"long-pole-map\"", 1)[0]
+    assert contents.index("[B]") < contents.index("[C]") < contents.index("[A]")
+
+
+def test_one_of_one_last_finisher_is_not_called_rare():
+    doc = _pole_order_agreement_doc()
+    doc["pr_critical_path"]["check_present_n_pr"] = 1
+    doc["pr_critical_path"]["populations"] = doc["pr_critical_path"]["populations"][:1]
+    for row in doc["pr_critical_path"]["checks"]:
+        row["present_on"] = 1
+        row["pole_n"] = 1 if row["name"] == "A" else 0
+
+    report = bp.render(doc)
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        "<a id=\"long-pole-map\"", 1)[0]
+    a_row = next(line for line in contents.splitlines() if "[A]" in line)
+    assert contents.index("Checks that hold up most PRs") < contents.index(a_row)
+    assert "rarely" not in a_row and "slower check usually ran alongside" not in a_row
+
+
+def test_unconfirmed_check_cannot_become_long_pole_one():
+    doc = _pole_order_agreement_doc()
+    counts = {"A": 1, "B": 1, "C": 1, "D": 0, "B setup": 0}
+    for row in doc["pr_critical_path"]["checks"]:
+        row["pole_n"] = counts[row["name"]]
+        if row["name"] == "D":
+            row["required_reachable"] = False
+            row["p50_s"] = 600.0
+    next(row for row in doc["pr_critical_path"]["poles"]
+         if row["check"] == "D")["p50_s"] = 600.0
+
+    report = bp.render(doc)
+    bottom = next(line for line in report.splitlines()
+                  if line.startswith("> **Bottom line.**"))
+    assert "Long pole 1, `A`," in bottom
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        "<a id=\"long-pole-map\"", 1)[0]
+    assert contents.index("[D]") > contents.index("[C]")
+
+
 def test_verifier_rejects_pole_group_order_bottom_disagreement_and_missing_rare_reason(tmp_path):
     doc = _pole_order_agreement_doc()
     clean = bp.render(doc)
@@ -7418,6 +7469,10 @@ def test_verifier_rejects_pole_group_order_bottom_disagreement_and_missing_rare_
         clean.replace(a_row + "\n" + b_row, b_row + "\n" + a_row),
         clean.replace("Long pole 1, `A`", "Long pole 1, `B`"),
         clean.replace(" · a slower check usually ran alongside", ""),
+        clean.replace("[A](#pole-1)", "[Z](#pole-1)").replace(
+            "Long pole 1, `A`", "Long pole 1, `Z`"),
+        clean.replace("at least 2 sampled PRs", "at least 3 sampled PRs").replace(
+            "fewer than 2 sampled PRs", "fewer than 3 sampled PRs"),
     ]
     vr = _load_verify_report()
     findings = tmp_path / "findings.json"
@@ -8322,6 +8377,32 @@ def test_aggregation_gate_pole_tells_the_upstream_story_not_a_prompt():
     assert "before optimizing" not in sec
     # The OTHER poles are untouched — each still drills and hands off.
     assert "🤖 Prompt for your coding agent" in _pole_section(md, "unit")
+
+
+def test_aggregation_upstream_inherits_the_terminal_verdict_frequency(tmp_path):
+    doc = _agg_gate_doc()
+    for check in doc["pr_critical_path"]["checks"]:
+        check["pole_n"] = 20 if check["name"] == "thank you, build" else 0
+    doc["pr_critical_path"]["poles"].append({
+        "check": "stable - x86_64-linux", "p50_s": 355.0,
+        "workflow_file": _AGG_DEPLOY, "job": "native",
+        "dominant_step": "Build native", "dominant_p50_s": 350.0,
+        "steps": [{"step": "Build native", "category": "build", "p50_s": 350.0}],
+    })
+
+    report = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+    upstream = contents.index("[stable - x86_64-linux]")
+    sink = contents.index("[thank you, build]")
+    assert upstream < sink
+    upstream_row = next(line for line in contents.splitlines()
+                        if "[stable - x86_64-linux]" in line)
+    assert "finishes last on 20/20 PRs" in upstream_row
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+    assert check.ok, check.detail
 
 
 def test_aggregation_gate_pole_role_line_is_a_registered_claim():

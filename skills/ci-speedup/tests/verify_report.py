@@ -12897,6 +12897,81 @@ _POLE_GROUP_ROW_RE = re.compile(
     r"^(\d+)\.\s+\S+\s+\[([^\]]+)\]\(#pole-(\d+)\)\s+-\s+"
     r"P50\s+([^·\n]+?)\s+·\s+finishes last on\s+(\d+)/(\d+)\s+PRs(.*)$",
     re.MULTILINE)
+_VR_POLE_HOLDS_UP_MIN_COUNT = 2
+_VR_POLE_LABEL_WIDTH = 33
+
+
+def _aggregation_upstream_gate_counts(data: dict) -> dict[str, int]:
+    """Effective gate frequency inherited by an aggregation verdict's slowest upstream."""
+    graph = _as_dict(data.get("workflow_job_graph"))
+    cp = _as_dict(data.get("pr_critical_path"))
+    checks = [_as_dict(row) for row in _as_list(cp.get("checks"))]
+    counts = {
+        _cmp_name(str(row.get("name") or row.get("check") or "")):
+        int(_num(row.get("pole_n")) or 0)
+        for row in checks
+    }
+    inherited: dict[str, int] = {}
+    for raw_pole in _as_list(cp.get("poles")):
+        pole = _as_dict(raw_pole)
+        if (_num(pole.get("p50_s")) or 0.0) > _VR_AGG_GATE_TRIVIAL_S:
+            continue
+        workflow = str(pole.get("workflow_file") or "")
+        jobs = _as_dict(graph.get(workflow))
+        if not jobs:
+            continue
+        sink_name = str(pole.get("check") or "")
+        sink_job = str(pole.get("job") or "")
+        if sink_job not in jobs:
+            candidates = [
+                job_id for job_id, meta in jobs.items()
+                if _vr_job_produces_check(
+                    str(_as_dict(meta).get("name") or job_id),
+                    bool(_as_dict(meta).get("matrix")), sink_name)
+            ]
+            if len(candidates) != 1:
+                continue
+            sink_job = candidates[0]
+        needs_of = {
+            job_id: [str(need) for need in _as_list(_as_dict(meta).get("needs"))]
+            for job_id, meta in jobs.items()
+        }
+        depended_on = {need for needs in needs_of.values() for need in needs}
+        if sink_job in depended_on:
+            continue
+        closure: set[str] = set()
+        frontier = list(needs_of.get(sink_job) or [])
+        while frontier:
+            job_id = frontier.pop()
+            if job_id in closure or job_id not in jobs:
+                continue
+            closure.add(job_id)
+            frontier.extend(needs_of.get(job_id) or [])
+        if len(closure) < 2 or not {job for job in jobs if job in depended_on} <= closure:
+            continue
+        if any((_num(_as_dict(step).get("p50_s")) or 0.0) > _VR_AGG_GATE_TRIVIAL_S
+               for step in _as_list(pole.get("steps"))):
+            continue
+        upstreams = [
+            row for row in checks
+            if str(row.get("workflow_file") or "") == workflow
+            and any(_vr_job_produces_check(
+                str(_as_dict(jobs.get(job_id)).get("name") or job_id),
+                bool(_as_dict(jobs.get(job_id)).get("matrix")),
+                str(row.get("name") or row.get("check") or ""))
+                    for job_id in closure)
+        ]
+        if not upstreams:
+            continue
+        slowest = max(
+            upstreams,
+            key=lambda row: max(
+                _num(row.get("p50_s")) or 0.0,
+                _num(_as_dict(row.get("bimodal")).get("high_p50_s")) or 0.0))
+        upstream_name = _cmp_name(str(slowest.get("name") or slowest.get("check") or ""))
+        sink_count = counts.get(_cmp_name(sink_name), 0)
+        inherited[upstream_name] = max(inherited.get(upstream_name, 0), sink_count)
+    return inherited
 
 
 def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) -> Check:
@@ -12916,6 +12991,7 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
     contents = _section(report, "📋 Contents")
     frequent_heading = "Checks that hold up most PRs"
     rare_heading = "Long but rarely the last to finish"
+    unconfirmed_heading = "Could not confirm these checks block merging"
     threshold_match = re.search(
         r"(?:Checks that hold up most PRs.*?at least|"
         r"Long but rarely the last to finish.*?fewer than)\s+(\d+)\s+sampled PRs",
@@ -12928,11 +13004,18 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
                      "its P50 and finishes-last count")
 
     threshold = int(threshold_match.group(1))
+    if threshold != _VR_POLE_HOLDS_UP_MIN_COUNT:
+        return Check(name, False,
+                     f"rendered group threshold {threshold} differs from the verifier contract "
+                     f"{_VR_POLE_HOLDS_UP_MIN_COUNT}")
     rare_at = contents.find(rare_heading)
+    unconfirmed_at = contents.find(unconfirmed_heading)
     failures: list[str] = []
-    groups: dict[str, list[float]] = {"holds-up": [], "rare-last": []}
+    groups: dict[str, list[float]] = {
+        "holds-up": [], "rare-last": [], "unconfirmed": []}
     by_name = {_cmp_name(str(row.get("name") or row.get("check") or "")): row
                for row in checks}
+    inherited_counts = _aggregation_upstream_gate_counts(data)
     first_name = ""
     first_full_name = ""
     for index, match in enumerate(rows, 1):
@@ -12943,12 +13026,9 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
             first_name = label
             first_full_name = pole_sections[0][1]
         count, total = int(count_text), int(total_text)
-        group = ("rare-last" if rare_at >= 0 and match.start() > rare_at
+        group = ("unconfirmed" if unconfirmed_at >= 0 and match.start() > unconfirmed_at
+                 else "rare-last" if rare_at >= 0 and match.start() > rare_at
                  else "holds-up")
-        expected_group = "holds-up" if count >= threshold else "rare-last"
-        if group != expected_group:
-            failures.append(
-                f"`{label}` is in {group} with {count} finishes; threshold is {threshold}")
         seconds = _parse_clock_to_s(p50_text)
         if seconds is None:
             failures.append(f"`{label}` has an unreadable P50 {p50_text!r}")
@@ -12961,12 +13041,26 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
         # through the corresponding full drill heading before looking up the
         # stamped check, so an ellipsis cannot make real evidence unjoinable.
         full_label = pole_sections[index - 1][1]
+        expected_label = (full_label if len(full_label) <= _VR_POLE_LABEL_WIDTH
+                          else full_label[:_VR_POLE_LABEL_WIDTH - 1] + "…")
+        if label != expected_label:
+            failures.append(
+                f"Contents label `{label}` does not match drill `{full_label}`")
         stamped = by_name.get(_cmp_name(full_label))
         if stamped is None:
             failures.append(f"`{label}` has no matching stamped check")
         else:
-            stamped_count = int(_num(stamped.get("pole_n")) or 0)
+            stamped_count = max(
+                int(_num(stamped.get("pole_n")) or 0),
+                inherited_counts.get(_cmp_name(full_label), 0))
             stamped_p50 = _num(stamped.get("p50_s"))
+            expected_group = (
+                "unconfirmed" if stamped.get("required_reachable") is False else
+                "holds-up" if (count >= threshold or (total > 0 and count == total)) else
+                "rare-last")
+            if group != expected_group:
+                failures.append(
+                    f"`{label}` is in {group} with {count} finishes; expected {expected_group}")
             if stamped_count != count:
                 failures.append(
                     f"`{label}` renders {count} finishes, stamped {stamped_count}")
@@ -12983,6 +13077,8 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
         failures.append("holds-up rows have no labelled group heading")
     if groups["rare-last"] and rare_heading not in contents:
         failures.append("rare-last rows have no labelled group heading")
+    if groups["unconfirmed"] and unconfirmed_heading not in contents:
+        failures.append("unconfirmed rows have no labelled group heading")
 
     bottom = next((line for line in report.splitlines()
                    if line.startswith("> **Bottom line.**")), "")

@@ -7569,6 +7569,7 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
     file_poles = [p for p in poles if str(p.get("workflow_file") or "").endswith(
         (".yml", ".yaml")) and p.get("job")]
     upstream_rank: dict[tuple[str, str], int] = {}
+    upstream_frequency: dict[tuple[str, str], int] = {}
     upstream_typical: set[tuple[str, str]] = set()
     for p in file_poles:
         shape = _agg_gate_shape(p, doc.get("workflow_job_graph"), list(checks))
@@ -7576,6 +7577,10 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
             upstream = (_check_name(shape["slowest"]), str(
                 shape["slowest"].get("workflow_file") or p.get("workflow_file") or ""))
             upstream_rank[upstream] = max(upstream_rank.get(upstream, 0), own_rank(p))
+            if have_frequencies:
+                upstream_frequency[upstream] = max(
+                    upstream_frequency.get(upstream, 0),
+                    int(frequencies.get(key(p)[0]) or 0))
             if typical_name(key(p)[0]):
                 upstream_typical.add(upstream)
 
@@ -7601,15 +7606,22 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
         # Aggregation-gate upstreams inherit the sink's frequency because the PR
         # waits for that upstream before the tiny terminal gate can finish.
         for p in matrices:
-            count = int(frequencies.get(key(p)[0]) or 0)
+            count = max(int(frequencies.get(key(p)[0]) or 0),
+                        upstream_frequency.get(key(p), 0))
             p["_display_gate_count"] = count
-            p["_pole_group"] = (
-                "holds-up" if count >= _POLE_HOLDS_UP_MIN_COUNT else "rare-last")
+            if reachability.get(key(p)[0]) is False:
+                p["_pole_group"] = "unconfirmed"
+            else:
+                p["_pole_group"] = (
+                    "holds-up" if (count >= _POLE_HOLDS_UP_MIN_COUNT
+                                   or (n > 0 and count == n)) else "rare-last")
         holds_up = sorted((p for p in matrices if p["_pole_group"] == "holds-up"),
-                          key=lambda p: -impact(p))
+                          key=lambda p: -(_num(p.get("p50_s")) or 0.0))
         rare_last = sorted((p for p in matrices if p["_pole_group"] == "rare-last"),
-                           key=lambda p: -impact(p))
-        selected = [*holds_up, *rare_last]
+                           key=lambda p: -(_num(p.get("p50_s")) or 0.0))
+        unconfirmed = sorted((p for p in matrices if p["_pole_group"] == "unconfirmed"),
+                             key=lambda p: -(_num(p.get("p50_s")) or 0.0))
+        selected = [*holds_up, *rare_last, *unconfirmed]
         return selected[:_TOP_WORKFLOWS], file_poles
     typical_rest = sorted((p for p in matrices[1:] if typical(p)), key=lambda p: -impact(p))
     rare_rest = sorted((p for p in matrices[1:] if not typical(p)), key=lambda p: -impact(p))
@@ -7705,7 +7717,8 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
     lines = ["## 📋 Contents", "",
              f"**🐌 {heading}** — {intro}, each linking to its long-pole drill-down "
              "(waterfall → biggest lever → agent prompt):", ""]
-    grouped = all(p.get("_pole_group") in {"holds-up", "rare-last"} for p in pole_wfs)
+    grouped = all(p.get("_pole_group") in {"holds-up", "rare-last", "unconfirmed"}
+                  for p in pole_wfs)
     last_group = ""
     for i, p in enumerate(pole_wfs, 1):
         group = str(p.get("_pole_group") or "")
@@ -7716,10 +7729,14 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
                 lines += [
                     "**Checks that hold up most PRs** - finished last on at least "
                     f"{_POLE_HOLDS_UP_MIN_COUNT} sampled PRs; longest first:", ""]
-            else:
+            elif group == "rare-last":
                 lines += [
                     "**Long but rarely the last to finish** - finished last on fewer than "
                     f"{_POLE_HOLDS_UP_MIN_COUNT} sampled PRs; longest first, with why:", ""]
+            else:
+                lines += [
+                    "**Could not confirm these checks block merging** - longest first; "
+                    "kept visible without crowning one as the gate:", ""]
             last_group = group
         check = _lbl(_clean_label(str(p.get("check", ""))))
         # Use the headline duration (slow mode for a bimodal pole), so the TOC's dot +
