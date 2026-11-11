@@ -4799,7 +4799,8 @@ def _detect_opt61(
             r"\s*=\s*([^\s;&]+)", re.IGNORECASE)
         build_command_re = re.compile(
             r"\b(?:cmake\s+--build|make|ninja|meson\s+compile|"
-            r"cargo\s+(?:build|test|clippy|nextest)|go\s+(?:build|test))\b",
+            r"cargo\s+(?:\+\S+\s+)?(?:build|test|clippy|nextest\s+run)|"
+            r"go\s+(?:build|test))\b",
             re.IGNORECASE)
         direct_compiler_re = re.compile(
             r"(?:^|[\s;&|])(ccache|sccache)(?=\s|$)", re.IGNORECASE)

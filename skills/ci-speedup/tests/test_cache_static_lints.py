@@ -175,7 +175,12 @@ def test_opt61_accepts_a_persisted_sccache_directory(tmp_path) -> None:
 
 def test_opt61_checks_declared_sccache_directory_for_all_compiler_consumers(
         tmp_path) -> None:
-    for index, command in enumerate(("cargo clippy --all-targets", "cargo nextest run")):
+    for index, command in enumerate((
+            "cargo clippy --all-targets",
+            "cargo nextest run",
+            "cargo +nightly clippy --all-targets",
+            "cargo +stable nextest run",
+    )):
         rows = _scan_workflow(tmp_path / str(index), f"""name: CI
 on: pull_request
 jobs:
@@ -211,6 +216,30 @@ jobs:
 """)
 
         assert "OPT61" not in _patterns(matching), command
+
+
+def test_opt61_ignores_nextest_version_before_a_correctly_persisted_run(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo nextest --version
+      - run: cargo nextest run
+        env:
+          SCCACHE_DIR: /build/sccache
+""")
+
+    assert "OPT61" not in _patterns(rows)
 
 
 def test_opt61_accepts_a_persisted_temporary_analysis_cache(tmp_path) -> None:
