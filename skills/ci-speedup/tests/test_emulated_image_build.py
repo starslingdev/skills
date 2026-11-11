@@ -395,7 +395,13 @@ def test_emulated_leaf_requires_a_single_native_builder_node():
         (_SINGLE_AMD64_BUILDER + compile_log).splitlines())
     assert one_node is not None and one_node["fix_key"] == "emulated-image-compile"
 
-    second_node = """Name:                  native-arm0
+    second_node = """Labels:
+ org.mobyproject.buildkit.worker.executor: oci
+ org.mobyproject.buildkit.worker.snapshotter: overlayfs
+GC Policy rule#0:
+ All: false
+ Keep Duration: 48h0m0s
+Name:                  native-arm0
 Endpoint:              tcp://native-arm.example:1234
 Status:                running
 BuildKit version:      v0.24.0

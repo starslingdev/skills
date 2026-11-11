@@ -2574,6 +2574,11 @@ def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
             re.IGNORECASE,
         ):
             continue
+        if re.search(r"^\s+[\w.-]+:\s*.*$", line):
+            # BuildKit prints label entries indented below `Labels:`. They are
+            # still part of this node, and may sit between its platform row
+            # and the next node's `Name:` line.
+            continue
         finish_block()
     finish_block()
     return complete_blocks[-1] if complete_blocks else ("", [])
