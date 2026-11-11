@@ -167,6 +167,38 @@ def test_identical_same_identity_aggregate_findings_do_not_report_scope_growth(
     assert "scope grew" not in output
 
 
+def test_brand_new_aggregate_finding_is_not_also_reported_as_scope_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        "name: Test\non: pull_request\njobs: {}\n",
+        two_duplicate_setup_groups(),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT12" in output
+    assert "OPT12 scope grew" not in output
+
+
+def test_new_group_under_existing_identity_is_not_also_scope_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    merge_text = (two_duplicate_setup_groups()
+                  .replace("  guard-verify:\n", "  a:\n")
+                  .replace("  test:\n", "  b:\n")
+                  .replace("  lint:\n", "  c:\n")
+                  .replace("  docs:\n", "  d:\n"))
+    base_text = merge_text.split("  c:\n", 1)[0]
+    base, merge = trees(tmp_path, base_text, merge_text)
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "ci-speedup-guard warning: OPT12" in output
+    assert "OPT12 scope grew to jobs: c, d" not in output
+
+
 def test_same_identity_aggregate_finding_reports_only_the_added_job(
         guard, tmp_path, capsys, monkeypatch):
     base, merge = trees(
@@ -178,6 +210,7 @@ def test_same_identity_aggregate_finding_reports_only_the_added_job(
     assert code == 0
     growth = [line for line in output.splitlines() if "scope grew" in line]
     assert growth
+    assert any("OPT12 scope grew to jobs: added" in line for line in growth)
     assert all("added" in line for line in growth)
     assert all("guard-verify" not in line and "test" not in line for line in growth)
 
