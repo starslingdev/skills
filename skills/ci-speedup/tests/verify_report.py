@@ -14728,6 +14728,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
     "gradle-test-parallelism": "test",
+    "lighthouse-serial-audits": frozenset({"scan", "test"}),
     "eslint-no-cache": "scan",
     "turbo-remote-cache": "build",
     "turbo-partial-cache": "build",

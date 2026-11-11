@@ -588,10 +588,29 @@ def test_a_runtime_expression_anywhere_on_a_step_is_held_back(extra):
     ("cargo clippy --all-targets", "cargo test"),            # one target/ and its lock
     ("./mvnw -q verify -DskipTests", "./mvnw -q test"),        # one target/
     ("pytest --cov=app tests/unit", "pytest --cov=app tests/api"),  # one .coverage
+    # one .lighthouseci/ report folder, cleared when each collect starts
+    ("npx lhci autorun --config=lighthouserc.mobile.json",
+     "npx @lhci/cli@0.15.x autorun --config=lighthouserc.desktop.json"),
 ])
 def test_two_steps_of_one_tool_in_one_tree_are_held_back(a, b):
     y = _BASE_YAML.replace("run: npx biome check .", f"run: {a}").replace(
         "run: npx tsc --noEmit", f"run: {b}")
+    _held(y, "siblings_share_tool_state")
+
+
+def test_two_lighthouse_steps_in_separate_trees_are_held_back():
+    # Separate report folders do not help: two audits on one runner compete for the same
+    # cores and skew the scores the budget gates on (OPT103 forbids it).
+    y = _BASE_YAML.replace("run: npx biome check .",
+                           "run: npx lhci autorun\n        working-directory: apps/shop").replace(
+        "run: npx tsc --noEmit", "run: npx lhci autorun\n        working-directory: apps/docs"
+    ).replace("run: npm test", "run: npm test\n        working-directory: web")
+    _held(y, "siblings_share_tool_state")
+
+
+def test_a_lighthouse_step_beside_other_checks_is_held_back():
+    # One audit beside a type check and a test suite: the siblings' load skews its score.
+    y = _BASE_YAML.replace("run: npx biome check .", "run: npx lhci autorun")
     _held(y, "siblings_share_tool_state")
 
 
