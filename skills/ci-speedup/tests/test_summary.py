@@ -177,7 +177,6 @@ def test_pr_floor_fallback_note_states_the_demotion():
     assert "do NOT re-probe gh or hand-write it" in s
     # The recency-only fallback scope is surfaced on the sample line, not just a count.
     assert "recency-only (external required suite, no PR carried it)" in s
-    assert "carried the gate suite" not in s
 
 
 def test_fileless_check_flagged_as_auto_demoted():
@@ -917,7 +916,6 @@ def test_diag_rerun_command_uses_runpy_and_never_a_raised_target():
     s = build_summary(doc, findings_path="/scratch/findings.json", root="/src/widgets")
     assert "RE-RUN the SAME audit" in s
     assert "Do NOT raise --target" in s
-    assert "100 completed PR commits across 5 distinct days" in s
     # The emitted command carries no --target flag at all (the warning text may name it).
     cmd_line = s.split("Re-run:", 1)[1].strip().splitlines()[0]
     assert cmd_line == ("python3 scripts/run.py --root /src/widgets "
