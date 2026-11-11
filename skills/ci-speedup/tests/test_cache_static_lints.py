@@ -307,6 +307,7 @@ def test_opt61_checks_inherited_sccache_dir_after_a_saved_build_override(
         "python scripts/build.py",
         "bash ci/compile.sh",
         "task build",
+        "echo $(./scripts/build.sh)",
     )
     undetected: list[str] = []
     for index, command in enumerate(commands):

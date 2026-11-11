@@ -4800,7 +4800,8 @@ def _detect_opt61(
         direct_compiler_re = re.compile(
             r"(?:^|[\s;&|])(ccache|sccache)(?=\s|$)", re.IGNORECASE)
         metadata_query_re = re.compile(
-            r"^\s*(?:\S+\s+)*(?:--version|-V|--help|-h)\s*$")
+            r"^\s*cargo\s+(?:\+\S+\s+)?nextest\s+(?:--version|-V)\s*$",
+            re.IGNORECASE)
         unrelated_shell_re = re.compile(
             r"^\s*(?:echo|printf)\b[^;&|]*$", re.IGNORECASE)
         analysis_command_re = re.compile(
@@ -4818,10 +4819,11 @@ def _detect_opt61(
                 if family not in env_text.casefold():
                     return False
                 # A run step can dispatch the configured wrapper through any
-                # project command.  Only commands that are wholly metadata or
-                # shell-output operations prove they cannot compile anything.
+                # project command.  Only the known nextest metadata probe and
+                # shell output without a command substitution prove otherwise.
                 return not (metadata_query_re.fullmatch(command)
-                            or unrelated_shell_re.fullmatch(command))
+                            or (unrelated_shell_re.fullmatch(command)
+                                and "$(" not in command and "`" not in command))
             family = "staticcheck" if name == "staticcheck_cache" else "golangci"
             match = analysis_command_re.search(command)
             return bool(match and family in match.group(0).casefold())
