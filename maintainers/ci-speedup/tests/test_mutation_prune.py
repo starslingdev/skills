@@ -32,6 +32,7 @@ def test_committed_mutation_report_records_the_reproducible_baseline() -> None:
     report = json.loads(REPORT.read_text(encoding="utf-8"))
 
     assert report["schema_version"] == 1
+    assert report["audit_test_count"] == 11067
     assert report["baseline"]["test_count"] > 0
     assert report["baseline"]["local_suite_wall_seconds"] > 0
     assert report["baseline"]["ci_suite_wall_seconds"] > 0
@@ -82,9 +83,12 @@ def test_mutant_run_is_offline_and_restores_the_source(tmp_path: Path) -> None:
 
     assert row["killers"] == ["test_engine.py::test_engine_stays_enabled"]
     assert source.read_text(encoding="utf-8") == "ENABLED = True\n"
+    interrupted = tmp_path / "interrupted"
+    interrupted.mkdir()
+    _assert_interrupted_run_preserves_source(interrupted)
 
 
-def test_interrupted_mutant_run_never_changes_the_source_tree(tmp_path: Path) -> None:
+def _assert_interrupted_run_preserves_source(tmp_path: Path) -> None:
     source = tmp_path / "engine.py"
     source.write_text("ENABLED = True\n", encoding="utf-8")
     (tmp_path / "test_engine.py").write_text(
