@@ -192,6 +192,7 @@ def test_same_identity_aggregate_finding_reports_only_the_added_job(
     assert code == 0
     growth = [line for line in output.splitlines() if "scope grew" in line]
     assert growth
+    assert any("OPT12 scope grew to jobs: added" in line for line in growth)
     assert all("added" in line for line in growth)
     assert all("guard-verify" not in line and "test" not in line for line in growth)
 
