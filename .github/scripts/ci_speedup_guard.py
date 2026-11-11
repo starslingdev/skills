@@ -539,7 +539,7 @@ def main(argv: list[str] | None = None) -> int:
                             if old is not None else all_old_jobs)
                 grew = sorted(set(f.get("affected_jobs", []))
                               - old_jobs)
-                if grew:
+                if grew and old_findings:
                     message = f"{f['pattern']} scope grew to jobs: {', '.join(grew)}"
                     annotation("warning", message, f)
                     aggregate_warning_messages.append(message)

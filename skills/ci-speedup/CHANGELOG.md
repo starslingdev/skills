@@ -1296,6 +1296,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-11** — Report a newly introduced aggregate finding once instead of also describing all of its jobs as scope growth; existing aggregate findings still warn when their job scope expands.
 - **2026-11-10** — Treat `go run <source-file> lint` and `go run <source-file> check...` as check-only gates while keeping runnable `./cmd` applications and mixed work steps out of that classification.
 - **2026-11-10** — Warn when a shard-like matrix grows while each leg repeats checkout and dependency setup, naming the job and effective before/after shard counts while honoring matrix include/exclude rules and ignoring diagnostic dimensions.
 - **2026-11-10** — Keep path-filter findings visible when sampled pull-request file lists are incomplete, label their hit rate as unmeasured with the reason, and withhold numeric credit.

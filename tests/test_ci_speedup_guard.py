@@ -166,6 +166,21 @@ def test_identical_same_identity_aggregate_findings_do_not_report_scope_growth(
     assert "scope grew" not in output
 
 
+def test_brand_new_aggregate_finding_is_not_also_reported_as_scope_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        "name: Test\non: pull_request\njobs: {}\n",
+        two_duplicate_setup_groups(),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT12" in output
+    assert "OPT12 scope grew" not in output
+
+
 def test_same_identity_aggregate_finding_reports_only_the_added_job(
         guard, tmp_path, capsys, monkeypatch):
     base, merge = trees(
