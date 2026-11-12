@@ -25,6 +25,9 @@ _CACHED_COUNT = re.compile(
     r"(?i)\b(\d+)\s+(?:(?:packages?|tests?|steps?|lines?).{0,20}\(cached\)|"
     r"(?:go\s+)?cached(?:\s+lines?)?)")
 _CACHE_STEP_NAME = re.compile(r"(?i)\bcach(?:e|ed|ing)\b")
+_CACHE_CAPABLE_STEP_NAME = re.compile(
+    r"(?i)\brestore (?:dependencies|packages)\b|\bset ?up "
+    r"(?:node(?:\.js)?|python|go|java|ruby|gradle|uv)\b")
 _DIRECT_CACHE_ACTION_LOG = re.compile(
     r"(?i)(?:actions/cache(?:/(?:restore|save))?|"
     r"(?:ccache|sccache)-action|rust-cache)@")
@@ -54,6 +57,13 @@ def _job_has_cache_step(job: dict[str, Any]) -> bool:
     return any(
         isinstance(step, dict)
         and _CACHE_STEP_NAME.search(str(step.get("name") or ""))
+        for step in job.get("steps") or [])
+
+
+def _job_may_have_cache_step(job: dict[str, Any]) -> bool:
+    return _job_has_cache_step(job) or any(
+        isinstance(step, dict)
+        and _CACHE_CAPABLE_STEP_NAME.search(str(step.get("name") or ""))
         for step in job.get("steps") or [])
 
 
@@ -220,8 +230,9 @@ def advance_verification(
     initial = saved.get("initial") if same_binding else None
     if not isinstance(initial, dict):
         initial = client.completed_cohort(repo, head, branch)
-    samples = (list(saved.get("samples") or []) if same_binding else
-               ([initial] if isinstance(initial, dict) else []))
+    samples = (list(saved.get("samples") or []) if same_binding else [])
+    if not samples and isinstance(initial, dict):
+        samples = [initial]
     context: dict[str, Any] = {
         **binding,
         "binding": binding,
@@ -485,7 +496,7 @@ class GhVerificationClient:
                   job_cap: int = _VERIFY_LOG_JOB_CAP) -> dict[str, Any]:
         logs: list[str] = []
         calls = unreadable = omitted = truncated = 0
-        has_cache_step = any(_job_has_cache_step(job) for job in jobs)
+        has_cache_step = any(_job_may_have_cache_step(job) for job in jobs)
         remaining = _VERIFY_LOG_TOTAL_CHAR_CAP
         shared_remaining = getattr(
             self, "_verification_log_budget_remaining", None)

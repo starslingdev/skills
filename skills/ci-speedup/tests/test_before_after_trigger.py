@@ -826,18 +826,26 @@ def test_verification_has_one_persisted_baseline_log_budget(tmp_path):
     saved = json.loads(context_path.read_text())
     assert saved["baseline"]
     after_baseline = client._job_logs(
-        "o/r", [{"id": 1000 + index} for index in range(5)])
+        "o/r", [{
+            "id": 1000 + index,
+            "steps": [{"name": "Restore dependencies"}],
+        } for index in range(5)])
     assert after_baseline["log_api_calls"] == 0
     assert after_baseline["log_jobs_omitted"] == 5
-
     client.log_gets.clear()
+    client.initial = _cohort("fix", "fix-initial")
     second = advance_verification(
         client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
         context_path=context_path, changed_files=[".github/workflows/ci.yml"],
         environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
-    assert second["status"] == "waiting-for-first-cohort"
+    assert second["status"] == "waiting-for-rerun"
+    assert second["sample_count"] == 1
     assert client.log_gets == []
     assert second["verification_log_api_calls"] == first["verification_log_api_calls"]
+    assert _cache_class({
+        "position": 2,
+        **after_baseline,
+    }) == ("unknown", "5 job logs omitted by cap")
 
 
 def test_default_branch_sampling_maps_squash_merge_and_stops_at_a_gap():
