@@ -873,7 +873,7 @@ jobs:
           ref: ${{ github.event.pull_request.head.sha }}
       - run: npm test
 """,
-            "attacker-head checkout executes pr code",
+            "checks out attacker-head pr code",
         ),
         (
             """      - run: ${{ github.event.pull_request.title }}

@@ -528,15 +528,15 @@ title_template: "pull-requests: write on an untrusted trigger in {basename}"
 correlation: pr-write-and-untrusted-trigger
 -->
 
-**TL;DR.** A workflow declares `pull-requests: write` anywhere in the document **and** is triggered by a member of the untrusted-event family — commonly `pull_request_target`, `issue_comment`, `workflow_run`, `pull_request_review`, or `pull_request_review_comment` (the full 11-trigger set is `_UNTRUSTED_TRIGGERS` in `scan.py`).
+**TL;DR.** A workflow declares `pull-requests: write` anywhere in the document **and** is triggered by a member of the untrusted-event family. The scanner keeps this HIGH when it sees PR-controlled execution, an attacker-head checkout, or review/merge API calls; a label/comment-only workflow with none of those paths is MEDIUM hygiene.
 
 **What an attacker can do.** A workflow compromise (injection, poisoned dependency, compromised action) self-approves and merges the malicious PR, bypassing branch protection's human-review requirement — elementary-data Apr 2026 chained this to PyPI + GHCR in 10 minutes.
 
 **Anti-pattern**: a workflow declares `pull-requests: write` **and** is triggered by any member of the untrusted-event family — `pull_request_target`, `issue_comment`, `workflow_run`, `issues`, `pull_request_review`, `pull_request_review_comment`, `discussion`, `discussion_comment`, `fork`, `watch`, `repository_dispatch` (this is the whole set; `scan.py`'s `_UNTRUSTED_TRIGGERS` is its source of truth). A compromise of any step in that workflow can self-approve or merge the PR, bypassing branch protection that requires reviewer approval. The elementary-data 2026 incident chained this exact pivot (default-write token + injection → forged `github-actions[bot]` commit → dispatched release workflow → PyPI publish in 10 minutes).
 
-**Prioritization**: every occurrence is a HIGH finding — a direct bypass of branch protection's human-review requirement. Attack first the workflows that also run attacker-supplied content (a template-injection sink, a fork checkout), since those hand the write scope to a stranger rather than requiring a separate compromise.
+**Prioritization**: an occurrence with an attacker-head checkout, PR-controlled execution, or review/merge API call is HIGH because it exposes a direct path to branch-protection bypass. An occurrence with none of those paths is MEDIUM: keep the automation cosmetic and review changes for any newly introduced execution or review/merge operation.
 
-**Fix recipe**: Two structural options:
+**Fix recipe**: For a MEDIUM label/comment-only occurrence, keep the job limited to those cosmetic operations, remove `pull-requests: write` if it is unused, and do not add PR-head checkout, PR-controlled execution, or review/merge API calls. For a HIGH occurrence, use one of these structural options:
 
 1. **Move `pull-requests: write` to a job that does NOT run on the untrusted trigger** — typically by splitting into two workflows (one on `pull_request_target` that uploads an artifact, one on `workflow_run` that consumes the artifact and posts the comment). Same shape as P14.9 fix.
 2. **Use a GitHub App** for the comment / approve operation. Astral's `astral-sh-bot` pattern: credentials live outside the repo, the App listens on the same webhook events, and a workflow file compromise doesn't expose the App's installation token.

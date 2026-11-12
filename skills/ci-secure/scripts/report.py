@@ -1236,7 +1236,8 @@ def _finding_group_section(
     # Summary next, then the copy-prompt collapsible. The summary is
     # what a skimmer reads; the collapsible expands when they want to
     # dispatch the fix. Verbose recipe YAML lives behind the catalog link.
-    summary = (cat.fix_recipe_summary or "").strip()
+    occurrence_guidance = str(first.get("fix_guidance", "")).strip()
+    summary = occurrence_guidance or (cat.fix_recipe_summary or "").strip()
     catalog_ref = f"[catalog §{pattern}]({catalog_link})"
     if summary:
         # Block form (a lead-in plus its numbered options) keeps the catalog
@@ -2464,6 +2465,9 @@ _ACTION_BY_FIX_STRATEGY = {
 def _group_action_summary(members: list[dict[str, Any]]) -> str:
     """Curated one-line action verb for a group, or "" to fall back to the
     short title. Keyed off the catalog's `fix_strategy` slug."""
+    supplied = members[0].get("fix_guidance", "")
+    if supplied:
+        return str(supplied)
     return _ACTION_BY_FIX_STRATEGY.get(members[0].get("fix_strategy", ""), "")
 
 

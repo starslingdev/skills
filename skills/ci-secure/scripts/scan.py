@@ -101,6 +101,9 @@ class FindingExtra(Finding, total=False):
     # report renders as its "What an attacker could do" row. Absent → the
     # report falls back to the catalog's static capability line.
     attacker_scenario: str
+    # Detector-specific guidance for findings whose evidence changes the
+    # appropriate remediation within one catalog pattern.
+    fix_guidance: str
     audit_id: str
     audit_url: str
     # "source" (evidence quotes the workflow verbatim) or "derived" (evidence
@@ -426,6 +429,12 @@ class RawHit:
     # `evidence` would either lose the verbatim quote or dress the derived half
     # as source; a separate field keeps both honest.
     derived_note: str | None = None
+    # A small number of evidence-sensitive patterns have a catalog default
+    # severity but can prove a narrower risk profile for this occurrence.
+    severity_override: Severity | None = None
+    attacker_scenario: str | None = None
+    fix_strategy_override: str | None = None
+    fix_guidance: str | None = None
 
 
 def detect_regex(file_path: Path, pattern: str) -> Iterator[RawHit]:
@@ -5716,14 +5725,102 @@ def _correlation_pr_write_and_untrusted_trigger(
     line = _find_pull_requests_write_line(text.splitlines()) or _find_line_for_top_level_key(
         text.splitlines(), "permissions"
     ) or 1
+    risk_reasons: list[str] = []
+    saw_cosmetic_operation = False
+    cosmetic_only = True
+    for _job_name, job in _walk_jobs(doc):
+        for step in _job_steps(job):
+            uses = step.get("uses")
+            with_block = step.get("with")
+            if isinstance(uses, str) and uses.startswith("actions/checkout") \
+                    and isinstance(with_block, dict) \
+                    and any(_attacker_head_ref(with_block.get(key))
+                            for key in ("ref", "repository")):
+                risk_reasons.append("checks out attacker-head PR code")
+            run = step.get("run")
+            if isinstance(run, str) and re.search(
+                r"\$\{\{\s*(?:github\.event\.pull_request\.(?!number\b|id\b|commits\b|sha\b|head_sha\b|merge_commit_sha\b|fork\b|merged\b|author_association\b)|github\.head_ref\b)",
+                run,
+            ):
+                risk_reasons.append("executes attacker-controlled PR text")
+            script = with_block.get("script") if isinstance(with_block, dict) else None
+            is_github_script = (
+                isinstance(uses, str)
+                and uses.startswith("actions/github-script")
+                and isinstance(script, str)
+            )
+            if is_github_script:
+                if re.search(r"(?:github\.)?(?:rest\.)?pulls\.createReview\s*\(", script, re.I) \
+                        or re.search(r"/pulls/[^'\"\s]+/reviews\b", script, re.I):
+                    risk_reasons.append("review API")
+                if re.search(r"(?:github\.)?(?:rest\.)?pulls\.merge\s*\(", script, re.I) \
+                        or re.search(r"/pulls/[^'\"\s]+/merge\b", script, re.I):
+                    risk_reasons.append("merge API")
+                cosmetic_calls = re.findall(
+                    r"(?:github\.)?(?:rest\.)?issues\.(addLabels|createComment)\s*\(",
+                    script,
+                    re.I,
+                )
+                saw_cosmetic_operation = saw_cosmetic_operation or bool(cosmetic_calls)
+                # The lowered profile is intentionally narrow: one or more
+                # inline label/comment calls and no other REST/GraphQL API.
+                scrubbed = re.sub(
+                    r"(?:github\.)?(?:rest\.)?issues\.(?:addLabels|createComment)\s*\(",
+                    "allowed(",
+                    script,
+                    flags=re.I,
+                )
+                if re.search(r"(?:github\.)?rest\.|github\.graphql\s*\(", scrubbed, re.I):
+                    cosmetic_only = False
+            else:
+                # A different action or a shell step is outside the precise
+                # label/comment-only shape this detector can safely lower.
+                cosmetic_only = False
+
+    # Preserve order while keeping the evidence compact when two risky legs
+    # coexist in one workflow.
+    risk_reasons = list(dict.fromkeys(risk_reasons))
+    if not risk_reasons and not (saw_cosmetic_operation and cosmetic_only):
+        risk_reasons.append(
+            "workflow is not limited to label/comment-only github-script automation"
+        )
+    if risk_reasons:
+        profile = "; HIGH because " + ", ".join(risk_reasons)
+        severity_override: Severity | None = None
+        attacker_scenario = None
+        fix_strategy_override = None
+        fix_guidance = None
+    else:
+        profile = (
+            "; MEDIUM hygiene: no checkout, no PR-code execution, and no "
+            "review/merge API"
+        )
+        severity_override = "MEDIUM"
+        attacker_scenario = (
+            "A pull request author can influence cosmetic label or comment "
+            "automation, but this workflow does not execute PR content or "
+            "call review or merge APIs."
+        )
+        fix_strategy_override = "limit-cosmetic-pr-automation"
+        fix_guidance = (
+            "Keep the job limited to cosmetic labeling or commenting; remove "
+            "`pull-requests: write` if it is unused, and do not add PR-head "
+            "checkout, PR-controlled execution, or review/merge API calls."
+        )
+
     yield RawHit(
         line=line,
         evidence=(
             f"{line:>4}: workflow triggers on {sorted(untrusted)} AND "
-            f"grants `pull-requests: write` at scope `{sample_scope}` <-- here"
+            f"grants `pull-requests: write` at scope `{sample_scope}`"
+            f"{profile} <-- here"
         ),
         match_text=sample_scope,
         derived=True,
+        severity_override=severity_override,
+        attacker_scenario=attacker_scenario,
+        fix_strategy_override=fix_strategy_override,
+        fix_guidance=fix_guidance,
     )
 
 
@@ -6738,7 +6835,7 @@ def _scan_once(
                 fmt_vars = {
                     "basename": basename,
                     "pattern": entry.pattern,
-                    "severity": entry.severity,
+                    "severity": hit.severity_override or entry.severity,
                     "match_text": hit.match_text,
                 }
                 try:
@@ -6755,7 +6852,7 @@ def _scan_once(
                 findings.append({
                     "id": f"f{finding_seq}",
                     "pattern": entry.pattern,
-                    "severity": entry.severity,
+                    "severity": hit.severity_override or entry.severity,
                     "title": title,
                     "workflow_file": rel,
                     "line": hit.line,
@@ -6776,7 +6873,13 @@ def _scan_once(
                     # the two differently so a derived sentence is never
                     # dressed as source the reader can go and find.
                     "evidence_kind": "derived" if hit.derived else "source",
-                    "fix_strategy": entry.fix_strategy,
+                    "fix_strategy": (
+                        hit.fix_strategy_override or entry.fix_strategy
+                    ),
+                    **({"attacker_scenario": hit.attacker_scenario}
+                       if hit.attacker_scenario else {}),
+                    **({"fix_guidance": hit.fix_guidance}
+                       if hit.fix_guidance else {}),
                     "fix_recipe_anchor": entry.anchor,
                     # `risk` and `risk_note` are deliberately absent.
                     # The orchestrator scores them per group against
