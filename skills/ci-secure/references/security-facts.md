@@ -7,7 +7,7 @@
 
 ---
 
-ci-secure computes thirteen deterministic, pass/fail configuration facts as
+ci-secure computes fourteen deterministic, pass/fail configuration facts as
 MACHINE-ONLY inputs for a future blended score (the ci-advisor door, not yet
 public). They are aggregated `100 × passed / scored` with no weights and no
 partial credit (registered 2026-08-03) — but **that aggregate is never a number
@@ -18,16 +18,19 @@ vector detectors are lexical rather than confirmed exploit proofs, and a public
 number must not grade a stranger's repo down on an unconfirmed match.
 
 **The denominator is token-dependent, so the aggregate is not comparable
-across scans run under different auth.** Up to six of the thirteen facts read
+across scans run under different auth.** Up to seven of the fourteen facts read
 the GitHub API (the CODEOWNERS fact only once a CODEOWNERS rule covers the
 workflows). In a repository where every fact applies and that rule exists, a
-scan with no repository or no token measures seven of thirteen and scores
+scan with no repository or no token measures seven of fourteen and scores
 `100 × passed / 7`; the same repository scanned with a token that can read
-every source scores over thirteen. Between the two sits the ordinary
+every source scores over fourteen. Between the two sits the ordinary
 reader's token: the two environment facts are measured from environment
 settings, but any verdict that rests on classic branch protection rules or a
 ruleset's bypass list (both admin-only) stays unmeasured, and so does the
-environment-scoped secrets fact whenever the secret lists answer 403. A
+environment-scoped secrets fact whenever the secret lists answer 403; the
+default-branch review fact is measured from the rules endpoint whenever a
+ruleset settles it, and is unmeasured when only classic branch protection
+(admin-only) could. A
 fact that does not apply to the repository at all leaves the denominator on
 top of that (see below), so the number drops by one for each such fact — in
 a repository whose workflows run no suite or that configures no dependency
@@ -41,7 +44,7 @@ compares different measurements.
 
 **The aggregate is machine-only.** ci-secure's own report and close render
 these facts as a pass/fail table and **no number** by design: a hygiene
-aggregate labelled "Security score" overclaims what thirteen config observations
+aggregate labelled "Security score" overclaims what fourteen config observations
 can say, and printed beside a ten-vector scan it read as a contradiction. The
 `security_score` block in the findings JSON keeps its shape — same keys, same `fact_id`s, same outcomes, same aggregate; only prose the
 report prints was reworded so it stops naming a score the reader never sees.
@@ -49,7 +52,7 @@ Consumers bind to the ids, not to the sentences. ci-advisor blends from that
 block, and quantification belongs there, where the blend context carries the
 denominators.
 
-A fact that cannot be measured — an unscannable workflow file; for the six
+A fact that cannot be measured — an unscannable workflow file; for the seven
 API-gated facts, no repository and no token; or, for
 `sec.deps.update-cooldown`, an update config this scan cannot parse — is
 **unmeasured, never a silent pass**: it scores nothing, stays in the applicable count as a
@@ -93,6 +96,7 @@ instead of shipping.
 | `sec.environments.branch-restricted` | — none | Deployment environment settings, rulesets and classic branch protection are read over the API, not from workflow YAML; ci-score reads no environment, ruleset or secret API, and no YAML edit moves this fact (an `environment:` key in a workflow is not what it reads). |
 | `sec.environments.approval-holds` | — none | An environment's required-reviewer setting, read over the API; no ci-score check reads it and no YAML edit can move it. |
 | `sec.secrets.environment-scoped` | — none | The repository and organisation secret lists are read over the API; ci-score reads no secret API, and no workflow YAML edit moves this fact (moving a secret into an environment is a settings change). |
+| `sec.default-branch.review-required` | — none | The default branch's rulesets and classic branch protection are read over the API, not from workflow YAML; no ci-score check reads either, and no YAML edit moves this fact. It reads the same merge rules as `sec.codeowners.workflows` but a different setting (an approval that survives a new push, not a Code Owner's review), so turning on one does not turn on the other. |
 | `sec.deps.update-cooldown` | — none | Dependabot and Renovate config files are not workflow YAML, and no ci-score check reads `dependabot.yml`, a Renovate config, `cooldown`, or `minimumReleaseAge` (ci-score's registry and methodology were searched for all four). The nearest neighbour, `ci.security.pinned-action-shas`, reads `uses:` refs in workflow files; adding a cooldown cannot move it, and pinning an action cannot move this. |
 
 **Residual correlation, disclosed:** a repo with careless
@@ -467,6 +471,11 @@ two moved numbers.
   "Restrict who can push to matching branches" (nobody listed) and
   "Restrict pushes that create matching branches" (rulesets do not count
   for that option), or add a required reviewer.
+  Grounded, with `sec.secrets.environment-scoped`, in the November 2026
+  compromised GitHub accounts CI secret stealer campaign
+  ([Reference incidents](security-patterns.md#reference-incidents)), in
+  which stolen tokens pushed workflows that ran with the repository's
+  secrets.
 - **`sec.environments.approval-holds`** — every environment that has
   required reviewers also has "Prevent self-review" on. Otherwise a leaked
   reviewer's credential starts a run and approves it itself. One bad
@@ -520,6 +529,59 @@ two moved numbers.
   (https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)
   and for fine-grained tokens
   (https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens).
+- **`sec.default-branch.review-required`** — the default branch takes no
+  code without a pull request that at least one other person approves, and
+  an approval stops counting once new commits are pushed ("Dismiss stale
+  pull request approvals when new commits are pushed" or "Require approval
+  of the most recent reviewable push"). Without that second setting, a
+  credential pushes new code onto an approved pull request and merges it on
+  the old approval. **What it limits**: one leaked token cannot land code on
+  the default branch alone. **What it does not stop**: a payload run on
+  another branch, which needs no review at all; only secrets kept in
+  environments stop that (`sec.secrets.environment-scoped`,
+  `sec.environments.branch-restricted`). Required status checks accept a
+  result from any source unless each is restricted to the app that runs it,
+  and a token that can edit workflows can still satisfy an app-restricted
+  check by pushing a workflow with that job name, which is why review, not
+  check restriction, is the control measured here.
+
+  **Passes** when active rulesets and classic branch protection, layered
+  the way GitHub layers them (the highest approval count wins, and either
+  source's stale-approval setting counts), require a pull request with at
+  least one approval and one of the two settings. **Fails** when nothing
+  requires a pull request, the approval count is 0, or neither setting is
+  on; the evidence names which. **Bypass is a qualified pass, never a
+  fail**: a ruleset's bypass actors, classic protection's pull request
+  allowances, and admins when classic protection does not include
+  administrators can skip review with their own credential, and the
+  evidence names them. Which credential leaks cannot be known from here,
+  and an admin credential can change these settings anyway. A ruleset
+  bypass list is returned only to someone with write access to the
+  ruleset, so on a reader's token the pass says the list was not readable.
+  **Unmeasured** when the settings cannot be read: no repository, no `gh`
+  or no auth, the rules endpoint failing, or, when the rules alone do not
+  hold, classic protection answering a non-admin with a 403. Two answers
+  settle classic protection without admin access: a 404 "Branch not
+  protected", and `protected: false` on the public branch endpoint
+  (`protected: true` is set by rulesets too and settles nothing). A source
+  that was not read can only add rules, so it never undoes a pass read from
+  another source; it does keep a fail from being reported. Rulesets in
+  `evaluate` or `disabled` mode enforce nothing and count for nothing: the
+  rules endpoint leaves them out, and a ruleset whose own detail says so is
+  dropped too. Reads `GET /repos/{owner}/{repo}/rules/branches/{branch}`
+  (read access) first, then each pull request rule's ruleset for its bypass
+  list, and `GET /repos/{owner}/{repo}/branches/{branch}/protection`
+  (admin-only) only when the rules alone do not hold. Grounded in the
+  November 2026 compromised GitHub accounts CI secret stealer campaign
+  ([Reference incidents](security-patterns.md#reference-incidents)), in
+  which stolen tokens with write access pushed a payload into the victims'
+  own repositories. **To fix a fail**: in a ruleset that targets the
+  default branch, or in its classic branch protection, turn on "Require a
+  pull request before merging" with at least 1 required approval, plus
+  "Dismiss stale pull request approvals when new commits are pushed" or
+  "Require approval of the most recent reviewable push". What that can
+  break: a person or bot that pushes straight to the default branch has to
+  open a pull request instead, or be added to the bypass list.
 
 
 ### Required-verdict coverage (2026-10-26)

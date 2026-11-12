@@ -53,8 +53,12 @@ THE FACTS
   F13 sec.secrets.environment-scoped      no repository or organisation
                                           secret is readable from any branch
                                           (API-gated)
+  F14 sec.default-branch.review-required  the default branch needs a pull
+                                          request with >= 1 approval that a
+                                          new push dismisses or re-asks
+                                          (API-gated)
 
-F7, F8, F11, F12 and F13 read the GitHub API, not workflow YAML, so they are
+F7, F8, F11, F12, F13 and F14 read the GitHub API, not workflow YAML, so they are
 TOKEN-GATED: no
 repo or no token means UNMEASURED with the reason stated — the same contract
 the impostor-SHA vector keeps. They are never a pass for being unreadable and
@@ -273,7 +277,7 @@ def _codeowners_covers_workflows(root: Path) -> tuple[str, str]:
     try:
         # `is_file()` re-raises EACCES on an unreadable parent directory, so
         # the probe belongs INSIDE the guard: one unreadable dir used to
-        # escape to scan.py's broad backstop and take all thirteen facts down.
+        # escape to scan.py's broad backstop and take all fourteen facts down.
         for candidate in _CODEOWNERS_CANDIDATES:
             if (root / candidate).is_file():
                 found = root / candidate
@@ -2852,8 +2856,12 @@ P1_RULESET_ONLY_BRANCH_COUNTS_AS_PROTECTED = False
 #     protected-branches, but this engine asks it only for custom-policy
 #     environments, where a 404 can only mean the read failed. It therefore
 #     has no entry here, and `branch_policies()` passes no `kind`.
+#   * `protection`: the classic branch protection endpoint answers 404 "Branch
+#     not protected" when the branch has none (the same answer
+#     `_NOT_PROTECTED_404_RE` reads for the required-checks fact).
 P6_NOT_FOUND_ANSWERS = {
     "branch": re.compile(r"branch not found", re.I),
+    "protection": re.compile(r"branch not protected", re.I),
 }
 
 _MANAGED_ENVIRONMENTS = frozenset({"github-pages", "copilot"})
@@ -3138,6 +3146,50 @@ class _GhPushAccess:
                 raise _Unread(f"{what} returned an unexpected shape")
             return [str(r["ref"])[len("refs/heads/"):] for r in refs]
         return self._once(f"refs:{prefix}", read)
+
+    def branch_rules(self, branch: str) -> list[dict]:
+        """The active rules on `branch`, from every ruleset that applies,
+        repository and organization alike. GitHub's docs: the endpoint
+        "Returns all active rules that apply to the specified branch", and
+        rules in "evaluate" or "disabled" rulesets "are not returned".
+        Readable with read access, unlike classic protection."""
+        def read():
+            what = f"the rules on branch `{branch}`"
+            rules = self._get(
+                f"repos/{self.repo}/rules/branches/{_branch_segment(branch)}"
+                f"?{_PER_PAGE}", paginate=True, key=None, what=what)
+            # A rule this reader cannot see the type of could be the one that
+            # requires review, so an odd entry is unread, never skipped.
+            if any(not isinstance(r, dict) or not r.get("type")
+                   for r in rules):
+                raise _Unread(f"{what} returned an unexpected shape")
+            return rules
+        return self._once(f"branch rules:{branch}", read)
+
+    def ruleset(self, rid: Any) -> dict:
+        def read():
+            body = self._get(
+                f"repos/{self.repo}/rulesets/{rid}?includes_parents=true",
+                what=f"ruleset {rid}")
+            if not isinstance(body, dict):
+                raise _Unread(f"ruleset {rid} was not an object")
+            return body
+        return self._once(f"ruleset:{rid}", read)
+
+    def classic_protection(self, branch: str) -> dict | None:
+        """Classic branch protection on `branch` (REST, admin only), or None
+        when GitHub answers 404 "Branch not protected" (P6: `protection`)."""
+        def read():
+            body = self._get(
+                f"repos/{self.repo}/branches/{_branch_segment(branch)}"
+                "/protection", kind="protection", forbidden_expected=True,
+                what=f"classic branch protection on `{branch}` (readable "
+                     "only by a repository admin)")
+            if body is not None and not isinstance(body, dict):
+                raise _Unread(f"classic branch protection on `{branch}` was "
+                              "not an object")
+            return body
+        return self._once(f"protection:{branch}", read)
 
     def _secret_names(self, key: str, path: str, what: str) -> list[str]:
         def read():
@@ -4004,6 +4056,265 @@ def _secrets_hint(reason: str) -> str:
     return ""
 
 
+# --- default-branch review (F14) ----------------------------------------------
+# A leaked token that can write to the repository puts code on the default
+# branch unless that branch needs a pull request someone else approves, and
+# unless an approval stops counting once new commits land. It does NOT stop a
+# payload run from another branch: only secrets kept in environments (F11,
+# F13) do. Read from the same memoised source as F11-F13: the rules endpoint
+# first (read access), classic protection only when the rules alone do not
+# hold, and the judging helpers (`_rule_holds`, `_fresh_approval`) are F11's.
+
+_REVIEW_FACT = "sec.default-branch.review-required"
+
+_REVIEW_FIX = (
+    "Turn on, in a ruleset that targets the default branch (or in its "
+    "classic branch protection): \"Require a pull request before merging\" "
+    "with at least 1 required approval, plus \"Dismiss stale pull request "
+    "approvals when new commits are pushed\" or \"Require approval of the "
+    "most recent reviewable push\"")
+
+# Only 5 (admin) is relied on elsewhere (`_ADMIN_ACTORS`); any other role id
+# is shown as its number rather than guessed.
+_ROLE_NAMES = {5: "repository admins"}
+
+
+def _actor_label(actor: Any) -> str:
+    """A ruleset bypass actor in plain words, from GitHub's documented
+    `actor_type` / `actor_id` / `bypass_mode`."""
+    if not isinstance(actor, dict):
+        return "an actor of unexpected shape"
+    kind, aid = actor.get("actor_type"), actor.get("actor_id")
+    label = {"OrganizationAdmin": "organization admins",
+             "EnterpriseOwner": "enterprise owners",
+             "DeployKey": "deploy keys"}.get(str(kind))
+    if label is None and kind == "RepositoryRole":
+        label = _ROLE_NAMES.get(aid, f"repository role {aid}")
+    if label is None:
+        word = "app" if kind == "Integration" else str(kind or "actor").lower()
+        label = f"{word} {aid}"
+    if actor.get("bypass_mode") == "pull_request":
+        label += " (when merging a pull request)"
+    return label
+
+
+def _ruleset_counts(src: Any, rule: dict) -> tuple[bool, str]:
+    """(counts, note) for one pull_request rule from the rules endpoint.
+    `counts` is False only when the ruleset's own detail says it is not
+    actively enforced; `note` names who may bypass it, or says that could
+    not be read."""
+    rid = rule.get("ruleset_id")
+    if rid is None:
+        return True, ("a pull request rule did not name its ruleset, so who "
+                      "may bypass it was not read")
+    try:
+        rs = src.ruleset(rid)
+    except _Unread as exc:
+        return True, f"who may bypass ruleset {rid} could not be read ({exc})"
+    name = rs.get("name") or rid
+    enforcement = rs.get("enforcement")
+    if enforcement is not None and enforcement != "active":
+        return False, (f"ruleset `{name}` requires review but is in "
+                       f"`{enforcement}` mode, which enforces nothing")
+    actors = rs.get("bypass_actors")
+    if not isinstance(actors, list):
+        return True, (f"ruleset `{name}`'s bypass list is not readable "
+                      "without the right to edit it")
+    if not actors:
+        return True, ""
+    return True, (f"ruleset `{name}` lets "
+                  + _capped([_actor_label(a) for a in actors], 4, ", ")
+                  + " bypass it")
+
+
+def _classic_review_params(body: dict) -> tuple[dict | None, str]:
+    """(pull_request parameters in the rules endpoint's names, bypass note)
+    from a classic protection body; (None, "") when it requires no pull
+    request. Raises `_Unread` on a shape it cannot read."""
+    reviews = body.get("required_pull_request_reviews")
+    if reviews is None:
+        return None, ""
+    if not isinstance(reviews, dict):
+        raise _Unread("classic branch protection's pull request settings "
+                      "have an unexpected shape")
+    params = {
+        "required_approving_review_count":
+            reviews.get("required_approving_review_count"),
+        "dismiss_stale_reviews_on_push": reviews.get("dismiss_stale_reviews"),
+        "require_last_push_approval": reviews.get("require_last_push_approval"),
+    }
+    who: list[str] = []
+    admins = body.get("enforce_admins")
+    if not (isinstance(admins, dict) and admins.get("enabled") is True):
+        who.append("repository admins (classic protection does not apply "
+                   "to administrators)")
+    allow = reviews.get("bypass_pull_request_allowances")
+    if isinstance(allow, dict):
+        for key, field in (("users", "login"), ("teams", "slug"),
+                           ("apps", "slug")):
+            for item in allow.get(key) or []:
+                if isinstance(item, dict) and item.get(field):
+                    who.append(f"`{item[field]}`")
+    note = ("classic branch protection lets " + _capped(who, 4, ", ")
+            + " skip it") if who else ""
+    return params, note
+
+
+def _layered(params: list[dict]) -> dict:
+    """One pull_request rule standing for every source that applies. GitHub
+    enforces the most restrictive version of each rule, so: the highest
+    approval count, and either source's stale-approval switch. A count of
+    unexpected shape leaves the total unknown unless another already needs
+    an approval."""
+    counts = [p.get("required_approving_review_count") for p in params]
+    ints = [c for c in counts
+            if isinstance(c, int) and not isinstance(c, bool)]
+    count = (max(ints) if ints and (max(ints) >= 1 or len(ints) == len(counts))
+             else None)
+
+    def either(key: str) -> Any:
+        vals = [p.get(key) for p in params]
+        if any(v is True for v in vals):
+            return True
+        return False if all(v is False for v in vals) else None
+    return {"type": "pull_request", "parameters": {
+        "required_approving_review_count": count,
+        "dismiss_stale_reviews_on_push": either("dismiss_stale_reviews_on_push"),
+        "require_last_push_approval": either("require_last_push_approval")}}
+
+
+def _review_verdict(src: Any) -> tuple[str, str]:
+    """(outcome, evidence) for `sec.default-branch.review-required`.
+
+    Pass needs, from what was READ: a pull request, at least one approval,
+    and stale approvals dismissed or the last push re-approved. A source that
+    was not read can only add rules, so it never undoes a pass; it does keep
+    a fail from being reported (unmeasured instead). Bypass actors qualify a
+    pass in its evidence and never turn it into a fail: which credential
+    leaks is not knowable here."""
+    try:
+        branch = src.default_branch()
+    except _Unread as exc:
+        return "unmeasured", f"unmeasured: {exc}"
+    label = f"`{branch}`"
+    params: list[dict] = []
+    notes: list[str] = []
+    skipped: list[str] = []
+    unread: list[str] = []
+    sources: list[str] = []
+    try:
+        rules = src.branch_rules(branch)
+    except _Unread as exc:
+        rules = []
+        unread.append(str(exc))
+    for rule in rules:
+        if rule.get("type") != "pull_request":
+            continue
+        counts, note = _ruleset_counts(src, rule)
+        if note:
+            (notes if counts else skipped).append(note)
+        if counts:
+            p = rule.get("parameters")
+            params.append(p if isinstance(p, dict) else {})
+            if "a ruleset" not in sources:
+                sources.append("a ruleset")
+
+    def judged() -> str | None:
+        return _rule_holds(_layered(params)) if params else None
+    state = judged()
+    if state != "held":
+        body: Any = _source(lambda: src.classic_protection(branch))
+        if isinstance(body, _Unread):
+            # `protected: false` means neither a ruleset nor classic
+            # protection covers the branch; `true` is set by a ruleset too.
+            flag = _source(lambda: src.branch(branch))
+            if isinstance(flag, dict) and flag.get("protected") is False:
+                body = None
+            else:
+                unread.append(str(body))
+        if isinstance(body, dict):
+            try:
+                cp, note = _classic_review_params(body)
+            except _Unread as exc:
+                unread.append(str(exc))
+            else:
+                if cp is not None:
+                    params.append(cp)
+                    sources.append("classic branch protection")
+                    if note:
+                        notes.append(note)
+        state = judged()
+
+    count = (_layered(params)["parameters"]["required_approving_review_count"]
+             if params else None)
+    if state == "held":
+        tail = ""
+        if notes:
+            tail = (" Able to skip that review with their own credential, so "
+                    "a leak of theirs is not covered: "
+                    + "; ".join(dict.fromkeys(notes))
+                    + ".")
+        elif not unread:
+            tail = " Nobody is listed as able to bypass it."
+        if unread:
+            tail += (" Not read: " + "; ".join(unread) + " — a source that "
+                     "was not read can only add rules, so the pass stands.")
+        return "pass", (
+            f"{label} requires a pull request with {count} approving "
+            f"review(s), and an approval stops counting once new commits are "
+            f"pushed ({' and '.join(sources)}), so one leaked push credential "
+            "cannot land code on it alone." + tail)
+    if unread:
+        said = ("what was read does not require it on its own; "
+                if params else "")
+        return "unmeasured", (
+            f"unmeasured: whether {label} requires a reviewed pull request "
+            f"could not be established — {said}{'; '.join(unread)}")
+    if state == "unknown":
+        return "unmeasured", (
+            f"unmeasured: a pull request rule on {label} does not say how many "
+            "approvals it needs, or whether they survive a new push")
+    extra = (" (" + "; ".join(skipped) + ")") if skipped else ""
+    if not params:
+        why = (f"nothing requires a pull request before code lands on "
+               f"{label}{extra}, so any push credential can push straight "
+               "to it")
+    elif count == 0:
+        why = (f"{label} requires a pull request but no approving review, so "
+               "a push credential opens a pull request and merges it itself")
+    else:
+        why = (f"{label} requires a pull request with {count} approving "
+               "review(s), but neither \"Dismiss stale pull request approvals "
+               "when new commits are pushed\" nor \"Require approval of the "
+               "most recent reviewable push\" is on, so a push credential "
+               "pushes new code onto an approved pull request and merges it "
+               "on the old approval")
+    return "fail", f"{why}. {_REVIEW_FIX}"
+
+
+def _default_branch_review(repo: str | None, fetcher) -> tuple[str, str]:
+    if not repo:
+        return "unmeasured", (
+            "unmeasured: the default branch's merge rules are read over the "
+            "API, and this scan had no repository to read them from — that "
+            "needs `gh` authenticated (`gh auth login`) and a GitHub remote "
+            "to derive `owner/name` from")
+    try:
+        src, detail = fetcher(repo)
+    except Exception as exc:                                   # noqa: BLE001
+        src, detail = None, f"the settings could not be read ({exc})"
+    if src is None:
+        return "unmeasured", f"unmeasured: {detail}"
+    try:
+        return _review_verdict(src)
+    except Exception as exc:                                   # noqa: BLE001
+        # A field the verdict code cannot handle costs this one check, with
+        # the reason, never the whole fact table.
+        _log.debug("default-branch review verdict failed", exc_info=True)
+        return "unmeasured", (f"unmeasured: the default branch's merge rules "
+                              f"could not be judged ({exc!r})")
+
+
 # --- the fact table -----------------------------------------------------------
 
 def compute_config_facts(
@@ -4019,7 +4330,7 @@ def compute_config_facts(
 ) -> dict[str, Any]:
     """Every fact, every time — pass/fail/unmeasured, never silently absent.
 
-    ``repo`` (``owner/name``) enables the SIX facts that need the API —
+    ``repo`` (``owner/name``) enables the SEVEN facts that need the API —
     ``sec.required-checks.skippable`` (branch protection),
     ``sec.fork-approval.effective`` (the repository's fork-PR approval
     setting), once a CODEOWNERS rule covers workflows
@@ -4028,7 +4339,9 @@ def compute_config_facts(
     ``sec.environments.branch-restricted`` and
     ``sec.environments.approval-holds``, and
     ``sec.secrets.environment-scoped`` (with the per-environment verdicts and
-    the secret-name list in the block's ``push_access`` key). It is optional, and
+    the secret-name list in the block's ``push_access`` key), and
+    ``sec.default-branch.review-required`` (read from the same source as the
+    environment facts). It is optional, and
     its absence is disclosed as UNMEASURED rather than skipped — a fact that
     quietly vanishes from the table is a silent pass.
 
@@ -4229,10 +4542,18 @@ def compute_config_facts(
 
     # Environment settings, not workflow YAML: a scan gap says nothing about
     # them. The default fetcher is looked up at call time so a test can
-    # replace it by name.
+    # replace it by name. One source serves these three checks and the
+    # default-branch review check, so a reading is asked for once.
+    settings_fetcher = push_access_fetcher or _push_access_via_gh
+    fetched: dict[str, tuple[Any, str]] = {}
+
+    def settings(r: str) -> tuple[Any, str]:
+        if r not in fetched:
+            fetched[r] = settings_fetcher(r)
+        return fetched[r]
     try:
         (env_outcome, env_evidence), (ap_outcome, ap_evidence), push_block = \
-            _push_access(repo, push_access_fetcher or _push_access_via_gh)
+            _push_access(repo, settings)
     except Exception as exc:                                   # noqa: BLE001
         # A field the verdict code cannot handle costs these three checks,
         # with the reason, never the whole fact table.
@@ -4261,6 +4582,14 @@ def compute_config_facts(
         "pushed branch can read any secret that is not)",
         False, sc_outcome == "pass", sc_evidence, outcome=sc_outcome)
     push_block["token_note"] = _TOKEN_NOTE
+    rv_outcome, rv_evidence = _default_branch_review(repo, settings)
+    add(_REVIEW_FACT,
+        "the default branch takes no code without a pull request that "
+        "someone else approves, and an approval stops counting once new "
+        "commits are pushed (so one leaked push credential cannot land code "
+        "there alone; a payload run from another branch is the "
+        "environment-scoped secrets check's question)",
+        False, rv_outcome == "pass", rv_evidence, outcome=rv_outcome)
 
     out = facts_to_score(facts)
     # Unscored: the per-environment verdicts, the secret-name inventory, and
