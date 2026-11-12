@@ -470,7 +470,11 @@ two moved numbers.
   branch protection rule on every protected pattern that turns on
   "Restrict who can push to matching branches" (nobody listed) and
   "Restrict pushes that create matching branches" (rulesets do not count
-  for that option), or add a required reviewer.
+  for that option), or add a required reviewer. The fail evidence says
+  why it matters: a workflow pushed to such a branch gets the
+  environment's secrets and cloud logins with no review and no merge, so
+  an environment any branch can use protects nothing from a pushed
+  workflow.
   Grounded, with `sec.secrets.environment-scoped`, in the November 2026
   compromised GitHub accounts CI secret stealer campaign
   ([Reference incidents](security-patterns.md#reference-incidents)), in
@@ -494,7 +498,11 @@ two moved numbers.
   readable from any branch a push credential creates, however well the
   environments are locked. **Passes** when neither list holds a secret,
   including a repository with no secrets at all. **Fails** when either
-  does; the evidence names each one, repository and organisation
+  does; the evidence first states the consequence (any workflow pushed to
+  any branch receives these N secrets, so one leaked push credential
+  exposes them all with no review and no merge, and the fix is an
+  environment only protected branches can use), then names them, up to
+  10 per list followed by `and N more`, repository and organisation
   separately, with a short deterministic hint (`PRIVATE_KEY`, `APP_ID`,
   `PYPI`, `NPM_TOKEN`, …) putting the likely high-value ones first — a
   sort order, not a severity. **Unmeasured** when a list cannot be read
@@ -517,7 +525,10 @@ two moved numbers.
   it needing the secret. For an organisation secret, narrowing
   its repository access to the repositories that need it is the
   alternative. The names (never values) also render under the row as the
-  secret list. The report states, every run in which this layer completes,
+  secret list, in full. On a fail (and only then: never on a pass or an
+  unmeasured row) the report also puts a short **Secrets reachable from any
+  branch** callout under its headline, with the count and a link to that
+  list; it is a hygiene gap and adds nothing to the vector count. The report states, every run in which this layer completes,
   that a pushed workflow can
   ask for its own write-scoped token and an OIDC login token, and that a
   credential which cannot push workflow files, but can change code the

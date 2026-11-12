@@ -13,7 +13,7 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
-- **2026-11-12** (#338) — ci-secure: a new API-gated config hygiene check,
+- **2026-11-12** (#PRNUM) — ci-secure: a new API-gated config hygiene check,
   `sec.default-branch.review-required`, and the incident that grounds it.
   The check passes when the default branch, through an active ruleset or
   classic branch protection, needs a pull request with at least one approval
@@ -28,7 +28,19 @@ entries are dated (UTC). Format loosely follows
   records the November 2026 compromised GitHub accounts CI secret stealer
   campaign as the grounding for this check and for
   `sec.secrets.environment-scoped`; it is not cited as a vector incident,
-  because the attacker already held a push credential.
+  because the attacker already held a push credential. The environment
+  secrets checks now say what is at stake: a failing
+  `sec.secrets.environment-scoped` states that any workflow pushed to any
+  branch receives its N secrets, so one leaked push credential exposes them
+  all with no review and no merge, and that the fix is an environment only
+  protected branches can use; it names them (never values), up to 10 per
+  list and then `and N more`. A failing `sec.environments.branch-restricted`
+  says an environment any branch can use protects nothing from a pushed
+  workflow. When the secrets check fails, the report also puts a short
+  **Secrets reachable from any branch** callout under its headline (a
+  blockquote linking to the "If a push credential leaks" section; it adds
+  nothing to the vector count), and the terminal summary leads its hygiene
+  clause with it. The findings JSON shape is unchanged.
 - ci-secure: "If a push credential leaks" — three new config hygiene checks,
   read over the GitHub API the way the required-checks and fork-approval
   checks already are. A credential that can push workflow files (GitHub's

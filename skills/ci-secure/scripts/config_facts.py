@@ -3924,7 +3924,11 @@ def _push_access(repo: str | None, fetcher) -> tuple[
             branch = ("fail", (
                 f"{len(failed)} of {len(judged)} environment(s) can be "
                 "reached from a branch any push credential can make, and "
-                "need no reviewer: " + _capped(failed, 6) + ". Restrict each "
+                "need no reviewer, so a workflow pushed to such a branch "
+                "gets their secrets and cloud logins with no review and no "
+                "merge; an environment any branch can use protects nothing "
+                "from a pushed workflow: " + _capped(failed, 6)
+                + ". Restrict each "
                 "to \"Selected branches and tags\" naming protected branches "
                 "whose rules block creating and pushing, or to \"Protected "
                 "branches only\" with a classic branch protection rule on "
@@ -4002,6 +4006,9 @@ _SCOPED_FIX = (
     "request or on a branch the environment does not accept can no longer "
     "read the secret; give that job an environment with a required "
     "reviewer, or stop it needing the secret")
+# Names (never values) shown per list in the evidence; the full list renders
+# under the row in the report.
+_SECRET_NAME_CAP = 10
 _SCOPED_ORG_FIX = (
     "; for an organisation secret, narrowing its repository access to the "
     "repositories that need it is the alternative")
@@ -4021,19 +4028,23 @@ def _secrets_scoped(inventory: dict[str, Any]) -> tuple[str, str]:
     if inventory.get("status") == "not_checked":
         return "unmeasured", f"unmeasured: {reason}"
     parts = []
-    if repo_names:
-        parts.append(f"{len(repo_names)} repository secret(s): " + ", ".join(
-            f"`{n}`" for n in _secret_names_in_order(repo_names)))
-    if org_names:
-        parts.append(f"{len(org_names)} organisation secret(s): " + ", ".join(
-            f"`{n}`" for n in _secret_names_in_order(org_names)))
+    for label, names in (("repository", repo_names),
+                         ("organisation", org_names)):
+        if names:
+            parts.append(f"{len(names)} {label} secret(s): " + _capped(
+                [f"`{n}`" for n in _secret_names_in_order(names)],
+                _SECRET_NAME_CAP, ", "))
     if parts:
+        total = len(repo_names or []) + len(org_names or [])
         unread = ("" if inventory.get("status") == "measured" else
                   f" (the other list could not be read: {reason}, so this "
                   "may not be all of them)")
         return "fail", (
-            "readable from any branch a push credential creates, outside "
-            "every environment — " + "; ".join(parts) + unread + ". "
+            f"any workflow pushed to any branch of this repository receives "
+            f"these {total} secret(s), so one leaked push credential exposes "
+            "them all, with no review and no merge — " + "; ".join(parts)
+            + unread + ". The fix is to move them into an environment that "
+            "only protected branches can use. "
             + _SCOPED_FIX + (_SCOPED_ORG_FIX if org_names else ""))
     if inventory.get("status") == "measured":
         return "pass", ("no repository or organisation secret is readable "

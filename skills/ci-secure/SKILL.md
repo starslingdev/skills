@@ -192,7 +192,7 @@ Contract lines, all mandatory:
   failed: `One hygiene gap: no enforced reviewer rule covers your workflows.` Two
   or more: name each, one short clause apiece. All passing: `All config
   hygiene checks pass.` Unmeasured is a coverage gap, n/a did not apply to
-  this repo: say each as itself, never as a pass and never as nothing.
+  this repo: say each as itself, never as a pass and never as nothing. A failing `sec.secrets.environment-scoped` goes first, in consequence words (terminal-summary.md).
 - **Then the vector map** — the line-item receipt, so the user sees what they
   are good on and what did not run without opening the file. Head it exactly
   `Vector scan — 10 attack vectors checked, N hit:` (N from the banner), so
