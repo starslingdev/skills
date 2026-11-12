@@ -12855,10 +12855,16 @@ def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
     shrinking denominator is surfaced, not silent."""
     counts: dict[str, int] = {}
     n = dropped = 0
+    unconfirmed = {
+        str(row.get("name") or row.get("check") or "")
+        for row in _as_list(cp.get("checks"))
+        if isinstance(row, dict) and row.get("required_reachable") is False
+    }
     for entry in _as_list(cp.get("populations")):
         try:
             _share, cks = entry
-            pos = [(str(nm), float(p)) for nm, p in cks if float(p) > 0]
+            pos = [(str(nm), float(p)) for nm, p in cks
+                   if float(p) > 0 and str(nm) not in unconfirmed]
         except (TypeError, ValueError):
             dropped += 1
             continue
@@ -13054,6 +13060,11 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
     failures: list[str] = []
     groups: dict[str, list[float]] = {
         "holds-up": [], "rare-last": [], "unconfirmed": []}
+    drill_group_labels = {
+        "holds-up": "Checks that hold up most PRs",
+        "rare-last": "Long but rarely the last to finish",
+        "unconfirmed": "Could not confirm this check blocks merging",
+    }
     by_name = {_cmp_name(str(row.get("name") or row.get("check") or "")): row
                for row in checks}
     inherited_counts = _aggregation_upstream_gate_counts(data)
@@ -13072,6 +13083,14 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
         group = ("unconfirmed" if unconfirmed_at >= 0 and match.start() > unconfirmed_at
                  else "rare-last" if rare_at >= 0 and match.start() > rare_at
                  else "holds-up")
+        drill_body = pole_sections[index - 1][2]
+        rendered_drill_groups = re.findall(
+            r"^\*\*Frequency group:\*\* (.+)\.$", drill_body, re.MULTILINE)
+        expected_drill_group = drill_group_labels[group]
+        if rendered_drill_groups != [expected_drill_group]:
+            failures.append(
+                f"`{label}` drill frequency group {rendered_drill_groups!r} differs from "
+                f"Contents group `{expected_drill_group}`")
         seconds = _parse_clock_to_s(p50_text)
         if seconds is None:
             failures.append(f"`{label}` has an unreadable P50 {p50_text!r}")
@@ -13086,6 +13105,11 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
         # through the corresponding full drill heading before looking up the
         # stamped check, so an ellipsis cannot make real evidence unjoinable.
         full_label = pole_sections[index - 1][1]
+        inherited_upstream = _cmp_name(full_label) in inherited_counts
+        claims_terminal_gate = "feeds the terminal `needs:` gate" in tail
+        if group == "rare-last" and claims_terminal_gate != inherited_upstream:
+            failures.append(
+                f"`{label}` terminal-needs reason does not match aggregation-gate topology")
         expected_label = (full_label if len(full_label) <= _VR_POLE_LABEL_WIDTH
                           else full_label[:_VR_POLE_LABEL_WIDTH - 1] + "…")
         if label != expected_label:

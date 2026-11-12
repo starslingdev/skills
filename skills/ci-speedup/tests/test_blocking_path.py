@@ -7433,6 +7433,21 @@ def test_pole_group_renderer_and_verifier_use_the_population_denominator(tmp_pat
     assert check.ok, check.detail
 
 
+def test_pole_group_verifier_excludes_an_unconfirmed_only_population(tmp_path):
+    doc = _pole_order_agreement_doc()
+    d_check = next(row for row in doc["pr_critical_path"]["checks"]
+                   if row["name"] == "D")
+    d_check["required_reachable"] = False
+    doc["pr_critical_path"]["populations"].append([0.1, [["D", 900.0]]])
+
+    report = bp.render(doc)
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+
+    assert check.ok, check.detail
+
+
 def test_pole_groups_sort_by_the_p50_the_rows_display():
     doc = _pole_order_agreement_doc()
     a_check = next(row for row in doc["pr_critical_path"]["checks"]
@@ -7512,6 +7527,38 @@ def test_verifier_rejects_pole_group_order_bottom_disagreement_and_missing_rare_
             and not c.skipped and not c.ok
         ]
         assert failures, f"pole-order verifier accepted tampered variant {i}"
+
+
+def test_verifier_rejects_a_drill_frequency_group_that_disagrees_with_contents(tmp_path):
+    doc = _pole_order_agreement_doc()
+    clean = bp.render(doc)
+    tampered = clean.replace(
+        "**Frequency group:** Checks that hold up most PRs.",
+        "**Frequency group:** Long but rarely the last to finish.",
+        1,
+    )
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+
+    check = _load_vr().check_pole_groups_and_bottom_agree(tampered, findings)
+
+    assert not check.ok, check.detail
+
+
+def test_verifier_rejects_a_forged_terminal_needs_reason(tmp_path):
+    doc = _pole_order_agreement_doc()
+    clean = bp.render(doc)
+    tampered = clean.replace(
+        "a slower check usually ran alongside",
+        "feeds the terminal `needs:` gate",
+        1,
+    )
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+
+    check = _load_vr().check_pole_groups_and_bottom_agree(tampered, findings)
+
+    assert not check.ok, check.detail
 
 
 def test_render_legacy_no_pole_n_keeps_presence_wording():
