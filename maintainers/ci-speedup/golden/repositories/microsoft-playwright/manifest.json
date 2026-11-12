@@ -1,0 +1,23 @@
+{
+  "api_fixture_count": 663,
+  "captured_at": "2026-11-11T09:50:00Z",
+  "checkout_sanitization": {
+    "environment_paths": "absolute runner and account paths use neutral fixture paths",
+    "long_decimal_runs": "long decimal runs use same-length shape-preserving pseudonyms",
+    "repository_links": "repository URL targets and numbered references use a neutral placeholder",
+    "snapshot_sha256": "680fb68f-163ab55c-4aa74791-6e02920b-3d409e51-d6bfc473-c6d41725-fe3a2fd2"
+  },
+  "commit": "3b438229c6a2ccdbe2d70007301d83c3",
+  "identifiers": "stable eight-digit fixture ids",
+  "log_cap_bytes": 200000,
+  "month_wide_completed_pr_commits": 650,
+  "month_wide_job_lists_recorded": 870,
+  "month_wide_pr_commits": 650,
+  "origin": "public-github:microsoft/playwright",
+  "pole_log_note": "the public API returned no pole logs for this recording",
+  "pole_logs_recorded": 0,
+  "repository": "microsoft/playwright",
+  "schema_version": 1,
+  "secret_scan": "passed",
+  "skipped_log_files": []
+}

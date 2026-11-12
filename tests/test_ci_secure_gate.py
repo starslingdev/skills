@@ -723,6 +723,32 @@ def test_a_partial_network_result_is_red_when_the_run_demands_completeness(
     assert "P14.11" in proc.stdout
 
 
+@pytest.mark.parametrize("status", [
+    "partial: 1 of 2 tag-pinned GitHub CLI extension install(s) looked up, "
+    "1 immutable (not reported), 1 UNVERIFIED — kept as findings",
+    "skipped: disabled via --gh-impostor=off (release-immutability lookup did "
+    "NOT run; 1 tag-pinned GitHub CLI extension install(s) kept as findings)",
+])
+def test_an_unfinished_release_lookup_is_noted_not_called_missing_coverage(
+        tmp_path: Path, status: str) -> None:
+    """P14.24's release lookup can only REMOVE a finding. When it does not
+    finish, every finding it would have judged is still reported, so nothing
+    is uncovered: it must not read as missing coverage, and a strict run must
+    not go red on it (a `${{ }}` pin can never be looked up, so that red could
+    never be fixed). It is still disclosed, on both surfaces."""
+    scan = _scan(gh_checks={
+        "P14.11": "ran: 3 unique pin(s) verified, 0 flagged",
+        "P14.24": status,
+    })
+    proc = run_scan(tmp_path, scan, env_extra={"CI_SECURE_GH_STRICT": "1"})
+
+    assert proc.returncode == 0, proc.stdout
+    assert "::error::" not in proc.stdout
+    assert "did NOT run to completion" not in proc.summary
+    assert "P14.24" in proc.summary
+    assert "::notice::" in proc.stdout and "P14.24" in proc.stdout
+
+
 def test_a_skipped_check_is_disclosed_in_the_summarys_first_lines(
         tmp_path: Path) -> None:
     """Both surfaces say it, and the summary says it before anything reassuring.

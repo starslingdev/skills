@@ -2523,22 +2523,38 @@ def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any]
 
 
 def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
-    """Parse the Buildx node block, retaining nodes with unusable platforms."""
+    """Parse the last complete Buildx node block, including unusable platforms."""
     in_nodes = False
     nodes: list[dict[str, str]] = []
     nodes_header = ""
     awaiting_platform = False
+    complete_blocks: list[tuple[str, list[dict[str, str]]]] = []
+
+    def finish_block() -> None:
+        nonlocal in_nodes
+        if (in_nodes and nodes_header and nodes
+                and all(node["platforms"] for node in nodes)):
+            complete_blocks.append((nodes_header, [dict(node) for node in nodes]))
+        in_nodes = False
+
     for line in lines:
         if re.search(r"\bNodes:\s*$", line):
+            finish_block()
             in_nodes = True
             nodes_header = line
+            nodes = []
+            awaiting_platform = False
             continue
         if not in_nodes:
             continue
+        if re.search(r"##\[(?:group|endgroup)\]", line, re.IGNORECASE):
+            finish_block()
+            continue
         if re.search(r"#\d+\s+\[[^\]]+\]\s+(?:FROM|RUN|COPY|ADD)\b", line,
                      re.IGNORECASE):
+            finish_block()
             break
-        if re.search(r"\bName:\s+\S+", line):
+        if re.match(r"^Name:\s+\S+", line):
             nodes.append({"name": line, "platforms": "", "native": ""})
             awaiting_platform = True
             continue
@@ -2553,7 +2569,17 @@ def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
             nodes[-1]["platforms"] = line
             nodes[-1]["native"] = detected[0] if detected else ""
             awaiting_platform = False
-    return nodes_header, nodes
+            continue
+        if re.search(r"^\s*[A-Za-z][A-Za-z0-9 ._#/-]*:\s*.*$", line):
+            # Buildx adds fields over time, and BuildKit label entries are
+            # indented below `Labels:`. Any key/value row is node metadata;
+            # structural group or build-step boundaries above end the block.
+            continue
+        if not line.strip():
+            continue
+        finish_block()
+    finish_block()
+    return complete_blocks[-1] if complete_blocks else ("", [])
 
 
 def _buildx_single_node(
