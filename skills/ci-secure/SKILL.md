@@ -88,11 +88,11 @@ respect to the report (e.g. `["P14.10", "P14.9"]`). Every group needs an
 attacker scenario in Phase 2.5, because **every group renders** — no render
 cut, no tiering, no topping-up.
 
-The impostor-SHA check takes `--gh-impostor auto|on|off`, default `auto`: it
-runs iff gh is authenticated. `on` demands it (scan.py exits 2 if gh is not
-authenticated, rather than quietly skipping); `off` disables it. Either way
-`gh_checks` records the status. **A skipped network-gated check is never a
-pass** — the report and terminal summary must both say so explicitly.
+`--gh-impostor auto|on|off` (default `auto`: runs iff gh is authenticated)
+gates the impostor-SHA check AND P14.24's release-immutability lookup. `on`
+demands gh (scan.py exits 2, never a quiet skip); `off` disables both, and
+`gh_checks` records each. **A skipped P14.11 is never a pass** — report and
+terminal summary say so; a skipped P14.24 lookup only keeps its findings.
 
 **Each later block re-derives `$FINDINGS`/`$REPORT` on its first line (fresh
 shell); inline commands use the literal path. Write NO scratch or pointer
@@ -167,8 +167,8 @@ spacing-sensitive — see the reference above):
 ```bash
 SLUG="$(printf '%s' "$(git rev-parse --show-toplevel)" | shasum | cut -c1-12)"; FINDINGS="${TMPDIR:-/tmp}/ci-secure-findings-${SLUG}.json"; REPORT="${TMPDIR:-/tmp}/ci-secure-report-${SLUG}.md"
 grep '^CI Secure' "$REPORT"                       # the banner (ENDS with the impostor word; `not recorded` is two)
-python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("gh_checks",{}).get("P14.11",""))' "$FINDINGS"  # status + pin detail
-grep '^| .*P14\.11' "$REPORT"                      # the ⚠️ vector-map row — only carries the reason on a skip/partial
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("gh_checks",{}).get("P14.11","")); print(d.get("action_lockfile","")); print(d.get("gh_checks",{}).get("P14.24",""))' "$FINDINGS"  # P14.11 status + pin detail, the lockfile state + count, then the P14.24 lookup status
+grep '^| [^*].*P14\.11' "$REPORT"                  # the ⚠️ vector-map row — only carries the reason on a skip/partial
 grep '^| \*\*Coverage\*\* |' "$REPORT"               # the provenance row
 grep -A4 'Incomplete coverage' "$REPORT"          # only when Coverage says PARTIAL
 ```

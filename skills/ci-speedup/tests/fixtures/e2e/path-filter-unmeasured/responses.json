@@ -19,12 +19,7 @@
           "conclusion": "success",
           "created_at": "2026-01-28T00:00:00Z",
           "run_started_at": "2026-01-28T00:00:00Z",
-          "updated_at": "2026-01-28T00:05:00Z",
-          "pull_requests": [
-            {
-              "number": 1
-            }
-          ]
+          "updated_at": "2026-01-28T00:05:00Z"
         },
         {
           "id": 1002,
@@ -35,12 +30,7 @@
           "conclusion": "success",
           "created_at": "2026-01-27T00:00:00Z",
           "run_started_at": "2026-01-27T00:00:00Z",
-          "updated_at": "2026-01-27T00:05:00Z",
-          "pull_requests": [
-            {
-              "number": 2
-            }
-          ]
+          "updated_at": "2026-01-27T00:05:00Z"
         },
         {
           "id": 1003,
@@ -51,12 +41,7 @@
           "conclusion": "success",
           "created_at": "2026-01-26T00:00:00Z",
           "run_started_at": "2026-01-26T00:00:00Z",
-          "updated_at": "2026-01-26T00:05:00Z",
-          "pull_requests": [
-            {
-              "number": 3
-            }
-          ]
+          "updated_at": "2026-01-26T00:05:00Z"
         }
       ]
     }
