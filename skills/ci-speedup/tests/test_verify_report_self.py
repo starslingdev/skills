@@ -322,6 +322,8 @@ def test_measured_opt32_is_the_only_new_pole_hygiene_exception(tmp_path: Path):
             "workflow_file": ".github/workflows/ci.yml",
             "path_filter_measurement": {
                 "sampled_prs": 60,
+                "sampled_runs": 60,
+                "runs_with_pr_number": 60,
                 "would_skip_prs": skipped,
                 "hit_rate": rate,
             },
@@ -336,12 +338,47 @@ def test_measured_opt32_is_the_only_new_pole_hygiene_exception(tmp_path: Path):
                     findings=finding(skipped=0, rate=0.0)) == "PASS"
     assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
                     findings=finding(skipped=3, rate=0.05, modeled=49.3)) == "PASS"
+    partial = finding(skipped=0, rate=0.0)
+    stamp = partial["findings"][0]["path_filter_measurement"]
+    stamp["runs_with_pr_number"] = 30
+    partial["findings"][0]["evidence"] = "Measured on 30 of 60 sampled runs"
+    assert _tag_for(rep + sect + "\nMeasured on 30 of 60 sampled runs", _DOUBLE_FRAME, tmp_path,
+                    findings=partial) == "FAIL"
     # FAIL: an inconsistent stamp or positive result without its modeled value
     # cannot use the exception. Other patterns remain covered by the discriminator above.
     assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
                     findings=finding(skipped=3, rate=0.5, modeled=49.3)) == "FAIL"
     assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
                     findings=finding(skipped=3, rate=0.05)) == "FAIL"
+
+
+def test_opt32_coverage_check_respects_the_rendered_member_cap(tmp_path: Path):
+    disclosures = [f"Measured on {30 + i} of {60 + i} sampled runs" for i in range(9)]
+    findings = []
+    for i, disclosure in enumerate(disclosures):
+        numbered = 30 + i
+        findings.append({
+            "pattern": "OPT32",
+            "runner_min_saving": None,
+            "wall_clock_p50_s": 0.0,
+            "job": f"test-{i}",
+            "affected_jobs": [f"test-{i}"],
+            "workflow_file": f".github/workflows/ci-{i}.yml",
+            "evidence": disclosure,
+            "path_filter_measurement": {
+                "sampled_prs": numbered,
+                "sampled_runs": 60 + i,
+                "runs_with_pr_number": numbered,
+                "would_skip_prs": 0,
+                "hit_rate": 0.0,
+            },
+        })
+    report = (_good() + _also_noticed_section("ci-0.yml", "test-0",
+                                              "OPT32 - Add path filters")
+              + "\n" + "\n".join(disclosures[:8]))
+
+    assert _tag_for(report, _DOUBLE_FRAME, tmp_path,
+                    findings={"findings": findings}) == "PASS"
 
 
 def _struct_findings(*findings: dict) -> dict:
@@ -7180,6 +7217,8 @@ def test_unmeasured_path_filter_must_render_even_without_a_drilled_pole(tmp_path
             "status": "unmeasured",
             "reason": "changed-file list unavailable or incomplete",
             "sampled_prs": 60,
+            "sampled_runs": 60,
+            "runs_with_pr_number": 60,
         },
     }]}), encoding="utf-8")
 

@@ -6168,11 +6168,25 @@ def _measure_opt32_path_filters(
     if not targets:
         return
     repo_patterns, pattern_sources = _opt32_repository_paths_ignore(wf_docs)
+    pr_runs_by_workflow = {
+        workflow: [
+            run for run in runs
+            if str(run.get("event") or "") in {"pull_request", "pull_request_target"}
+        ]
+        for workflow, runs in sampled_runs_by_wf.items()
+    }
     numbers_by_workflow = {
         workflow: list(dict.fromkeys(
             number for run in runs for number in [_run_pr_number(run)]
             if isinstance(number, int)))
-        for workflow, runs in sampled_runs_by_wf.items()
+        for workflow, runs in pr_runs_by_workflow.items()
+    }
+    run_coverage_by_workflow = {
+        workflow: (
+            len(runs),
+            sum(isinstance(_run_pr_number(run), int) for run in runs),
+        )
+        for workflow, runs in pr_runs_by_workflow.items()
     }
     all_numbers = list(dict.fromkeys(
         number for finding in targets
@@ -6183,14 +6197,28 @@ def _measure_opt32_path_filters(
         if number not in changed:
             changed[number] = _opt32_changed_files(client, repo, number)
     for finding in targets:
-        numbers = numbers_by_workflow.get(str(finding.get("workflow_file") or ""), [])
+        workflow = str(finding.get("workflow_file") or "")
+        numbers = numbers_by_workflow.get(workflow, [])
+        sampled_runs, runs_with_pr_number = run_coverage_by_workflow.get(
+            workflow, (0, 0))
         if not numbers:
+            if sampled_runs <= 0:
+                continue
+            finding["path_filter_measurement"] = {
+                "status": "unmeasured",
+                "reason": "no PR number on sampled runs",
+                "sampled_prs": 0,
+                "sampled_runs": sampled_runs,
+                "runs_with_pr_number": runs_with_pr_number,
+            }
             continue
         if any(changed[number] is None for number in numbers):
             finding["path_filter_measurement"] = {
                 "status": "unmeasured",
                 "reason": "changed-file list unavailable or incomplete",
                 "sampled_prs": len(numbers),
+                "sampled_runs": sampled_runs,
+                "runs_with_pr_number": runs_with_pr_number,
             }
             continue
         would_skip = 0
@@ -6208,6 +6236,8 @@ def _measure_opt32_path_filters(
         source = "repository paths-ignore" if repo_patterns else "conservative defaults"
         finding["path_filter_measurement"] = {
             "sampled_prs": sampled,
+            "sampled_runs": sampled_runs,
+            "runs_with_pr_number": runs_with_pr_number,
             "would_skip_prs": would_skip,
             "hit_rate": round(hit_rate, 4),
             "source": source,
@@ -6216,6 +6246,10 @@ def _measure_opt32_path_filters(
         }
         measured = (f" Measured {would_skip} of {sampled} sampled PRs as fully "
                     "covered by the candidate filter.")
+        coverage = (
+            f" Measured on {runs_with_pr_number} of {sampled_runs} sampled runs; "
+            "runs without a PR number were excluded."
+            if runs_with_pr_number < sampled_runs else "")
         if repo_patterns:
             named = ", ".join(f"`{p}`" for p in repo_patterns)
             workflows = ", ".join(f"`{p}`" for p in pattern_sources)
@@ -6225,7 +6259,7 @@ def _measure_opt32_path_filters(
             suffix = (" Measured with conservative documentation-only defaults: "
                       "`*.md`, `docs/**/*.md`, `LICENSE*`, `.github/*.md`.")
         finding["evidence"] = (str(finding.get("evidence") or "").rstrip()
-                               + measured + suffix)
+                               + measured + coverage + suffix)
 
 
 _CACHE_SIZING_PATTERNS = frozenset(
@@ -24514,7 +24548,7 @@ _CACHE_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 
 def _cache_keywords_for_finding(finding: dict[str, Any]) -> tuple[str, ...]:
-    """Scope a static compiler-cache lint to the cache family it predicts."""
+    """Scope a static cache lint to the cache family it predicts."""
     pattern = str(finding.get("pattern") or "")
     keywords = _CACHE_KEYWORDS.get(pattern, ())
     if not finding.get("static_cache_lint"):
@@ -24522,12 +24556,16 @@ def _cache_keywords_for_finding(finding: dict[str, Any]) -> tuple[str, ...]:
     explicit = str(finding.get("cache_family") or "").strip().lower()
     if explicit:
         return (explicit,)
-    evidence = " ".join(str(finding.get(key) or "")
-                        for key in ("evidence", "subject", "evidence_snippet")).lower()
-    compiler_families = tuple(
-        family for family in ("sccache", "ccache", "staticcheck", "golangci", "buildkit", "go")
-        if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", evidence))
-    return compiler_families or keywords
+    explicit_path = str(
+        finding.get("cache_path") or finding.get("cache_key") or ""
+    ).strip().lower()
+    if explicit_path:
+        return (explicit_path,)
+    # An unscoped static lint must not borrow an unrelated cache line. Current
+    # scanners stamp one of the fields above; this sentinel keeps older or
+    # malformed findings unconfirmed instead of treating an empty tuple as
+    # "any cache".
+    return ("__unscoped_static_cache_lint__",)
 
 
 def _clean_log_line(line: str) -> str:

@@ -19,9 +19,11 @@ from test_opt81_faster_runner import _CI, _COLLECT_YAML, _Opt81Client, _cts  # n
 
 
 class _PathFilterClient(_Opt81Client):
-    def __init__(self, paths_by_pr: dict[int, list[str]], *, yaml: str = _COLLECT_YAML):
+    def __init__(self, paths_by_pr: dict[int, list[str]], *, yaml: str = _COLLECT_YAML,
+                 missing_pr_numbers: set[int] | None = None):
         super().__init__([("ubuntu-latest", 197)] * 60, yaml)
         self.paths_by_pr = paths_by_pr
+        self.missing_pr_numbers = missing_pr_numbers or set()
         self.changed_file_calls = 0
 
     def json(self, endpoint, allow_missing=False):
@@ -29,7 +31,8 @@ class _PathFilterClient(_Opt81Client):
         if response is not None:
             if isinstance(response, dict) and "workflow_runs" in response:
                 for i, run in enumerate(response["workflow_runs"], 1):
-                    run["pull_requests"] = [{"number": i}]
+                    run["pull_requests"] = (
+                        [] if i in self.missing_pr_numbers else [{"number": i}])
             return response
         match = re.fullmatch(r"repos/o/r/pulls/(\d+)/files\?per_page=100(?:&page=(\d+))?", endpoint)
         if match:
@@ -161,6 +164,38 @@ def test_opt32_unmeasured_ceiling_stays_visible_through_collect_and_verifier(
     report = _verify_full(doc, tmp_path)
     assert "hit rate not measured (changed-file list unavailable or incomplete)" in report
     assert "Add path filters" in report.split('<a id="also-noticed">', 1)[1]
+
+
+def test_opt32_without_pr_numbers_stays_visible_through_collect_and_verifier(
+        monkeypatch, tmp_path):
+    client = _PathFilterClient({}, missing_pr_numbers=set(range(1, 61)))
+
+    doc = _collect(monkeypatch, client)
+    measurement = next((
+        finding.get("path_filter_measurement")
+        for finding in doc["findings"] if finding.get("pattern") == "OPT32"
+    ), None)
+
+    assert measurement is not None
+    assert measurement["status"] == "unmeasured"
+    assert measurement["reason"] == "no PR number on sampled runs"
+    report = _verify_full(doc, tmp_path)
+    assert "hit rate not measured (no PR number on sampled runs)" in report
+
+
+def test_opt32_discloses_partial_pr_number_coverage_through_collect_and_verifier(
+        monkeypatch, tmp_path):
+    paths = {number: [f"src/file{number}.py"] for number in range(1, 31)}
+    client = _PathFilterClient(paths, missing_pr_numbers=set(range(31, 61)))
+
+    doc = _collect(monkeypatch, client)
+    finding = _opt32(doc)
+
+    assert finding["path_filter_measurement"]["sampled_runs"] == 60
+    assert finding["path_filter_measurement"]["runs_with_pr_number"] == 30
+    assert "Measured on 30 of 60 sampled runs" in finding["evidence"]
+    report = _verify_full(doc, tmp_path)
+    assert "Measured on 30 of 60 sampled runs" in report
 
 
 def test_opt32_unmeasured_disclosure_is_never_cut_by_the_appendix_cap():

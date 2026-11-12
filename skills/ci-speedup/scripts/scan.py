@@ -3505,7 +3505,8 @@ def _detect_opt9(doc: dict, raw: str) -> list[Hit]:
                     evidence=f"job `{job_name}`: " + "; ".join(cache_notes),
                     match_text=f"{job_name}#jest",
                     facts={"jest_static_notes": cache_notes,
-                           "static_cache_lint": True},
+                           "static_cache_lint": True,
+                           "cache_family": "jest"},
                 ))
     return hits
 
@@ -3784,8 +3785,10 @@ def _matrix_shard_leg_count(job: dict) -> int | None:
     return len(projected) if projected else None
 
 
-def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
-    """Repeated checkout/setup with no artifact handoff (OPT14 heuristic).
+def _opt14_setup_state(
+    doc: dict,
+) -> tuple[list[str], dict[str, int], dict[str, list[str]], bool]:
+    """Return repeated setup jobs and matrix facts for OPT14 and the guard.
 
     Repetition can be across at least two jobs or across the effective shard
     configurations of one matrix job. An upload-only step (for example a
@@ -3838,23 +3841,17 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
     # so keep it even when it is the workflow's only setup job.
     setup_jobs = sorted(set(_co_running(_jobs_from_doc(doc), setup_jobs))
                         | set(matrix_setup_legs))
-    if setup_jobs and not has_handoff:
-        if len(setup_jobs) >= 2:
-            evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "
-                        f"install with no `actions/upload-artifact` / "
-                        f"`download-artifact` handoff: {', '.join(setup_jobs)}")
-        else:
-            job_name = setup_jobs[0]
-            repeated = matrix_setup_repeated[job_name]
-            repeated_text = ", ".join(repeated[:-1])
-            if len(repeated) > 1:
-                repeated_text += f" and {repeated[-1]}"
-            else:
-                repeated_text = repeated[0]
-            evidence = (
-                f"shard matrix repeats {repeated_text} across "
-                f"{matrix_setup_legs[job_name]} legs with no artifact handoff: "
-                f"{job_name}")
+    return setup_jobs, matrix_setup_legs, matrix_setup_repeated, has_handoff
+
+
+def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
+    """Report repeated setup across jobs, while leaving lone-shard facts unreported."""
+    setup_jobs, matrix_setup_legs, matrix_setup_repeated, has_handoff = (
+        _opt14_setup_state(doc))
+    if len(setup_jobs) >= 2 and not has_handoff:
+        evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "
+                    f"install with no `actions/upload-artifact` / "
+                    f"`download-artifact` handoff: {', '.join(setup_jobs)}")
         return [Hit(
             line=1,
             affected_jobs=setup_jobs,
@@ -4717,6 +4714,60 @@ def _uses_persistent_remote_builder(job: dict) -> bool:
     return False
 
 
+def _static_cache_family(
+    *values: object,
+    cache_key: object = "",
+    cache_paths: object = (),
+) -> str:
+    """Return a stable cache-family token for log confirmation."""
+    key_text = str(cache_key or "").casefold()
+    key_without_expressions = re.sub(r"\$\{\{.*?\}\}", " ", key_text)
+    key_tokens = [
+        token.strip("._-")
+        for token in re.findall(r"[a-z][a-z0-9_.]*", key_without_expressions)
+    ]
+    key_tokens = [token for token in key_tokens if token]
+    if isinstance(cache_paths, (list, tuple, set)):
+        path_values = list(cache_paths)
+    else:
+        path_values = [cache_paths]
+    path_tokens = [
+        token.strip("._-")
+        for path in path_values
+        for token in re.findall(r"[a-z][a-z0-9_.]*", str(path or "").casefold())
+    ]
+    path_tokens = [token for token in path_tokens if token]
+    texts = [key_text, *(str(value or "").casefold() for value in values)]
+    for text in texts:
+        for family in (
+            "sccache", "ccache", "staticcheck", "golangci", "buildkit",
+            "jest", "playwright", "pnpm", "turbo", "cargo", "npm",
+            "maven", "go",
+        ):
+            if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", text):
+                return family
+    ignored = {
+        "build", "cache", "dependencies", "deps", "github", "home", "key",
+        "keys", "linux", "repository", "restore", "runner", "sha", "shared",
+    }
+    for token in reversed(path_tokens):
+        if token in key_tokens and token not in ignored:
+            return token
+    for token in reversed(key_tokens):
+        if (token not in ignored
+                and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
+            return token
+    text = " ".join(texts)
+    without_expressions = re.sub(r"\$\{\{.*?\}\}", " ", text)
+    tokens = re.findall(r"[a-z][a-z0-9_.]*", without_expressions)
+    for token in tokens:
+        token = token.strip("._-")
+        if (token and token not in ignored
+                and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
+            return token
+    return "declared-cache"
+
+
 def _detect_opt61(
     doc: dict, raw: str, *, saved_keys: list[str] | None = None,
 ) -> list[Hit]:
@@ -4729,8 +4780,10 @@ def _detect_opt61(
             continue
         cache_steps = _cache_action_steps(job)
         cache_paths: list[str] = []
+        cache_paths_by_step: dict[int, list[str]] = {}
         unknown_env_cache_names: set[str] = set()
         for cache_step in cache_steps:
+            step_cache_paths: list[str] = []
             values = (cache_step.get("with")
                       if isinstance(cache_step.get("with"), dict) else {})
             for raw_path in str(values.get("path") or "").splitlines():
@@ -4742,16 +4795,18 @@ def _detect_opt61(
                     # `${{ env.CACHE_ROOT }}/ccache`.  A value written through
                     # GITHUB_ENV is unavailable to the static YAML parser, but
                     # the suffix still proves which cache the action saves.
-                    cache_paths.append(raw_path.strip().casefold())
+                    step_cache_paths.append(raw_path.strip().casefold())
                     unknown_env_cache_names.update(
                         name.casefold()
                         for name in _CACHE_ENV_PATH_RE.findall(raw_path))
                 else:
-                    cache_paths.extend(
+                    step_cache_paths.extend(
                         line.strip().casefold()
                         for line in resolved.splitlines() if line.strip())
+            cache_paths.extend(step_cache_paths)
+            cache_paths_by_step[id(cache_step)] = step_cache_paths
         blob = "\n".join((_job_run_blob(job), _job_env_blob(job, doc)))
-        reasons: list[tuple[str, str]] = []
+        reasons: list[tuple[str, str, str]] = []
 
         for step in cache_steps:
             values = step.get("with") if isinstance(step.get("with"), dict) else {}
@@ -4762,13 +4817,26 @@ def _detect_opt61(
             if key and restore and rolling_key and not any(
                     saved_key.startswith(_normalized_actions_expression(prefix))
                     for prefix in restore for saved_key in saved_keys):
-                reasons.append(("restore-keys", "none of its `restore-keys` can restore the "
-                                "rolling saved-key family on a later edit"))
+                reasons.append((
+                    "restore-keys",
+                    "none of its `restore-keys` can restore the rolling saved-key "
+                    "family on a later edit",
+                    _static_cache_family(
+                        cache_key=key,
+                        cache_paths=cache_paths_by_step.get(id(step), [])),
+                ))
             size = values.get("max-size") or values.get("max_size")
             mib = _size_mib(str(size)) if size is not None else None
             if mib is not None and mib <= 64:
-                reasons.append((str(size), f"its compiler-cache size limit is only {size} and "
-                                "may churn before the next reuse"))
+                reasons.append((
+                    str(size),
+                    f"its compiler-cache size limit is only {size} and may churn before "
+                    "the next reuse",
+                    _static_cache_family(
+                        _uses(step),
+                        cache_key=key,
+                        cache_paths=cache_paths_by_step.get(id(step), [])),
+                ))
 
         for match in re.finditer(
                 r"\bCCACHE_MAXSIZE\s*=\s*([^\s;&]+)|\bccache\s+-M\s+([^\s;&]+)",
@@ -4776,9 +4844,12 @@ def _detect_opt61(
             value = match.group(1) or match.group(2)
             mib = _size_mib(value)
             if mib is not None and mib <= 64:
-                reasons.append((match.group(0),
-                                f"its compiler-cache size limit is only {value} and may churn "
-                                "before the next reuse"))
+                reasons.append((
+                    match.group(0),
+                    f"its compiler-cache size limit is only {value} and may churn before "
+                    "the next reuse",
+                    "ccache",
+                ))
 
         temp = _TEMP_CACHE_RE.search(blob)
         cache_path_text = "\n".join(cache_paths)
@@ -4885,8 +4956,11 @@ def _detect_opt61(
         if temp and not (persisted_declared or any(
                 _cache_path_covers(path, temp.group(0).split("=", 1)[-1])
                 for path in cache_paths)):
-            reasons.append((temp.group(0),
-                            "a compiler or analysis cache lives in temporary storage and is not saved"))
+            reasons.append((
+                temp.group(0),
+                "a compiler or analysis cache lives in temporary storage and is not saved",
+                _static_cache_family(temp.group(0)),
+            ))
         uses_compiler_cache = bool(_COMPILER_CACHE_RE.search(blob))
         supplied_by_cache_action = any(
             re.search(r"ccache-action|rust-cache", _uses(step), re.IGNORECASE)
@@ -4902,8 +4976,12 @@ def _detect_opt61(
         if (uses_compiler_cache and not supplied_by_cache_action and not persisted_compiler
                 and not _is_self_hosted(job)
                 and not _compiler_cache_has_remote_backend(job, doc)):
-            reasons.append((_COMPILER_CACHE_RE.search(blob).group(0),
-                            "the compiler cache has no persistence step"))
+            matched_compiler = _COMPILER_CACHE_RE.search(blob).group(0)
+            reasons.append((
+                matched_compiler,
+                "the compiler cache has no persistence step",
+                _static_cache_family(matched_compiler),
+            ))
         analysis_dir_entries = [
             (name, value) for name, value in declared_dirs
             if name in {"staticcheck_cache", "golangci_lint_cache"}
@@ -4915,8 +4993,12 @@ def _detect_opt61(
                                or bool(unknown_env_cache_names & {
                                    "staticcheck_cache", "golangci_lint_cache"}))
         if _ANALYSIS_CACHE_RE.search(blob) and not persisted_analysis:
-            reasons.append((_ANALYSIS_CACHE_RE.search(blob).group(0),
-                            "the analysis cache has no persistence step"))
+            matched_analysis = _ANALYSIS_CACHE_RE.search(blob).group(0)
+            reasons.append((
+                matched_analysis,
+                "the analysis cache has no persistence step",
+                _static_cache_family(matched_analysis),
+            ))
         steps = _steps(job)
         cache_indices = [i for i, step in enumerate(steps) if step in cache_steps]
         deleted: re.Match[str] | None = None
@@ -4929,7 +5011,11 @@ def _detect_opt61(
             if candidate is None or not prior:
                 continue
             deleted = candidate
-            reasons.append((candidate.group(0), "a later step deletes the cache directory"))
+            reasons.append((
+                candidate.group(0),
+                "a later step deletes the cache directory",
+                _static_cache_family(candidate.group(0)),
+            ))
             restore_index = max(prior)
             # With no command between restore and deletion, the restored path is
             # provably unread. A wrapper command may consume it, so fail closed.
@@ -4937,8 +5023,11 @@ def _detect_opt61(
                                       for s in steps[restore_index + 1:index])
             break
 
-        for matched, reason in dict.fromkeys(reasons):
-            facts: dict[str, Any] = {"static_cache_lint": True}
+        for matched, reason, cache_family in dict.fromkeys(reasons):
+            facts: dict[str, Any] = {
+                "static_cache_lint": True,
+                "cache_family": cache_family,
+            }
             if deleted is not None and matched == deleted.group(0) and deletion_unread:
                 facts["cache_path_consumed"] = False
             hits.append(Hit(
@@ -4987,7 +5076,7 @@ def _detect_opt4(doc: dict, raw: str) -> list[Hit]:
                           f"its intended later scope: {reason}; confirm the miss in its own build log "
                           "before crediting a saving"),
                 match_text=match.group(0).strip(),
-                facts={"static_cache_lint": True},
+                facts={"static_cache_lint": True, "cache_family": "buildkit"},
             ))
             break
     return hits
@@ -5036,7 +5125,7 @@ def _detect_opt4_ephemeral_mounts(
                           "crediting a saving"),
                 match_text=matched,
                 snippet=f"{dockerfile.relative_to(root)}: {matched}",
-                facts={"static_cache_lint": True},
+                facts={"static_cache_lint": True, "cache_family": "buildkit"},
             )))
     return out
 
@@ -5072,7 +5161,8 @@ def _detect_opt62(doc: dict, raw: str) -> list[Hit]:
                              if go_clean else "on a self-hosted (persistent) runner destroys build artifacts")
                           + f" (`{m.group(0).strip()}`) before each run, defeating reuse"),
                 match_text=job_name,
-                facts=({"static_cache_lint": True} if go_clean else {}),
+                facts=({"static_cache_lint": True, "cache_family": "go"}
+                       if go_clean else {}),
             ))
     return hits
 
@@ -9378,6 +9468,22 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # document is byte-identical to before. Rendered as the "Parallel steps"
         # row of the report's Data sources table.
         extra["parallel_steps"] = parallel_stats
+    matrix_setup_facts: dict[str, dict[str, dict[str, Any]]] = {}
+    for rel, doc, _raw in parsed:
+        _jobs, leg_counts, repeated_work, has_handoff = _opt14_setup_state(doc)
+        leg_counts = {
+            job: legs for job, legs in leg_counts.items()
+            if (rel, job) not in unreadable_jobs
+        }
+        if leg_counts and not has_handoff:
+            matrix_setup_facts[rel] = {
+                job: {"legs": legs, "repeated": repeated_work.get(job, [])}
+                for job, legs in sorted(leg_counts.items())
+            }
+    if matrix_setup_facts:
+        # Guard-only facts: a lone sharded test job is not a report finding,
+        # but growing its matrix still needs the differential warning.
+        extra["matrix_setup_facts"] = matrix_setup_facts
 
     return {
         **extra,

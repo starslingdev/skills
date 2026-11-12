@@ -1,0 +1,344 @@
+"""A workflow lockfile must never make the impostor-SHA check go quiet.
+
+GitHub's workflow lockfile (`.github/workflows/actions.lock`, written by
+`gh actions-lock`) lets a repository keep `uses: owner/repo@v7.0.1` in its
+YAML while the commit that runs lives only in the lockfile. The impostor-SHA
+check (P14.11) reads full-commit pins from `uses:` lines, so on a locked
+repository it has nothing to check — and before this test the report said
+nothing about it either. A check with nothing to check must say why.
+
+The note is informational, never a coverage gap: GitHub itself verifies a
+locked commit at run time (reachable from its recorded ref, same repository
+identity), so a locked repository did the right thing and must still read
+"Coverage: complete". An unreadable or malformed lockfile is never credited.
+"""
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+_SKILL_DIR = Path(__file__).resolve().parents[1]
+_SCAN_SCRIPT = _SKILL_DIR / "scripts" / "scan.py"
+_SCRIPTS = str(_SKILL_DIR / "scripts")
+
+# Import report.py the way test_report.py does (module names collide across
+# the skills' scripts/ dirs under the repo-wide run).
+_saved_config = sys.modules.pop("config", None)
+_saved_report = sys.modules.pop("report", None)
+sys.path.insert(0, _SCRIPTS)
+try:
+    import report  # noqa: E402
+finally:
+    try:
+        sys.path.remove(_SCRIPTS)
+    except ValueError:                          # pragma: no cover - defensive
+        pass
+    if _saved_config is not None:
+        sys.modules["config"] = _saved_config
+    else:
+        sys.modules.pop("config", None)
+    if _saved_report is not None:
+        sys.modules["report"] = _saved_report
+    else:
+        sys.modules.pop("report", None)
+
+
+# Modeled on GitHub's documented lockfile setup: two jobs both checking out
+# with a tag, one third-party action with a tag, and a lockfile that onboards
+# the workflow and records the commit for each reference.
+_LINT_YML = """\
+name: lint
+on: [push, pull_request]
+permissions: {}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - uses: j178/prek-action@v3.1.0
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - run: echo done
+"""
+
+_ACTIONS_LOCK = """\
+version: 'v0.0.3'
+workflows:
+  .github/workflows/lint.yml:
+    - actions/checkout@v7.0.1
+    - j178/prek-action@v3.1.0
+dependencies:
+  actions/checkout@v7.0.1:
+    ref: v7.0.1
+    commit: 'sha1-3d3c42e5aac5ba805825da76410c181273ba90b1'
+    owner_id: 44036562
+    repo_id: 197814629
+  j178/prek-action@v3.1.0:
+    ref: v3.1.0
+    commit: 'sha1-44924fe9ef4a6f88253c4b6b1bf11c689d3ce53d'
+    owner_id: 2123180
+    repo_id: 905126443
+"""
+
+
+def _repo(tmp_path: Path, lock: str | None) -> Path:
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "lint.yml").write_text(_LINT_YML, encoding="utf-8")
+    if lock is not None:
+        (wf / "actions.lock").write_text(lock, encoding="utf-8")
+    return tmp_path
+
+
+def _scan(root: Path) -> dict:
+    result = subprocess.run(
+        [sys.executable, str(_SCAN_SCRIPT), "--root", str(root),
+         "--gh-impostor", "off"],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def _lockfile_row(md: str) -> str:
+    rows = [ln for ln in md.splitlines() if ln.startswith("| **Action lockfile** |")]
+    return rows[0] if rows else ""
+
+
+def test_locked_references_are_disclosed_not_silently_unchecked(tmp_path: Path) -> None:
+    data = _scan(_repo(tmp_path, _ACTIONS_LOCK))
+    lock = data.get("action_lockfile")
+    assert lock == {
+        "path": ".github/workflows/actions.lock",
+        "state": "valid",
+        "covered_references": 3,
+        "covered_workflows": [".github/workflows/lint.yml"],
+    }, lock
+    # Informational: GitHub verifies locked commits itself, so a locked
+    # repository's coverage stays complete.
+    assert data["coverage_notes"] == []
+    assert data["scan_incomplete"] == []
+    assert data["dropped_matches"] == []
+
+    md = report.render(data)
+    row = _lockfile_row(md)
+    assert row, "the report must carry an Action lockfile row"
+    assert "3 action reference(s) in 1 workflow(s)" in row
+    assert "`.github/workflows/actions.lock`" in row
+    assert "GitHub verifies each locked commit at run time" in row
+    assert "P14.11" in row
+    assert "✅ complete" in md
+
+
+@pytest.mark.parametrize("lock", [
+    None,                                            # no lockfile
+    "version: [unclosed\n",                          # does not parse
+    _ACTIONS_LOCK.replace("sha1-3d3c42e5aac5ba805825da76410c181273ba90b1",
+                          "sha1-3d3c42e5"),          # short commit
+    _ACTIONS_LOCK.replace("'v0.0.3'", "'v9.0.0'"),   # undocumented version
+    _ACTIONS_LOCK.replace("    owner_id: 2123180\n", ""),  # missing identity
+    _ACTIONS_LOCK.replace("dependencies:\n",                    # dup key,
+                          "dependencies:\n  actions/checkout@v7.0.1:\n"
+                          "    ref: v7.0.1\n", 1),               # bad copy first
+    _ACTIONS_LOCK.replace("    - j178/prek-action@v3.1.0\n",
+                          "    - j178/prek-action@v3.1.0\n"
+                          "    - other/action@v1\n"),  # listed, no entry
+], ids=["absent", "unparseable", "short-commit", "unknown-version",
+        "missing-owner-id", "duplicate-key", "dangling-reference"])
+def test_no_or_malformed_lockfile_credits_nothing(tmp_path: Path, lock) -> None:
+    data = _scan(_repo(tmp_path, lock))
+    entry = data.get("action_lockfile")
+    assert isinstance(entry, dict), entry
+    assert entry["covered_references"] == 0
+    assert entry["covered_workflows"] == []
+    assert entry["state"] == ("absent" if lock is None else "invalid")
+    row = _lockfile_row(report.render(data))
+    assert "verifies each locked commit" not in row
+    if lock is None:
+        assert row == ""
+    else:
+        assert "not a lockfile this scan can read" in row
+        # The row names the check it bears on, so the terminal summary's
+        # P14.11 line can say the lockfile was not credited.
+        assert "P14.11" in row
+
+
+def test_unlisted_workflow_is_not_covered(tmp_path: Path) -> None:
+    """Only a workflow listed under `workflows:` runs its locked commits."""
+    lock = _ACTIONS_LOCK.replace(".github/workflows/lint.yml",
+                                 ".github/workflows/other.yml")
+    data = _scan(_repo(tmp_path, lock))
+    entry = data["action_lockfile"]
+    assert entry["state"] == "valid"
+    assert entry["covered_references"] == 0
+    assert entry["covered_workflows"] == []
+    assert "verifies each locked commit" not in _lockfile_row(report.render(data))
+
+
+_REUSABLE_YML = """\
+name: release
+on: [push]
+permissions: {}
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+          uses: actions/checkout@v7.0.1
+  publish:
+    uses: org/shared/.github/workflows/publish.yml@v1
+"""
+
+_REUSABLE_LOCK = """\
+version: 'v0.0.3'
+workflows:
+  .github/workflows/release.yml:
+    - actions/checkout@v7.0.1
+    - org/shared/.github/workflows/publish.yml@v1
+dependencies:
+  actions/checkout@v7.0.1:
+    ref: v7.0.1
+    commit: 'sha1-3d3c42e5aac5ba805825da76410c181273ba90b1'
+    owner_id: 44036562
+    repo_id: 197814629
+  org/shared/.github/workflows/publish.yml@v1:
+    ref: v1
+    commit: 'sha1-1111111111111111111111111111111111111111'
+    owner_id: 1
+    repo_id: 2
+"""
+
+
+def test_only_step_actions_are_counted(tmp_path: Path) -> None:
+    """GitHub's lockfile does not pin calls to reusable workflows
+    (`jobs.<id>.uses`), so a lockfile entry for one is not verified at run
+    time and must never be counted as one GitHub verifies. Nor is an action
+    input that happens to be named `uses` under `with:` a reference."""
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    (wf / "release.yml").write_text(_REUSABLE_YML, encoding="utf-8")
+    (wf / "actions.lock").write_text(_REUSABLE_LOCK, encoding="utf-8")
+    entry = _scan(tmp_path)["action_lockfile"]
+    assert entry["state"] == "valid"
+    assert entry["covered_references"] == 1, entry
+    assert entry["covered_workflows"] == [".github/workflows/release.yml"]
+
+
+def test_misspelled_lockfile_is_named_by_its_real_path(tmp_path: Path) -> None:
+    """GitHub reads only `actions.lock`; a case variant covers nothing, and the
+    report must name the file that is actually there, not a path that is not."""
+    root = _repo(tmp_path, None)
+    (root / ".github" / "workflows" / "Actions.lock").write_text(
+        _ACTIONS_LOCK, encoding="utf-8")
+    data = _scan(root)
+    entry = data["action_lockfile"]
+    assert entry["state"] == "invalid"
+    assert entry["path"] == ".github/workflows/Actions.lock", entry
+    row = _lockfile_row(report.render(data))
+    assert "`.github/workflows/Actions.lock`" in row
+
+
+def test_symlinked_or_undecodable_lockfile_credits_nothing(tmp_path: Path) -> None:
+    """The two fail-closed branches the parity test cannot reach: a symbolic
+    link (ci-secure refuses any) and bytes that are not UTF-8 (must not crash
+    the scan)."""
+    linked = _repo(tmp_path / "linked", None)
+    real = tmp_path / "real.lock"
+    real.write_text(_ACTIONS_LOCK, encoding="utf-8")
+    (linked / ".github" / "workflows" / "actions.lock").symlink_to(real)
+    assert _scan(linked)["action_lockfile"]["state"] == "invalid"
+    raw = _repo(tmp_path / "raw", None)
+    (raw / ".github" / "workflows" / "actions.lock").write_bytes(
+        b"version: '\xff\xfe'\n")
+    assert _scan(raw)["action_lockfile"]["state"] == "invalid"
+
+
+_COUNTING_YML = """\
+name: lint
+on: [push]
+permissions: {}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: other/unlocked@v2
+      - uses: ./.github/actions/local
+      - uses: docker://alpine:3
+"""
+
+
+def test_counting_excludes_commit_pins_unlocked_and_local_refs(tmp_path: Path) -> None:
+    """Only the tag reference the lockfile locks counts: a full-commit pin is
+    P14.11's own, a reference the lockfile does not lock is plainly unpinned,
+    and local / docker references are not actions the lockfile records."""
+    # The lockfile ALSO locks the full-commit reference, so only the
+    # commit-pin exclusion (not a missing entry) keeps it out of the count.
+    lock = _ACTIONS_LOCK.replace(
+        "    - j178/prek-action@v3.1.0\n",
+        "    - j178/prek-action@v3.1.0\n"
+        "    - actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+    ) + (
+        "  actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1:\n"
+        "    ref: v7.0.1\n"
+        "    commit: 'sha1-3d3c42e5aac5ba805825da76410c181273ba90b1'\n"
+        "    owner_id: 44036562\n"
+        "    repo_id: 197814629\n"
+    )
+    root = _repo(tmp_path, lock)
+    (root / ".github" / "workflows" / "lint.yml").write_text(
+        _COUNTING_YML, encoding="utf-8")
+    entry = _scan(root)["action_lockfile"]
+    assert entry["covered_references"] == 1, entry
+
+
+_SKILL_MD = (_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+
+
+def _skill_md_findings_reader() -> str:
+    """The `python3 -c '...' "$FINDINGS"` program SKILL.md hands the agent."""
+    found = re.findall(r"^python3 -c '([^']+)' \"\$FINDINGS\"", _SKILL_MD,
+                       re.MULTILINE)
+    assert len(found) == 1, found
+    return found[0]
+
+
+@pytest.mark.parametrize("lock,state", [
+    (_ACTIONS_LOCK, "valid"),
+    ("version: [unclosed\n", "invalid"),
+], ids=["valid", "invalid"])
+def test_skill_md_commands_reach_the_lockfile_state(tmp_path: Path, lock,
+                                                     state: str) -> None:
+    """terminal-summary.md tells the agent to carry the lockfile onto the
+    P14.11 line. The agent runs only SKILL.md's commands, so one of them must
+    hand it the lockfile state in BOTH states, and the P14.11 grep must keep
+    returning only the vector-map row it is documented to return."""
+    data = _scan(_repo(tmp_path, lock))
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(data), encoding="utf-8")
+    out = subprocess.run(
+        [sys.executable, "-c", _skill_md_findings_reader(), str(findings)],
+        capture_output=True, text=True, timeout=60, check=True,
+    ).stdout
+    assert f"'state': '{state}'" in out, out
+    md_path = tmp_path / "report.md"
+    md_path.write_text(report.render(data), encoding="utf-8")
+    pat = re.search(r"^grep '([^']*P14[^']*)' \"\$REPORT\"", _SKILL_MD,
+                    re.MULTILINE).group(1)
+    lines = subprocess.run(["grep", pat, str(md_path)], capture_output=True,
+                           text=True, timeout=60).stdout.splitlines()
+    assert lines and not any("Action lockfile" in ln for ln in lines), lines
