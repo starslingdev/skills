@@ -312,9 +312,10 @@ approval.
 **Approval status:** awaiting owner approval.
 ### `typical-floor-thresholds`
 
-**Current value:** a floor needs 80% near-universal presence
-(`_FLOOR_NEAR_UNIVERSAL_FRAC`) and strictly more than 50% co-occurrence
-(`_FLOOR_COOCCUR_MAJORITY_FRAC`).
+**Current value:** when per-pole co-occurrence data is available, a floor needs
+strictly more than 50% co-occurrence (`_FLOOR_COOCCUR_MAJORITY_FRAC`). When it
+is unavailable, the fallback needs 80% presence relative to the most-present
+sibling (`_FLOOR_NEAR_UNIVERSAL_FRAC`).
 
 **Report statements:** typical-PR floor, recurrent chain framing, and which
 check is treated as part of the common wait.
@@ -322,8 +323,8 @@ check is treated as part of the common wait.
 **Reason:** The floor should describe a common path rather than a minority
 combination of checks.
 
-**Proposed decision:** **Keep 80% and strictly more than 50%.** Both values
-remain awaiting owner approval.
+**Proposed decision:** **Keep the more-than-50% co-occurrence path and its 80%
+presence fallback.** Both values remain awaiting owner approval.
 
 **Approval status:** awaiting owner approval.
 ### `severity-cutoffs`
@@ -556,8 +557,9 @@ when a bounded observable cohort exists.
 
 **Current value:** representative report-bearing floors are OPT64: 3 retried
 runs; OPT79: 3 hits, 3 misses, 5 seconds and 20% waste, a 25% tail share, and
-1 second of long-pole headroom; OPT80: 6 occurrences, a 3x or 30-second tail,
-2 tail runs, 2 proven tail runs, a 20-second gap, and at most 4 log probes;
+1 second of long-pole headroom; OPT80: 6 occurrences, a tail threshold equal to
+`max(3 × P50, P50 + 30 seconds)`, 2 tail runs, 2 proven tail runs, a 20-second
+gap, and at most 4 log probes;
 OPT81: 8 samples per label, a 30-second and 25% gap, 50% covered time, and a
 30-second cache-lever floor; OPT82: 60 seconds; OPT83: 15% and 20 seconds;
 OPT84: 0% minimum share and 20 seconds.

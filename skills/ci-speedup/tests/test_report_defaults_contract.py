@@ -391,6 +391,9 @@ def test_report_defaults_machine_contract_matches_the_engine():
     assert defaults == {"min_n": 8, "min_frac": 0.30,
                         "min_ratio": 1.6, "min_high_s": 60.0}
     assert "**Keep 8 / 30% / 1.6x / 60 seconds.**" in text
+    assert "when per-pole co-occurrence data is available" in text
+    assert "presence fallback" in text
+    assert "`max(3 × P50, P50 + 30 seconds)`" in text
 
     for pattern in ("OPT29", "OPT35", "OPT38", "OPT44"):
         assert re.search(
