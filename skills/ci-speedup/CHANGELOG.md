@@ -1297,7 +1297,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
-- **2026-11-11** — Keep shard-growth warnings visible when matrix legs upload test reports for a merge job, and recognise an `index` matrix axis when it feeds the runner's `--shard` argument.
+- **2026-11-11** — Keep shard-growth warnings visible when matrix legs upload reports or download report-only artifacts, even from a job that also builds; preserve ordinary artifact-handoff exemptions and recognise an `index` matrix axis when it feeds the runner's `--shard` argument.
 - **2026-11-11** — Keep path-filter findings visible when sampled pull-request runs have no PR number, and disclose the measured share when only part of the run sample can be mapped to pull requests.
 - **2026-11-11** — Bound Buildx node parsing to complete inspect blocks, so later `docker info` output cannot invent builder nodes and a bootstrapped inspect supersedes an earlier inactive snapshot.
 - **2026-11-11** — Report a newly introduced aggregate finding once instead of also describing all of its jobs as scope growth; existing aggregate findings still warn when their job scope expands.

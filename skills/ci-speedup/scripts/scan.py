@@ -3757,9 +3757,13 @@ def _matrix_axis_feeds_shard(job: dict, key: object) -> bool:
         return True
     if key_text.casefold() != "index":
         return False
+    matrix_ref = (
+        rf"matrix(?:\.{re.escape(key_text)}|"
+        rf"\[\s*['\"]{re.escape(key_text)}['\"]\s*\])"
+    )
     return re.search(
         rf"--shard(?:=|\s+)[\"']?[^\s\"']*"
-        rf"\$\{{\{{\s*matrix\.{re.escape(key_text)}\s*\}}\}}"
+        rf"\$\{{\{{\s*{matrix_ref}\s*\}}\}}"
         rf"[^\s\"']*[\"']?",
         _job_run_blob(job),
         re.IGNORECASE,
@@ -3822,6 +3826,32 @@ def _artifact_selector_matches(
     return re.fullmatch(pattern_re, upload_name) is not None
 
 
+_REPORT_ARTIFACT_RE = re.compile(
+    r"(?:^|[\s./_-])(?:allure|coverage|junit|reports?|results?|"
+    r"test[-_]?(?:reports?|results?))(?:$|[\s./_-])",
+    re.IGNORECASE,
+)
+
+
+def _is_report_artifact(step: dict) -> bool:
+    """Whether an upload names report/result data rather than build output."""
+    values = step.get("with") if isinstance(step.get("with"), dict) else {}
+    paths = [
+        line.strip() for line in str(values.get("path") or "").splitlines()
+        if line.strip()
+    ]
+    path_is_report = [bool(_REPORT_ARTIFACT_RE.search(path)) for path in paths]
+    if any(path_is_report):
+        # An artifact that bundles `dist` with `coverage` still carries build
+        # output, so a sharded consumer genuinely reuses another job's build.
+        return all(path_is_report)
+    identity = "\n".join((
+        str(step.get("name") or ""),
+        str(values.get("name") or ""),
+    ))
+    return _REPORT_ARTIFACT_RE.search(identity) is not None
+
+
 def _jobs_with_build_handoff(jobs: dict[str, Any]) -> set[str]:
     """Jobs that consume a build artifact uploaded by a different job."""
     producers: list[tuple[str, str]] = []
@@ -3831,6 +3861,8 @@ def _jobs_with_build_handoff(jobs: dict[str, Any]) -> set[str]:
             continue
         for step in _steps(job):
             if "upload-artifact" not in _uses(step):
+                continue
+            if _is_report_artifact(step):
                 continue
             upload_name, _ = _artifact_selector(step, upload=True)
             if upload_name:
@@ -3870,10 +3902,15 @@ def _opt14_setup_state(
     matrix_setup_repeated: dict[str, list[str]] = {}
     jobs = _jobs_from_doc(doc)
     handoff_jobs = _jobs_with_build_handoff(jobs)
+    has_upload = has_download = False
     for job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
         steps = _steps(job)
+        has_upload = has_upload or any(
+            "upload-artifact" in _uses(step) for step in steps)
+        has_download = has_download or any(
+            "download-artifact" in _uses(step) for step in steps)
         has_checkout = any(_uses(s).startswith("actions/checkout") for s in steps)
         has_install = bool(_INSTALL_RE.search(_job_run_blob(job))) or any(
             _uses(s).startswith("actions/setup-node") and (s.get("with") or {}).get("cache")
@@ -3908,7 +3945,8 @@ def _opt14_setup_state(
     # jobs must not hide a sharded job, while a shard that downloads another
     # job's build remains exempt.
     ordinary_setup_jobs = (
-        set() if handoff_jobs else set(_co_running(jobs, setup_jobs)))
+        set() if has_upload and has_download
+        else set(_co_running(jobs, setup_jobs)))
     setup_jobs = sorted(
         ordinary_setup_jobs | (set(matrix_setup_legs) - handoff_jobs))
     return setup_jobs, matrix_setup_legs, matrix_setup_repeated, handoff_jobs

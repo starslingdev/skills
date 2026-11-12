@@ -552,6 +552,37 @@ jobs:
     assert "OPT14" not in _scan_one(tmp_path, neg)
 
 
+@pytest.mark.parametrize("build_command", (
+    "npx tsc -p .",
+    "vite build",
+    "mvn package",
+))
+def test_opt14_ordinary_build_handoff_accepts_unlisted_build_commands(
+        build_command: str):
+    raw = f"""name: CI
+on: push
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: {build_command}
+      - uses: actions/upload-artifact@v4
+        with: {{name: dist, path: dist}}
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with: {{name: dist}}
+      - run: npm test
+"""
+
+    assert scan._detect_opt14(scan.yaml.safe_load(raw), raw) == []
+
+
 def test_opt14_upload_only_does_not_suppress(tmp_path: Path):
     """An upload-only step (e.g. a coverage report) is NOT a setup handoff —
     the two setup jobs still duplicate install, so OPT14 must still fire."""

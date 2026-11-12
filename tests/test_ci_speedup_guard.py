@@ -180,6 +180,12 @@ def index_metadata_matrix(*, matrix_legs: int) -> str:
     )
 
 
+def bracket_index_shard_matrix(*, shard_legs: int) -> str:
+    """An index shard selected through GitHub's bracket expression form."""
+    return playwright_report_matrix(shard_legs=shard_legs).replace(
+        "${{ matrix.index }}", "${{ matrix['index'] }}")
+
+
 def sharded_build_export_matrix(*, shard_legs: int) -> str:
     """Shards export their own builds; they do not consume a shared build."""
     values = ", ".join(str(i) for i in range(1, shard_legs + 1))
@@ -238,6 +244,45 @@ jobs:
         with: {{name: app}}
       - run: npm test
 {lint}"""
+
+
+def report_producer_with_sharded_consumer(
+        *, shard_legs: int, artifact_name: str = "coverage-report",
+        artifact_paths: tuple[str, ...] = ("coverage",),
+        upload_step_name: str = "Upload artifact") -> str:
+    """A build job exports test results that shards read as data, not a build."""
+    values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    path_block = "\n".join(f"            {path}" for path in artifact_paths)
+    return f"""name: Report consumer
+on: pull_request
+jobs:
+  prepare-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --coverage
+      - name: {upload_step_name}
+        uses: actions/upload-artifact@v4
+        with:
+          name: {artifact_name}
+          path: |
+{path_block}
+  shards:
+    needs: prepare-report
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [{values}]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: {{name: {artifact_name}}}
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --shard=${{{{ matrix.shard }}}}/{shard_legs}
+"""
 
 
 def trees(tmp_path: Path, base_text: str, merge_text: str):
@@ -392,6 +437,20 @@ def test_playwright_include_indexes_feed_shard_growth(
     assert "OPT14 job shards: 8 -> 16 legs" in output
 
 
+def test_bracket_index_expression_feeds_shard_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        bracket_index_shard_matrix(shard_legs=8),
+        bracket_index_shard_matrix(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
 def test_index_axis_beside_shard_argument_is_not_a_shard_dimension(
         guard, tmp_path, capsys, monkeypatch):
     base, merge = trees(
@@ -418,6 +477,54 @@ def test_sharded_producer_is_not_a_build_handoff_consumer(
 
     assert code == 0
     assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_report_from_a_build_job_does_not_hide_shard_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        report_producer_with_sharded_consumer(shard_legs=8),
+        report_producer_with_sharded_consumer(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_report_step_name_identifies_a_generic_report_artifact(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        report_producer_with_sharded_consumer(
+            shard_legs=8, artifact_name="artifact", artifact_paths=("tmp/out",),
+            upload_step_name="Upload coverage report"),
+        report_producer_with_sharded_consumer(
+            shard_legs=16, artifact_name="artifact", artifact_paths=("tmp/out",),
+            upload_step_name="Upload coverage report"),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_mixed_build_output_and_report_remains_a_build_handoff(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        report_producer_with_sharded_consumer(
+            shard_legs=8, artifact_name="app", artifact_paths=("dist", "coverage")),
+        report_producer_with_sharded_consumer(
+            shard_legs=16, artifact_name="app", artifact_paths=("dist", "coverage")),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards" not in output
 
 
 def test_build_once_handoff_keeps_ordinary_setup_group_silent(
