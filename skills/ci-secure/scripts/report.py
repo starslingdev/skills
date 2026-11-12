@@ -487,6 +487,21 @@ def _group_severity(members: list[dict[str, Any]]) -> str:
     )
 
 
+def _group_representative(members: list[dict[str, Any]]) -> dict[str, Any]:
+    """Member whose evidence profile governs shared group prose and fixes.
+
+    A producer may assign per-occurrence severity within one catalog pattern.
+    In that case the group headline already uses the worst severity, so its
+    scenario and remediation must come from a member at that same severity —
+    never from whichever workflow happened to sort first.
+    """
+    severity = _group_severity(members)
+    return next(
+        (member for member in members if member.get("severity", "MANUAL") == severity),
+        members[0] if members else {},
+    )
+
+
 def _occurrence_severity_breakdown(members: list[dict[str, Any]]) -> str:
     """Per-severity occurrence split, e.g. ``3 HIGH · 100 MEDIUM · 102 LOW``.
 
@@ -507,7 +522,7 @@ def _occurrence_severity_breakdown(members: list[dict[str, Any]]) -> str:
 
 
 def _group_attacker_scenario(members: list[dict[str, Any]]) -> str:
-    return members[0].get("attacker_scenario") or ""
+    return _group_representative(members).get("attacker_scenario") or ""
 
 
 def _group_is_all_dormant(members: list[dict[str, Any]]) -> bool:
@@ -526,7 +541,7 @@ def _group_short_title(
 ) -> str:
     """The h4 title for a group — a single descriptive sentence-case
     phrase, with no per-file specifics."""
-    first = members[0]
+    first = _group_representative(members)
     pattern = first.get("pattern", "")
     cat = catalog_sections.get(pattern, _ExtractedSection())
     heading = cat.heading_text or pattern
@@ -743,6 +758,8 @@ def _build_fix_prompt(
     changes in working tree).
     """
     n = len(members)
+    representative = _group_representative(members)
+    occurrence_guidance = str(representative.get("fix_guidance", "")).strip()
     occurrences_block = "\n".join(_occurrence_bullet_for_prompt(m) for m in members)
     # Full path, not `<findings.json>`: the file lives under `$TMPDIR` and a
     # dispatched subagent cannot guess the directory from a placeholder. Shell-
@@ -781,7 +798,13 @@ def _build_fix_prompt(
     tldr = (cat.tldr or "").strip()
     context_line = tldr if tldr else f"Pattern `{pattern}` from the ci-secure catalog."
     recipe_yaml = (cat.fix_recipe_yaml or "").strip()
-    if recipe_yaml:
+    if occurrence_guidance:
+        recipe_section = (
+            f"Catalog reference: {catalog_url}\n\n"
+            "Evidence-specific guidance for this finding:\n\n"
+            f"{occurrence_guidance}"
+        )
+    elif recipe_yaml:
         recipe_section = (
             f"Catalog reference: {catalog_url}\n\n"
             "Recipe (from the catalog):\n\n"
@@ -890,7 +913,7 @@ def _finding_group_section(
     the group has been dispatched, producing
     ``## FIXED — Finding N: {short_title} — …``.
     """
-    first = members[0]
+    first = _group_representative(members)
     pattern = first.get("pattern", "")
     severity = _group_severity(members)
     cat = catalog_sections.get(pattern, _ExtractedSection())
@@ -2465,10 +2488,13 @@ _ACTION_BY_FIX_STRATEGY = {
 def _group_action_summary(members: list[dict[str, Any]]) -> str:
     """Curated one-line action verb for a group, or "" to fall back to the
     short title. Keyed off the catalog's `fix_strategy` slug."""
-    supplied = members[0].get("fix_guidance", "")
+    representative = _group_representative(members)
+    supplied = representative.get("fix_guidance", "")
     if supplied:
-        return str(supplied)
-    return _ACTION_BY_FIX_STRATEGY.get(members[0].get("fix_strategy", ""), "")
+        # The occurrence-specific guidance is the full visible summary below;
+        # repeating it here as an imperative prints the same paragraph twice.
+        return ""
+    return _ACTION_BY_FIX_STRATEGY.get(representative.get("fix_strategy", ""), "")
 
 
 def _validate_findings(

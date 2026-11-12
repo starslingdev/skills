@@ -5702,6 +5702,101 @@ def _find_pull_requests_write_line(lines: list[str]) -> int | None:
     return None
 
 
+def _p1418_grants_pr_write(permissions: Any) -> bool:
+    """Whether one workflow/job permissions value grants PR write access."""
+    if isinstance(permissions, str):
+        return permissions.strip().lower() == "write-all"
+    if not isinstance(permissions, dict):
+        return False
+    value = permissions.get("pull-requests")
+    return isinstance(value, str) and value.strip().lower() == "write"
+
+
+def _p1418_write_scoped_jobs(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Jobs whose effective permissions include ``pull-requests: write``.
+
+    A job-level permissions block replaces the workflow-level block; an
+    unrelated read-only job therefore cannot lend its steps to the job that
+    owns the write token, or make that token look more dangerous than it is.
+    """
+    workflow_write = _p1418_grants_pr_write(doc.get("permissions"))
+    scoped: list[tuple[str, dict[str, Any]]] = []
+    for name, job in _walk_jobs(doc):
+        if "permissions" in job:
+            has_write = _p1418_grants_pr_write(job.get("permissions"))
+        else:
+            has_write = workflow_write
+        if has_write:
+            scoped.append((name, job))
+    return scoped
+
+
+_P1418_COSMETIC_CALL_RE = re.compile(
+    r"^\s*(?:await\s+)?(?:github\.)?(?:rest\.)?issues\."
+    r"(?:addLabels|createComment)\s*\(",
+    re.I,
+)
+
+
+def _p1418_is_one_cosmetic_call(script: str) -> bool:
+    """Prove the narrow inline-script shape eligible for MEDIUM.
+
+    The accepted program is exactly one label/comment API call. Its argument
+    may be an object or arrays of literal labels, but it may not contain a
+    nested call, a template expression, or trailing JavaScript. This is
+    intentionally a positive proof rather than a deny-list of dangerous JS.
+    """
+    if "${{" in script or "`" in script:
+        return False
+    match = _P1418_COSMETIC_CALL_RE.match(script)
+    if match is None:
+        return False
+    opening = match.end() - 1
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(opening, len(script)):
+        char = script[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+        elif char == "(":
+            depth += 1
+            if depth > 1:
+                return False
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return not script[index + 1:].strip().strip(";").strip()
+            if depth < 0:
+                return False
+    return False
+
+
+def _p1418_script_risk(script: str) -> str | None:
+    """Specific HIGH reason for a script, before the generic fail-closed one."""
+    for expression in re.findall(r"\$\{\{.*?\}\}", script, re.S):
+        lowered = expression.lower()
+        if ("github.event.pull_request." in lowered or "github.head_ref" in lowered) \
+                and not _is_shape_safe_expression(expression):
+            return "executes attacker-controlled PR text"
+    flattened = re.sub(r"[\s.\[\]'\"]+", ".", script.lower())
+    if "pulls.createreview" in flattened \
+            or re.search(r"/pulls/[^'\"\s]+/reviews\b", script, re.I):
+        return "review API"
+    if "pulls.merge" in flattened \
+            or re.search(r"/pulls/[^'\"\s]+/merge\b", script, re.I):
+        return "merge API"
+    return None
+
+
 def _correlation_pr_write_and_untrusted_trigger(
     file_path: Path,
 ) -> Iterator[RawHit]:
@@ -5726,10 +5821,14 @@ def _correlation_pr_write_and_untrusted_trigger(
         text.splitlines(), "permissions"
     ) or 1
     risk_reasons: list[str] = []
-    saw_cosmetic_operation = False
-    cosmetic_only = True
-    for _job_name, job in _walk_jobs(doc):
-        for step in _job_steps(job):
+    scoped_jobs = _p1418_write_scoped_jobs(doc)
+    all_scoped_jobs_cosmetic = bool(scoped_jobs)
+    for _job_name, job in scoped_jobs:
+        steps = _job_steps(job)
+        job_is_cosmetic = len(steps) == 1
+        if not steps:
+            job_is_cosmetic = False
+        for step in steps:
             uses = step.get("uses")
             with_block = step.get("with")
             if isinstance(uses, str) and uses.startswith("actions/checkout") \
@@ -5744,43 +5843,25 @@ def _correlation_pr_write_and_untrusted_trigger(
             ):
                 risk_reasons.append("executes attacker-controlled PR text")
             script = with_block.get("script") if isinstance(with_block, dict) else None
+            action_id = uses.split("@", 1)[0].lower() if isinstance(uses, str) else ""
             is_github_script = (
-                isinstance(uses, str)
-                and uses.startswith("actions/github-script")
+                action_id == "actions/github-script"
                 and isinstance(script, str)
             )
             if is_github_script:
-                if re.search(r"(?:github\.)?(?:rest\.)?pulls\.createReview\s*\(", script, re.I) \
-                        or re.search(r"/pulls/[^'\"\s]+/reviews\b", script, re.I):
-                    risk_reasons.append("review API")
-                if re.search(r"(?:github\.)?(?:rest\.)?pulls\.merge\s*\(", script, re.I) \
-                        or re.search(r"/pulls/[^'\"\s]+/merge\b", script, re.I):
-                    risk_reasons.append("merge API")
-                cosmetic_calls = re.findall(
-                    r"(?:github\.)?(?:rest\.)?issues\.(addLabels|createComment)\s*\(",
-                    script,
-                    re.I,
-                )
-                saw_cosmetic_operation = saw_cosmetic_operation or bool(cosmetic_calls)
-                # The lowered profile is intentionally narrow: one or more
-                # inline label/comment calls and no other REST/GraphQL API.
-                scrubbed = re.sub(
-                    r"(?:github\.)?(?:rest\.)?issues\.(?:addLabels|createComment)\s*\(",
-                    "allowed(",
-                    script,
-                    flags=re.I,
-                )
-                if re.search(r"(?:github\.)?rest\.|github\.graphql\s*\(", scrubbed, re.I):
-                    cosmetic_only = False
+                specific_risk = _p1418_script_risk(script)
+                if specific_risk:
+                    risk_reasons.append(specific_risk)
+                if not _p1418_is_one_cosmetic_call(script):
+                    job_is_cosmetic = False
             else:
-                # A different action or a shell step is outside the precise
-                # label/comment-only shape this detector can safely lower.
-                cosmetic_only = False
+                job_is_cosmetic = False
+        all_scoped_jobs_cosmetic = all_scoped_jobs_cosmetic and job_is_cosmetic
 
     # Preserve order while keeping the evidence compact when two risky legs
     # coexist in one workflow.
     risk_reasons = list(dict.fromkeys(risk_reasons))
-    if not risk_reasons and not (saw_cosmetic_operation and cosmetic_only):
+    if not risk_reasons and not all_scoped_jobs_cosmetic:
         risk_reasons.append(
             "workflow is not limited to label/comment-only github-script automation"
         )

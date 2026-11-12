@@ -30,6 +30,7 @@ decision the JSON can answer.
   "workflow_activity": {"runs_30d": 218, "last_run": "...", "dormant": false},
   "evidence": "   8: job `bench` on `pull_request_target` checks out `${{ github.event.pull_request.head.sha }}` then executes from the tree <-- here",
   "fix_strategy": "switch-to-pull-request-or-drop-head-checkout",
+  "fix_guidance": "Optional evidence-specific guidance when this occurrence needs a narrower fix than the catalog default.",
   "fix_recipe_anchor": "p149--fork-code-executed-with-privileges"
 }
 ```
@@ -45,8 +46,10 @@ dormancy state rather than inferring one from a missing flag.
 
 ## The attacker_scenario merged in at Phase 2.5
 
-The one non-scripted field. Written once per pattern group and merged onto
-**every member** of that group:
+Usually written in Phase 2.5. A detector may supply it when the same catalog
+pattern has evidence-specific severity profiles; Phase 2.5 preserves that text
+and fills only members still missing a scenario. Scenarios are shared only
+within one `(pattern, severity, fix_strategy)` profile:
 
 ```json
 {
