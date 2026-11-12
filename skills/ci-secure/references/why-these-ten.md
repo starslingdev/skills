@@ -51,7 +51,7 @@ rejection record).
 | 2 | P14.9 | Fork code executed with privileges — untrusted trigger + head checkout + execution | GitHub Security Lab "pwn request" writeups; Trivy round 1 (2026) |
 | 3 | P14.7 | Fork-writable shared cache — poisoned cache consumed by trusted runs | TanStack (2026); Ultralytics (2024) |
 | 4 | P14.11 | Impostor / unreachable action SHA — a pin the canonical repo never contained | tj-actions/changed-files (2025); Chainguard "imposter commits" research |
-| 5 | P14.14 | Whole-context secrets dump — `toJSON(secrets)` into logs/env | tj-actions payload behavior (memory scraping, 2025); Compromised GitHub accounts CI secret stealer (2026) — a stolen token pushes the dump into the victim's own workflow |
+| 5 | P14.14 | Whole-context secrets dump — `toJSON(secrets)` into logs/env | tj-actions payload behavior (memory scraping, 2025) |
 | 6 | P14.15 | Attacker-controlled `$GITHUB_ENV` / `$GITHUB_PATH` write — hijacks later steps | GitHub Security Lab environment-injection writeups |
 | 7 | P14.18 | `pull-requests: write` on an untrusted trigger — outsider's event holds a write token | elementary-data (2026) — forged release via default-write token |
 | 8 | P14.19 | Credential files in caches/artifacts — keys fetchable by other jobs or the public | Trivy round 2 (2026) — attacker swept the runner for exactly these credential files (SSH keys, cloud creds, Kubernetes tokens); caching or uploading them extends that exposure |

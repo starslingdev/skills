@@ -77,6 +77,10 @@
     "repos/example-org/example-repo/rulesets?includes_parents=true&per_page=100": {
       "status": "ok",
       "stdout": "[{\"id\": 311, \"name\": \"trunk-review\", \"target\": \"branch\", \"enforcement\": \"active\", \"source_type\": \"Repository\"}, {\"id\": 318, \"name\": \"legacy-trunk-checks\", \"target\": \"branch\", \"enforcement\": \"disabled\", \"source_type\": \"Repository\"}, {\"id\": 322, \"name\": \"version-tags\", \"target\": \"tag\", \"enforcement\": \"active\", \"source_type\": \"Repository\"}, {\"id\": 327, \"name\": \"hotfix-lane\", \"target\": \"branch\", \"enforcement\": \"active\", \"source_type\": \"Repository\"}, {\"id\": 340, \"name\": \"archived-tag-freeze\", \"target\": \"tag\", \"enforcement\": \"active\", \"source_type\": \"Repository\"}, {\"id\": 352, \"name\": \"trunk-history\", \"target\": \"branch\", \"enforcement\": \"active\", \"source_type\": \"Repository\"}]"
+    },
+    "repos/example-org/example-repo/rules/branches/trunk?per_page=100": {
+      "status": "ok",
+      "stdout": "[{\"type\": \"pull_request\", \"ruleset_source_type\": \"Repository\", \"ruleset_source\": \"example-org/example-repo\", \"ruleset_id\": 311, \"parameters\": {\"required_approving_review_count\": 2, \"dismiss_stale_reviews_on_push\": true, \"require_last_push_approval\": false, \"require_code_owner_review\": false, \"required_review_thread_resolution\": false}}, {\"type\": \"non_fast_forward\", \"ruleset_source_type\": \"Repository\", \"ruleset_source\": \"example-org/example-repo\", \"ruleset_id\": 311}, {\"type\": \"deletion\", \"ruleset_source_type\": \"Repository\", \"ruleset_source\": \"example-org/example-repo\", \"ruleset_id\": 352}, {\"type\": \"creation\", \"ruleset_source_type\": \"Repository\", \"ruleset_source\": \"example-org/example-repo\", \"ruleset_id\": 352}]"
     }
   }
 }

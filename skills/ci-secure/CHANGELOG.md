@@ -13,11 +13,22 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
-- **2026-11-12** (#338) — ci-secure: docs-only reference addition. The
-  catalog's Reference incidents now records the November 2026 compromised
-  GitHub accounts CI secret stealer campaign as a plain-English chain, and
-  why-these-ten.md cites it as public grounding for P14.14. No scanning
-  behavior changes.
+- **2026-11-12** (#338) — ci-secure: a new API-gated config hygiene check,
+  `sec.default-branch.review-required`, and the incident that grounds it.
+  The check passes when the default branch, through an active ruleset or
+  classic branch protection, needs a pull request with at least one approval
+  and either dismisses stale approvals on a new push or requires approval of
+  the most recent push; it fails when no pull request is required, the
+  approval count is 0, or neither stale-approval setting is on, naming which.
+  Bypass actors (and admins when classic protection does not include them)
+  qualify a pass in its evidence and never fail it. Unreadable settings are
+  unmeasured, never a pass. It reads the rules endpoint first (read access)
+  and classic protection only when the rules alone do not hold. Fourteen
+  facts now; up to seven are API-gated. The catalog's Reference incidents
+  records the November 2026 compromised GitHub accounts CI secret stealer
+  campaign as the grounding for this check and for
+  `sec.secrets.environment-scoped`; it is not cited as a vector incident,
+  because the attacker already held a push credential.
 - ci-secure: "If a push credential leaks" — three new config hygiene checks,
   read over the GitHub API the way the required-checks and fork-approval
   checks already are. A credential that can push workflow files (GitHub's

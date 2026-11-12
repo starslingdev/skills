@@ -56,7 +56,7 @@ By default the skill operates on the current working directory.
    If it's not, ask the user for a path and `cd` there before continuing.
 2. Verify `.github/workflows/` exists. If it doesn't, stop and tell the
    user the repo has no GitHub Actions workflows to scan.
-3. Dormancy and the six API-gated facts need `owner/repo`; Phase 2's block
+3. Dormancy and the seven API-gated facts need `owner/repo`; Phase 2's block
    derives it in its own shell (never carry it in a variable). If gh is
    unavailable or no repo derives, proceed: the report says so (impostor-SHA
    skipped without gh; those facts UNMEASURED, never passes). Name the cause.
