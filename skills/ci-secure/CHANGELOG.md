@@ -320,7 +320,10 @@ entries are dated (UTC). Format loosely follows
   rate limit or authentication failure is not), the finding is kept with its
   offline wording and `gh_checks["P14.24"]` records `skipped` or `partial`
   with the reason; the report shows this as a note, not as a missing
-  finding. Also fixed in the same finding text: a `--pin` written as a
+  finding, and each unverified pin it lists is flattened like any other
+  scanned text, so a workflow path or `--pin` value cannot add Markdown of
+  its own. A scan that stops with an error switches the lookup back off, as
+  a finished one does. Also fixed in the same finding text: a `--pin` written as a
   `${{ }}` expression showed the scanner's internal placeholder instead of
   the expression, and an abbreviated `--pin` was described as something git
   re-resolves, which a gh extension install does not do.

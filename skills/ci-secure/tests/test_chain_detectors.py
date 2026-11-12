@@ -5351,6 +5351,23 @@ def test_p1424_gh_extension_tag_with_no_release_is_a_finding(tmp_path):
     assert result["gh_checks"]["P14.24"].startswith("ran:")
 
 
+def test_p1424_gh_extension_failed_scan_leaves_the_lookup_offline(tmp_path):
+    """A scan that raises (here: zero workflows, a CoverageError) must not
+    leave the release lookup switched on. Otherwise a caller that catches the
+    error and then calls the detector directly reaches the network, and can
+    suppress a finding, on the strength of a scan that never finished."""
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    (tmp_path / "empty" / ".github" / "workflows").mkdir(parents=True)
+    with pytest.raises(scan.CoverageError):
+        scan.scan(catalog, tmp_path / "empty", gh_impostor=True)
+    calls: list[str] = []
+    with mock.patch.object(scan.subprocess, "run", side_effect=_release_stub(
+            {_LOCK_RELEASE: {"tag_name": "v0.4.1", "immutable": True}}, calls)):
+        hits = _remote_exec_hits(tmp_path / "direct", _GH_EXT_LOCKFILE)
+    assert [c for c in calls if "/releases/tags/" in c] == []
+    assert len(hits) == 1, hits
+
+
 def test_p1424_gh_extension_lookup_off_keeps_todays_finding(tmp_path):
     """Off (or gh unavailable): no network call, today's finding and wording
     byte for byte, and `gh_checks` says the lookup did NOT run and why."""

@@ -2054,7 +2054,11 @@ def _gh_checks_block(
     def _unverified(pid: str) -> list[str]:
         entry = details.get(pid) or {}
         pins = entry.get("unverified") if isinstance(entry, dict) else None
-        return [str(p) for p in pins] if isinstance(pins, list) else []
+        # Each label names the scanned workflow path and the pin as written,
+        # both controlled by the repository under audit, and lands in an
+        # inline code span below.
+        return ([_flatten_scanned(p) for p in pins]
+                if isinstance(pins, list) else [])
 
     skipped: list[tuple[str, str]] = []
     partial: list[tuple[str, str]] = []

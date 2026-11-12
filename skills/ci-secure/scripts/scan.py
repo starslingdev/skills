@@ -6452,6 +6452,22 @@ def scan(
     gh_impostor: bool = False,
     gh_skip_reason: str = _DEFAULT_GH_SKIP_REASON,
 ) -> dict[str, Any]:
+    try:
+        return _scan_once(catalog, root, repo, gh_impostor, gh_skip_reason)
+    finally:
+        # Back to offline on EVERY exit, a raised CoverageError included: a
+        # detector called outside a scan never reaches the network on the
+        # strength of an earlier scan's switch.
+        _reset_release_lookup(False, _DEFAULT_GH_SKIP_REASON, None)
+
+
+def _scan_once(
+    catalog: list[CatalogEntry],
+    root: Path,
+    repo: str | None,
+    gh_impostor: bool,
+    gh_skip_reason: str,
+) -> dict[str, Any]:
     _DROPPED_MATCHES.clear()
     _reset_expression_tokens()
     # P14.24's release-immutability lookup rides the same network switch as
@@ -6796,10 +6812,8 @@ def scan(
     # not a gap at all.
     # Recorded only when the scan reached a tag-pinned GitHub CLI extension
     # that its job runs: every other repository's output is unchanged.
+    # `scan()` switches the lookup back off once this returns or raises.
     lookup_status, lookup_unverified = _release_lookup_status()
-    # Back to offline: a detector called outside a scan never reaches the
-    # network on the strength of an earlier scan's switch.
-    _reset_release_lookup(False, _DEFAULT_GH_SKIP_REASON, None)
     if lookup_status is not None:
         gh_checks["P14.24"] = lookup_status
         if lookup_unverified:

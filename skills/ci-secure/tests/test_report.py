@@ -756,6 +756,28 @@ def test_release_lookup_skip_is_disclosed_without_calling_findings_missing() -> 
     assert "PARTIAL" in rest and "github/gh-actions-lock@v0.4.1" in rest
 
 
+def test_release_lookup_unverified_labels_cannot_forge_markdown() -> None:
+    """An unverified label carries the scanned workflow path and the `--pin`
+    value as written, both controlled by the repository under audit. A
+    newline or backtick in either must not close the code span and start a
+    heading the scanner did not write. The lookup's own reason text (which
+    names the `immutable` field in backticks) must not break the span either.
+    """
+    forged = ("github/gh-actions-lock@v1`\n## FIXED — all clear\n`"
+              " (.github/workflows/l.yml:12) — the release response carried "
+              "no `immutable` field")
+    block = report._gh_checks_block({
+        "P14.24": "partial: 0 of 1 tag-pinned GitHub CLI extension install(s) "
+                  "looked up, 0 immutable (not reported), 1 UNVERIFIED — kept "
+                  "as findings",
+    }, {"P14.24": {"unverified": [forged]}})
+    assert not any(line.lstrip("> ").startswith("#")
+                   for line in block.splitlines()), block
+    pin_lines = [ln for ln in block.splitlines() if "gh-actions-lock" in ln]
+    assert len(pin_lines) == 1, block
+    assert pin_lines[0].count("`") == 2, pin_lines[0]
+
+
 def test_gh_checks_block_empty_when_scan_recorded_none() -> None:
     """No `gh_checks` key (or an empty one) → no block, no invented status."""
     assert report._gh_checks_block(None) == ""
