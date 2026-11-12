@@ -219,9 +219,26 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
         elif (first and created < first) or (last and created > last):
             continue
         row = dict(source)
-        row["jobs"] = [
+        included_jobs = [
             job for job in source.get("jobs") or []
             if isinstance(job, dict) and included_job(job)]
+        row["jobs"] = included_jobs
+        included_run_keys = {
+            str(job.get("run_key")) for job in included_jobs if job.get("run_key")}
+        included_run_ids = {
+            int(job.get("run_id") or 0) for job in included_jobs if job.get("run_id")}
+        included_workflows = {
+            str(job.get("workflow") or "") for job in included_jobs
+            if job.get("workflow")}
+        row["runs"] = [
+            run for run in source.get("runs") or []
+            if isinstance(run, dict) and (
+                (run.get("run_key") and str(run.get("run_key")) in included_run_keys)
+                or (run.get("id") and int(run.get("id") or 0) in included_run_ids)
+                or (not run.get("run_key") and not run.get("id")
+                    and str(run.get("workflow") or "") in included_workflows)
+            )
+        ]
         commits.append(row)
     scoped = dict(month)
     scoped["pr_commits"] = commits
@@ -279,19 +296,20 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
     # two different ways (``commit-NNNNNN`` versus a hexadecimal SHA).  Normalize
     # copied page rows to the month identity by workflow + run timestamp before
     # deduplication, and alias the corresponding check-run fixture.
-    commit_by_workflow_time: dict[tuple[str, str], str] = {}
+    commits_by_workflow_time: dict[tuple[str, str], set[str]] = {}
     for commit in month.get("pr_commits") or []:
         if not isinstance(commit, dict):
             continue
         for run in commit.get("runs") or []:
             if isinstance(run, dict) and run.get("workflow") and run.get("created_at"):
-                commit_by_workflow_time[
-                    (str(run["workflow"]), str(run["created_at"]))
-                ] = str(commit.get("sha") or "")
+                commits_by_workflow_time.setdefault(
+                    (str(run["workflow"]), str(run["created_at"])), set()
+                ).add(str(commit.get("sha") or ""))
 
     existing_heads: dict[int, set[str]] = {}
     existing_oldest: dict[int, str] = {}
     existing_times: dict[int, set[str]] = {}
+    existing_pages: dict[int, dict[str, Any]] = {}
     for workflow in workflows.values():
         workflow_id = int(workflow.get("id") or 0)
         endpoint = f"repos/{repository}/actions/workflows/{workflow_id}/runs?per_page=100"
@@ -301,10 +319,11 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
             for run in payload.get("workflow_runs") or []:
                 if not isinstance(run, dict):
                     continue
-                replacement = commit_by_workflow_time.get((
+                replacements = commits_by_workflow_time.get((
                     str(workflow.get("name") or workflow.get("path") or ""),
                     str(run.get("created_at") or ""),
-                ))
+                ), set())
+                replacement = next(iter(replacements)) if len(replacements) == 1 else ""
                 old_sha = str(run.get("head_sha") or "")
                 if replacement:
                     run["head_sha"] = replacement
@@ -321,6 +340,7 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
             fixture.write_text(
                 json.dumps(payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8")
+            existing_pages[workflow_id] = payload
             existing_heads[workflow_id] = {
                 str(run.get("head_sha") or "")
                 for run in payload.get("workflow_runs") or [] if isinstance(run, dict)
@@ -415,7 +435,6 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
             created_at = str(source_run.get("created_at")
                              or commit.get("created_at") or "")
             if (not workflow_id or not head_sha
-                    or head_sha in existing_heads.get(workflow_id, set())
                     or created_at in existing_times.get(workflow_id, set())
                     or (existing_oldest.get(workflow_id)
                         and created_at >= existing_oldest[workflow_id])):
@@ -488,9 +507,24 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
     for workflow_id, runs in runs_by_workflow.items():
         runs.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
         total = len(runs) + len(existing_heads.get(workflow_id, set()))
-        for offset in range(0, len(runs), 100):
+        first_payload = dict(existing_pages.get(workflow_id) or {})
+        first_rows = list(first_payload.get("workflow_runs") or [])
+        first_count = min(len(runs), max(0, 100 - len(first_rows)))
+        if first_count:
+            first_payload["total_count"] = total
+            first_payload["workflow_runs"] = first_rows + runs[:first_count]
+            for suffix in ("", "&event=pull_request"):
+                _write_fixture(
+                    destination,
+                    f"repos/{repository}/actions/workflows/{workflow_id}/runs"
+                    f"?per_page=100{suffix}",
+                    first_payload,
+                )
+        remaining = runs[first_count:]
+        for offset in range(0, len(remaining), 100):
             page = 2 + offset // 100
-            payload = {"total_count": total, "workflow_runs": runs[offset:offset + 100]}
+            payload = {"total_count": total,
+                       "workflow_runs": remaining[offset:offset + 100]}
             for suffix in ("", "&event=pull_request"):
                 _write_fixture(
                     destination,

@@ -29770,8 +29770,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             timestamps = [
                 str(row.get("created_at") or row.get("updated_at") or "")
                 for row in workflow_rows
-                if str(row.get("event") or "") in _DEVELOPER_EVENTS
-                and (row.get("created_at") or row.get("updated_at"))
+                if row.get("created_at") or row.get("updated_at")
             ]
             if timestamps:
                 active_horizons.append(min(timestamps))

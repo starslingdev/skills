@@ -6,6 +6,7 @@ import ast
 import gzip
 import importlib.util
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
 
@@ -297,10 +298,11 @@ def test_replay_exposes_month_wide_runs_and_jobs_as_deeper_api_pages(tmp_path: P
     compare._dynamic_replay_copy(recording, replay)
 
     page = json.loads((replay / compare._fixture_name(
-        "repos/public/example/actions/workflows/1234/runs?per_page=100&page=2"
+        "repos/public/example/actions/workflows/1234/runs?per_page=100"
     )).read_text(encoding="utf-8"))
-    assert [run["head_sha"] for run in page["workflow_runs"]] == ["commit-000001"]
-    run_id = page["workflow_runs"][0]["id"]
+    assert [run["head_sha"] for run in page["workflow_runs"]] == [
+        "newer-live-page", "commit-000001"]
+    run_id = page["workflow_runs"][1]["id"]
     jobs = json.loads((replay / compare._fixture_name(
         f"repos/public/example/actions/runs/{run_id}/jobs?per_page=100"
     )).read_text(encoding="utf-8"))
@@ -309,6 +311,44 @@ def test_replay_exposes_month_wide_runs_and_jobs_as_deeper_api_pages(tmp_path: P
         f"repos/public/example/actions/runs/{run_id}/jobs?per_page=100&page=2"
     )).read_text(encoding="utf-8"))
     assert [job["name"] for job in jobs_page_2["jobs"]] == ["tests-100"]
+
+
+def test_engine_span_oracle_ignores_runs_without_included_gate_jobs(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({
+            "schema_version": 1,
+            "pr_commits": [{
+                "sha": "commit-1",
+                "created_at": "2026-11-01T00:00:00Z",
+                "completed": True,
+                "runs": [
+                    {"run_key": "docs-run", "workflow": "Docs",
+                     "created_at": "2026-11-01T00:00:00Z"},
+                    {"run_key": "ci-run", "workflow": "CI",
+                     "created_at": "2026-11-01T00:10:00Z"},
+                ],
+                "jobs": [
+                    {"run_key": "docs-run", "workflow": "Docs", "name": "docs",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:01:00Z"},
+                    {"run_key": "ci-run", "workflow": "CI", "name": "gate",
+                     "started_at": "2026-11-01T00:10:00Z",
+                     "completed_at": "2026-11-01T00:20:00Z"},
+                ],
+            }],
+        }, stream)
+    findings = {"pr_critical_path": {
+        "checks": [{"name": "CI / gate", "required_reachable": True}],
+        "chain_facts": [{"sha": "commit-1", "chain": ["CI / gate"]}],
+    }}
+
+    oracle = compare._oracle_for_engine_span(recording, findings)
+
+    assert oracle["typical_pr_wait_s"] == 600
 
 
 def test_replay_preserves_run_identity_timestamps_and_missing_job_lists(
@@ -372,11 +412,11 @@ def test_replay_preserves_run_identity_timestamps_and_missing_job_lists(
     compare._dynamic_replay_copy(recording, replay)
 
     ci_page = json.loads((replay / compare._fixture_name(
-        "repos/public/example/actions/workflows/11/runs?per_page=100&page=2"
-    )).read_text(encoding="utf-8"))["workflow_runs"]
+        "repos/public/example/actions/workflows/11/runs?per_page=100"
+    )).read_text(encoding="utf-8"))["workflow_runs"][1:]
     docs_page = json.loads((replay / compare._fixture_name(
-        "repos/public/example/actions/workflows/12/runs?per_page=100&page=2"
-    )).read_text(encoding="utf-8"))["workflow_runs"]
+        "repos/public/example/actions/workflows/12/runs?per_page=100"
+    )).read_text(encoding="utf-8"))["workflow_runs"][1:]
     assert [row["created_at"] for row in ci_page] == [
         "2026-11-01T01:00:00Z", "2026-11-01T00:00:00Z"]
     assert {row["head_sha"] for row in ci_page + docs_page} == {"commit-000001"}
@@ -455,9 +495,142 @@ def test_replay_uses_one_commit_identity_on_copied_and_synthetic_pages(
     )).is_file()
 
 
-def test_month_recording_job_list_reads_are_bounded() -> None:
+def test_replay_does_not_merge_ambiguous_same_second_commits(tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8")
+
+    def fixture(endpoint: str, payload: dict[str, object]) -> None:
+        with gzip.open(api / (compare._fixture_name(endpoint) + ".gz"),
+                       "wt", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+
+    fixture("repos/public/example/actions/workflows?per_page=100", {
+        "workflows": [{"id": 11, "name": "CI", "path": ".github/workflows/ci.yml"}],
+    })
+    fixture("repos/public/example/actions/workflows/11/runs?per_page=100", {
+        "workflow_runs": [
+            {"head_sha": "copied-a", "created_at": "2026-11-01T00:00:00Z"},
+            {"head_sha": "copied-b", "created_at": "2026-11-01T00:00:00Z"},
+        ],
+    })
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"pr_commits": [
+            {"sha": "commit-a", "completed": True, "runs": [{
+                "workflow": "CI", "created_at": "2026-11-01T00:00:00Z"}], "jobs": []},
+            {"sha": "commit-b", "completed": True, "runs": [{
+                "workflow": "CI", "created_at": "2026-11-01T00:00:00Z"}], "jobs": []},
+        ]}, stream)
+
+    replay = tmp_path / "replay"
+    compare._dynamic_replay_copy(recording, replay)
+
+    page = json.loads((replay / compare._fixture_name(
+        "repos/public/example/actions/workflows/11/runs?per_page=100"
+    )).read_text(encoding="utf-8"))["workflow_runs"]
+    assert [row["head_sha"] for row in page] == ["copied-a", "copied-b"]
+
+
+def test_replay_keeps_distinct_runs_for_one_commit(tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8")
+
+    def fixture(endpoint: str, payload: dict[str, object]) -> None:
+        with gzip.open(api / (compare._fixture_name(endpoint) + ".gz"),
+                       "wt", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+
+    fixture("repos/public/example/actions/workflows?per_page=100", {
+        "workflows": [{"id": 11, "name": "CI", "path": ".github/workflows/ci.yml"}],
+    })
+    fixture("repos/public/example/actions/workflows/11/runs?per_page=100", {
+        "workflow_runs": [{
+            "head_sha": "copied-sha", "created_at": "2026-11-01T02:00:00Z",
+        }],
+    })
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"pr_commits": [{
+            "sha": "commit-1", "completed": True,
+            "runs": [
+                {"run_key": "new", "workflow": "CI", "status": "completed",
+                 "created_at": "2026-11-01T02:00:00Z", "jobs_recorded": True},
+                {"run_key": "old", "workflow": "CI", "status": "completed",
+                 "created_at": "2026-11-01T01:00:00Z", "jobs_recorded": True},
+            ],
+            "jobs": [{
+                "run_key": "old", "workflow": "CI", "name": "test",
+                "status": "completed", "conclusion": "success",
+                "started_at": "2026-11-01T01:00:00Z",
+                "completed_at": "2026-11-01T01:02:00Z",
+            }],
+        }]}, stream)
+
+    replay = tmp_path / "replay"
+    compare._dynamic_replay_copy(recording, replay)
+
+    page = json.loads((replay / compare._fixture_name(
+        "repos/public/example/actions/workflows/11/runs?per_page=100"
+    )).read_text(encoding="utf-8"))["workflow_runs"]
+    assert [row["created_at"] for row in page] == [
+        "2026-11-01T02:00:00Z", "2026-11-01T01:00:00Z"]
+
+
+def test_month_recording_job_list_reads_are_bounded(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     recorder = _load("record")
     assert recorder.MONTH_JOB_LIST_READ_CAP <= 400
+
+    state_path = tmp_path / "month-wide.json"
+    state_path.write_text(json.dumps({
+        "run_inventory_complete": True,
+        "pr_commits": [{
+            "sha": f"sha-{run_id}",
+            "created_at": "2026-11-01T00:00:00Z",
+            "completed": True,
+            "runs": [{
+                "id": run_id,
+                "workflow": "CI",
+                "status": "completed",
+                "created_at": "2026-11-01T00:00:00Z",
+                "updated_at": "2026-11-01T00:02:00Z",
+                "jobs_recorded": False,
+            }],
+            "jobs": [],
+        } for run_id in range(1, 4)],
+    }), encoding="utf-8")
+    calls: list[int] = []
+
+    def jobs(endpoint: str, key: str) -> list[dict[str, object]]:
+        del key
+        run_id = int(endpoint.split("/runs/", 1)[1].split("/", 1)[0])
+        calls.append(run_id)
+        if run_id == 1 and calls.count(1) == 1:
+            raise RuntimeError("temporary job-list failure")
+        return [{
+            "id": run_id + 100,
+            "name": "test",
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-11-01T00:00:00Z",
+            "completed_at": "2026-11-01T00:02:00Z",
+        }]
+
+    monkeypatch.setattr(recorder, "MONTH_JOB_LIST_READ_CAP", 3)
+    monkeypatch.setattr(recorder, "_pages", jobs)
+    recorder._month_history(
+        "public/example",
+        datetime(2026, 11, 2, tzinfo=timezone.utc),
+        state_path,
+    )
+
+    assert len(calls) <= recorder.MONTH_JOB_LIST_READ_CAP
 
 
 def test_every_proposed_expectation_waits_for_owner_signoff() -> None:

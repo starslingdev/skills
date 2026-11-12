@@ -476,11 +476,12 @@ def _month_history(repository: str, captured_at: datetime, state_path: Path) -> 
         temp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
         temp.replace(state_path)
 
-    completed_fetches = 0
-    while completed_fetches < MONTH_JOB_LIST_READ_CAP and (pending := pending_runs()):
-        pending = pending[:MONTH_JOB_LIST_READ_CAP - completed_fetches]
+    attempted_fetches = 0
+    while attempted_fetches < MONTH_JOB_LIST_READ_CAP and (pending := pending_runs()):
+        pending = pending[:MONTH_JOB_LIST_READ_CAP - attempted_fetches]
         for offset in range(0, len(pending), 200):
             batch = pending[offset:offset + 200]
+            attempted_fetches += len(batch)
             with ThreadPoolExecutor(max_workers=40) as pool:
                 futures = [pool.submit(fetch_jobs, item) for item in batch]
                 results = []
@@ -505,7 +506,6 @@ def _month_history(repository: str, captured_at: datetime, state_path: Path) -> 
                 for row in commit["runs"]:
                     if int(row.get("id") or 0) == int(run.get("id") or 0):
                         row["jobs_recorded"] = True
-                completed_fetches += 1
             write_state()
             if failures and not results:
                 raise RuntimeError("every job-list request in a recording batch failed")

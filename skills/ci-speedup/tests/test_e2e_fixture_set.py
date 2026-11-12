@@ -47,6 +47,7 @@ class FixtureClient:
         self.job_reads: dict[str, int] = {}
         self.log_reads: dict[str, int] = {}
         self.check_reads = 0
+        self._prefetched_json: dict[tuple[str, bool], list[object]] = {}
 
     def available(self) -> bool:
         return not self.gave_up
@@ -55,7 +56,25 @@ class FixtureClient:
         if error:
             self.errors += 1
 
+    def prefetch_json(self, endpoints, *, allow_missing: bool = False) -> None:
+        for endpoint in dict.fromkeys(endpoints):
+            key = (endpoint, bool(allow_missing))
+            self._prefetched_json.setdefault(key, []).append(
+                self._json(endpoint, allow_missing=allow_missing))
+
+    def drain_prefetch(self) -> int:
+        leftover = sum(len(rows) for rows in self._prefetched_json.values())
+        self._prefetched_json.clear()
+        return leftover
+
     def json(self, endpoint: str, allow_missing: bool = False):
+        key = (endpoint, bool(allow_missing))
+        parked = self._prefetched_json.get(key)
+        if parked:
+            return parked.pop(0)
+        return self._json(endpoint, allow_missing=allow_missing)
+
+    def _json(self, endpoint: str, allow_missing: bool = False):
         self.queries += 1
         expire_after = self.recorded.get("expire_after")
         if isinstance(expire_after, int) and self.queries > expire_after:
@@ -1376,10 +1395,12 @@ def test_builder_detected_platform_and_dominance_guards_run_through_collection(
 
 
 def test_push_fixture_fetches_the_recorded_run_jobs_once(monkeypatch, tmp_path):
-    doc, _report, _checks = run_fixture(
+    doc, _report, checks = run_fixture(
         FIXTURE_ROOT / "push-job-list", monkeypatch, tmp_path)
 
     assert doc["_fixture_job_reads"]["9001"] == 1
+    assert doc["data_sources"]["prefetch_unconsumed"] == 0
+    assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
 def test_default_branch_image_is_drilled_and_kept_out_of_merge_claims(
@@ -2042,20 +2063,19 @@ def test_pr_sample_walks_busy_sibling_to_candidate_history_horizon(
         row["id"] = 80_000 + number
         return row
 
-    newest_shared = [sibling_run(row, index)
-                     for index, row in enumerate(candidates[:50])]
-    unrelated = []
-    for index, source in enumerate(candidates[:50], 50):
+    push_only = []
+    for index, source in enumerate(candidates):
         row = sibling_run(source, index)
-        row["head_sha"] = f"unrelated-{index}"
-        row["head_branch"] = f"unrelated-{index}"
+        row["event"] = "push"
+        row["head_sha"] = f"push-{index}"
+        row["head_branch"] = "staging"
         row["created_at"] = "2026-01-26T23:59:00Z"
         row["run_started_at"] = row["created_at"]
         row["updated_at"] = "2026-01-26T23:59:30Z"
-        unrelated.append(row)
+        push_only.append(row)
     older_shared = [sibling_run(row, 100 + index)
-                    for index, row in enumerate(candidates[50:])]
-    sibling_rows = newest_shared + unrelated + older_shared
+                    for index, row in enumerate(candidates)]
+    sibling_rows = push_only + older_shared
     for row in sibling_rows:
         started = datetime.fromisoformat(
             row["run_started_at"].replace("Z", "+00:00"))
@@ -2074,8 +2094,8 @@ def test_pr_sample_walks_busy_sibling_to_candidate_history_horizon(
         }]
     recorded["workflows"].append({
         "id": 312, "path": ".github/workflows/sibling.yml",
-        "name": "Sibling", "runs_30d": 150,
-        "run_pages": [newest_shared + unrelated, older_shared],
+        "name": "Sibling", "runs_30d": 200,
+        "run_pages": [push_only, older_shared],
     })
     recorded["commits_by_workflow"][".github/workflows/sibling.yml"] = []
     sample_log = "\n".join([
