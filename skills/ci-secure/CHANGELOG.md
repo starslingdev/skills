@@ -330,8 +330,16 @@ entries are dated (UTC). Format loosely follows
   and a finding whose release was looked up no longer says the setting is
   not visible offline. Also fixed in the same finding text: a `--pin` written as a
   `${{ }}` expression showed the scanner's internal placeholder instead of
-  the expression, and an abbreviated `--pin` was described as something git
-  re-resolves, which a gh extension install does not do.
+  the expression (a git clone/fetch/checkout at an expression ref had the
+  same bug in its finding text and `match_text`, fixed by the same change),
+  and an abbreviated `--pin` was described as something git re-resolves,
+  which a gh extension install does not do. The CI gate treats an
+  unfinished P14.24 lookup as a `::notice::`, not as missing coverage: it
+  never reds a `CI_SECURE_GH_STRICT=1` run, since its findings are all still
+  reported and a run-time pin can never be looked up. The report note and
+  terminal summary now say to sign in to gh and re-run, not to dismiss
+  the finding; the Phase 3 one-liner prints the P14.24 status, and
+  SKILL.md says `--gh-impostor` gates both lookups.
 
 - **2026-11-11** (#329) — A repository that adopts GitHub's workflow lockfile no
   longer loses the impostor-SHA check (P14.11) in silence. With a lockfile,

@@ -5617,3 +5617,15 @@ def test_p1424_gh_extension_abbreviated_pin_is_not_worded_as_git(tmp_path):
     assert "ABBREVIATED" in note
     assert "git re-resolves" not in note
     assert "GitHub CLI" in note and "install" in note
+
+
+def test_p1424_clone_at_an_expression_ref_shows_it_as_written(tmp_path):
+    """The clone arm shares `_ref_description` with the gh extension arm: a
+    ref set by a `${{ }}` expression must read as written in the note and in
+    `match_text`, never as the scanner's internal placeholder."""
+    body = _MUTABLE_FETCH.replace("--branch main", "--branch ${{ inputs.ref }}")
+    hits = _remote_exec_hits(tmp_path, body)
+    assert len(hits) == 1, hits
+    for text in (hits[0].derived_note or "", hits[0].match_text or ""):
+        assert "$EXPR" not in text and "\x00" not in text, text
+        assert "${{ inputs.ref }}" in text, text

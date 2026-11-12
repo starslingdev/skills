@@ -754,6 +754,11 @@ def test_release_lookup_skip_is_disclosed_without_calling_findings_missing() -> 
     assert "P14.11 impostor-SHA check: SKIPPED" in warning
     assert "P14.24" not in warning
     assert "PARTIAL" in rest and "github/gh-actions-lock@v0.4.1" in rest
+    # The skill has no dismiss step to point at; the remedy is a re-run with
+    # gh signed in. Each listed pin already carries its own reason.
+    assert "dismiss" not in rest
+    assert "re-run" in rest and "gh auth login" in rest
+    assert "not looked up" not in rest
 
 
 def test_release_lookup_unverified_labels_cannot_forge_markdown() -> None:

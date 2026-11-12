@@ -2086,13 +2086,14 @@ def _gh_checks_block(
             word = "SKIPPED" if state == "skipped" else "PARTIAL"
             note.append(f"> **{_label(pid)}: {word} — {reason}.**")
             for pin in _unverified(pid):
-                note.append(f">   - `{pin}` — not looked up")
+                note.append(f">   - `{pin}`")
         note.append(">")
         note.append(
             "> Every tag-pinned GitHub CLI extension finding is still listed "
             "below. The lookup only removes one whose release GitHub has "
-            "locked as immutable; for those it did not check, confirm the "
-            "release shows the Immutable badge before dismissing the finding."
+            "locked as immutable. To have it check these, sign in to gh "
+            "(`gh auth login`) and re-run; a pin set at run time can never "
+            "be checked."
         )
         note.append("")
     out: list[str] = []

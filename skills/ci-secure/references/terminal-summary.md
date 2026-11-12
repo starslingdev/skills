@@ -40,9 +40,12 @@ are not optional.
 **P14.24's release-immutability lookup is not a header line.** It is
 recorded in `gh_checks["P14.24"]` only when the scan reached a GitHub CLI
 extension pinned to a tag and then run, and it can only remove a finding.
-When that status is `skipped` or `partial`, say so in one clause where the
-summary names the P14.24 finding(s): `release-immutability lookup did not
-run (<reason>), so tag-pinned extensions are reported as mutable`. Never
+The Phase 3 `$FINDINGS` one-liner prints it on its third line (empty when
+the key is absent). When that status is `skipped` or `partial`, say so in
+one clause where the summary names the P14.24 finding(s):
+`release-immutability lookup did not run (<reason>), so tag-pinned
+extensions are reported as mutable`, adding `; sign in to gh and re-run to
+check them` when the reason is gh sign-in or `--gh-impostor=off`. Never
 call this a missing finding, and never word it as `NOT a pass`: every
 tag-pinned finding is still listed.
 
