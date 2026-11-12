@@ -826,6 +826,100 @@ def test_p1418_fires_on_pr_write_under_untrusted_trigger_not_safe(tmp_path: Path
     assert "P14.18" not in _patterns_for_file(_scan_dir(safe_root), "pr.yml")
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "github.rest.issues.addLabels({owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, labels: ['triage']})",
+        "github.rest.issues.createComment({owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: 'Thanks'})",
+    ],
+)
+def test_p1418_cosmetic_github_script_without_checkout_is_hygiene(
+    tmp_path: Path, operation: str,
+) -> None:
+    """A base-code label/comment bot has no path to PR code or review bypass."""
+    _write_workflow(
+        tmp_path,
+        "cosmetic.yml",
+        """on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  cosmetic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            %s
+""" % operation,
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "MEDIUM"
+    assert "cosmetic" in finding["attacker_scenario"].lower()
+    assert "no checkout" in finding["evidence"].lower()
+    assert "no pr-code execution" in finding["evidence"].lower()
+    assert "no review/merge api" in finding["evidence"].lower()
+    assert "workflow_run" not in finding["fix_guidance"]
+
+
+@pytest.mark.parametrize(
+    ("steps", "reason"),
+    [
+        (
+            """      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm test
+""",
+            "attacker-head checkout executes pr code",
+        ),
+        (
+            """      - run: ${{ github.event.pull_request.title }}
+""",
+            "executes attacker-controlled pr text",
+        ),
+        (
+            """      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.pulls.createReview({owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number, event: 'APPROVE'})
+""",
+            "review api",
+        ),
+        (
+            """      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.pulls.merge({owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number})
+""",
+            "merge api",
+        ),
+    ],
+)
+def test_p1418_keeps_high_for_pr_code_and_review_merge_paths(
+    tmp_path: Path, steps: str, reason: str,
+) -> None:
+    _write_workflow(
+        tmp_path,
+        "danger.yml",
+        """on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  danger:
+    runs-on: ubuntu-latest
+    steps:
+""" + steps,
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "HIGH"
+    assert reason in finding["evidence"].lower()
+
+
 # -----------------------------------------------------------------------------
 # Coverage failures: a scan that could not check what it claims to have checked
 # must EXIT NON-ZERO, never emit a clean-looking result. Each test below is

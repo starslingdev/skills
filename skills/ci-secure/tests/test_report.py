@@ -446,6 +446,22 @@ def test_attacker_scenario_row_uses_llm_field() -> None:
     assert "Any GitHub user can open a fork PR — zero prior access." in md
 
 
+def test_p1418_cosmetic_occurrence_uses_its_hygiene_fix() -> None:
+    finding = _complete_finding(
+        pattern="P14.18",
+        severity="MEDIUM",
+        title="Cosmetic pull request automation",
+        fix_strategy="limit-cosmetic-pr-automation",
+        fix_guidance=(
+            "Keep this job limited to cosmetic labeling or commenting; "
+            "remove its write permission if unused."
+        ),
+    )
+    md = _finding_section([finding])
+    assert "Keep this job limited to cosmetic labeling or commenting" in md
+    assert "Split into separate trusted / untrusted workflows" not in md
+
+
 def test_attacker_row_falls_back_to_catalog_capability() -> None:
     """Without an LLM `attacker_scenario`, the row falls back to the
     catalog's static 'What an attacker can do' prose — it is never blank
