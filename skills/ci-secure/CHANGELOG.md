@@ -314,9 +314,13 @@ entries are dated (UTC). Format loosely follows
   `action_lockfile` block; the report adds an **Action lockfile** row naming
   how many references in how many workflows are locked, that GitHub verifies
   each locked commit at run time, and that P14.11 checks only commit pins
-  written in `uses:`. Coverage is unchanged: a locked repository still reads
-  complete. The reader's accept/reject verdict is pinned against ci-score's
-  by a repo-root parity test.
+  written in `uses:`. Only step-level `uses:` count: a call to a reusable
+  workflow is never counted, since the lockfile does not pin one. A lockfile
+  the scan cannot read is named by its real path and the row says its tag
+  references are checked by neither. The terminal summary reads the state
+  from the findings JSON. Coverage is unchanged: a locked repository still
+  reads complete. The reader's accept/reject verdict is pinned against
+  ci-score's by a repo-root parity test.
 
 - **2026-11-09** — A crafted workflow line can no longer freeze the scan. The
   install-command matcher (dependency install scripts in a job that holds

@@ -96,12 +96,16 @@ The one non-scripted field. Written once per pattern group and merged onto
   steps. Parallel steps are a github.com / GitHub Enterprise Cloud feature;
   the scan reads the syntax wherever it appears.
 - `action_lockfile` — the GitHub Actions workflow lockfile
-  (`.github/workflows/actions.lock`): `path`, `state` (`absent`, `valid`, or
+  (`.github/workflows/actions.lock`): `path` (a case variant such as
+  `Actions.lock` is named as it is on disk), `state` (`absent`, `valid`, or
   `invalid` for a file that is not exactly that name, a symbolic link,
-  unreadable, unparseable, an undocumented format version, or holding any
-  malformed entry — invalid credits nothing), `covered_references` (tag-pinned
-  `uses:` references, in scanned workflows the lockfile lists, that it locks
-  to a commit) and `covered_workflows`. The key is always present.
+  unreadable, unparseable, a format version the scan does not recognize, or
+  holding any malformed entry — invalid credits nothing),
+  `covered_references` (step-level `uses:` occurrences not pinned to a full
+  commit, in scanned workflows the lockfile lists, that it locks to a commit;
+  repeats count, and a reusable-workflow call is never counted because the
+  lockfile does not pin one) and `covered_workflows`. The key is always
+  present.
   Informational, never a coverage gap: GitHub verifies each locked commit at
   run time, and P14.11 checks only commit pins written in `uses:`, so these
   are the references P14.11 leaves to GitHub. The report states them on its

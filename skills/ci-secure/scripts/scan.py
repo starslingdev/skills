@@ -5521,7 +5521,7 @@ def _collect_sha_pins(
 #                                              owner_id, repo_id, uses?}}
 _LOCKFILE_REL = ".github/workflows/actions.lock"
 _LOCK_COMMIT_RE = re.compile(r"\Asha1-[0-9a-f]{40}\Z")
-_LOCK_VERSIONS = ("v0.0.2", "v0.0.3")  # the format versions GitHub documents
+_LOCK_VERSIONS = ("v0.0.2", "v0.0.3")  # the versions ci-score accepts (GitHub's docs show v0.0.3)
 _LOCK_WORKFLOW_KEY_RE = re.compile(r"\A\.github/workflows/[^/]+\Z")
 _LOCK_SHA40_RE = re.compile(r"\A[0-9a-f]{40}\Z")
 
@@ -5637,15 +5637,51 @@ def _load_action_lockfile(root: Path) -> tuple[str, dict[str, set[str]]]:
     return "valid", per_workflow
 
 
+def _lock_step_uses(doc: Any) -> Iterator[str]:
+    """Each step-level `uses:` value (`jobs.<id>.steps[].uses`), in order.
+
+    Deliberately NOT `_walk_uses_values`: GitHub's lockfile does not pin a
+    call to a reusable workflow (`jobs.<id>.uses`), so a lockfile entry for
+    one is never verified at run time, and an action input named `uses`
+    under `with:` is not a reference at all. Same rule as ci-score's
+    `_step_uses`."""
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return
+    for job in jobs.values():
+        steps = job.get("steps") if isinstance(job, dict) else None
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if isinstance(step, dict) and isinstance(step.get("uses"), str):
+                yield step["uses"].strip()
+
+
+def _lockfile_display_path(root: Path, state: str) -> str:
+    """The lockfile path to name: a case variant (`Actions.lock`) is named as
+    it is on disk, so the report never points at a file that is not there."""
+    if state != "invalid":
+        return _LOCKFILE_REL
+    try:
+        names = os.listdir(root / ".github" / "workflows")
+    except OSError:
+        return _LOCKFILE_REL
+    if "actions.lock" in names:
+        return _LOCKFILE_REL
+    variants = sorted(n for n in names if n.lower() == "actions.lock")
+    return f".github/workflows/{variants[0]}" if variants else _LOCKFILE_REL
+
+
 def _action_lockfile_summary(root: Path,
                              workflow_files: list[Path]) -> dict[str, Any]:
     """What the lockfile covers that P14.11 does not read.
 
-    Counts each `uses:` reference, in a scanned workflow the lockfile lists,
-    whose ref is NOT a full commit and that the lockfile locks for that
-    workflow — the references whose commit lives only in the lockfile. A
-    full-commit pin is left to P14.11, which checks it directly. Always
-    returns the key set so report.py can rely on it."""
+    Counts each step-level `uses:` occurrence, in a scanned workflow the
+    lockfile lists, whose ref is NOT a full commit and that the lockfile
+    locks for that workflow — the references whose commit lives only in the
+    lockfile. A full-commit pin is left to P14.11, which checks it directly;
+    a reusable-workflow call is never counted (the lockfile does not pin
+    it). Always returns the key set so report.py can rely on it."""
     state, per_workflow = _load_action_lockfile(root)
     covered = 0
     covered_workflows: list[str] = []
@@ -5657,10 +5693,10 @@ def _action_lockfile_summary(root: Path,
                 continue
             text = _read_text_safe(wf)
             doc = _parse_yaml_text(text, wf, quiet=True) if text else None
-            if not isinstance(doc, (dict, list)):
+            if not isinstance(doc, dict):
                 continue  # an unparseable workflow is already a coverage gap
             n = 0
-            for value in _walk_uses_values(doc):
+            for value in _lock_step_uses(doc):
                 k = _lock_ref_key(value)
                 if (k is None or value.startswith(("./", "docker://"))
                         or _LOCK_SHA40_RE.match(k.rpartition("@")[2].lower())):
@@ -5673,7 +5709,7 @@ def _action_lockfile_summary(root: Path,
     logger.debug("action lockfile: state=%s, %d reference(s) in %d workflow(s)",
                  state, covered, len(covered_workflows))
     return {
-        "path": _LOCKFILE_REL,
+        "path": _lockfile_display_path(root, state),
         "state": state,
         "covered_references": covered,
         "covered_workflows": covered_workflows,

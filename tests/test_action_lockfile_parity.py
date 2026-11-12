@@ -7,10 +7,10 @@ skill installs standalone, so a copy is the only option; this test is the
 coupling. If the two drift, one engine calls a lockfile valid that the other
 rejects, and the two reports disagree about the same file.
 
-ci-secure's copy is deliberately narrower in one place: it does not consult
+ci-secure's copy is deliberately narrower in two places: it does not consult
 git's file list for the lockfile's spelling, and refuses any symbolic link.
-Both cases only withhold credit. Every case below is a plain file in a
-non-git directory, where the two readers must agree exactly.
+Both are pinned in ci-secure's own suite. Every case below is a plain file in
+a non-git directory, where the two readers must agree exactly.
 
 It lives at the repo ROOT: a cross-skill read is normal here and forbidden
 inside either skill's own suite.
@@ -77,7 +77,27 @@ _CASES = {
     "missing-owner-id": _GOOD.replace("    owner_id: 2123180\n", ""),
     "bool-repo-id": _GOOD.replace("repo_id: 905126443", "repo_id: true"),
     "ref-mismatch": _GOOD.replace("ref: v3.1.0", "ref: v3.1.1"),
-    "duplicate-key": _GOOD + "  actions/checkout@v7.0.1:\n    ref: v7.0.1\n",
+    # The malformed copy FIRST and the valid one last: plain yaml keeps the
+    # last, so only a real duplicate-key refusal rejects this.
+    "duplicate-key": _GOOD.replace(
+        "dependencies:\n", "dependencies:\n  actions/checkout@v7.0.1:\n    ref: v7.0.1\n", 1),
+    "commit-without-sha1-prefix": _GOOD.replace(
+        "'sha1-3d3c42e5aac5ba805825da76410c181273ba90b1'",
+        "'3d3c42e5aac5ba805825da76410c181273ba90b1'"),
+    "uppercase-commit": _GOOD.replace(
+        "3d3c42e5aac5ba805825da76410c181273ba90b1",
+        "3D3C42E5AAC5BA805825DA76410C181273BA90B1"),
+    "version-v0.0.1": _GOOD.replace("'v0.0.3'", "'v0.0.1'"),
+    "version-v0.0.4": _GOOD.replace("'v0.0.3'", "'v0.0.4'"),
+    "sha-key-missing-ref": _NESTED.replace("    ref: v3\n", ""),
+    "uses-not-a-list": _NESTED.replace(
+        "    uses:\n      - other/inner@2222222222222222222222222222222222222222",
+        "    uses: other/inner@2222222222222222222222222222222222222222"),
+    "dependencies-not-mapping": "version: 'v0.0.3'\nworkflows: {}\ndependencies: []\n",
+    "workflow-key-dotdot": _GOOD.replace(".github/workflows/lint.yml",
+                                         ".github/workflows/.."),
+    "workflow-key-outside-dir": _GOOD.replace(".github/workflows/lint.yml",
+                                              ".github/x/lint.yml"),
     "dangling-listed": _GOOD.replace(
         "    - j178/prek-action@v3.1.0\n",
         "    - j178/prek-action@v3.1.0\n    - other/action@v1\n"),
@@ -141,6 +161,10 @@ def test_good_cases_are_actually_valid(tmp_path: Path, sides) -> None:
     assert state == "valid"
     assert per_wf == {".github/workflows/lint.yml": {
         "actions/checkout@v7.0.1", "j178/prek-action@v3.1.0"}}
+    (wf / "actions.lock").write_text(_NESTED, encoding="utf-8")
+    state, per_wf = secure._load_action_lockfile(tmp_path)
+    assert state == "valid"
+    assert per_wf == {".github/workflows/ci.yml": {"owner/composite@v1"}}
 
 
 def test_absent_agrees(tmp_path: Path, sides) -> None:

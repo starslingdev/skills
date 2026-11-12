@@ -1333,8 +1333,12 @@ def _action_lockfile_cell(action_lockfile: dict[str, Any] | None) -> str:
     state = entry.get("state")
     path = str(entry.get("path") or ".github/workflows/actions.lock")
     if state == "invalid":
-        return (f"`{path}` is present but not a readable, well-formed "
-                "lockfile, so no action reference is credited to it")
+        return (f"`{path}` is present but not a lockfile this scan can read "
+                "(misnamed, malformed, or a format version it does not "
+                "recognize), so none of its action references is counted as "
+                "locked; the impostor-SHA check (P14.11) checks only commit "
+                "pins written in `uses:`, so tag references here are checked "
+                "by neither")
     n_refs = int(entry.get("covered_references") or 0)
     workflows = entry.get("covered_workflows") or []
     if state != "valid" or not n_refs:
