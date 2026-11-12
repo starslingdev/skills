@@ -38,8 +38,8 @@ only — this is not a comprehensive audit.*
 **Prereqs:** PyYAML (`pip install pyyaml` — the scanner's only third-party
 dep). `gh` is optional, used for the network-gated impostor-SHA check (P14.11
 — the one vector that cannot be answered from YAML alone), the dormancy note,
-and six config facts read over the API (required checks skippable, fork-PR
-approval, CODEOWNERS enforced, two environment checks, secrets). Everything
+and seven config facts read over the API (required checks, fork-PR approval,
+CODEOWNERS, two environment checks, secrets, default-branch review). Everything
 else runs locally in seconds. Troubleshooting: [references/troubleshooting.md](references/troubleshooting.md).
 
 **`<ci-secure>` in the commands below is this skill's own install directory** —
@@ -56,7 +56,7 @@ By default the skill operates on the current working directory.
    If it's not, ask the user for a path and `cd` there before continuing.
 2. Verify `.github/workflows/` exists. If it doesn't, stop and tell the
    user the repo has no GitHub Actions workflows to scan.
-3. Dormancy and the six API-gated facts need `owner/repo`; Phase 2's block
+3. Dormancy and the seven API-gated facts need `owner/repo`; Phase 2's block
    derives it in its own shell (never carry it in a variable). If gh is
    unavailable or no repo derives, proceed: the report says so (impostor-SHA
    skipped without gh; those facts UNMEASURED, never passes). Name the cause.
@@ -192,7 +192,7 @@ Contract lines, all mandatory:
   failed: `One hygiene gap: no enforced reviewer rule covers your workflows.` Two
   or more: name each, one short clause apiece. All passing: `All config
   hygiene checks pass.` Unmeasured is a coverage gap, n/a did not apply to
-  this repo: say each as itself, never as a pass and never as nothing.
+  this repo: say each as itself, never as a pass and never as nothing. A failing `sec.secrets.environment-scoped` goes first, in consequence words (terminal-summary.md).
 - **Then the vector map** — the line-item receipt, so the user sees what they
   are good on and what did not run without opening the file. Head it exactly
   `Vector scan — 10 attack vectors checked, N hit:` (N from the banner), so
