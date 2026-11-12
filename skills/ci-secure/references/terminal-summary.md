@@ -37,6 +37,18 @@ are not optional.
 | `Impostor-SHA check (P14.11): …` | **Assembled** from the **banner's** own impostor-check word (`ran` / `partial` / `SKIPPED` / `not recorded` — the impostor word ENDS the pre-drawn line, and it is two words in the `not recorded` state, so read to the end of the line rather than taking the last token) plus the `gh_checks["P14.11"]` status/detail in `$FINDINGS` (the pin counts — "14 unique pins verified, 0 flagged", or the UNVERIFIED count on a partial — live there, NOT in any report row). On a run that did NOT fully complete, add the reason from the report's `> [!WARNING]` gh-checks blockquote (or the ⚠️ `P14.11` vector-map row). Do NOT read the pin counts off the vector-map row: when the check ran clean that row is a generic ✅ "no match" like every other clean vector and carries none of them. Always say `PARTIAL … NOT a pass` / `SKIPPED … this check did NOT run` verbatim when it did not run. Then read the `action_lockfile` dict the same `$FINDINGS` one-liner prints on its second line (the JSON, not the report, is the source): when `state` is `valid` and `covered_references` is above 0, append `; N action reference(s) in M workflow(s) locked by actions.lock are verified by GitHub at run time, not by this check` (N = `covered_references`, M = the length of `covered_workflows`); when `state` is `invalid`, append `; <path> is not a lockfile this scan can read, so no reference is counted as locked`; when `absent`, append nothing. |
 | `Coverage: …` | **Assembled** from the **Coverage** ROW of the provenance table at the top of the report — NOT from any sentence under the banner, where nothing of the kind is rendered. The row reads `✅ complete — every workflow file was scanned` or `⚠️ **PARTIAL** — not every workflow was fully scanned`, and on PARTIAL it does **not** say what was missed: that lives in the separate `> [!WARNING] **Incomplete coverage — …**` blockquote further down, and your line must carry it. |
 
+**P14.24's release-immutability lookup is not a header line.** It is
+recorded in `gh_checks["P14.24"]` only when the scan reached a GitHub CLI
+extension pinned to a tag and then run, and it can only remove a finding.
+The Phase 3 `$FINDINGS` one-liner prints it on its third line (empty when
+the key is absent). When that status is `skipped` or `partial`, say so in
+one clause where the summary names the P14.24 finding(s):
+`release-immutability lookup did not run (<reason>), so tag-pinned
+extensions are reported as mutable`, adding `; sign in to gh and re-run to
+check them` when the reason is gh sign-in or `--gh-impostor=off`. Never
+call this a missing finding, and never word it as `NOT a pass`: every
+tag-pinned finding is still listed.
+
 The extraction commands are in SKILL.md Phase 3. Run them as written; do not
 re-derive them here. The one to be careful with is the P14.11 vector-map row:
 the id renders in backticks with **no space before it**, so a pattern
