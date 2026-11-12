@@ -148,14 +148,31 @@ def advance_verification(
     tracking_default = on_default_branch
     baseline_lane = ("push" if cache_sensitive or on_default_branch
                      else "pull_request")
-    before = (baseline_doc.get("verification_baseline")
-              if isinstance(baseline_doc, dict) else None)
-    if isinstance(before, list) and before and baseline_lane:
-        before = _baseline_for_lane(before, baseline_lane)
-    if (not isinstance(before, list) or not before) and isinstance(
-            baseline_doc, dict):
-        before = _baseline_from_findings(
-            baseline_doc, lane=baseline_lane, client=client, repo=repo)
+    saved_baseline = saved.get("baseline") if static_matches else None
+    reused_baseline = isinstance(saved_baseline, list)
+    if reused_baseline:
+        before = saved_baseline
+    else:
+        before = (baseline_doc.get("verification_baseline")
+                  if isinstance(baseline_doc, dict) else None)
+        if isinstance(before, list) and before and baseline_lane:
+            before = _baseline_for_lane(before, baseline_lane)
+        if (not isinstance(before, list) or not before) and isinstance(
+                baseline_doc, dict):
+            before = _baseline_from_findings(
+                baseline_doc, lane=baseline_lane, client=client, repo=repo)
+    baseline_log_calls = sum(
+        int(cohort.get("log_api_calls") or 0)
+        for cohort in before or [] if isinstance(cohort, dict))
+    baseline_log_budget = _VERIFY_LOG_JOB_CAP
+    if isinstance(before, list) and before:
+        emit("Verification baseline log reads: "
+             f"{baseline_log_calls}/{baseline_log_budget}"
+             f"{' (reused)' if reused_baseline else ''}.")
+    baseline_log_result = {
+        "baseline_log_api_calls": baseline_log_calls,
+        "baseline_log_api_budget": baseline_log_budget,
+    }
     resolved_head = client.remote_head(repo, branch)
     head = resolved_head
     if tracking_default and static_matches and saved_binding.get("head_sha"):
@@ -167,7 +184,8 @@ def advance_verification(
         # remains the anchor for the three default-branch pushes.
         head = str(saved_binding.get("head_sha") or "")
     if not head:
-        return {"status": "ineligible", "verdict": None}
+        return {"status": "ineligible", "verdict": None,
+                **baseline_log_result}
     binding = {
         **static_binding,
         "head_sha": head,
@@ -179,14 +197,14 @@ def advance_verification(
         return {"status": "complete", "head_sha": head,
                 "sample_count": len(saved.get("samples") or []),
                 "verdict": saved["verdict"], "reused": True,
-                "discarded_moved_head": False}
+                "discarded_moved_head": False, **baseline_log_result}
 
     initial = saved.get("initial") if same_binding else None
     if not isinstance(initial, dict):
         initial = client.completed_cohort(repo, head, branch)
     if initial is None:
         return {"status": "waiting-for-first-cohort", "head_sha": head,
-                "verdict": None}
+                "verdict": None, **baseline_log_result}
 
     samples = list(saved.get("samples") or []) if same_binding else [initial]
     context: dict[str, Any] = {
@@ -200,6 +218,8 @@ def advance_verification(
                             for item in sample.get("run_attempt_ids") or []],
         "pending_rerun": (saved.get("pending_rerun")
                           if same_binding else None),
+        "baseline": before if isinstance(before, list) else [],
+        **baseline_log_result,
         "verdict": None,
     }
 
@@ -221,7 +241,7 @@ def advance_verification(
         persist()
         return {"status": "rerun-preflight-refused", "head_sha": head,
                 "sample_count": len(current_samples), "verdict": None,
-                "discarded_moved_head": moved}
+                "discarded_moved_head": moved, **baseline_log_result}
 
     def moved_result() -> dict[str, Any] | None:
         current = client.remote_head(repo, branch)
@@ -234,7 +254,7 @@ def advance_verification(
             persist()
             return {"status": "moved-head", "head_sha": current,
                     "sample_count": 0, "verdict": None,
-                    "discarded_moved_head": True}
+                    "discarded_moved_head": True, **baseline_log_result}
         return None
 
     if not isinstance(before, list) or not before:
@@ -244,7 +264,7 @@ def advance_verification(
         return {"status": "baseline-unavailable", "head_sha": head,
                 "baseline_lane": baseline_lane,
                 "sample_count": len(samples), "verdict": None,
-                "discarded_moved_head": moved}
+                "discarded_moved_head": moved, **baseline_log_result}
 
     distinct_push_sampling = bool(cache_sensitive or on_default_branch)
     if distinct_push_sampling:
@@ -270,7 +290,7 @@ def advance_verification(
             return {"status": "waiting-for-default-branch-pushes",
                     "head_sha": head, "sample_count": len(distinct),
                     "needed": wanted_pushes, "verdict": None,
-                    "discarded_moved_head": moved}
+                    "discarded_moved_head": moved, **baseline_log_result}
         samples = distinct
     else:
         wanted = max(1, target_runs)
@@ -310,7 +330,8 @@ def advance_verification(
                 persist()
                 return {"status": "waiting-for-rerun", "head_sha": head,
                         "sample_count": len(samples), "verdict": None,
-                        "discarded_moved_head": moved}
+                        "discarded_moved_head": moved,
+                        **baseline_log_result}
             drift = moved_result()
             if drift is not None:
                 return drift
@@ -319,7 +340,8 @@ def advance_verification(
                 persist()
                 return {"status": "moved-head", "head_sha": head,
                         "sample_count": len(samples), "verdict": None,
-                        "discarded_moved_head": True}
+                        "discarded_moved_head": True,
+                        **baseline_log_result}
             samples.append(cohort)
             context["pending_rerun"] = None
             context["samples"] = samples
@@ -365,14 +387,16 @@ def advance_verification(
                 persist()
                 return {"status": "waiting-for-rerun", "head_sha": head,
                         "sample_count": len(samples), "verdict": None,
-                        "discarded_moved_head": moved}
+                        "discarded_moved_head": moved,
+                        **baseline_log_result}
             drift = moved_result()
             if drift is not None:
                 return drift
             if str(cohort.get("head_sha") or "") != head:
                 return {"status": "moved-head", "head_sha": head,
                         "sample_count": len(samples), "verdict": None,
-                        "discarded_moved_head": True}
+                        "discarded_moved_head": True,
+                        **baseline_log_result}
             samples.append(cohort)
             context["pending_rerun"] = None
             context["samples"] = samples
@@ -392,7 +416,8 @@ def advance_verification(
     persist()
     return {"status": "complete", "head_sha": head,
             "sample_count": len(samples), "verdict": verdict,
-            "reused": False, "discarded_moved_head": moved}
+            "reused": False, "discarded_moved_head": moved,
+            **baseline_log_result}
 
 
 class GhVerificationClient:
@@ -439,7 +464,8 @@ class GhVerificationClient:
             return None
         return _strip_terminal_escapes(result.stdout)
 
-    def _job_logs(self, repo: str, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    def _job_logs(self, repo: str, jobs: list[dict[str, Any]], *,
+                  job_cap: int = _VERIFY_LOG_JOB_CAP) -> dict[str, Any]:
         logs: list[str] = []
         calls = unreadable = omitted = truncated = 0
         has_cache_step = any(_job_has_cache_step(job) for job in jobs)
@@ -452,7 +478,7 @@ class GhVerificationClient:
             if not job_id:
                 unreadable += 1
                 continue
-            if calls >= _VERIFY_LOG_JOB_CAP or remaining == 0:
+            if calls >= job_cap or remaining == 0:
                 omitted += 1
                 continue
             calls += 1
@@ -806,6 +832,7 @@ def _baseline_from_findings(
              if lane == "push" else
              ((doc.get("pr_critical_path") or {}).get("commit_wall_clock") or {}))
     cohorts: list[dict[str, Any]] = []
+    log_calls = 0
     for fact in clock.get("facts") or []:
         if not isinstance(fact, dict) or fact.get("partial") is True:
             continue
@@ -862,7 +889,10 @@ def _baseline_from_findings(
         }
         read_logs = getattr(client, "_job_logs", None)
         if not embedded_logs and repo and callable(read_logs):
-            log_sample = read_logs(repo, raw_jobs)
+            log_sample = read_logs(
+                repo, raw_jobs,
+                job_cap=max(0, _VERIFY_LOG_JOB_CAP - log_calls))
+            log_calls += int(log_sample.get("log_api_calls") or 0)
         cohorts.append({
             "head_sha": sha,
             "cohort_id": f"baseline:{sha}",

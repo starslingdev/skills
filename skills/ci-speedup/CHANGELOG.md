@@ -30,6 +30,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-12** — Cap baseline job-log reads across an entire post-fix verification, persist the sampled baseline for later polls, and disclose the calls used against the budget.
 - **2026-11-11** — Exclude matrix legs whose dominant test step was skipped when their only remaining steps ran on every leg, while preserving platform-specific legs as real work.
 
 ### Added
