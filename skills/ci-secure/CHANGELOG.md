@@ -224,6 +224,15 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-11-12** — The P14.18 finding reads in plain English. Its title is now
+  "Workflow That Outside Activity Can Start Has `pull-requests: write`" (the
+  catalog anchor tail changes with it; the `P14.18` ID and the in-report
+  `finding-N` anchors do not); its TL;DR no longer names an internal variable
+  or source file; its platform note says GitHub added opt-in settings that are
+  off by default; and every finding's severity row is labelled "Severity of
+  this kind of setup", so it no longer reads as a verdict on the specific
+  workflow assessed by the attacker scenario. Wording only, the check is
+  unchanged. A test now fails if any pattern renders an internal identifier.
 - 2026-10-27: Required-summary coverage now reads strict jq assertions, resolves
   verdict-action tags only to the reviewed commit, and proves large strict
   aggregates without enumerating every result combination. Scores can move

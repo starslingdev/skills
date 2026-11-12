@@ -1444,7 +1444,8 @@ def test_multiline_catalog_tldr_renders_without_breaking_markdown() -> None:
     # 2. Every datum the old table carried is still present, one bullet each.
     body = md.split("#### 🔍 Evidence")[0]
     for label in (
-        "Pattern", "TL;DR", "Severity", "Workflow activity", "Occurrences",
+        "Pattern", "TL;DR", "Severity of this kind of setup",
+        "Workflow activity", "Occurrences",
         "Fix strategy",
     ):
         assert f"- **{label}:** " in body, label
@@ -2454,3 +2455,55 @@ def test_skill_md_names_every_coverage_channel_the_engine_reads() -> None:
         + ", ".join(missing)
         + ". Reading a subset calls a degraded run clean."
     )
+
+
+# ---------------------------------------------------------------------------
+# P14.18 plain-English wording (2026-11-12)
+# ---------------------------------------------------------------------------
+
+# (The agent-facing fix prompt legitimately names run.py/report.py as commands
+# to re-run; the user-facing finding prose must not name internals.)
+_INTERNAL_IDENTIFIERS = ("_UNTRUSTED_TRIGGERS", "scan.py")
+
+
+def _render_p1418() -> str:
+    return report.render({
+        "findings": [_mk(pattern="P14.18")], "repo": "x/y",
+        "scanned_workflows": 3,
+    })
+
+
+def test_p1418_finding_leaks_no_internal_identifier() -> None:
+    md = _render_p1418()
+    for ident in _INTERNAL_IDENTIFIERS:
+        assert ident not in md, f"internal identifier {ident!r} rendered"
+
+
+def test_no_pattern_renders_an_internal_identifier() -> None:
+    """Class guard: the leak was one pattern's TL;DR, but any catalog entry
+    could carry the same shape."""
+    for pattern in ("P14.1", "P14.7", "P14.9", "P14.10", "P14.11", "P14.14",
+                    "P14.15", "P14.18", "P14.19", "P14.24", "P14.25"):
+        md = report.render({
+            "findings": [_mk(pattern=pattern)], "repo": "x/y",
+            "scanned_workflows": 3,
+        })
+        for ident in _INTERNAL_IDENTIFIERS:
+            assert ident not in md, f"{pattern}: {ident!r} rendered"
+        assert not re.search(r"`_[A-Z][A-Z_]{3,}`", md), pattern
+
+
+def test_p1418_title_and_platform_note_use_plain_wording() -> None:
+    md = _render_p1418()
+    heading = next(
+        ln for ln in md.splitlines() if "Finding 1" in ln and ln.startswith("#")
+    )
+    assert "Untrusted Trigger" not in heading
+    assert "Outside Activity Can Start" in heading
+    note = next(
+        ln for ln in md.splitlines() if ln.startswith("- **Platform mitigation:**")
+    )
+    assert "evaluate-mode" not in note
+    assert "off by default" in note
+    # The label rates the kind of setup, not this workflow.
+    assert "- **Severity of this kind of setup:** **HIGH**" in md

@@ -1071,7 +1071,10 @@ def _finding_group_section(
         # learning that the platform narrowed this vector — and which
         # residuals still leave it live for them.
         rows.append(("Platform mitigation", cat.platform_note))
-    rows.append(("Severity", f"**{severity}**"))
+    # The label says what the rating is OF: the kind of setup in general. The
+    # scenario row above (written by the agent) is what assesses THIS workflow,
+    # and the two can disagree without either being wrong.
+    rows.append(("Severity of this kind of setup", f"**{severity}**"))
     rows.append(("Workflow activity", activity_value))
     n = len(members)
     sev_split = _occurrence_severity_breakdown(members)
@@ -2214,8 +2217,9 @@ def _methodology_block(n_vectors: int) -> str:
         "| **Severity** | Criticality is membership in the ten-vector "
         "catalog: every finding here is a complete outsider → compromise "
         "chain, and every one renders. The HIGH / MEDIUM label records the "
-        "unfixed attack's potency — it never tiers, truncates, or reorders "
-        "what you see. |\n"
+        "unfixed attack's potency for that kind of setup in general — it "
+        "never tiers, truncates, or reorders what you see. The attacker "
+        "scenario in each finding is what assesses your specific workflow. |\n"
         "| **Finding grouping** | Every occurrence of the same underlying "
         "rule (same catalog pattern) collapses into one "
         "`## Finding N` entry — and every group renders, always. The "
