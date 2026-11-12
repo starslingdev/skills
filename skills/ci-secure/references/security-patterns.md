@@ -385,9 +385,9 @@ nothing.
 the commit the latest release tag points at:
 
 ```bash
-gh api repos/OWNER/REPO/commits/BAD_SHA          # 404 → not in the canonical repo
-gh api repos/OWNER/REPO/releases/latest --jq .tag_name
-gh api repos/OWNER/REPO/git/ref/tags/TAG --jq .object.sha   # pin this instead
+gh api repos/OWNER/REPO/commits/BAD_SHA --hostname github.com          # 404 → not in the canonical repo
+gh api repos/OWNER/REPO/releases/latest --hostname github.com --jq .tag_name
+gh api repos/OWNER/REPO/git/ref/tags/TAG --hostname github.com --jq .object.sha   # pin this instead
 ```
 
 Verify the new pin the same way before committing it.
