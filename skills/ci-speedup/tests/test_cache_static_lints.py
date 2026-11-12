@@ -439,6 +439,54 @@ jobs:
     assert undetected == []
 
 
+def test_opt61_ignores_non_build_steps_after_a_saved_build_override(
+        tmp_path) -> None:
+    commands = (
+        "mkdir -p dist",
+        "cp Cargo.lock dist/",
+        "tar -cf dist.tar dist",
+        "du -sh target",
+        "find target -maxdepth 1 -type f",
+        "grep -R TODO src",
+        "head -n 5 Cargo.lock",
+        "rustc --version",
+        "cargo --version",
+        "cargo fmt --check",
+        "rustup show",
+        "df -h",
+        "test -f Cargo.lock",
+        "ls -la $HOME",
+        "echo ok | tee log.txt",
+        "git diff --exit-code",
+        "cat Cargo.lock",
+    )
+    false_positives: list[str] = []
+    for index, command in enumerate(commands):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: {command}
+""")
+
+        if "OPT61" in _patterns(rows):
+            false_positives.append(command)
+
+    assert false_positives == []
+
+
 def test_opt61_checks_declared_sccache_directory_for_unlisted_consumers(
         tmp_path) -> None:
     commands = (

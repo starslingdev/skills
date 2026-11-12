@@ -4870,17 +4870,19 @@ def _detect_opt61(
             r"\s*=\s*([^\s;&]+)", re.IGNORECASE)
         direct_compiler_re = re.compile(
             r"(?:^|[\s;&|])(ccache|sccache)(?=\s|$)", re.IGNORECASE)
-        metadata_query_re = re.compile(
-            r"^\s*cargo\s+(?:\+\S+\s+)?nextest\s+(?:--version|-V)\s*$",
-            re.IGNORECASE)
-        unrelated_shell_re = re.compile(
-            r"^\s*(?:echo|printf)\b[^;&|]*$", re.IGNORECASE)
-        compiler_cache_inert_re = re.compile(
-            r"^\s*(?:"
-            r"git\s+(?:diff|status|show|log|rev-parse|ls-files)\b|"
-            r"ls\b|cat\b|"
-            r"rustup\s+(?:component|target|toolchain)\s+(?:add|list|install)\b"
-            r")[^;&|`$()]*$",
+        compiler_cache_consumer_re = re.compile(
+            r"(?:^|[\s;&|`$(])(?:"
+            r"cargo\s+(?:\+\S+\s+)?(?:build|test|check|bench|doc|clippy|"
+            r"nextest\s+run|hack\b|llvm-cov\b)|"
+            r"cross\s+(?:build|test|check|bench)\b|"
+            r"cmake\s+--build\b|meson\s+compile\b|make\b|ninja\b|"
+            r"bazel(?:isk)?\s+(?:build|test)\b|just\s+\S+|task\s+\S+|"
+            r"(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?\S+|"
+            r"rustc\s+(?!--version\b|-V\b)|"
+            r"(?:python(?:3(?:\.\d+)?)?|bash|sh)\s+(?:-[A-Za-z]+\s+)*"
+            r"(?:\./)?(?:scripts?|ci|tools?)/\S+|"
+            r"(?:\./|(?:scripts?|ci|tools?)/)\S+"
+            r")",
             re.IGNORECASE,
         )
         analysis_command_re = re.compile(
@@ -4897,15 +4899,11 @@ def _detect_opt61(
                 env_text = "\n".join(f"{key}={value}" for key, value in env.items())
                 if family not in env_text.casefold():
                     return False
-                # A run step can dispatch the configured wrapper through any
-                # project command.  Only the known nextest metadata probe and
-                # commands that only inspect files or install toolchain pieces
-                # prove that this step cannot compile anything. Compound shell
-                # commands stay eligible because a later segment may build.
-                return not (metadata_query_re.fullmatch(command)
-                            or compiler_cache_inert_re.fullmatch(command)
-                            or (unrelated_shell_re.fullmatch(command)
-                                and "$(" not in command and "`" not in command))
+                # Only build drivers, task runners, and first-party scripts can
+                # consume the configured compiler wrapper. File inspection,
+                # packaging, toolchain setup, and metadata probes do not make
+                # an inherited cache directory active merely by sharing a job.
+                return compiler_cache_consumer_re.search(command) is not None
             family = "staticcheck" if name == "staticcheck_cache" else "golangci"
             match = analysis_command_re.search(command)
             return bool(match and family in match.group(0).casefold())
@@ -4956,16 +4954,6 @@ def _detect_opt61(
                         declared_dirs.append((name, value))
             inherited_env.update(github_env_updates)
         declared_dirs = list(dict.fromkeys(declared_dirs))
-        if not any(name in {"ccache_dir", "sccache_dir"}
-                   for name, _value in declared_dirs):
-            # A compiler wrapper can be invoked through an arbitrary project
-            # script or Cargo subcommand.  When no known command gives us a
-            # narrower step-scoped directory, keep the job/workflow declaration
-            # as the path the configured compiler cache is expected to use.
-            declared_dirs.extend(
-                (name, value) for name, value in base_env.items()
-                if name in {"ccache_dir", "sccache_dir"} and value)
-            declared_dirs = list(dict.fromkeys(declared_dirs))
         declared_compiler_dirs = [
             value for name, value in declared_dirs
             if name in {"ccache_dir", "sccache_dir"}
