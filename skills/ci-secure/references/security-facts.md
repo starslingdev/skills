@@ -576,9 +576,12 @@ two moved numbers.
   protected", and `protected: false` on the public branch endpoint
   (`protected: true` is set by rulesets too and settles nothing). A plain
   `Not Found (HTTP 404)` from classic protection is how GitHub hides it
-  from a non-admin; once the rules endpoint has answered, that hide is
-  ordinary (as for `sec.required-checks.enforced`): the rules alone decide,
-  and a fail says classic protection could not be read. A 5xx that quotes a
+  from a non-admin. Hidden classic protection can only add review rules:
+  when the rules alone hold, it is never asked and the check passes; when
+  they fall short, the check is unmeasured, never a fail, and the evidence
+  says the rulesets do not require a reviewed pull request whose approval
+  resets on a new push, that classic protection is hidden from this reader,
+  and that an admin can confirm by re-running the scan. A 5xx that quotes a
   404, a rate limit or a timeout stays unmeasured. A source
   that was not read can only add rules, so it never undoes a pass read from
   another source; it does keep a fail from being reported. Rulesets in

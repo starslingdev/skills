@@ -4335,10 +4335,22 @@ def _review_verdict(src: Any) -> tuple[str, str]:
             f"unmeasured: a pull request rule on {label} does not say how many "
             "approvals it needs, or whether they survive a new push")
     extra = (" (" + "; ".join(skipped) + ")") if skipped else ""
-    hid = (". Note: classic branch protection could not be read (GitHub answers a "
-           "reader without admin rights Not Found), so this rests on the "
-           "rulesets alone; an admin can confirm classic protection adds no "
-           "review rule" if hidden else "")
+    if hidden:
+        # Hidden classic protection can only ADD review rules, so the rulesets
+        # falling short proves nothing: the hidden source could supply the
+        # missing rule.
+        short = ("no ruleset requires a pull request" if not params else
+                 "they require a pull request but no approving review"
+                 if count == 0 else
+                 f"they require {count} approving review(s) but neither "
+                 "stale-approval setting is on")
+        return "unmeasured", (
+            f"unmeasured: the rulesets on {label} do not require a reviewed "
+            f"pull request whose approval resets on a new push ({short}"
+            f"{'; ' + '; '.join(skipped) if skipped else ''}), and classic "
+            "branch protection is hidden from this reader (GitHub answers a "
+            "reader without admin rights Not Found), so it could add that "
+            "rule; a repository admin can confirm by re-running this scan")
     if not params:
         why = (f"nothing requires a pull request before code lands on "
                f"{label}{extra}, so any push credential can push straight "
@@ -4353,7 +4365,7 @@ def _review_verdict(src: Any) -> tuple[str, str]:
                "most recent reviewable push\" is on, so a push credential "
                "pushes new code onto an approved pull request and merges it "
                "on the old approval")
-    return "fail", f"{why}. {_REVIEW_FIX}{hid}"
+    return "fail", f"{why}. {_REVIEW_FIX}"
 
 
 def _default_branch_review(repo: str | None, fetcher) -> tuple[str, str]:

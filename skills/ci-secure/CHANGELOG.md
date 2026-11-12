@@ -41,11 +41,13 @@ entries are dated (UTC). Format loosely follows
   blockquote linking to the "If a push credential leaks" section; it adds
   nothing to the vector count), and the terminal summary leads its hygiene
   clause with it. The findings JSON shape is unchanged. The new check also
-  reads a plain `Not Found (HTTP 404)` from classic branch protection as
-  GitHub's ordinary hide from a non-admin reader once the rules endpoint
-  has answered (the same rule as the required-checks fix below, #327): the
-  rules alone then decide, and a fail says classic protection could not be
-  read; a 5xx quoting a 404, a rate limit or a timeout stays unmeasured.
+  recognizes a plain `Not Found (HTTP 404)` from classic branch protection
+  as GitHub's ordinary hide from a non-admin reader (the same reading as the
+  required-checks fix below, #327). Hidden classic protection can only add
+  review rules, so rulesets that hold on their own still pass, and rulesets
+  that fall short are unmeasured, never a fail: the evidence says classic
+  protection is hidden from this reader and an admin can confirm. A 5xx
+  quoting a 404, a rate limit or a timeout stays unmeasured.
 - ci-secure: "If a push credential leaks" — three new config hygiene checks,
   read over the GitHub API the way the required-checks and fork-approval
   checks already are. A credential that can push workflow files (GitHub's

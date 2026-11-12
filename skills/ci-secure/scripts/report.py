@@ -1899,7 +1899,7 @@ def _exposed_secrets_callout(security_score: Any) -> str:
     inv = inv if isinstance(inv, dict) else {}
     lists = [inv.get(k) for k in ("repo_secrets", "org_secrets")]
     total = sum(len(x) for x in lists if isinstance(x, list))
-    count = (f"{total} secret(s)" if total else "Repository or organisation "
+    count = (f"{total} secret(s)" if total else "Repository or organization "
              "secrets")
     partial = (" (at least; one secret list could not be read)"
                if inv.get("status") == "partial" else "")

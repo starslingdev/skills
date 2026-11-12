@@ -315,28 +315,49 @@ def test_admin_only_classic_protection_cannot_be_read_as_none(tmp_path):
 #
 # GitHub answers a non-admin reader of the classic protection endpoint with a
 # plain "Not Found (HTTP 404)" (the same hide the required-checks fact
-# accepts via `_is_classic_hidden_404`). Once the rules endpoint answered,
-# that hide is ordinary: the rules alone decide, and the evidence says
-# classic protection was not read. Anything else stays unmeasured.
+# accepts via `_is_classic_hidden_404`). Hidden classic protection can only
+# ADD review rules, so it never undoes a pass the rulesets earn on their own,
+# and it always keeps the rulesets alone from proving a fail: that case is
+# unmeasured, naming the hide and that an admin can confirm.
 
 _HIDDEN_404 = _api_error("gh: Not Found (HTTP 404)")
 
 
-def test_a_hidden_classic_404_lets_the_rules_alone_fail_it(tmp_path):
+def test_a_hidden_classic_404_never_undoes_a_ruleset_pass(tmp_path):
+    f, gh = _run(tmp_path, _responses(rules=[_pr_rule(dismiss=True)],
+                                      rulesets=[_ruleset()],
+                                      classic=_HIDDEN_404, protected=True))
+    assert f["outcome"] == "pass", f
+    # The rulesets settle it, so the admin-only endpoint is never asked and
+    # there is no unread source to disclose.
+    assert CLASSIC not in gh.calls, gh.calls
+
+
+def test_a_hidden_classic_404_keeps_short_rulesets_unmeasured(tmp_path):
     f, _ = _run(tmp_path, _responses(rules=[_pr_rule()],
                                      rulesets=[_ruleset()],
                                      classic=_HIDDEN_404, protected=True))
-    assert f["outcome"] == "fail", f
+    assert f["outcome"] == "unmeasured", f
     ev = f["evidence"]
-    assert "most recent reviewable push" in ev, ev
-    assert "classic branch protection could not be read" in ev, ev
+    assert "rulesets" in ev and "reset" in ev, ev
+    assert "hidden from this reader" in ev, ev
+    assert "admin can confirm" in ev, ev
 
 
-def test_a_hidden_classic_404_with_no_pull_request_rule_fails(tmp_path):
+def test_a_hidden_classic_404_with_no_pull_request_rule_is_unmeasured(
+        tmp_path):
     f, _ = _run(tmp_path, _responses(classic=_HIDDEN_404, protected=True))
+    assert f["outcome"] == "unmeasured", f
+    assert "hidden from this reader" in f["evidence"], f
+    assert "admin can confirm" in f["evidence"], f
+
+
+def test_a_hidden_classic_404_on_an_unprotected_branch_still_fails(tmp_path):
+    """`protected: false` is a readable no from both sources, so the hide
+    hides nothing there."""
+    f, _ = _run(tmp_path, _responses(classic=_HIDDEN_404, protected=False))
     assert f["outcome"] == "fail", f
     assert "nothing requires a pull request" in f["evidence"], f
-    assert "classic branch protection could not be read" in f["evidence"], f
 
 
 def test_a_hidden_classic_404_never_settles_an_unread_rules_endpoint(

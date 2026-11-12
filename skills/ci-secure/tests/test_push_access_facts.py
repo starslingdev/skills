@@ -1965,7 +1965,7 @@ def test_a_branch_policy_entry_without_a_type_is_a_branch(tmp_path):
 # Grounded in the November 2026 compromised-accounts campaign (Reference
 # incidents in security-patterns.md): a token with ordinary write access
 # pushed a workflow to a throwaway branch, and every repository and
-# organisation secret reached it with no review and no merge. The evidence
+# organization secret reached it with no review and no merge. The evidence
 # says that consequence, not just a count.
 
 def test_a_secrets_fail_says_what_one_leaked_push_credential_reaches(
