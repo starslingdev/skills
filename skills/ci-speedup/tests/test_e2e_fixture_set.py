@@ -2624,12 +2624,21 @@ def test_pr_sample_job_list_reads_stop_at_the_shared_contract_cap(
     run_root = tmp_path / "run-job-list-cap"
     run_root.mkdir()
 
-    doc, report, _checks = run_fixture(fixture, monkeypatch, run_root)
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
 
     cp = doc["pr_critical_path"]
     assert cp["sample_job_list_reads"] == cr._PR_SAMPLE_JOB_LIST_READ_CAP == 1200
+    # The ordinary 20-run workflow drill happens before representative sampling
+    # and those successful payloads become free memo hits. Exclude those known
+    # baseline reads; the candidate walk itself must issue no more than its stamp.
+    baseline_ids = {str(290_000 + offset) for offset in range(20)}
+    observed_candidate_reads = sum(
+        count for run_id, count in doc["_fixture_job_reads"].items()
+        if run_id not in baseline_ids)
+    assert observed_candidate_reads == cr._PR_SAMPLE_JOB_LIST_READ_CAP
     assert cp["sample_job_list_cap_hit"] is True
     assert cp["sample_stop_reason"] == "job_list_cap"
+    assert [c for c in checks if not c.skipped and not c.ok] == []
     assert "1200 of at most 1200; cap reached" in report
 
 
