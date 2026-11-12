@@ -249,23 +249,72 @@ def test_cli_never_rewrites_findings_when_reporting_a_declined_analysis(tmp_path
 
 
 def test_cli_reports_null_invalid_and_unbound_analysis_inputs(tmp_path, capsys):
-    before, after = _run_cli(
-        tmp_path, _doc(),
-        {_KEY: None, "invalid": ["not", "an", "object"], "unbound": _ANALYSIS},
-        logs={_KEY: _LOG},
-    )
+    null_dir = tmp_path / "null"
+    invalid_dir = tmp_path / "invalid"
+    unbound_dir = tmp_path / "unbound"
+    null_dir.mkdir()
+    invalid_dir.mkdir()
+    unbound_dir.mkdir()
+    null_before, null_after = _run_cli(
+        null_dir, _doc(), {_KEY: None}, logs={_KEY: _LOG})
+    invalid_before, invalid_after = _run_cli(
+        invalid_dir, _doc(), {_KEY: ["not", "an", "object"]}, logs={_KEY: _LOG})
+    unbound_before, unbound_after = _run_cli(
+        unbound_dir, _doc(), {"unbound": _ANALYSIS}, logs={_KEY: _LOG})
 
-    assert after == before
+    assert null_after == null_before
+    assert invalid_after == invalid_before
+    assert unbound_after == unbound_before
     err = capsys.readouterr().err
     assert "--analysis ci declined" in err and "not an object" in err
-    assert "--analysis invalid declined" in err and "not an object" in err
     assert "--analysis unbound declined" in err and "no rendered pole matched" in err
+
+
+def test_cli_reports_analysis_for_a_pole_below_the_render_cap(tmp_path, capsys):
+    doc = _doc()
+    doc["pr_critical_path"]["poles"] = []
+    doc["findings"] = []
+    for index in range(6):
+        check = f"job-{index}"
+        workflow = f".github/workflows/w{index}.yml"
+        doc["pr_critical_path"]["poles"].append({
+            "check": check, "p50_s": float(600 - index * 10),
+            "workflow_file": workflow, "job": check,
+            "dominant_step": "work", "dominant_p50_s": float(500 - index * 10),
+            "steps": [{"step": "work", "category": "test",
+                       "p50_s": float(500 - index * 10)}],
+        })
+
+    before, after = _run_cli(tmp_path, doc, {"w5": _ANALYSIS}, logs={"w5": _LOG})
+
+    assert after == before
+    assert "--analysis w5 declined: no rendered pole matched" in capsys.readouterr().err
+
+
+def test_cli_reports_syntactically_invalid_analysis_without_touching_input(tmp_path, capsys):
+    findings = tmp_path / "findings.json"
+    analysis = tmp_path / "analysis.json"
+    report = tmp_path / "report.md"
+    findings.write_text(json.dumps(_doc(), indent=2) + "\n", encoding="utf-8")
+    before = findings.read_bytes()
+    analysis.write_text("{not-json", encoding="utf-8")
+
+    assert bp.main([
+        "--in", str(findings), "--out", str(report),
+        "--analysis", f"{_KEY}={analysis}",
+    ]) == 0
+
+    assert findings.read_bytes() == before
+    err = capsys.readouterr().err
+    assert "--analysis ci declined" in err
+    assert "could not be read or parsed" in err
 
 
 def _aggregation_gate_doc() -> dict:
     wf = ".github/workflows/aggregate.yml"
     return {
         "repo": "o/r", "scanned_at": "2026-11-03T00:00:00Z", "findings": [],
+        "data_bundle": {"logs": [{"check": "gate", "workflow_file": wf}]},
         "data_sources": {"runs_sampled": 20, "jobs_sampled": 40,
                          "workflows_analyzed": 1},
         "workflow_job_graph": {wf: {
