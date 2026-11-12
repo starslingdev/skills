@@ -1,0 +1,342 @@
+{
+  "human_review": {
+    "bottom_line_must_contain": "Windows (firefox)",
+    "findings_must_appear": [],
+    "findings_must_not_appear": [],
+    "report_must_contain": [],
+    "report_must_not_contain": [],
+    "review_notes": "Proposed from the public shard/upload/merge workflow shape and independent month-wide oracle: lead with the longest check among gates observed on at least five completed PR commits. Awaiting owner review."
+  },
+  "oracle": {
+    "bookkeeping_cutoff_s": 60,
+    "bookkeeping_jobs": [
+      {
+        "check": "tests 1 / Web Components - html-reporter",
+        "excluded_on": 83
+      },
+      {
+        "check": "tests 1 / Web Components - web",
+        "excluded_on": 75
+      },
+      {
+        "check": "tests 2 / ${{ matrix.os }} (${{ matrix.browser }}${{ (((matrix.node-version != 22) && format(' - Node.js {0}', matrix.node-version)) || '') }})",
+        "excluded_on": 16
+      },
+      {
+        "check": "tests 2 / ${{ matrix.os }} (${{ matrix.browser }})",
+        "excluded_on": 16
+      },
+      {
+        "check": "tests 2 / time library - ${{ matrix.clock }}",
+        "excluded_on": 14
+      },
+      {
+        "check": "tests 2 / Tracing ${{ matrix.browser }}",
+        "excluded_on": 12
+      },
+      {
+        "check": "tests 2 / windows-large - ${{ matrix.browser }}",
+        "excluded_on": 11
+      },
+      {
+        "check": "tests 2 / Electron - ${{ matrix.os }}",
+        "excluded_on": 8
+      },
+      {
+        "check": "tests 2 / Test ${{ matrix.channel }} on ${{ matrix.runs-on }}",
+        "excluded_on": 8
+      },
+      {
+        "check": "tests 2 / Test Runner - ubuntu-large - Node.js ${{ matrix.node-version }}",
+        "excluded_on": 8
+      },
+      {
+        "check": "tests 2 / Installation Test ${{ matrix.os }} (${{ matrix.node_version }})",
+        "excluded_on": 7
+      },
+      {
+        "check": "tests 2 / Android - ubuntu-large",
+        "excluded_on": 4
+      },
+      {
+        "check": "infra / Lint snippets",
+        "excluded_on": 1
+      },
+      {
+        "check": "infra / docs & lint",
+        "excluded_on": 1
+      },
+      {
+        "check": "tests 2 / Tracing chromium",
+        "excluded_on": 1
+      },
+      {
+        "check": "tests 2 / Windows",
+        "excluded_on": 1
+      }
+    ],
+    "gate_order": [
+      "tests 1 / Test Runner - macos-latest (2/2)",
+      "MCP / macos-latest - chrome",
+      "MCP / windows-latest - firefox",
+      "tests 2 / Test chrome on macos-latest",
+      "MCP / ubuntu-latest - firefox",
+      "infra / docs & lint",
+      "tests 1 / Test Runner - macos-latest (1/2)",
+      "MCP / ubuntu-latest - chrome",
+      "MCP / macos-latest - firefox",
+      "MCP / windows-latest - msedge",
+      "MCP / ubuntu-latest - chromium",
+      "tests 1 / Installation Test ubuntu-latest",
+      "tests 2 / Windows (firefox)",
+      "MCP / ubuntu-latest - webkit",
+      "tests 1 / Installation Test windows-latest",
+      "tests 1 / Test Runner - ubuntu-large - bun",
+      "tests BiDi / BiDi (moz-firefox-nightly, true)",
+      "tests 1 / Installation Test macos-latest",
+      "tests 2 / Android - ubuntu-large",
+      "tests 1 / Test Runner - ubuntu-large",
+      "MCP / windows-latest - chrome",
+      "tests 2 / macos-15-large (firefox)",
+      "tests 1 / ubuntu-large - webkit",
+      "tests 1 / ubuntu-large - firefox",
+      "tests 1 / Test Runner (ubuntu-latest, 20, 2, 2, 58:42)",
+      "tests WebView (iOS Simulator) / WebView on iOS Simulator (3/4)",
+      "tests 1 / VSCode Extension",
+      "tests 1 / Test Runner (macos-latest, 22, 1, 2, 58:42)",
+      "extension / macos-latest",
+      "infra / Lint snippets"
+    ],
+    "gates": [
+      {
+        "check": "tests 1 / Test Runner - macos-latest (2/2)",
+        "last_on": 139,
+        "out_of": 565,
+        "p50_s": 2091.0,
+        "share": 0.246018
+      },
+      {
+        "check": "MCP / macos-latest - chrome",
+        "last_on": 137,
+        "out_of": 565,
+        "p50_s": 2118.0,
+        "share": 0.242478
+      },
+      {
+        "check": "MCP / windows-latest - firefox",
+        "last_on": 53,
+        "out_of": 565,
+        "p50_s": 3096.0,
+        "share": 0.093805
+      },
+      {
+        "check": "tests 2 / Test chrome on macos-latest",
+        "last_on": 39,
+        "out_of": 565,
+        "p50_s": 4885.0,
+        "share": 0.069027
+      },
+      {
+        "check": "MCP / ubuntu-latest - firefox",
+        "last_on": 33,
+        "out_of": 565,
+        "p50_s": 2871.0,
+        "share": 0.058407
+      },
+      {
+        "check": "infra / docs & lint",
+        "last_on": 33,
+        "out_of": 565,
+        "p50_s": 208.0,
+        "share": 0.058407
+      },
+      {
+        "check": "tests 1 / Test Runner - macos-latest (1/2)",
+        "last_on": 26,
+        "out_of": 565,
+        "p50_s": 1963.0,
+        "share": 0.046018
+      },
+      {
+        "check": "MCP / ubuntu-latest - chrome",
+        "last_on": 13,
+        "out_of": 565,
+        "p50_s": 3900.0,
+        "share": 0.023009
+      },
+      {
+        "check": "MCP / macos-latest - firefox",
+        "last_on": 9,
+        "out_of": 565,
+        "p50_s": 2571.0,
+        "share": 0.015929
+      },
+      {
+        "check": "MCP / windows-latest - msedge",
+        "last_on": 9,
+        "out_of": 565,
+        "p50_s": 1938.0,
+        "share": 0.015929
+      },
+      {
+        "check": "MCP / ubuntu-latest - chromium",
+        "last_on": 8,
+        "out_of": 565,
+        "p50_s": 4153.5,
+        "share": 0.014159
+      },
+      {
+        "check": "tests 1 / Installation Test ubuntu-latest",
+        "last_on": 8,
+        "out_of": 565,
+        "p50_s": 2494.5,
+        "share": 0.014159
+      },
+      {
+        "check": "tests 2 / Windows (firefox)",
+        "last_on": 7,
+        "out_of": 565,
+        "p50_s": 5094.0,
+        "share": 0.012389
+      },
+      {
+        "check": "MCP / ubuntu-latest - webkit",
+        "last_on": 7,
+        "out_of": 565,
+        "p50_s": 2996.0,
+        "share": 0.012389
+      },
+      {
+        "check": "tests 1 / Installation Test windows-latest",
+        "last_on": 7,
+        "out_of": 565,
+        "p50_s": 2224.0,
+        "share": 0.012389
+      },
+      {
+        "check": "tests 1 / Test Runner - ubuntu-large - bun",
+        "last_on": 6,
+        "out_of": 565,
+        "p50_s": 3115.5,
+        "share": 0.010619
+      },
+      {
+        "check": "tests BiDi / BiDi (moz-firefox-nightly, true)",
+        "last_on": 5,
+        "out_of": 565,
+        "p50_s": 1598.0,
+        "share": 0.00885
+      },
+      {
+        "check": "tests 1 / Installation Test macos-latest",
+        "last_on": 5,
+        "out_of": 565,
+        "p50_s": 854.0,
+        "share": 0.00885
+      },
+      {
+        "check": "tests 2 / Android - ubuntu-large",
+        "last_on": 4,
+        "out_of": 565,
+        "p50_s": 4720.5,
+        "share": 0.00708
+      },
+      {
+        "check": "tests 1 / Test Runner - ubuntu-large",
+        "last_on": 4,
+        "out_of": 565,
+        "p50_s": 3245.5,
+        "share": 0.00708
+      },
+      {
+        "check": "MCP / windows-latest - chrome",
+        "last_on": 4,
+        "out_of": 565,
+        "p50_s": 1797.5,
+        "share": 0.00708
+      },
+      {
+        "check": "tests 2 / macos-15-large (firefox)",
+        "last_on": 3,
+        "out_of": 565,
+        "p50_s": 2591.0,
+        "share": 0.00531
+      },
+      {
+        "check": "tests 1 / ubuntu-large - webkit",
+        "last_on": 2,
+        "out_of": 565,
+        "p50_s": 2312.5,
+        "share": 0.00354
+      },
+      {
+        "check": "tests 1 / ubuntu-large - firefox",
+        "last_on": 1,
+        "out_of": 565,
+        "p50_s": 21663.0,
+        "share": 0.00177
+      },
+      {
+        "check": "tests 1 / Test Runner (ubuntu-latest, 20, 2, 2, 58:42)",
+        "last_on": 1,
+        "out_of": 565,
+        "p50_s": 5335.0,
+        "share": 0.00177
+      },
+      {
+        "check": "tests WebView (iOS Simulator) / WebView on iOS Simulator (3/4)",
+        "last_on": 1,
+        "out_of": 565,
+        "p50_s": 2884.0,
+        "share": 0.00177
+      },
+      {
+        "check": "tests 1 / VSCode Extension",
+        "last_on": 1,
+        "out_of": 565,
+        "p50_s": 1997.0,
+        "share": 0.00177
+      },
+      {
+        "check": "tests 1 / Test Runner (macos-latest, 22, 1, 2, 58:42)",
+        "last_on": 1,
+        "out_of": 565,
+        "p50_s": 1832.0,
+        "share": 0.00177
+      },
+      {
+        "check": "extension / macos-latest",
+        "last_on": 1,
+        "out_of": 565,
+        "p50_s": 192.0,
+        "share": 0.00177
+      },
+      {
+        "check": "infra / Lint snippets",
+        "last_on": 1,
+        "out_of": 565,
+        "p50_s": 103.0,
+        "share": 0.00177
+      }
+    ],
+    "repository": "microsoft/playwright",
+    "sample": {
+      "completed_pr_commits": 650,
+      "completed_with_eligible_jobs": 565,
+      "distinct_days": 31,
+      "first_completed_at": "2026-10-12T12:32:24Z",
+      "inflight_pr_commits": 0,
+      "last_completed_at": "2026-11-11T02:14:01Z",
+      "total_pr_commits": 650
+    },
+    "schema_version": 1,
+    "typical_pr_wait_s": 2279.0,
+    "window": {
+      "end": "2026-11-11T09:50:00Z",
+      "start": "2026-10-12T09:50:00Z"
+    }
+  },
+  "repository": "microsoft/playwright",
+  "review_status": "awaiting owner sign-off",
+  "schema_version": 1
+}
