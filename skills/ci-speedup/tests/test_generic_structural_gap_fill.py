@@ -218,24 +218,97 @@ def test_declined_analysis_is_loud_and_recorded_in_findings(capsys):
     }]
 
 
-def test_cli_persists_the_analysis_disposition(tmp_path, capsys):
+def _run_cli(tmp_path, doc: dict, analyses: dict[str, object], *,
+             logs: dict[str, str] | None = None) -> tuple[bytes, str]:
     findings = tmp_path / "findings.json"
-    analysis = tmp_path / "analysis.json"
-    log = tmp_path / "job.log"
     report = tmp_path / "report.md"
-    findings.write_text(json.dumps(_doc("OPT72")), encoding="utf-8")
-    analysis.write_text(json.dumps(_ANALYSIS), encoding="utf-8")
-    log.write_text(_LOG, encoding="utf-8")
+    findings.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    before = findings.read_bytes()
+    argv = ["--in", str(findings), "--out", str(report)]
+    for key, payload in analyses.items():
+        path = tmp_path / f"{key}-analysis.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        argv += ["--analysis", f"{key}={path}"]
+    for key, text in (logs or {}).items():
+        path = tmp_path / f"{key}-job.log"
+        path.write_text(text, encoding="utf-8")
+        argv += ["--log", f"{key}={path}"]
 
-    assert bp.main([
-        "--in", str(findings), "--out", str(report),
-        "--log", f"{_KEY}={log}", "--analysis", f"{_KEY}={analysis}",
-    ]) == 0
+    assert bp.main(argv) == 0
+    return before, findings.read_bytes()
 
-    saved = json.loads(findings.read_text(encoding="utf-8"))
-    assert saved["analysis_dispositions"][0]["status"] == "declined"
-    assert "specific structural catalog pattern" in saved["analysis_dispositions"][0]["reason"]
-    assert "--analysis ci declined" in capsys.readouterr().err
+
+def test_cli_never_rewrites_findings_when_reporting_a_declined_analysis(tmp_path, capsys):
+    before, after = _run_cli(tmp_path, _doc("OPT72"), {_KEY: _ANALYSIS},
+                             logs={_KEY: _LOG})
+
+    assert after == before
+    err = capsys.readouterr().err
+    assert "--analysis ci declined" in err
+    assert "specific structural catalog pattern" in err
+
+
+def test_cli_reports_null_invalid_and_unbound_analysis_inputs(tmp_path, capsys):
+    before, after = _run_cli(
+        tmp_path, _doc(),
+        {_KEY: None, "invalid": ["not", "an", "object"], "unbound": _ANALYSIS},
+        logs={_KEY: _LOG},
+    )
+
+    assert after == before
+    err = capsys.readouterr().err
+    assert "--analysis ci declined" in err and "not an object" in err
+    assert "--analysis invalid declined" in err and "not an object" in err
+    assert "--analysis unbound declined" in err and "no rendered pole matched" in err
+
+
+def _aggregation_gate_doc() -> dict:
+    wf = ".github/workflows/aggregate.yml"
+    return {
+        "repo": "o/r", "scanned_at": "2026-11-03T00:00:00Z", "findings": [],
+        "data_sources": {"runs_sampled": 20, "jobs_sampled": 40,
+                         "workflows_analyzed": 1},
+        "workflow_job_graph": {wf: {
+            "build": {"name": "build", "needs": []},
+            "lint": {"name": "lint", "needs": []},
+            "gate": {"name": "gate", "needs": ["build", "lint"]},
+        }},
+        "pr_critical_path": {
+            "sampled_pr_count": 20, "sample_target": 20, "sample_complete": True,
+            "check_present_n_pr": 20, "critical_path_check": "build",
+            "poles": [
+                {"check": "build", "p50_s": 120.0, "workflow_file": wf,
+                 "job": "build", "dominant_step": "compile", "dominant_p50_s": 100.0,
+                 "steps": [{"step": "compile", "category": "build", "p50_s": 100.0}]},
+                {"check": "gate", "p50_s": 3.0, "workflow_file": wf,
+                 "job": "gate", "steps": []},
+            ],
+            "checks": [
+                {"name": "build", "p50_s": 120.0, "present_on": 20,
+                 "workflow_file": wf},
+                {"name": "lint", "p50_s": 60.0, "present_on": 20,
+                 "workflow_file": wf},
+                {"name": "gate", "p50_s": 3.0, "present_on": 20,
+                 "workflow_file": wf},
+            ],
+            "populations": [],
+        },
+    }
+
+
+def test_aggregation_gate_analysis_is_declined_not_recorded_as_rendered(capsys):
+    doc = _aggregation_gate_doc()
+
+    md = bp.render(doc, {"aggregate": _LOG}, analyses={"aggregate": _ANALYSIS})
+
+    gate = md[md.index("▸ `gate`"):]
+    assert "**Aggregation gate" in gate
+    assert "🤖 LLM root-cause analysis" not in gate
+    assert doc["analysis_dispositions"][-1] == {
+        "key": "aggregate", "check": "gate", "status": "declined",
+        "reason": "the pole is an aggregation gate with no analysis block",
+    }
+    assert "--analysis aggregate declined" in capsys.readouterr().err
 
 
 def test_specific_structural_pattern_still_covers_its_pole():
