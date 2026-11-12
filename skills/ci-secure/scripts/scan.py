@@ -4708,6 +4708,52 @@ def _gh_extension_name(target: str) -> str | None:
     return base or None
 
 
+def _single_quoted_flags(text: str) -> list[bool]:
+    """Per character of `text`: is it inside single quotes? (`_shell_scan`'s
+    quoting rules, which do not say WHICH quote a data character sits in.)"""
+    flags: list[bool] = []
+    quote: str | None = None
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote != "'" and ch == "\\" and i + 1 < n:
+            flags += [False, False]
+            i += 2
+            continue
+        if quote:
+            flags.append(quote == "'")
+            if ch == quote:
+                quote = None
+        else:
+            if ch in "'\"":
+                quote = ch
+            flags.append(ch == "'")
+        i += 1
+    return flags
+
+
+def _commands_in_execution_order(command: str) -> list[str]:
+    """Each command of `command`, preceded by the commands its `$( … )`
+    substitutions run, in the order the shell runs them.
+
+    `install && out=$(gh <name>)` installs first and then runs: reading every
+    substitution body ahead of the whole line put the run before the install.
+    A substitution inside single quotes is printed text, never run, so its body
+    is not a command at all.
+    """
+    flags = _single_quoted_flags(command)
+    subs = iter(_COMMAND_SUBSTITUTION_RE.finditer(command))
+    out: list[str] = []
+    for segment in _install_command_segments(
+            _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
+        for _ in range(segment.count("$SUBST")):
+            match = next(subs, None)
+            if match is not None and not flags[match.start()]:
+                out.extend(_commands_in_execution_order(match.group(0)[2:-1]))
+        out.append(segment)
+    return out
+
+
 def _gh_extension_executions(
     text: str, job_range: tuple[int, int] | None,
     gap: Callable[..., None] | None = None,
@@ -4726,9 +4772,7 @@ def _gh_extension_executions(
     invocations: list[tuple[int, int, str, str]] = []
     pos = 0
     for line_no, raw, command, _new_step in _job_shell_commands(text, job_range):
-        bodies = _substitution_command_bodies(command)
-        for segment in bodies + _install_command_segments(
-                _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
+        for segment in _commands_in_execution_order(command):
             pos += 1
             tokens = _strip_command_prefix(_shell_tokens(segment))
             if not tokens or tokens[0] != "gh" or len(tokens) < 2:

@@ -5164,6 +5164,31 @@ def test_p1424_gh_extension_install_without_visible_invocation_is_a_gap(tmp_path
                for g in added), added
 
 
+def test_p1424_gh_extension_run_captured_after_the_install(tmp_path):
+    """`install && out=$(gh <name>)` installs FIRST and then runs it. Reading
+    every substitution body ahead of the whole line put the run before the
+    install, so the job produced only a coverage note."""
+    hits = _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install github/gh-actions-lock && out=$(gh actions-lock --verify)",
+    ))
+    assert len(hits) == 1, hits
+    # A double-quoted substitution still runs its body.
+    hits = _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install github/gh-actions-lock",
+        'out="$(gh actions-lock --verify)"',
+    ))
+    assert len(hits) == 1, hits
+
+
+def test_p1424_gh_extension_single_quoted_substitution_is_text(tmp_path):
+    """Inside single quotes `$( … )` is printed, never run, so neither half of
+    the chain is there."""
+    assert _remote_exec_hits(tmp_path, _gh_ext_job(
+        "echo '$(gh extension install github/gh-actions-lock)'",
+        "echo '$(gh actions-lock --verify)'",
+    )) == []
+
+
 def test_catalog_scan_end_to_end_fires_p14_24_on_a_gh_extension(tmp_path):
     _wf(tmp_path, "lockfile.yml", _GH_EXT_LOCKFILE)
     catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")

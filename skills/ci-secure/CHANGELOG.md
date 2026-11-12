@@ -316,7 +316,9 @@ entries are dated (UTC). Format loosely follows
   and an install of the scanned repository are not reported; an install with
   no visible run of the extension is recorded as a coverage note. Covers the
   `ext` alias, `--pin=X`, `--force`, flag order, `HOST/OWNER/REPO` and URL
-  targets, and multi-line `run:` blocks.
+  targets, multi-line `run:` blocks, and a run captured with `$( … )` after
+  the install on the same line; a `$( … )` inside single quotes is printed
+  text and is read as neither half.
 - **2026-11-09** — A crafted workflow line can no longer freeze the scan. The
   install-command matcher (dependency install scripts in a job that holds
   secrets) offered two readings of the same text in four places: an
