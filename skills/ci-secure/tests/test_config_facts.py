@@ -4033,6 +4033,29 @@ def test_an_admin_only_403_discloses_the_source_it_could_not_read():
     assert "read from rulesets only" in detail, detail
 
 
+def test_a_plain_classic_not_found_uses_the_rulesets_answer():
+    """GitHub hides classic protection from a non-admin reader as a plain
+    404, even when the readable rulesets source fully answers the question.
+    Keep the contexts and disclose that classic protection was unread."""
+    rules = [{
+        "type": "required_status_checks",
+        "parameters": {"required_status_checks": [
+            {"context": "build"},
+            {"context": "lint"},
+            {"context": "test"},
+        ]},
+    }]
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(
+            rules,
+            RuntimeError("gh: Not Found (HTTP 404)"))):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts == ["build", "lint", "test"], (contexts, detail)
+    assert "read from rulesets only" in detail, detail
+    assert "classic branch protection could not be read" in detail, detail
+
+
 def test_a_branch_filtered_push_workflow_cannot_veto_the_real_producer(tmp_path):
     """The tag-only shape was rejected; `on: push: branches: [main]` was not —
     and it is far commoner. A deploy workflow with a job named `test` never
@@ -4304,8 +4327,7 @@ def test_a_404_for_a_reason_other_than_unprotected_is_still_unread():
     `\\b404\\b`, so a branch renamed between the two calls, a plan-gated
     endpoint, even a 502 mentioning 404 in its body, all became "nothing
     required here" — a measured PASS over a source never read."""
-    for message in ("HTTP 404: Not Found",
-                    "Upgrade to GitHub Pro to use this feature (HTTP 404)",
+    for message in ("Upgrade to GitHub Pro to use this feature (HTTP 404)",
                     "HTTP 502: upstream returned 404 for 1 of 3 shards"):
         with mock.patch.object(
             cf, "_gh_utils",
