@@ -12106,6 +12106,12 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # the valueless + all-pole test below excludes exactly those, mirroring
         # `check_pole_not_reframed_as_hygiene`. A finding that also touches a NON-pole job still
         # renders (the all-pole guard keeps it), so its signal is not lost off-path.
+        # The drilled poles describe the pull-request lane. A finding collected
+        # only from schedule/release/workflow-dispatch runs is not measured on
+        # that lane, so sharing the same job name does not make its disclosure
+        # redundant with the PR pole.
+        if f.get("non_pr_lane") is True:
+            return False
         if str(f.get("pattern") or "") == "OPT32":
             measurement = f.get("path_filter_measurement")
             if isinstance(measurement, dict):
