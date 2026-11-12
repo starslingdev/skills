@@ -3784,8 +3784,10 @@ def _matrix_shard_leg_count(job: dict) -> int | None:
     return len(projected) if projected else None
 
 
-def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
-    """Repeated checkout/setup with no artifact handoff (OPT14 heuristic).
+def _opt14_setup_state(
+    doc: dict,
+) -> tuple[list[str], dict[str, int], dict[str, list[str]], bool]:
+    """Return repeated setup jobs and matrix facts for OPT14 and the guard.
 
     Repetition can be across at least two jobs or across the effective shard
     configurations of one matrix job. An upload-only step (for example a
@@ -3838,23 +3840,17 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
     # so keep it even when it is the workflow's only setup job.
     setup_jobs = sorted(set(_co_running(_jobs_from_doc(doc), setup_jobs))
                         | set(matrix_setup_legs))
-    if setup_jobs and not has_handoff:
-        if len(setup_jobs) >= 2:
-            evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "
-                        f"install with no `actions/upload-artifact` / "
-                        f"`download-artifact` handoff: {', '.join(setup_jobs)}")
-        else:
-            job_name = setup_jobs[0]
-            repeated = matrix_setup_repeated[job_name]
-            repeated_text = ", ".join(repeated[:-1])
-            if len(repeated) > 1:
-                repeated_text += f" and {repeated[-1]}"
-            else:
-                repeated_text = repeated[0]
-            evidence = (
-                f"shard matrix repeats {repeated_text} across "
-                f"{matrix_setup_legs[job_name]} legs with no artifact handoff: "
-                f"{job_name}")
+    return setup_jobs, matrix_setup_legs, matrix_setup_repeated, has_handoff
+
+
+def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
+    """Report repeated setup across jobs, while leaving lone-shard facts unreported."""
+    setup_jobs, matrix_setup_legs, matrix_setup_repeated, has_handoff = (
+        _opt14_setup_state(doc))
+    if len(setup_jobs) >= 2 and not has_handoff:
+        evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "
+                    f"install with no `actions/upload-artifact` / "
+                    f"`download-artifact` handoff: {', '.join(setup_jobs)}")
         return [Hit(
             line=1,
             affected_jobs=setup_jobs,
@@ -4804,6 +4800,14 @@ def _detect_opt61(
             re.IGNORECASE)
         unrelated_shell_re = re.compile(
             r"^\s*(?:echo|printf)\b[^;&|]*$", re.IGNORECASE)
+        compiler_cache_inert_re = re.compile(
+            r"^\s*(?:"
+            r"git\s+(?:diff|status|show|log|rev-parse|ls-files)\b|"
+            r"ls\b|cat\b|"
+            r"rustup\s+(?:component|target|toolchain)\s+(?:add|list|install)\b"
+            r")[^;&|`$()]*$",
+            re.IGNORECASE,
+        )
         analysis_command_re = re.compile(
             r"(?:^|[\s;&|])(?:staticcheck|golangci-lint)(?=\s|$)", re.IGNORECASE)
 
@@ -4820,8 +4824,11 @@ def _detect_opt61(
                     return False
                 # A run step can dispatch the configured wrapper through any
                 # project command.  Only the known nextest metadata probe and
-                # shell output without a command substitution prove otherwise.
+                # commands that only inspect files or install toolchain pieces
+                # prove that this step cannot compile anything. Compound shell
+                # commands stay eligible because a later segment may build.
                 return not (metadata_query_re.fullmatch(command)
+                            or compiler_cache_inert_re.fullmatch(command)
                             or (unrelated_shell_re.fullmatch(command)
                                 and "$(" not in command and "`" not in command))
             family = "staticcheck" if name == "staticcheck_cache" else "golangci"
@@ -9397,6 +9404,22 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # document is byte-identical to before. Rendered as the "Parallel steps"
         # row of the report's Data sources table.
         extra["parallel_steps"] = parallel_stats
+    matrix_setup_facts: dict[str, dict[str, dict[str, Any]]] = {}
+    for rel, doc, _raw in parsed:
+        _jobs, leg_counts, repeated_work, has_handoff = _opt14_setup_state(doc)
+        leg_counts = {
+            job: legs for job, legs in leg_counts.items()
+            if (rel, job) not in unreadable_jobs
+        }
+        if leg_counts and not has_handoff:
+            matrix_setup_facts[rel] = {
+                job: {"legs": legs, "repeated": repeated_work.get(job, [])}
+                for job, legs in sorted(leg_counts.items())
+            }
+    if matrix_setup_facts:
+        # Guard-only facts: a lone sharded test job is not a report finding,
+        # but growing its matrix still needs the differential warning.
+        extra["matrix_setup_facts"] = matrix_setup_facts
 
     return {
         **extra,

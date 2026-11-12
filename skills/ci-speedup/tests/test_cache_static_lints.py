@@ -263,6 +263,10 @@ jobs:
       - run: cargo test
         env:
           SCCACHE_DIR: /build/sccache
+      - run: git diff --exit-code
+      - run: ls -la target
+      - run: cat Cargo.lock
+      - run: rustup component add clippy
 """)
 
     assert "OPT61" not in _patterns(rows)
