@@ -4861,8 +4861,8 @@ def _gh_extension_ref_description(ref: str | None) -> str:
 # A binary extension's `--pin` names a release TAG. A release GitHub publishes
 # as IMMUTABLE locks its tag and assets, so that pin cannot move — but the
 # setting lives on GitHub, not in the workflow. With the network checks on
-# (the same `--gh-impostor` switch as P14.11, so `off` keeps the whole scan
-# offline), each tag-pinned install that the job then runs is looked up once
+# (the same `--gh-impostor` switch as P14.11, so `off` keeps every vector
+# lookup offline), each tag-pinned install that the job then runs is looked up once
 # per (repository, tag) per scan:
 #
 #   GET /repos/{owner}/{repo}/releases/tags/{tag}   → the release's
@@ -4945,6 +4945,8 @@ def _gh_release_immutability(slug: str, tag: str) -> tuple[str, str]:
             )
         except FileNotFoundError:
             return "unknown", "gh is not installed"
+        except OSError:
+            return "unknown", "gh could not be run"
         except subprocess.TimeoutExpired:
             last = "the GitHub API timed out"
             continue
@@ -4955,7 +4957,13 @@ def _gh_release_immutability(slug: str, tag: str) -> tuple[str, str]:
                 body = json.loads(result.stdout or "{}")
             except ValueError:
                 return "unknown", "the release response was not JSON"
-            flag = body.get("immutable") if isinstance(body, dict) else None
+            if not isinstance(body, dict):
+                return "unknown", "the release response was not an object"
+            if body.get("tag_name") != tag or body.get("draft") is True:
+                # Only the published release at exactly this tag can vouch.
+                return "unknown", ("the release response did not describe "
+                                   "the published release at this tag")
+            flag = body.get("immutable")
             if flag is True:
                 return "immutable", ""
             if flag is False:
@@ -5116,9 +5124,12 @@ def _correlation_unverified_remote_code_execution(
         for inst, exec_line, invoked in _gh_extension_executions(
             text, job_range, _gap, file_path,
         ):
-            ref_text = _gh_extension_ref_description(inst.ref)
+            # `--pin=` with no value installs the latest release, as no pin.
+            pin = inst.ref or None
+            ref_text = _gh_extension_ref_description(pin)
             observed = ""
-            if inst.ref is not None and not _ABBREV_SHA_RE.match(inst.ref):
+            offline = " (not visible offline)"
+            if pin is not None and not _ABBREV_SHA_RE.match(pin):
                 verdict, _reason = _release_lookup(inst, file_path)
                 if verdict == "immutable":
                     _gap(f"a GitHub CLI extension `{_as_written(inst.repo)}` "
@@ -5128,6 +5139,8 @@ def _correlation_unverified_remote_code_execution(
                          f"change), so it is deliberately not reported",
                          kind=_KIND_SUPPRESSED)
                     continue
+                if verdict in ("mutable", "not_release"):
+                    offline = ""             # the scan did look
                 if verdict == "mutable":
                     observed = (" GitHub reports this release is NOT "
                                 "immutable, so its tag can be moved.")
@@ -5151,7 +5164,7 @@ def _correlation_unverified_remote_code_execution(
                     f"40-character commit id passed to `--pin` cannot change "
                     f"under you; a binary extension's `--pin` names a release "
                     f"tag, which is fixed only when that release is published "
-                    f"as immutable (not visible offline) — otherwise download "
+                    f"as immutable{offline} — otherwise download "
                     f"the release asset, verify its digest and run the local "
                     f"copy." + observed
                 ),
@@ -6474,7 +6487,7 @@ def _scan_once(
     _DROPPED_MATCHES.clear()
     _reset_expression_tokens()
     # P14.24's release-immutability lookup rides the same network switch as
-    # P14.11, so `--gh-impostor off` keeps the whole scan offline.
+    # P14.11, so `--gh-impostor off` keeps every vector lookup offline.
     _reset_release_lookup(gh_impostor, gh_skip_reason, root)
     _PARSE_FAILURES_LOGGED.clear()
     workflow_files = all_workflow_files(root)

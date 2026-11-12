@@ -324,7 +324,11 @@ entries are dated (UTC). Format loosely follows
   finding, and each unverified pin it lists is flattened like any other
   scanned text, so a workflow path or `--pin` value cannot add Markdown of
   its own. A scan that stops with an error switches the lookup back off, as
-  a finished one does. Also fixed in the same finding text: a `--pin` written as a
+  a finished one does. Only the published release whose tag is exactly the
+  pin can vouch for it; a `gh` that cannot be run is a failed lookup, not a
+  crashed scan; `--pin=` with no value is read as no pin (latest release);
+  and a finding whose release was looked up no longer says the setting is
+  not visible offline. Also fixed in the same finding text: a `--pin` written as a
   `${{ }}` expression showed the scanner's internal placeholder instead of
   the expression, and an abbreviated `--pin` was described as something git
   re-resolves, which a gh extension install does not do.
