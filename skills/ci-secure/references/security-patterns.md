@@ -95,7 +95,7 @@ to the fix agent as a constraint.
 pattern: P14.10
 severity: HIGH
 detector: yaml-run-injection
-match: "\$\{\{\s*(github\.event\.(issue|comment|pull_request|discussion|workflow_run|head_commit|inputs|client_payload)\.[a-zA-Z_.]+|github\.event\.inputs\.[a-zA-Z_0-9]+|github\.head_ref)(\s*\|\|[^}]*?)?\s*\}\}"
+match: "\$\{\{\s*(github\.event\.(issue|comment|pull_request|discussion|workflow_run|head_commit|inputs|client_payload)\.[a-zA-Z_0-9.]+|github\.event\.inputs\.[a-zA-Z_0-9]+|inputs\.[a-zA-Z_0-9]+|github\.head_ref)(\s*\|\|[^}]*?)?\s*\}\}"
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
 fix_strategy: env-var-indirection
 fix-surface: yaml
@@ -116,18 +116,19 @@ Attacker-controllable expression sources:
 - `github.event.head_commit.message` and any other commit metadata on `push` triggers
 - `github.head_ref` (PR source branch name)
 - `github.event.workflow_run.head_branch`, `.display_title`
-- `workflow_dispatch` inputs that accept free-form strings, in their `github.event.inputs.*` spelling
+- `workflow_dispatch` and reusable-workflow inputs that accept free-form
+  strings, in either their `github.event.inputs.*` or `inputs.*` spelling
 - Anything from `repository_dispatch.client_payload`
 - Output of an earlier step derived from any of the above
 
 A **`||` fallback does not sanitize anything.** `${{ github.head_ref || github.ref_name }}` is matched, because `||` returns the FIRST operand whenever it is truthy — so on a pull request the branch name an attacker chose is exactly what lands in the shell, and the safe-looking right-hand side never evaluates. The match therefore tolerates ` || <anything>` after the context path, and the value-shape exclusion above is judged on the first operand only: `${{ github.event.pull_request.title || '' }}` stays a finding, while `${{ github.event.pull_request.number || 0 }}` remains excluded. (cal.com's `production-build-without-database.yml:72` interpolated `${{ github.head_ref || github.ref_name }}` into a `run:` block holding roughly a dozen secrets and went unreported for exactly this reason.)
 
-The bare `inputs.*` context is deliberately **not** matched. It resolves to a
-`workflow_call` input on a reusable workflow, and a caller who can set that
-input already has write access to a workflow file in the repo — an insider,
-not the outsider the catalog's admission test requires. (`workflow_dispatch`
-inputs remain in scope via their `github.event.inputs.*` spelling, which is
-what the trigger actually populates.)
+Quoted bracket indexing is normalized to the same dotted source paths before
+matching. This includes `inputs['max-items']`, `github.event.inputs["name"]`
+and chained forms such as `github.event['client_payload']['command']`; bracket
+indexing is required for input names containing a hyphen. The same
+normalization is used by P14.15. Other contexts such as `matrix['os']` remain
+outside this source list.
 
 The `yaml-run-injection` detector walks `jobs.*.steps.*.run` and only fires when the regex matches inside a `run:` scalar — the actual shell context. Expressions in `env:`, `with:`, or `name:` blocks are structurally excluded: those are not shell contexts for this sink. That is a statement about *this* sink only — an action that shells out its own inputs turns a `with:` value into shell code inside the action's body, which is a different, undetected class.
 

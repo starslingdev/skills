@@ -97,7 +97,7 @@ def _all_patterns(data: dict) -> set[str]:
 EXPECTED_COUNTS = {
     "P14.7": 1,
     "P14.9": 1,
-    "P14.10": 9,
+    "P14.10": 10,
     "P14.14": 3,
     "P14.15": 2,
     "P14.18": 1,
@@ -264,31 +264,24 @@ def test_p1410_covers_all_documented_sinks(scan_findings: list[dict]) -> None:
     """P14.10 must catch every sink the catalog prose names as in-scope — and
     only those.
 
-    The fixture carries four template-injection lines. Three are in scope
+    The fixture carries four template-injection lines. All four are in scope
     (`github.event.head_commit.*`, `github.event.inputs.*`,
-    `github.event.client_payload.*`); the fourth, bare `inputs.*`, is
-    deliberately NOT (see the negative test below).
+    `github.event.client_payload.*`, and the unified `inputs.*` context).
     """
     hits_on_sinks = [
         f
         for f in scan_findings
         if f["pattern"] == "P14.10" and "p14_10_new_sinks" in f["workflow_file"]
     ]
-    assert len(hits_on_sinks) == 3, (
-        f"Expected 3 P14.10 hits on the new-sinks fixture, got {len(hits_on_sinks)}"
+    assert len(hits_on_sinks) == 4, (
+        f"Expected 4 P14.10 hits on the new-sinks fixture, got {len(hits_on_sinks)}"
     )
 
 
-def test_p1410_does_not_fire_on_bare_workflow_call_inputs(tmp_path: Path) -> None:
-    """Bare `${{ inputs.x }}` in a `run:` block must NOT fire.
-
-    It resolves to a `workflow_call` input, which only a caller with write
-    access to a workflow file in this repo can set — an insider, not the
-    outsider the catalog's admission test requires. Every other pattern here
-    starts at someone with no repo access, so keeping this one would have
-    made P14.10 the exception. The `workflow_dispatch` spelling
-    (`github.event.inputs.*`) IS a sink and must still fire.
-    """
+def test_p1410_fires_on_modern_workflow_inputs(tmp_path: Path) -> None:
+    """The unified ``inputs`` context is caller-filled for dispatch and
+    reusable workflows, so its dotted form is the same source as its bracket
+    form and the legacy ``github.event.inputs`` spelling."""
     _write_workflow(tmp_path, "reusable.yml", (
         "on:\n"
         "  workflow_call:\n"
@@ -301,7 +294,7 @@ def test_p1410_does_not_fire_on_bare_workflow_call_inputs(tmp_path: Path) -> Non
         "    steps:\n"
         '      - run: echo "deploying to ${{ inputs.env_name }}"\n'
     ))
-    assert "P14.10" not in _patterns_for_file(_scan_dir(tmp_path), "reusable.yml")
+    assert "P14.10" in _patterns_for_file(_scan_dir(tmp_path), "reusable.yml")
 
     dispatch_root = tmp_path / "dispatch"
     _write_workflow(dispatch_root, "reusable.yml", (
@@ -318,7 +311,7 @@ def test_p1410_does_not_fire_on_bare_workflow_call_inputs(tmp_path: Path) -> Non
     ))
     assert "P14.10" in _patterns_for_file(
         _scan_dir(dispatch_root), "reusable.yml"
-    ), "the workflow_dispatch sink must still fire"
+    ), "the legacy workflow_dispatch spelling must still fire"
 
 
 def test_p1410_ignores_github_generated_value_shape_safe_fields(tmp_path: Path) -> None:
@@ -430,6 +423,88 @@ def test_p1410_modern_bare_inputs_context_is_caller_filled(
     # list is what the catalog is checked against, and what a future change to
     # the anchor rule would be measured by.
     assert "inputs." in scan._ATTACKER_FILLED_PREFIXES
+
+
+@pytest.mark.parametrize("expression", [
+    "inputs['max-items']",
+    'inputs [ "max-items" ]',
+    "github.event.inputs['max-items']",
+    'github.event.inputs [ "max-items" ]',
+    "github.event['inputs']['max-items']",
+    'github.event["client_payload"]["command"]',
+    "github.event['pull_request']['title']",
+    "inputs.max_items",
+    "github.event.inputs.max_items",
+])
+def test_bracket_indexed_attacker_inputs_reach_both_shell_sinks(
+    tmp_path: Path, expression: str,
+) -> None:
+    direct = tmp_path / "direct"
+    _write_workflow(direct, "sink.yml", (
+        "on: workflow_dispatch\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f'      - run: echo "${{{{ {expression} }}}}"\n'
+    ))
+    direct_hits = [
+        finding for finding in _scan_dir(direct)["findings"]
+        if finding["pattern"] == "P14.10"
+    ]
+    assert len(direct_hits) == 1, direct_hits
+    assert direct_hits[0]["line"] == 6
+    assert expression in direct_hits[0]["evidence"]
+
+    deferred = tmp_path / "deferred"
+    _write_workflow(deferred, "sink.yml", (
+        "on: workflow_dispatch\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f'      - run: echo "VALUE=${{{{ {expression} }}}}" >> "$GITHUB_ENV"\n'
+    ))
+    deferred_hits = [
+        finding for finding in _scan_dir(deferred)["findings"]
+        if finding["pattern"] == "P14.15"
+    ]
+    assert len(deferred_hits) == 1, deferred_hits
+    assert deferred_hits[0]["line"] == 6
+    assert expression in deferred_hits[0]["evidence"]
+
+
+@pytest.mark.parametrize("expression", [
+    "matrix['os']",
+    'steps["prepare"].outputs.value',
+])
+def test_bracket_indexing_does_not_promote_non_source_contexts(
+    tmp_path: Path, expression: str,
+) -> None:
+    _write_workflow(tmp_path, "safe.yml", (
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f'      - run: echo "${{{{ {expression} }}}}"\n'
+        f'      - run: echo "VALUE=${{{{ {expression} }}}}" >> "$GITHUB_ENV"\n'
+    ))
+    patterns = _patterns_for_file(_scan_dir(tmp_path), "safe.yml")
+    assert "P14.10" not in patterns
+    assert "P14.15" not in patterns
+
+
+def test_bracket_indexed_github_generated_shape_stays_safe(tmp_path: Path) -> None:
+    _write_workflow(tmp_path, "safe.yml", (
+        "on: pull_request\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: echo \"${{ github.event.pull_request['number'] }}\"\n"
+    ))
+    assert "P14.10" not in _patterns_for_file(_scan_dir(tmp_path), "safe.yml")
 
 
 def test_shape_safe_allowlist_only_ever_touches_template_expressions() -> None:
