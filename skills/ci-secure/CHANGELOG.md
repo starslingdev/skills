@@ -305,6 +305,11 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-12** (#324) — P14.10 and P14.15 now treat quoted bracket-indexed
+  attacker inputs like their dotted equivalents, including hyphenated input
+  names and chained `github.event` / `client_payload` lookups. Bracket access
+  on non-source contexts remains silent.
+
 - **2026-11-11** (#331) — A GitHub CLI extension pinned to a tag on a
   release GitHub has locked as immutable is no longer reported (P14.24). That
   tag and its assets cannot move, but the offline scan could not see the
