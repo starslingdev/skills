@@ -355,6 +355,32 @@ def test_a_failing_rule_with_no_bypassers_names_none(tmp_path):
                                      rulesets=[_ruleset()]))
     assert f["outcome"] == "fail", f
     assert "bypass list" not in f["evidence"], f
+    # With nobody to name, the evidence is exactly what it was before.
+    assert f["evidence"].endswith("most recent reviewable push\""), f
+
+
+def test_a_failing_rule_says_when_its_bypass_list_was_not_read(tmp_path):
+    """An unread bypass list is part of the fix too: without a word here the
+    next scan, after the rule is fixed, turns unmeasured on that list."""
+    f, _ = _run(tmp_path, _responses(rules=[_pr_rule()],
+                                     rulesets=[_ruleset(bypass=None)]))
+    assert f["outcome"] == "fail", f
+    ev = f["evidence"]
+    assert "`protect-main-7`'s bypass list is not readable" in ev, ev
+
+
+def test_a_failing_rules_classic_bypassers_get_classic_advice(tmp_path):
+    """Classic protection has no "For pull requests only" mode; the advice
+    names the classic setting that lists them, as the bypass fail does."""
+    f, _ = _run(tmp_path, _responses(classic=_classic(apps=["deploy-bot"])))
+    assert f["outcome"] == "fail", f
+    ev = f["evidence"]
+    assert "app `deploy-bot`" in ev, ev
+    assert ("\"Allow specified actors to bypass required pull requests\""
+            in ev), ev
+    # Fixing the rule in a source that does not list the actor holds it, so
+    # the removal advice is tied to the source that lists them.
+    assert "fixed in a source that lists" in ev, ev
 
 
 def test_a_ruleset_in_evaluate_mode_is_not_counted(tmp_path):

@@ -345,10 +345,11 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
-- **2026-11-12** — ci-secure: the default-branch review check, when it fails on the
-  rule's own settings, now also names anyone short of an admin on a bypass
-  list, so one report lists every fix instead of a second fail after the
-  first fix.
+- **2026-11-12** (#345) — ci-secure: the default-branch review check, when it
+  fails on the rule's own settings, now also names anyone short of an admin
+  on a bypass list (with the classic or ruleset setting to change) and any
+  bypass list it could not read, so one report lists every fix instead of a
+  second fail or unmeasured after the first fix.
 
 - **2026-11-12** (#341, closes #327) — Required-check auditing now keeps a readable ruleset
   answer when GitHub hides classic branch protection from a non-admin reader

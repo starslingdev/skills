@@ -562,7 +562,8 @@ two moved numbers.
   source's stale-approval setting counts), require a pull request with at
   least one approval and one of the two settings. **Fails** when nothing
   requires a pull request, the approval count is 0, or neither setting is
-  on; the evidence names which. **Anyone short of an admin who can skip
+  on; the evidence names which, plus every bypasser short of an admin and
+  any bypass list that could not be read, so one report lists every fix. **Anyone short of an admin who can skip
   the review also fails it**: a ruleset bypass actor that is an app, a
   deploy key, a team, a user or a repository role other than admin, and
   any user, team or app in classic protection's "Allow specified actors to
