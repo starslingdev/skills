@@ -3396,14 +3396,18 @@ _ADMIN_ACTORS = {("RepositoryRole", 5), ("OrganizationAdmin", None),
                  ("OrganizationAdmin", 1), ("EnterpriseOwner", None)}
 
 
-def _bypass_state(rs: dict, block: str) -> str:
-    """'clean' (nobody short of an admin), 'open' or 'unknown' (the list is
-    not served to readers without admin rights) for one block."""
-    if "bypass_actors" not in rs or not isinstance(rs["bypass_actors"], list):
-        return "unknown"
-    for actor in rs["bypass_actors"]:
+def _open_bypass_actors(rs: dict, block: str) -> list[dict] | None:
+    """The bypass actors short of an admin that can skip `block` of ruleset
+    `rs`, or None when the list is not readable (it is not served to readers
+    without the right to edit the ruleset). Shared by the environment checks
+    and the default-branch review check, so both read a bypasser alike."""
+    actors = rs.get("bypass_actors")
+    if not isinstance(actors, list):
+        return None
+    out = []
+    for actor in actors:
         if not isinstance(actor, dict):
-            return "unknown"
+            return None
         if actor.get("bypass_mode") == "pull_request" and block != "update":
             # GitHub lets this actor merge a pull request that does not meet
             # the rules. A merge can neither create nor delete a ref, but it
@@ -3411,8 +3415,15 @@ def _bypass_state(rs: dict, block: str) -> str:
             continue
         if (actor.get("actor_type"), actor.get("actor_id")) in _ADMIN_ACTORS:
             continue
-        return "open"
-    return "clean"
+        out.append(actor)
+    return out
+
+
+def _bypass_state(rs: dict, block: str) -> str:
+    """'clean' (nobody short of an admin), 'open' or 'unknown' (the list is
+    not served to readers without admin rights) for one block."""
+    actors = _open_bypass_actors(rs, block)
+    return "unknown" if actors is None else "open" if actors else "clean"
 
 
 _BLOCKS = {"creation": {"creation"}, "update": {"update", "pull_request"},
@@ -4152,43 +4163,65 @@ def _actor_label(actor: Any) -> str:
     return label
 
 
-def _ruleset_counts(src: Any, rule: dict) -> tuple[bool, str, bool]:
-    """(counts, note, unread) for one pull_request rule from the rules
-    endpoint. `counts` is False only when the ruleset's own detail says it is
-    not actively enforced; `note` names who may bypass it, or says that could
-    not be read, and `unread` says which of the two it is."""
+class _Source:
+    """One source of the default branch's pull request rule: its parameters
+    (the rules endpoint's names), the actors short of an admin that may skip
+    it as {identity: label} (None when that list could not be read), the
+    admins that may, and why the list was not read."""
+
+    def __init__(self, params: dict, bypass: dict | None, admins: list[str],
+                 unread: str = "", pr_only: bool = False):
+        self.params, self.bypass, self.admins = params, bypass, admins
+        self.unread, self.pr_only = unread, pr_only
+
+
+# The two bypass-list schemes name the same kind of actor differently (a
+# ruleset by numeric id, classic protection by login or slug), so an actor
+# of one scheme cannot be matched to one of the same kind in the other.
+_CLASSIC_KINDS = {"users": ("User", "login", "user"),
+                  "teams": ("Team", "slug", "team"),
+                  "apps": ("Integration", "slug", "app")}
+
+
+def _ruleset_source(src: Any, rule: dict) -> tuple[Any, str]:
+    """(source, skip note) for one pull_request rule from the rules endpoint;
+    source is None when the ruleset's own detail says it is not actively
+    enforced."""
+    p = rule.get("parameters")
+    params = p if isinstance(p, dict) else {}
     rid = rule.get("ruleset_id")
     if rid is None:
-        return True, ("a pull request rule did not name its ruleset, so who "
-                      "may bypass it was not read"), True
+        return _Source(params, None, [], "a pull request rule did not name "
+                       "its ruleset, so who may bypass it was not read"), ""
     try:
         rs = src.ruleset(rid)
     except _Unread as exc:
-        return (True, f"who may bypass ruleset {rid} could not be read "
-                f"({exc})", True)
+        return _Source(params, None, [], f"who may bypass ruleset {rid} could "
+                       f"not be read ({exc})"), ""
     name = rs.get("name") or rid
     enforcement = rs.get("enforcement")
     if enforcement is not None and enforcement != "active":
-        return False, (f"ruleset `{name}` requires review but is in "
-                       f"`{enforcement}` mode, which enforces nothing"), False
-    actors = rs.get("bypass_actors")
-    if not isinstance(actors, list):
-        return True, (f"ruleset `{name}`'s bypass list is not readable "
-                      "without the right to edit it"), True
-    if not actors:
-        return True, "", False
-    return True, (f"ruleset `{name}` lets "
-                  + _capped([_actor_label(a) for a in actors], 4, ", ")
-                  + " bypass it"), False
+        return None, (f"ruleset `{name}` requires review but is in "
+                      f"`{enforcement}` mode, which enforces nothing")
+    open_ = _open_bypass_actors(rs, "update")
+    if open_ is None:
+        return _Source(params, None, [], f"ruleset `{name}`'s bypass list is "
+                       "not readable without the right to edit it"), ""
+    admins = [_actor_label(a) for a in rs["bypass_actors"]
+              if isinstance(a, dict)
+              and (a.get("actor_type"), a.get("actor_id")) in _ADMIN_ACTORS]
+    bypass = {(a.get("actor_type"), a.get("actor_id")): _actor_label(a)
+              for a in open_}
+    pr_only = any(a.get("bypass_mode") == "pull_request" for a in open_)
+    return _Source(params, bypass, admins, pr_only=pr_only), ""
 
 
-def _classic_review_params(body: dict) -> tuple[dict | None, str]:
-    """(pull_request parameters in the rules endpoint's names, bypass note)
-    from a classic protection body; (None, "") when it requires no pull
-    request. Raises `_Unread` on a shape it cannot read."""
+def _classic_source(body: dict) -> Any:
+    """The classic protection body as a source; None when it requires no
+    pull request. Raises `_Unread` on a shape it cannot read."""
     reviews = body.get("required_pull_request_reviews")
     if reviews is None:
-        return None, ""
+        return None
     if not isinstance(reviews, dict):
         raise _Unread("classic branch protection's pull request settings "
                       "have an unexpected shape")
@@ -4198,21 +4231,39 @@ def _classic_review_params(body: dict) -> tuple[dict | None, str]:
         "dismiss_stale_reviews_on_push": reviews.get("dismiss_stale_reviews"),
         "require_last_push_approval": reviews.get("require_last_push_approval"),
     }
-    who: list[str] = []
-    admins = body.get("enforce_admins")
-    if not (isinstance(admins, dict) and admins.get("enabled") is True):
-        who.append("repository admins (classic protection does not apply "
-                   "to administrators)")
+    admins: list[str] = []
+    enforce = body.get("enforce_admins")
+    if not (isinstance(enforce, dict) and enforce.get("enabled") is True):
+        admins.append("repository admins (classic protection does not apply "
+                      "to administrators)")
     allow = reviews.get("bypass_pull_request_allowances")
-    if isinstance(allow, dict):
-        for key, field in (("users", "login"), ("teams", "slug"),
-                           ("apps", "slug")):
-            for item in allow.get(key) or []:
-                if isinstance(item, dict) and item.get(field):
-                    who.append(f"`{item[field]}`")
-    note = ("classic branch protection lets " + _capped(who, 4, ", ")
-            + " skip it") if who else ""
-    return params, note
+    odd = _Source(params, None, admins, "classic branch protection's bypass "
+                  "allowances have an unexpected shape")
+    if allow is None:
+        return _Source(params, {}, admins)
+    if not isinstance(allow, dict):
+        return odd
+    bypass: dict = {}
+    for key, (kind, field, word) in _CLASSIC_KINDS.items():
+        items = allow.get(key) or []
+        if not isinstance(items, list):
+            return odd
+        for item in items:
+            if not (isinstance(item, dict) and item.get(field)):
+                return odd
+            bypass[("classic", kind, item[field])] = f"{word} `{item[field]}`"
+    return _Source(params, bypass, admins)
+
+
+def _same_kind_elsewhere(actor: tuple, source: Any) -> bool:
+    """Could `actor` be listed in `source` under the other scheme's name?"""
+    def kind(a: tuple) -> Any:
+        return a[1] if a[0] == "classic" else a[0]
+    for other in source.bypass or {}:
+        if (kind(other) == kind(actor)
+                and (other[0] == "classic") != (actor[0] == "classic")):
+            return True
+    return False
 
 
 def _layered(params: list[dict]) -> dict:
@@ -4238,23 +4289,101 @@ def _layered(params: list[dict]) -> dict:
         "require_last_push_approval": either("require_last_push_approval")}}
 
 
+def _holds(group: list) -> bool:
+    return bool(group) and _rule_holds(
+        _layered([g.params for g in group])) == "held"
+
+
+def _bypass_verdict(label: str, count: Any, found: list, sources: list[str],
+                    unread: list[str], hidden: bool) -> tuple[str, str]:
+    """The verdict once the layered rule holds: does it hold for everyone
+    short of an admin? GitHub layers every source, so an actor escapes only
+    when it may skip every source that would hold it."""
+    rule = (f"{label} requires a pull request with {count} approving "
+            "review(s), and an approval stops counting once new commits are "
+            f"pushed ({' and '.join(sources)})")
+    known = [g for g in found if g.bypass is not None]
+    labels: dict = {}
+    for g in known:
+        labels.update(g.bypass)
+    # A definite escape: the sources that do not list the actor do not hold
+    # it. An unread source might, so then nothing is definite.
+    escaped = [] if (hidden or unread) else [
+        actor for actor in labels
+        if not _holds([g for g in found if actor not in (g.bypass or {})])]
+    admins = list(dict.fromkeys(a for g in found for a in g.admins))
+    if escaped:
+        names = _capped([labels[a] for a in escaped], 6, ", ")
+        pr_only = any(g.pr_only and set(g.bypass or {}) & set(escaped)
+                      for g in found)
+        return "fail", (
+            f"{rule}, but {names} can skip it from a bypass list, so a leaked "
+            f"credential of any of these can land code on {label} with no "
+            "review"
+            + (" (\"For pull requests only\" bypass still lets them merge "
+               "their own pull request without the required approval)"
+               if pr_only else "")
+            + ". Remove them from the bypass list (the ruleset's, or classic "
+            "branch protection's \"Allow specified actors to bypass required "
+            "pull requests\"); \"For pull requests only\" bypass is not "
+            "enough, because GitHub then lets the actor \"bypass any branch "
+            "protections and merge that pull request\". Leave only admins, "
+            "who can change these settings anyway")
+    clean = _holds(known) and all(
+        _holds([g for g in known if a not in g.bypass
+                and not _same_kind_elsewhere(a, g)]) for a in labels)
+    if not clean or len(known) < len(found):
+        why = [g.unread for g in found if g.bypass is None and g.unread]
+        if hidden:
+            why.append("classic branch protection is hidden from this reader "
+                       "(GitHub answers a reader without admin rights Not "
+                       "Found), so whether it holds them could not be read")
+        why += unread
+        listed = (" " + _capped(list(labels.values()), 6, ", ")
+                  + " may skip part of it;") if labels else ""
+        return "unmeasured", (
+            f"unmeasured: {rule}, but who may bypass it could not be fully "
+            f"read:{listed} " + "; ".join(dict.fromkeys(why))
+            + " — anyone short of an admin on a bypass list would let a "
+            "leaked credential land code with no review; a repository admin "
+            "can confirm by re-running this scan")
+    tail = ""
+    if labels:
+        tail += (" " + _capped(list(labels.values()), 6, ", ") + " may skip "
+                 "one source, but another still holds them.")
+    if admins:
+        who = _capped(admins, 4, ", ")
+        tail += (" " + who[:1].upper() + who[1:] + " can also skip it; an "
+                 "admin can change these settings anyway, so an admin's "
+                 "token is a separate risk.")
+    elif not labels and not unread:
+        tail += " Nobody short of an admin is listed as able to bypass it."
+    if unread:
+        tail += (" Not read: " + "; ".join(unread) + " — a source that was "
+                 "not read can only add rules, so the pass stands.")
+    return "pass", (f"{rule}, so one leaked push credential cannot land code "
+                    "on it alone." + tail)
+
+
 def _review_verdict(src: Any) -> tuple[str, str]:
     """(outcome, evidence) for `sec.default-branch.review-required`.
 
     Pass needs, from what was READ: a pull request, at least one approval,
-    and stale approvals dismissed or the last push re-approved. A source that
-    was not read can only add rules, so it never undoes a pass; it does keep
-    a fail from being reported (unmeasured instead). Bypass actors qualify a
-    pass in its evidence and never turn it into a fail: which credential
-    leaks is not knowable here."""
+    and stale approvals dismissed or the last push re-approved, binding
+    everyone short of an admin. A source that was not read can only add
+    rules, so it never undoes a pass; it does keep a fail from being reported
+    (unmeasured instead). Owner decision: a bypass actor short of an admin
+    (an app, a deploy key, a team, a user, a role other than admin, or a
+    classic bypass allowance) that can skip every source holding it FAILS,
+    because a leaked credential of theirs lands code with no review; an
+    unread bypass list is unmeasured, never a pass. Admins qualify a pass:
+    an admin can change these settings anyway."""
     try:
         branch = src.default_branch()
     except _Unread as exc:
         return "unmeasured", f"unmeasured: {exc}"
     label = f"`{branch}`"
-    params: list[dict] = []
-    notes: list[str] = []
-    unread_bypass: list[str] = []
+    found: list = []
     skipped: list[str] = []
     unread: list[str] = []
     sources: list[str] = []
@@ -4268,20 +4397,19 @@ def _review_verdict(src: Any) -> tuple[str, str]:
     for rule in rules:
         if rule.get("type") != "pull_request":
             continue
-        counts, note, bypass_unread = _ruleset_counts(src, rule)
-        if note:
-            (skipped if not counts else
-             unread_bypass if bypass_unread else notes).append(note)
-        if counts:
-            p = rule.get("parameters")
-            params.append(p if isinstance(p, dict) else {})
-            if "a ruleset" not in sources:
-                sources.append("a ruleset")
+        source, note = _ruleset_source(src, rule)
+        if source is None:
+            skipped.append(note)
+            continue
+        found.append(source)
+        if "a ruleset" not in sources:
+            sources.append("a ruleset")
 
     def judged() -> str | None:
-        return _rule_holds(_layered(params)) if params else None
+        return (_rule_holds(_layered([g.params for g in found]))
+                if found else None)
     state = judged()
-    if state != "held":
+    if state != "held" or not _holds([g for g in found if g.bypass == {}]):
         body: Any = _source(lambda: src.classic_protection(branch))
         if isinstance(body, _Unread):
             # `protected: false` means neither a ruleset nor classic
@@ -4290,48 +4418,27 @@ def _review_verdict(src: Any) -> tuple[str, str]:
             if isinstance(flag, dict) and flag.get("protected") is False:
                 body = None
             elif isinstance(body, _ClassicHidden) and rules_read:
-                # The ordinary non-admin hide, as the required-checks fact
-                # reads it: the rules endpoint answered, so its rules decide,
-                # and the evidence says classic protection was not read.
+                # The ordinary non-admin hide: classic protection could only
+                # add review rules, and its bypass list is unread.
                 hidden = True
             else:
                 unread.append(str(body))
         if isinstance(body, dict):
             try:
-                cp, note = _classic_review_params(body)
+                cs = _classic_source(body)
             except _Unread as exc:
                 unread.append(str(exc))
             else:
-                if cp is not None:
-                    params.append(cp)
+                if cs is not None:
+                    found.append(cs)
                     sources.append("classic branch protection")
-                    if note:
-                        notes.append(note)
         state = judged()
+    params = [g.params for g in found]
 
     count = (_layered(params)["parameters"]["required_approving_review_count"]
              if params else None)
     if state == "held":
-        tail = ""
-        if notes:
-            tail = (" Able to skip that review with their own credential, so "
-                    "a leak of theirs is not covered: "
-                    + "; ".join(dict.fromkeys(notes))
-                    + ".")
-        elif not unread and not unread_bypass:
-            tail = " Nobody is listed as able to bypass it."
-        if unread_bypass:
-            # Unread is not an actor: said apart from who may skip review.
-            tail += (" Who may bypass it was not read: "
-                     + "; ".join(dict.fromkeys(unread_bypass)) + ".")
-        if unread:
-            tail += (" Not read: " + "; ".join(unread) + " — a source that "
-                     "was not read can only add rules, so the pass stands.")
-        return "pass", (
-            f"{label} requires a pull request with {count} approving "
-            f"review(s), and an approval stops counting once new commits are "
-            f"pushed ({' and '.join(sources)}), so one leaked push credential "
-            "cannot land code on it alone." + tail)
+        return _bypass_verdict(label, count, found, sources, unread, hidden)
     if unread:
         said = ("what was read does not require it on its own; "
                 if params else "")

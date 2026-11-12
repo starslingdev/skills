@@ -18,6 +18,10 @@
       "status": "error",
       "stderr": "gh: You must have repository read permissions or have the repository secrets fine-grained permission. (HTTP 403)"
     },
+    "repos/example-org/example-repo/branches/trunk/protection": {
+      "status": "error",
+      "stderr": "gh: Not Found (HTTP 404)"
+    },
     "repos/example-org/example-repo/branches/trunk": {
       "status": "ok",
       "stdout": "{\"name\": \"trunk\", \"protected\": true, \"protection\": {\"enabled\": true}}"

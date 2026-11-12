@@ -562,16 +562,25 @@ two moved numbers.
   source's stale-approval setting counts), require a pull request with at
   least one approval and one of the two settings. **Fails** when nothing
   requires a pull request, the approval count is 0, or neither setting is
-  on; the evidence names which. **Bypass is a qualified pass, never a
-  fail**: a ruleset's bypass actors, classic protection's pull request
-  allowances, and admins when classic protection does not include
-  administrators can skip review with their own credential, and the
-  evidence names them. Which credential leaks cannot be known from here,
-  and an admin credential can change these settings anyway. A ruleset
-  bypass list is returned only to someone with write access to the
-  ruleset, so on a reader's token the pass says the list was not readable.
+  on; the evidence names which. **Anyone short of an admin who can skip
+  the review also fails it**: a ruleset bypass actor that is an app, a
+  deploy key, a team, a user or a repository role other than admin, and
+  any user, team or app in classic protection's "Allow specified actors to
+  bypass required pull requests", because a leaked credential of theirs
+  lands code with no review. The evidence names each one. "For pull
+  requests only" bypass fails too: GitHub then lets the actor "bypass any
+  branch protections and merge that pull request". GitHub layers every
+  source, so an actor listed on one source but held by another that lists
+  no one does not fail it. **Admins qualify a pass**: organization admins,
+  the repository admin role, and admins when classic protection does not
+  include administrators are named in the evidence, because an admin can
+  change these settings anyway, so an admin's token is a separate risk.
+  A ruleset bypass list is returned only to someone with write access to
+  the ruleset, so on a reader's token the check is **unmeasured**, never a
+  pass, unless another fully read source holds everyone.
   **Unmeasured** when the settings cannot be read: no repository, no `gh`
-  or no auth, the rules endpoint failing, or, when the rules alone do not
+  or no auth, a bypass list that could not be read, the rules endpoint
+  failing, or, when the rules alone do not
   hold, classic protection answering a non-admin with a 403. Two answers
   settle classic protection: a 404 "Branch not protected" (sent only to an
   admin), and, for any reader, `protected: false` on the public branch endpoint

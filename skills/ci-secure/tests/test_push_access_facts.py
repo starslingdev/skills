@@ -293,11 +293,13 @@ def test_the_example_repository(tmp_path):
     # is unmeasured here, never a pass.
     assert _fact(out, SCOPED)["outcome"] == "unmeasured", _fact(out, SCOPED)
 
-    # `trunk`'s ruleset needs two approvals and dismisses stale ones, so the
-    # default-branch review check passes from the rules endpoint alone; the
-    # bypass list is not served to this reader, and the pass says so.
+    # `trunk`'s ruleset needs two approvals and dismisses stale ones, but
+    # its bypass list is not served to this reader and classic protection
+    # is hidden behind a plain 404: anyone short of an admin on either list
+    # would skip review, so the default-branch review check is unmeasured,
+    # never a pass.
     review = _fact(out, "sec.default-branch.review-required")
-    assert review["outcome"] == "pass", review
+    assert review["outcome"] == "unmeasured", review
     assert "bypass list is not readable" in review["evidence"], review
 
     # Admin bypass is an information line, never part of either verdict.

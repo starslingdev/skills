@@ -20,9 +20,14 @@ entries are dated (UTC). Format loosely follows
   and either dismisses stale approvals on a new push or requires approval of
   the most recent push; it fails when no pull request is required, the
   approval count is 0, or neither stale-approval setting is on, naming which.
-  Bypass actors (and admins when classic protection does not include them)
-  qualify a pass in its evidence and never fail it. Unreadable settings are
-  unmeasured, never a pass. It reads the rules endpoint first (read access)
+  Anyone short of an admin who can skip the review fails it, named in the
+  evidence: a ruleset bypass actor that is an app, a deploy key, a team, a
+  user or a non-admin role (including "For pull requests only" bypass,
+  which still lets them merge without the approval), and classic
+  protection's bypass allowances; repositories with such bypassers fail
+  this check. Admins qualify a pass in its evidence. An unreadable bypass
+  list, like any unreadable setting, is unmeasured, never a pass. The
+  environment checks and this one share one reading of a bypass actor. It reads the rules endpoint first (read access)
   and classic protection only when the rules alone do not hold. Fourteen
   facts now; up to seven are API-gated. The catalog's Reference incidents
   records the November 2026 compromised GitHub accounts CI secret stealer

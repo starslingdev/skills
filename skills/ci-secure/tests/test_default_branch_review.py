@@ -205,36 +205,108 @@ def test_rules_layer_across_rulesets_and_classic_protection(tmp_path):
     assert f["outcome"] == "pass", f
 
 
-# --- bypass: a pass whose evidence names who can skip review -------------------
+# --- bypass ---------------------------------------------------------------------
+#
+# Owner decision (PR #341): a review rule that anyone short of an admin can
+# skip does not stop a leaked credential, so it FAILS, naming each actor.
+# Admins (organization admins, the repository admin role, classic protection
+# that does not include administrators) stay a pass with a note: an admin can
+# change these settings anyway. An unread bypass list is unmeasured, never a
+# pass. `pull_request` bypass mode counts too — GitHub: "The actor can then
+# choose to bypass any branch protections and merge that pull request."
 
-def test_ruleset_bypass_actors_are_named_on_a_pass(tmp_path):
-    bypass = [{"actor_id": 5, "actor_type": "RepositoryRole",
-               "bypass_mode": "always"},
-              {"actor_id": 42, "actor_type": "Team",
-               "bypass_mode": "pull_request"}]
-    f, _ = _run(tmp_path, _responses(rules=[_pr_rule(dismiss=True)],
-                                     rulesets=[_ruleset(bypass=bypass)]))
+_HEADLINE = "cannot land code on it alone"
+
+
+def _actor(kind, aid, mode="always"):
+    return {"actor_type": kind, "actor_id": aid, "bypass_mode": mode}
+
+
+def _bypass_run(tmp_path, bypass, **kw):
+    return _run(tmp_path, _responses(rules=[_pr_rule(dismiss=True)],
+                                     rulesets=[_ruleset(bypass=bypass)], **kw))
+
+
+@pytest.mark.parametrize("actor, named", [
+    (_actor("Integration", 9), "app 9"),
+    (_actor("DeployKey", None), "deploy keys"),
+    (_actor("RepositoryRole", 4), "repository role 4"),
+    (_actor("Team", 42), "team 42"),
+    (_actor("User", 77), "user 77"),
+])
+def test_a_non_admin_bypass_actor_fails(tmp_path, actor, named):
+    f, _ = _bypass_run(tmp_path, [actor])
+    assert f["outcome"] == "fail", f
+    ev = f["evidence"]
+    assert named in ev, ev
+    assert "with no review" in ev, ev
+    assert "bypass list" in ev, ev
+    assert _HEADLINE not in ev, ev
+
+
+def test_pull_request_bypass_mode_still_fails(tmp_path):
+    f, _ = _bypass_run(tmp_path, [_actor("Team", 42, "pull_request")])
+    assert f["outcome"] == "fail", f
+    assert "merge their own pull request" in f["evidence"], f
+
+
+def test_admin_only_bypass_passes_with_a_note(tmp_path):
+    f, _ = _bypass_run(tmp_path, [_actor("OrganizationAdmin", None),
+                                  _actor("RepositoryRole", 5)])
     assert f["outcome"] == "pass", f
     ev = f["evidence"]
-    assert "bypass" in ev, ev
-    assert "repository admins" in ev and "team 42" in ev, ev
+    assert _HEADLINE in ev, ev
+    assert ("organization admins" in ev.lower()
+            and "repository admins" in ev.lower()), ev
+    assert "change these settings anyway" in ev, ev
 
 
-def test_an_unreadable_bypass_list_is_disclosed_on_a_pass(tmp_path):
-    f, _ = _run(tmp_path, _responses(rules=[_pr_rule(dismiss=True)],
-                                     rulesets=[_ruleset(bypass=None)]))
-    assert f["outcome"] == "pass", f
+def test_admins_plus_a_team_fail_and_name_only_the_team(tmp_path):
+    f, _ = _bypass_run(tmp_path, [_actor("RepositoryRole", 5),
+                                  _actor("Team", 42)])
+    assert f["outcome"] == "fail", f
+    assert "team 42" in f["evidence"], f
+
+
+def test_an_unreadable_bypass_list_is_unmeasured(tmp_path):
+    f, _ = _bypass_run(tmp_path, None)
+    assert f["outcome"] == "unmeasured", f
     assert "bypass list is not readable" in f["evidence"], f
-    # Unread is not an actor: it is never listed as able to skip review.
-    assert "Able to skip" not in f["evidence"], f
+    assert _HEADLINE not in f["evidence"], f
 
 
-def test_classic_admin_exemption_and_allowances_are_named_on_a_pass(tmp_path):
+def test_classic_admin_exemption_alone_passes_with_a_note(tmp_path):
     f, _ = _run(tmp_path, _responses(classic=_classic(
-        dismiss=True, enforce_admins=False, users=["release-bot"])))
+        dismiss=True, enforce_admins=False)))
     assert f["outcome"] == "pass", f
-    ev = f["evidence"]
-    assert "admins" in ev and "`release-bot`" in ev, ev
+    assert "admins" in f["evidence"], f
+
+
+@pytest.mark.parametrize("kw, named", [
+    ({"apps": ["deploy-bot"]}, "app `deploy-bot`"),
+    ({"users": ["release-bot"]}, "user `release-bot`"),
+    ({"teams": ["releasers"]}, "team `releasers`"),
+])
+def test_a_classic_bypass_allowance_fails(tmp_path, kw, named):
+    f, _ = _run(tmp_path, _responses(classic=_classic(dismiss=True, **kw)))
+    assert f["outcome"] == "fail", f
+    assert named in f["evidence"], f
+    assert _HEADLINE not in f["evidence"], f
+
+
+def test_a_bypasser_still_bound_by_another_source_passes(tmp_path):
+    """GitHub layers rulesets and classic protection: an app that may skip
+    the ruleset is still held by classic protection that lists no one."""
+    f, gh = _bypass_run(tmp_path, [_actor("Integration", 9)],
+                        classic=_classic(dismiss=True))
+    assert f["outcome"] == "pass", f
+    assert CLASSIC in gh.calls, gh.calls
+
+
+def test_a_bypasser_with_hidden_classic_protection_is_unmeasured(tmp_path):
+    f, _ = _bypass_run(tmp_path, [_actor("Integration", 9)],
+                       classic=_HIDDEN_404, protected=True)
+    assert f["outcome"] == "unmeasured", f
 
 
 # --- fail ---------------------------------------------------------------------
@@ -401,14 +473,12 @@ def test_a_missing_stale_approval_setting_is_never_read_as_on(tmp_path):
     assert f["outcome"] == "unmeasured", f
 
 
-def test_an_unreadable_ruleset_detail_still_counts_its_rule(tmp_path):
+def test_an_unreadable_ruleset_detail_is_unmeasured(tmp_path):
     """The rule came from the rules endpoint, which returns only active
-    rules; only who may bypass it is unread, and that is said apart."""
+    rules; who may bypass it is unread, so the check cannot pass."""
     f, _ = _run(tmp_path, _responses(rules=[_pr_rule(dismiss=True)]))
-    assert f["outcome"] == "pass", f
-    ev = f["evidence"]
-    assert "who may bypass ruleset 7 could not be read" in ev, ev
-    assert "Able to skip" not in ev, ev
+    assert f["outcome"] == "unmeasured", f
+    assert "who may bypass ruleset 7 could not be read" in f["evidence"], f
 
 
 def test_a_pass_discloses_an_unread_rules_endpoint(tmp_path):
