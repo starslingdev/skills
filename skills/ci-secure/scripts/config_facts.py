@@ -2934,7 +2934,19 @@ _CREDENTIAL_NOTE = (
 
 
 class _Unread(Exception):
-    """A source this scan asked for and could not read; the message is why."""
+    """A source this scan asked for and could not read; the message is why.
+    `raw` keeps gh's own error text, when there was one."""
+
+    def __init__(self, message: str, raw: str = ""):
+        super().__init__(message)
+        self.raw = raw
+
+
+class _ClassicHidden(_Unread):
+    """Classic branch protection answered a plain "Not Found (HTTP 404)",
+    which is how GitHub hides that admin-only endpoint from a non-admin
+    reader (`_is_classic_hidden_404`). Still unread: only a caller that has
+    the rules endpoint's answer may treat it as an ordinary hide."""
 
 
 def _not_found_is_an_answer(kind: str, exc: Exception) -> bool:
@@ -3005,15 +3017,17 @@ class _GhPushAccess:
             try:
                 self._memo[key] = (True, fn())
             except _Unread as exc:
-                self._memo[key] = (False, str(exc))
+                self._memo[key] = (False, exc)
             except Exception as exc:                           # noqa: BLE001
                 # Unmeasured either way, but an engine bug must stay
                 # distinguishable from a coverage gap in a debug trace.
                 _log.debug("push access reader %s failed", key, exc_info=True)
-                self._memo[key] = (False, f"{key}: {str(exc).strip()}")
+                self._memo[key] = (False, _Unread(f"{key}: {str(exc).strip()}"))
         ok, value = self._memo[key]
         if not ok:
-            raise _Unread(value)
+            # The same kind of failure each time (a hidden classic 404 stays
+            # one), never a retry.
+            raise type(value)(str(value), value.raw)
         return value
 
     def _get(self, path: str, *, paginate: bool = False, kind: str = "",
@@ -3027,7 +3041,7 @@ class _GhPushAccess:
             if kind and _not_found_is_an_answer(kind, exc):
                 return None
             raise _Unread(f"{what or path} could not be read "
-                          f"({str(exc).strip()})")
+                          f"({str(exc).strip()})", raw=str(exc).strip())
         try:
             return _paged(text, key) if paginate else json.loads(text)
         except ValueError as exc:
@@ -3203,11 +3217,16 @@ class _GhPushAccess:
         """Classic branch protection on `branch` (REST, admin only), or None
         when GitHub answers 404 "Branch not protected" (P6: `protection`)."""
         def read():
-            body = self._get(
-                f"repos/{self.repo}/branches/{_branch_segment(branch)}"
-                "/protection", kind="protection", forbidden_expected=True,
-                what=f"classic branch protection on `{branch}` (readable "
-                     "only by a repository admin)")
+            try:
+                body = self._get(
+                    f"repos/{self.repo}/branches/{_branch_segment(branch)}"
+                    "/protection", kind="protection", forbidden_expected=True,
+                    what=f"classic branch protection on `{branch}` (readable "
+                         "only by a repository admin)")
+            except _Unread as exc:
+                if _is_classic_hidden_404(exc.raw):
+                    raise _ClassicHidden(str(exc), exc.raw) from None
+                raise
             if body is not None and not isinstance(body, dict):
                 raise _Unread(f"classic branch protection on `{branch}` was "
                               "not an object")
@@ -4236,10 +4255,12 @@ def _review_verdict(src: Any) -> tuple[str, str]:
     skipped: list[str] = []
     unread: list[str] = []
     sources: list[str] = []
+    hidden = False
+    rules_read = True
     try:
         rules = src.branch_rules(branch)
     except _Unread as exc:
-        rules = []
+        rules, rules_read = [], False
         unread.append(str(exc))
     for rule in rules:
         if rule.get("type") != "pull_request":
@@ -4264,6 +4285,11 @@ def _review_verdict(src: Any) -> tuple[str, str]:
             flag = _source(lambda: src.branch(branch))
             if isinstance(flag, dict) and flag.get("protected") is False:
                 body = None
+            elif isinstance(body, _ClassicHidden) and rules_read:
+                # The ordinary non-admin hide, as the required-checks fact
+                # reads it: the rules endpoint answered, so its rules decide,
+                # and the evidence says classic protection was not read.
+                hidden = True
             else:
                 unread.append(str(body))
         if isinstance(body, dict):
@@ -4309,6 +4335,10 @@ def _review_verdict(src: Any) -> tuple[str, str]:
             f"unmeasured: a pull request rule on {label} does not say how many "
             "approvals it needs, or whether they survive a new push")
     extra = (" (" + "; ".join(skipped) + ")") if skipped else ""
+    hid = (". Note: classic branch protection could not be read (GitHub answers a "
+           "reader without admin rights Not Found), so this rests on the "
+           "rulesets alone; an admin can confirm classic protection adds no "
+           "review rule" if hidden else "")
     if not params:
         why = (f"nothing requires a pull request before code lands on "
                f"{label}{extra}, so any push credential can push straight "
@@ -4323,7 +4353,7 @@ def _review_verdict(src: Any) -> tuple[str, str]:
                "most recent reviewable push\" is on, so a push credential "
                "pushes new code onto an approved pull request and merges it "
                "on the old approval")
-    return "fail", f"{why}. {_REVIEW_FIX}"
+    return "fail", f"{why}. {_REVIEW_FIX}{hid}"
 
 
 def _default_branch_review(repo: str | None, fetcher) -> tuple[str, str]:

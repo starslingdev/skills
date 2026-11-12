@@ -311,6 +311,54 @@ def test_admin_only_classic_protection_cannot_be_read_as_none(tmp_path):
     assert "classic" in f["evidence"], f
 
 
+# --- classic protection hidden behind a plain 404 ------------------------------
+#
+# GitHub answers a non-admin reader of the classic protection endpoint with a
+# plain "Not Found (HTTP 404)" (the same hide the required-checks fact
+# accepts via `_is_classic_hidden_404`). Once the rules endpoint answered,
+# that hide is ordinary: the rules alone decide, and the evidence says
+# classic protection was not read. Anything else stays unmeasured.
+
+_HIDDEN_404 = _api_error("gh: Not Found (HTTP 404)")
+
+
+def test_a_hidden_classic_404_lets_the_rules_alone_fail_it(tmp_path):
+    f, _ = _run(tmp_path, _responses(rules=[_pr_rule()],
+                                     rulesets=[_ruleset()],
+                                     classic=_HIDDEN_404, protected=True))
+    assert f["outcome"] == "fail", f
+    ev = f["evidence"]
+    assert "most recent reviewable push" in ev, ev
+    assert "classic branch protection could not be read" in ev, ev
+
+
+def test_a_hidden_classic_404_with_no_pull_request_rule_fails(tmp_path):
+    f, _ = _run(tmp_path, _responses(classic=_HIDDEN_404, protected=True))
+    assert f["outcome"] == "fail", f
+    assert "nothing requires a pull request" in f["evidence"], f
+    assert "classic branch protection could not be read" in f["evidence"], f
+
+
+def test_a_hidden_classic_404_never_settles_an_unread_rules_endpoint(
+        tmp_path):
+    responses = _responses(classic=_HIDDEN_404, protected=True)
+    responses[RULES] = _HTTP_502
+    f, _ = _run(tmp_path, responses)
+    assert f["outcome"] == "unmeasured", f
+
+
+@pytest.mark.parametrize("err", [
+    _api_error("gh: Bad Gateway (HTTP 502): upstream Not Found (HTTP 404)"),
+    _api_error("gh: API rate limit exceeded (HTTP 403)"),
+    RuntimeError("timed out after 30s"),
+])
+def test_other_classic_failures_stay_unmeasured(tmp_path, err):
+    f, _ = _run(tmp_path, _responses(rules=[_pr_rule()],
+                                     rulesets=[_ruleset()],
+                                     classic=err, protected=True))
+    assert f["outcome"] == "unmeasured", f
+
+
 def test_a_pull_request_rule_of_unexpected_shape_is_unmeasured(tmp_path):
     rule = _pr_rule(dismiss=True)
     rule["parameters"]["required_approving_review_count"] = "one"

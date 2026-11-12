@@ -574,7 +574,12 @@ two moved numbers.
   hold, classic protection answering a non-admin with a 403. Two answers
   settle classic protection without admin access: a 404 "Branch not
   protected", and `protected: false` on the public branch endpoint
-  (`protected: true` is set by rulesets too and settles nothing). A source
+  (`protected: true` is set by rulesets too and settles nothing). A plain
+  `Not Found (HTTP 404)` from classic protection is how GitHub hides it
+  from a non-admin; once the rules endpoint has answered, that hide is
+  ordinary (as for `sec.required-checks.enforced`): the rules alone decide,
+  and a fail says classic protection could not be read. A 5xx that quotes a
+  404, a rate limit or a timeout stays unmeasured. A source
   that was not read can only add rules, so it never undoes a pass read from
   another source; it does keep a fail from being reported. Rulesets in
   `evaluate` or `disabled` mode enforce nothing and count for nothing: the
