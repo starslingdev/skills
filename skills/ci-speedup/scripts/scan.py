@@ -3785,8 +3785,10 @@ def _matrix_shard_leg_count(job: dict) -> int | None:
     return len(projected) if projected else None
 
 
-def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
-    """Repeated checkout/setup with no artifact handoff (OPT14 heuristic).
+def _opt14_setup_state(
+    doc: dict,
+) -> tuple[list[str], dict[str, int], dict[str, list[str]], bool]:
+    """Return repeated setup jobs and matrix facts for OPT14 and the guard.
 
     Repetition can be across at least two jobs or across the effective shard
     configurations of one matrix job. An upload-only step (for example a
@@ -3839,23 +3841,17 @@ def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
     # so keep it even when it is the workflow's only setup job.
     setup_jobs = sorted(set(_co_running(_jobs_from_doc(doc), setup_jobs))
                         | set(matrix_setup_legs))
-    if setup_jobs and not has_handoff:
-        if len(setup_jobs) >= 2:
-            evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "
-                        f"install with no `actions/upload-artifact` / "
-                        f"`download-artifact` handoff: {', '.join(setup_jobs)}")
-        else:
-            job_name = setup_jobs[0]
-            repeated = matrix_setup_repeated[job_name]
-            repeated_text = ", ".join(repeated[:-1])
-            if len(repeated) > 1:
-                repeated_text += f" and {repeated[-1]}"
-            else:
-                repeated_text = repeated[0]
-            evidence = (
-                f"shard matrix repeats {repeated_text} across "
-                f"{matrix_setup_legs[job_name]} legs with no artifact handoff: "
-                f"{job_name}")
+    return setup_jobs, matrix_setup_legs, matrix_setup_repeated, has_handoff
+
+
+def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
+    """Report repeated setup across jobs, while leaving lone-shard facts unreported."""
+    setup_jobs, matrix_setup_legs, matrix_setup_repeated, has_handoff = (
+        _opt14_setup_state(doc))
+    if len(setup_jobs) >= 2 and not has_handoff:
+        evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "
+                    f"install with no `actions/upload-artifact` / "
+                    f"`download-artifact` handoff: {', '.join(setup_jobs)}")
         return [Hit(
             line=1,
             affected_jobs=setup_jobs,
@@ -4718,23 +4714,52 @@ def _uses_persistent_remote_builder(job: dict) -> bool:
     return False
 
 
-def _static_cache_family(*values: object) -> str:
+def _static_cache_family(
+    *values: object,
+    cache_key: object = "",
+    cache_paths: object = (),
+) -> str:
     """Return a stable cache-family token for log confirmation."""
-    texts = [str(value or "").casefold() for value in values]
+    key_text = str(cache_key or "").casefold()
+    key_without_expressions = re.sub(r"\$\{\{.*?\}\}", " ", key_text)
+    key_tokens = [
+        token.strip("._-")
+        for token in re.findall(r"[a-z][a-z0-9_.]*", key_without_expressions)
+    ]
+    key_tokens = [token for token in key_tokens if token]
+    if isinstance(cache_paths, (list, tuple, set)):
+        path_values = list(cache_paths)
+    else:
+        path_values = [cache_paths]
+    path_tokens = [
+        token.strip("._-")
+        for path in path_values
+        for token in re.findall(r"[a-z][a-z0-9_.]*", str(path or "").casefold())
+    ]
+    path_tokens = [token for token in path_tokens if token]
+    texts = [key_text, *(str(value or "").casefold() for value in values)]
     for text in texts:
         for family in (
             "sccache", "ccache", "staticcheck", "golangci", "buildkit",
-            "jest", "playwright", "pnpm", "turbo", "go",
+            "jest", "playwright", "pnpm", "turbo", "cargo", "npm",
+            "maven", "go",
         ):
             if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", text):
                 return family
+    ignored = {
+        "build", "cache", "dependencies", "deps", "github", "home", "key",
+        "keys", "linux", "repository", "restore", "runner", "sha", "shared",
+    }
+    for token in reversed(path_tokens):
+        if token in key_tokens and token not in ignored:
+            return token
+    for token in reversed(key_tokens):
+        if (token not in ignored
+                and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
+            return token
     text = " ".join(texts)
     without_expressions = re.sub(r"\$\{\{.*?\}\}", " ", text)
     tokens = re.findall(r"[a-z][a-z0-9_.]*", without_expressions)
-    ignored = {
-        "build", "cache", "dependencies", "deps", "github", "key", "keys",
-        "linux", "restore", "runner", "sha", "shared",
-    }
     for token in tokens:
         token = token.strip("._-")
         if (token and token not in ignored
@@ -4797,7 +4822,9 @@ def _detect_opt61(
                     "none of its `restore-keys` can restore the rolling saved-key "
                     "family on a later edit",
                     _static_cache_family(
-                        *cache_paths_by_step.get(id(step), []), key, *restore),
+                        *restore,
+                        cache_key=key,
+                        cache_paths=cache_paths_by_step.get(id(step), [])),
                 ))
             size = values.get("max-size") or values.get("max_size")
             mib = _size_mib(str(size)) if size is not None else None
@@ -4807,7 +4834,9 @@ def _detect_opt61(
                     f"its compiler-cache size limit is only {size} and may churn before "
                     "the next reuse",
                     _static_cache_family(
-                        *cache_paths_by_step.get(id(step), []), _uses(step), key),
+                        _uses(step),
+                        cache_key=key,
+                        cache_paths=cache_paths_by_step.get(id(step), [])),
                 ))
 
         for match in re.finditer(
@@ -9440,6 +9469,22 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # document is byte-identical to before. Rendered as the "Parallel steps"
         # row of the report's Data sources table.
         extra["parallel_steps"] = parallel_stats
+    matrix_setup_facts: dict[str, dict[str, dict[str, Any]]] = {}
+    for rel, doc, _raw in parsed:
+        _jobs, leg_counts, repeated_work, has_handoff = _opt14_setup_state(doc)
+        leg_counts = {
+            job: legs for job, legs in leg_counts.items()
+            if (rel, job) not in unreadable_jobs
+        }
+        if leg_counts and not has_handoff:
+            matrix_setup_facts[rel] = {
+                job: {"legs": legs, "repeated": repeated_work.get(job, [])}
+                for job, legs in sorted(leg_counts.items())
+            }
+    if matrix_setup_facts:
+        # Guard-only facts: a lone sharded test job is not a report finding,
+        # but growing its matrix still needs the differential warning.
+        extra["matrix_setup_facts"] = matrix_setup_facts
 
     return {
         **extra,

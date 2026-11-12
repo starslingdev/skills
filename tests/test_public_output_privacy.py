@@ -355,6 +355,11 @@ def test_ci_helper_reads_pr_text_only_from_env():
     assert "check_public_output.py" in helper
     for flag in ('--target "$GITHUB_REPOSITORY"', "--text-file", '--base "origin/$BASE_REF"'):
         assert flag in helper
+    for repository in (
+        "home-assistant/core", "vercel/next.js", "ethereum/go-ethereum",
+        "microsoft/playwright",
+    ):
+        assert f"--allow {repository}" in helper
 
 
 @pytest.mark.parametrize("job_id", ["test-self", "test-fork"])

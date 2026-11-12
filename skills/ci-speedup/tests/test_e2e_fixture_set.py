@@ -1188,6 +1188,23 @@ def test_builder_topology_and_foreign_only_shapes_run_through_collection(
             "#10 [linux/amd64 build 2/3]", second_node + "#10 [linux/amd64 build 2/3]"))
     assert "emulated-image-compile" not in multi_node["leaves"]
 
+    docker_info = (
+        "##[group]Docker info\n"
+        "Server:\n"
+        " Name: runner-engine\n"
+        " Server Version: 27.5.1\n"
+        "##[endgroup]\n")
+    _doc, _report, after_info = _run_multiarch_log_variant(
+        "multiarch-docker-info", monkeypatch, tmp_path,
+        lambda log: log.replace(
+            "#10 [linux/amd64 build 2/3]", docker_info + "#10 [linux/amd64 build 2/3]"))
+    emulated = next(
+        leaf for leaf in after_info["leaf_details"]
+        if leaf.get("fix_key") == "emulated-image-compile")
+    assert emulated["magnitude"] == {
+        "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
+    assert "builder_topology_unconfirmed" not in emulated
+
     def foreign_only(log: str) -> str:
         start = log.index("#10 [linux/amd64 build 2/3]")
         end = log.index("Cache not found", start)

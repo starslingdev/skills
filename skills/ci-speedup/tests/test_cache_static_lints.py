@@ -66,6 +66,52 @@ def test_opt61_flags_restore_prefix_that_cannot_match_saved_key(tmp_path) -> Non
         assert status != "miss"
 
 
+def test_opt61_scopes_confirmation_to_the_saved_key_family(tmp_path) -> None:
+    cases = (
+        ("target", "cargo"),
+        ("node_modules", "npm"),
+        ("~/.m2/repository", "maven"),
+    )
+    for index, (path, family) in enumerate(cases):
+        rows = _scan(tmp_path / f"key-family-{index}", f"""      - uses: actions/cache@v4
+        with:
+          path: {path}
+          key: {family}-${{{{ runner.os }}}}-${{{{ github.sha }}}}
+          restore-keys: other-${{{{ runner.os }}}}-
+      - run: {family} build
+""")
+        row = next(item for item in rows if item["pattern"] == "OPT61"
+                   and "restore" in item["evidence"].lower())
+        status, _line = collect_runs._cache_status_from_log(
+            f"Cache not found for input keys: {family}-Linux-deadbeef",
+            collect_runs._cache_keywords_for_finding(row),
+        )
+        assert status == "miss"
+
+
+def test_opt61_uses_the_specific_key_word_after_an_unlisted_prefix(tmp_path) -> None:
+    for index, prefix in enumerate(("ubuntu", "ci")):
+        rows = _scan(tmp_path / f"generic-prefix-{index}", f"""      - uses: actions/cache@v4
+        with:
+          path: ~/.cache
+          key: {prefix}-${{{{ runner.os }}}}-tool-${{{{ github.sha }}}}
+          restore-keys: other-${{{{ runner.os }}}}-
+      - run: tool build
+""")
+        row = next(item for item in rows if item["pattern"] == "OPT61"
+                   and "restore" in item["evidence"].lower())
+        own_status, _line = collect_runs._cache_status_from_log(
+            f"Cache not found for input keys: {prefix}-Linux-tool-deadbeef",
+            collect_runs._cache_keywords_for_finding(row),
+        )
+        unrelated_status, _line = collect_runs._cache_status_from_log(
+            f"Cache not found for input keys: {prefix}-Linux-pnpm-deadbeef",
+            collect_runs._cache_keywords_for_finding(row),
+        )
+        assert own_status == "miss"
+        assert unrelated_status == "unknown"
+
+
 def test_opt61_accepts_a_matching_rolling_restore_prefix(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:
