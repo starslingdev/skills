@@ -19,6 +19,7 @@ Two halves, both pinned here:
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -124,6 +125,17 @@ def _render(doc: dict, analysis: dict | None = None) -> str:
                      analyses=({_KEY: analysis} if analysis else None))
 
 
+def _secondary_remote_cache_finding() -> dict:
+    return {
+        "id": "f-OPT3", "pattern": "OPT3", "pattern_class": "data-driven",
+        "severity": "MEDIUM", "title": "Remote cache is read-only",
+        "workflow_file": _WF, "line": 12, "affected_jobs": [_CHECK],
+        "wall_clock_p50_s": 180.0, "runner_min_saving": 0.0,
+        "pr_critical_path_check": _CHECK,
+        "evidence": "TURBO_CACHE is remote:ro on pull requests",
+    }
+
+
 def test_log_excerpt_matches_no_log_level_detector():
     # Precondition: the pole's only catalog match is the structural one.
     assert bp._catalog_leaf(bp._parse_log(_LOG)) is None
@@ -155,6 +167,75 @@ def test_generic_only_pole_takes_the_gap_fill_analysis(pattern):
     assert f"📐 Structural root-cause - {pattern}" in md  # the lever is not dropped
     # The filled pole's audit line no longer claims nothing is known about the step.
     assert "no known root-cause pattern matched" not in md
+
+
+def test_generic_primary_takes_analysis_when_a_secondary_leaf_matches_the_job():
+    doc = _doc()
+    doc["findings"].append(_secondary_remote_cache_finding())
+    assert bp._data_driven_for_pole(doc["pr_critical_path"]["poles"][0], doc["findings"])
+
+    md = _render(doc, _ANALYSIS)
+
+    assert "🤖 LLM root-cause analysis" in md
+    assert "SENTINEL-GAP-FILL-PROMPT" in md
+    assert "no drill-down available" not in md
+    vr = _load_verify_report()
+    failures = [c for c in vr.run_checks(md, None, None, None)
+                if not c.ok and not c.skipped and c.name !=
+                "report's skill commit is HEAD or an ancestor of it (provenance)"]
+    assert failures == []
+
+
+def test_generic_primary_takes_analysis_beside_an_offcategory_log_leaf():
+    doc = _doc()
+    log = _LOG + "\n$ eslint . --ext .ts,.tsx,.js\n"
+    pole = doc["pr_critical_path"]["poles"][0]
+    parsed = bp._parse_log(log)
+    assert parsed and parsed["fix_key"] == "eslint-no-cache"
+    kept, secondary = bp._demote_offcategory_leaf(parsed, pole)
+    assert kept is None and secondary is not None
+
+    md = bp.render(doc, {_KEY: log}, {}, {_KEY: _RUN_URL}, "2026-11-03",
+                   {_KEY: _TIMELINE}, analyses={_KEY: _ANALYSIS})
+
+    assert "ci-speedup:offcategory-leaf" in md
+    assert "🤖 LLM root-cause analysis" in md
+    assert "SENTINEL-GAP-FILL-PROMPT" in md
+    assert "no drill-down available" not in md
+
+
+def test_declined_analysis_is_loud_and_recorded_in_findings(capsys):
+    doc = _doc("OPT72")
+
+    _render(doc, _ANALYSIS)
+
+    assert "--analysis ci declined" in capsys.readouterr().err
+    assert doc["analysis_dispositions"] == [{
+        "key": _KEY,
+        "check": _CHECK,
+        "status": "declined",
+        "reason": "a specific structural catalog pattern already names the root cause",
+    }]
+
+
+def test_cli_persists_the_analysis_disposition(tmp_path, capsys):
+    findings = tmp_path / "findings.json"
+    analysis = tmp_path / "analysis.json"
+    log = tmp_path / "job.log"
+    report = tmp_path / "report.md"
+    findings.write_text(json.dumps(_doc("OPT72")), encoding="utf-8")
+    analysis.write_text(json.dumps(_ANALYSIS), encoding="utf-8")
+    log.write_text(_LOG, encoding="utf-8")
+
+    assert bp.main([
+        "--in", str(findings), "--out", str(report),
+        "--log", f"{_KEY}={log}", "--analysis", f"{_KEY}={analysis}",
+    ]) == 0
+
+    saved = json.loads(findings.read_text(encoding="utf-8"))
+    assert saved["analysis_dispositions"][0]["status"] == "declined"
+    assert "specific structural catalog pattern" in saved["analysis_dispositions"][0]["reason"]
+    assert "--analysis ci declined" in capsys.readouterr().err
 
 
 def test_specific_structural_pattern_still_covers_its_pole():

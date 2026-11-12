@@ -13982,6 +13982,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     steps = steps or {}
     mags = mags or {}
     analyses = analyses or {}
+    if analyses:
+        # This is part of the findings object the renderer was handed, so callers that
+        # persist the enriched findings retain every explicit decision not to use a
+        # supplied analysis. Reset per render: a prior attempt must not leak into this one.
+        doc["analysis_dispositions"] = []
     cs = claims.ClaimSet()
     _LAST_CLAIMS = cs
     cp = doc.get("pr_critical_path") or {}
@@ -15682,20 +15687,56 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # not pull an LLM gap-fill analysis (that path is for poles no detector recognized).
         _catalog_covered = bool(structural_specific or data_driven
                                 or _opt79_pole_covers(opt79_pole) or opt82_pole)
-        analysis = (_match(analyses)
-                    if (leaf is None and _catalog_leaf(offcat_leaf) is None
-                        and not _catalog_covered) else None)
-        if analysis and (
-                not isinstance(analysis, dict)
-                or not isinstance(analysis.get("cause"), str)
-                or not analysis["cause"].strip()
-                or not isinstance(analysis.get("prompt"), str)
-                or not analysis["prompt"].strip()
-                or not isinstance(analysis.get("evidence"), list)
-                or not analysis["evidence"]
-                or not all(isinstance(line, str) and line.strip()
-                           for line in analysis["evidence"])):
-            analysis = None
+        offered_analysis = _match(analyses)
+        analysis = None
+        decline_reason = ""
+        if offered_analysis is not None:
+            if leaf is not None:
+                decline_reason = "a log detector already names the root cause"
+            elif structural_specific:
+                decline_reason = (
+                    "a specific structural catalog pattern already names the root cause")
+            elif not generic_structural and _catalog_leaf(offcat_leaf) is not None:
+                decline_reason = "a log detector matched a secondary off-category cause"
+            elif not generic_structural and (
+                    _opt79_pole_covers(opt79_pole) or opt82_pole or data_driven):
+                decline_reason = "a specific catalog finding already names the root cause"
+            elif not isinstance(offered_analysis, dict):
+                decline_reason = "the analysis JSON is not an object"
+            elif not isinstance(offered_analysis.get("cause"), str) \
+                    or not offered_analysis["cause"].strip():
+                decline_reason = "the analysis has no non-empty cause"
+            elif not isinstance(offered_analysis.get("prompt"), str) \
+                    or not offered_analysis["prompt"].strip():
+                decline_reason = "the analysis has no non-empty prompt"
+            elif (not isinstance(offered_analysis.get("evidence"), list)
+                  or not offered_analysis["evidence"]
+                  or not all(isinstance(line, str) and line.strip()
+                             for line in offered_analysis["evidence"])):
+                decline_reason = "the analysis has no non-empty evidence lines"
+            else:
+                # Generic structural cards are the pole's primary match and name no cause
+                # inside the job. A secondary appendix finding must not make that supplied
+                # gap-fill disappear: the report still needs the captured-log explanation.
+                analysis = offered_analysis
+        if offered_analysis is not None and analysis is None:
+            disposition = {
+                "key": str(owner_key or ""),
+                "check": str(p.get("check") or ""),
+                "status": "declined",
+                "reason": decline_reason or "the pole is not eligible for gap-fill analysis",
+            }
+            doc.setdefault("analysis_dispositions", []).append(disposition)
+            print(f"ci-speedup: --analysis {owner_key or '<unbound>'} declined for "
+                  f"{p.get('check') or 'unnamed pole'}: {disposition['reason']}",
+                  file=sys.stderr)
+        elif analysis is not None:
+            doc.setdefault("analysis_dispositions", []).append({
+                "key": str(owner_key or ""),
+                "check": str(p.get("check") or ""),
+                "status": "rendered",
+                "reason": "the pole's primary match is only a generic structural pattern",
+            })
         out.append(f'<a id="pole-{i}"></a>')
         out.append("")
         # `wf_base` (a workflow FILENAME) and `check` are BOTH arbitrary repo text dropped
@@ -16708,6 +16749,24 @@ def main(argv: list[str] | None = None) -> int:
             return 1
     md = render(doc, logs, samples, log_runs, args.captured_at, steps, mags,
                 analyses=analyses)
+    if analyses:
+        # A supplied analysis is an explicit render input. Persist its disposition in the
+        # findings artifact before writing the report, so a declined input cannot vanish
+        # after stderr scrolls away. Replace atomically; a recording failure is a hard CLI
+        # error because silently omitting this audit trail would recreate the bug.
+        disposition_tmp = args.in_path.with_name(f".{args.in_path.name}.analysis.tmp")
+        try:
+            disposition_tmp.write_text(
+                json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+            disposition_tmp.replace(args.in_path)
+        except OSError as e:
+            try:
+                disposition_tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            print(f"--analysis: cannot record disposition in {args.in_path}: {e}",
+                  file=sys.stderr)
+            return 1
     if args.out_path:
         args.out_path.write_text(md + "\n", encoding="utf-8")
         # Claims layer manifest, written alongside the report (never in place of it - the
