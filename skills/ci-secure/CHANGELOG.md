@@ -13,6 +13,11 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- **2026-11-12** (#338) — ci-secure: docs-only reference addition. The
+  catalog's Reference incidents now records the November 2026 compromised
+  GitHub accounts CI secret stealer campaign as a plain-English chain, and
+  why-these-ten.md cites it as public grounding for P14.14. No scanning
+  behavior changes.
 - ci-secure: "If a push credential leaks" — three new config hygiene checks,
   read over the GitHub API the way the required-checks and fork-approval
   checks already are. A credential that can push workflow files (GitHub's
