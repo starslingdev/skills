@@ -3540,6 +3540,8 @@ _CHAIN_RELEVANT_RE = re.compile(
     # Command NAMES that fetch or execute…
     r"\b(?:git|cd|source|pip|pip3|python[0-9.]*|node|nodejs|bash|sh|zsh|ksh"
     r"|ruby|perl|php|pwsh|powershell)\b"
+    # …a GitHub CLI extension install (the third shape)…
+    r"|\bgh\s+(?:extensions?|ext)\s"
     # …and the shape of an execution that names no command at all: a PATH
     # invoked directly (`tools/setup.py --msg=…`). Without this arm a visible
     # clone followed by an unparseable `tools/setup.py` produced zero findings
@@ -4638,6 +4640,204 @@ def _mutable_fetch_executions(
     return sorted(pairs, key=lambda p: p[0].line)
 
 
+# --- P14.24, third shape: a GitHub CLI extension installed at a mutable ref ---
+#
+# `gh extension install OWNER/REPO` downloads the extension — a release binary,
+# or the repository's own script — at the LATEST release, or at the ref named by
+# `--pin`. A release tag or a branch is whatever that repository's owner points
+# it at when the job runs, so it is the same trust model as a `git clone` at a
+# branch, and it follows the same rule: a finding needs the install AND a later
+# run of the extension in the same job (`gh <name> …`, or `gh extension exec
+# <name>`). Only a full 40-hex `--pin` is immutable, and a local install
+# (`gh extension install .`) is the repository's own code.
+_GH_EXTENSION_GROUPS = frozenset({"extension", "extensions", "ext"})
+_GH_EXTENSION_VALUE_OPTS = frozenset({"--pin"})
+
+
+@dataclass(frozen=True)
+class _GhExtensionInstall:
+    line: int
+    raw: str
+    repo: str            # as written: OWNER/REPO, HOST/OWNER/REPO or a URL
+    name: str | None     # the command it installs; None when not knowable
+    ref: str | None      # None = the latest release (no `--pin`)
+    pos: int
+
+
+def _gh_extension_command(tokens: list[str]) -> tuple[str, list[str]] | None:
+    """(subcommand, args) for `gh extension|ext <sub> …`, else None."""
+    if len(tokens) >= 3 and tokens[0] == "gh" and tokens[1] in _GH_EXTENSION_GROUPS:
+        return tokens[2], tokens[3:]
+    return None
+
+
+def _parse_gh_extension_install(
+    args: list[str],
+) -> tuple[str | None, str | None]:
+    """(target, `--pin` value) from `gh extension install`'s arguments."""
+    target: str | None = None
+    pin: str | None = None
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok.startswith("--pin="):
+            pin = tok.split("=", 1)[1]
+        elif tok in _GH_EXTENSION_VALUE_OPTS:
+            if i + 1 < len(args):
+                pin = args[i + 1]
+            i += 1
+        elif not tok.startswith("-") and target is None:
+            target = tok
+        i += 1
+    return target, pin
+
+
+def _gh_extension_is_local(target: str) -> bool:
+    return target == "." or target.startswith(("./", "../", "/", "~"))
+
+
+def _gh_extension_name(target: str) -> str | None:
+    """The command an extension repository installs: its name minus `gh-`."""
+    if "$" in target or "\x00" in target:
+        return None
+    base = target.rstrip("/").rsplit("/", 1)[-1]
+    if base.endswith(".git"):
+        base = base[: -len(".git")]
+    if base.startswith("gh-"):
+        base = base[len("gh-"):]
+    return base or None
+
+
+def _single_quoted_flags(text: str) -> list[bool]:
+    """Per character of `text`: is it inside single quotes? (`_shell_scan`'s
+    quoting rules, which do not say WHICH quote a data character sits in.)"""
+    flags: list[bool] = []
+    quote: str | None = None
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote != "'" and ch == "\\" and i + 1 < n:
+            flags += [False, False]
+            i += 2
+            continue
+        if quote:
+            flags.append(quote == "'")
+            if ch == quote:
+                quote = None
+        else:
+            if ch in "'\"":
+                quote = ch
+            flags.append(ch == "'")
+        i += 1
+    return flags
+
+
+def _commands_in_execution_order(command: str) -> list[str]:
+    """Each command of `command`, preceded by the commands its `$( … )`
+    substitutions run, in the order the shell runs them.
+
+    `install && out=$(gh <name>)` installs first and then runs: reading every
+    substitution body ahead of the whole line put the run before the install.
+    A substitution inside single quotes is printed text, never run, so its body
+    is not a command at all.
+    """
+    flags = _single_quoted_flags(command)
+    subs = iter(_COMMAND_SUBSTITUTION_RE.finditer(command))
+    out: list[str] = []
+    for segment in _install_command_segments(
+            _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
+        for _ in range(segment.count("$SUBST")):
+            match = next(subs, None)
+            if match is not None and not flags[match.start()]:
+                out.extend(_commands_in_execution_order(match.group(0)[2:-1]))
+        out.append(segment)
+    return out
+
+
+def _gh_extension_executions(
+    text: str, job_range: tuple[int, int] | None,
+    gap: Callable[..., None] | None = None,
+    file_path: Path | None = None,
+) -> list[tuple[_GhExtensionInstall, int, str]]:
+    """Every (mutable install, invocation line, invocation as written) in a job.
+
+    Mirrors `_mutable_fetch_executions`: both halves must be in the SAME job and
+    the invocation must come after the install it runs (or in a step that may
+    run at the same time). A mutable install with no visible invocation is a
+    coverage note — the extension may still run from a script this scan cannot
+    read — rather than a finding or a silent pass.
+    """
+    installs: list[_GhExtensionInstall] = []
+    # (position, line, extension name, invocation as written)
+    invocations: list[tuple[int, int, str, str]] = []
+    pos = 0
+    for line_no, raw, command, _new_step in _job_shell_commands(text, job_range):
+        for segment in _commands_in_execution_order(command):
+            pos += 1
+            tokens = _strip_command_prefix(_shell_tokens(segment))
+            if not tokens or tokens[0] != "gh" or len(tokens) < 2:
+                continue
+            ext = _gh_extension_command(tokens)
+            if ext is None:
+                # `gh <name> …` — a built-in command never collides with an
+                # installed extension's name (gh refuses the install), so only
+                # names a visible install provided are ever matched below.
+                invocations.append((pos, line_no, tokens[1],
+                                    f"gh {tokens[1]}"))
+                continue
+            sub, args = ext
+            if sub == "exec" and args and not args[0].startswith("-"):
+                invocations.append((pos, line_no, args[0],
+                                    f"gh {tokens[1]} exec {args[0]}"))
+                continue
+            if sub != "install":
+                continue
+            target, pin = _parse_gh_extension_install(args)
+            if not target or _gh_extension_is_local(target):
+                continue
+            if "://" in target:
+                slug_url = target
+            elif target.count("/") >= 2:            # HOST/OWNER/REPO
+                slug_url = "https://" + target
+            else:                                   # OWNER/REPO
+                slug_url = "https://github.com/" + target
+            if file_path is not None and _is_self_clone(slug_url, file_path):
+                continue
+            if pin and _FULL_SHA_RE.match(pin):
+                if gap is not None:
+                    gap(f"a GitHub CLI extension `{_as_written(target)}` on "
+                        f"line {line_no} is pinned to a full commit id, so it "
+                        f"is deliberately not reported", kind=_KIND_SUPPRESSED)
+                continue
+            installs.append(_GhExtensionInstall(
+                line_no, raw, target, _gh_extension_name(target), pin, pos))
+
+    spans = _step_spans(text)
+    pairs: list[tuple[_GhExtensionInstall, int, str]] = []
+    for idx, inst in enumerate(installs):
+        # A later install of the same extension replaces this one; it is then
+        # judged on its own.
+        until = next((later.pos for later in installs[idx + 1:]
+                      if later.name == inst.name), None)
+        hit = None
+        if inst.name is not None:
+            hit = next(
+                ((line, written) for at, line, name, written in invocations
+                 if name == inst.name
+                 and (at > inst.pos or _lines_concurrent(spans, inst.line, line))
+                 and (until is None or at < until)),
+                None,
+            )
+        if hit is not None:
+            pairs.append((inst, hit[0], hit[1]))
+        elif until is None and gap is not None:
+            gap(f"a GitHub CLI extension `{_as_written(inst.repo)}` is "
+                f"installed at a mutable reference on line {inst.line}, but "
+                f"no run of it is visible in this job, so whether it executes "
+                f"was NOT checked — review the job by hand")
+    return pairs
+
+
 def _pin_races(pin_line: int | None, lines: tuple[int, ...],
                racing: Callable[[int, int], bool], concurrency: bool) -> bool:
     """A pin may run at the same time as one of `lines` (the fetch, the
@@ -4717,6 +4917,32 @@ def _correlation_unverified_remote_code_execution(
                     f"line {exec_line}. "
                     f"A full 40-character commit id is the only reference that "
                     f"cannot change under you."
+                ),
+            )
+
+        for inst, exec_line, invoked in _gh_extension_executions(
+            text, job_range, _gap, file_path,
+        ):
+            ref_text = ("its latest release (no `--pin`)" if inst.ref is None
+                        else _ref_description(inst.ref))
+            yield RawHit(
+                line=inst.line,
+                evidence=f"{inst.line:>4}: {inst.raw}  <-- here",
+                match_text=(f"gh extension {_as_written(inst.repo)} at "
+                            f"{inst.ref or 'latest release'}"),
+                derived_note=(
+                    f"jobs.{job_name} installs the GitHub CLI extension "
+                    f"`{_as_written(inst.repo)}` at {ref_text} — a MUTABLE "
+                    f"reference, so what is installed is whatever that "
+                    f"repository's owner publishes under it at the moment the "
+                    f"job runs — and then runs it as `{invoked}` at line "
+                    f"{exec_line}. For a script extension, a full "
+                    f"40-character commit id passed to `--pin` cannot change "
+                    f"under you; a binary extension's `--pin` names a release "
+                    f"tag, which is fixed only when that release is published "
+                    f"as immutable (not visible offline) — otherwise download "
+                    f"the release asset, verify its digest and run the local "
+                    f"copy."
                 ),
             )
 
@@ -5501,6 +5727,221 @@ def _collect_sha_pins(
     return pins
 
 
+# ---- GitHub Actions workflow lockfile ---------------------------------------
+#
+# `gh actions-lock` writes `.github/workflows/actions.lock`: the workflow YAML
+# keeps `uses: owner/repo@v7.0.1` and the commit that runs lives only in the
+# lockfile. For a workflow listed under `workflows:`, GitHub runs the locked
+# commit and, at run time, rejects one that is not reachable from its recorded
+# ref or whose owner/repository identity no longer matches. P14.11 reads only
+# full-commit `uses:` pins, so on a locked repository it has nothing to check;
+# `_action_lockfile_summary` makes that visible instead of silent.
+#
+# A minimal, fail-closed reader of the same format ci-score credits (skills
+# install standalone, so no cross-skill import). Its accept/reject verdict is
+# pinned against ci-score's reader by tests/test_action_lockfile_parity.py at
+# the repo root. Shape (format v0.0.x):
+#   version: 'v0.0.3'
+#   workflows: {'.github/workflows/ci.yml': ['actions/checkout@v7.0.1', ...]}
+#   dependencies: {'actions/checkout@v7.0.1': {ref, commit: 'sha1-<40 hex>',
+#                                              owner_id, repo_id, uses?}}
+_LOCKFILE_REL = ".github/workflows/actions.lock"
+_LOCK_COMMIT_RE = re.compile(r"\Asha1-[0-9a-f]{40}\Z")
+_LOCK_VERSIONS = ("v0.0.2", "v0.0.3")  # the versions ci-score accepts (GitHub's docs show v0.0.3)
+_LOCK_WORKFLOW_KEY_RE = re.compile(r"\A\.github/workflows/[^/]+\Z")
+_LOCK_SHA40_RE = re.compile(r"\A[0-9a-f]{40}\Z")
+
+
+class _StrictLockLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a duplicated mapping key: plain yaml keeps the
+    LAST of two equal keys, so a malformed entry followed by a valid one would
+    read as valid."""
+
+
+def _lock_no_duplicate_keys(loader: yaml.SafeLoader, node: Any,
+                            deep: bool = False) -> Any:
+    seen: set[Any] = set()
+    for key_node, _value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            dup = key in seen
+            seen.add(key)
+        except TypeError:
+            raise yaml.YAMLError("unhashable mapping key")
+        if dup:
+            raise yaml.YAMLError(f"duplicated key {key!r}")
+    return loader.construct_mapping(node, deep=deep)
+
+
+_StrictLockLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _lock_no_duplicate_keys)
+
+
+def _lock_ref_key(text: Any) -> str | None:
+    """`owner/repo[/path]@ref` → the lookup key (owner/repo matched
+    case-insensitively, as GitHub resolves them; the ref exactly)."""
+    if not isinstance(text, str) or "@" not in text:
+        return None
+    action, _, ref = text.partition("@")
+    return f"{action.strip().lower()}@{ref.strip()}"
+
+
+def _load_action_lockfile(root: Path) -> tuple[str, dict[str, set[str]]]:
+    """(state, per_workflow): state is "absent", "valid" or "invalid";
+    per_workflow maps each listed workflow to the reference keys locked for it.
+
+    Fails CLOSED — anything this reader cannot fully vouch for is "invalid"
+    and covers nothing: a file not spelled exactly `actions.lock` (GitHub
+    reads only that path), a symbolic link, unreadable bytes, YAML that does
+    not parse or repeats a key, an unknown top-level key, an undocumented
+    format version, a commit that is not `sha1-` plus 40 hex, a missing ref /
+    owner_id / repo_id, an entry whose `ref` disagrees with its key, a
+    reference listed (or named in `uses:`) with no entry of its own, or a
+    workflow key that is not exactly `.github/workflows/<file>`."""
+    bad: tuple[str, dict[str, set[str]]] = ("invalid", {})
+    wf_dir = root / ".github" / "workflows"
+    try:
+        names = os.listdir(wf_dir)
+    except OSError:
+        return "absent", {}
+    if "actions.lock" not in names:
+        # A case variant is not GitHub's lockfile either; it covers nothing.
+        return ("invalid", {}) if any(n.lower() == "actions.lock" for n in names) \
+            else ("absent", {})
+    path = wf_dir / "actions.lock"
+    if path.is_symlink() or not path.is_file():
+        return bad
+    try:
+        loader = _StrictLockLoader(path.read_text(encoding="utf-8"))
+        try:
+            doc = loader.get_single_data()
+        finally:
+            loader.dispose()
+    except (OSError, ValueError, yaml.YAMLError):
+        return bad
+    if not isinstance(doc, dict) or set(doc) - {"version", "workflows", "dependencies"}:
+        return bad
+    wfs, deps = doc.get("workflows"), doc.get("dependencies")
+    if (doc.get("version") not in _LOCK_VERSIONS
+            or not isinstance(wfs, dict) or not isinstance(deps, dict)):
+        return bad
+    valid: set[str] = set()
+    nested: set[str] = set()
+    for key, entry in deps.items():
+        k = _lock_ref_key(key)
+        if (k is None or not isinstance(entry, dict)
+                or not isinstance(entry.get("ref"), str)
+                or not (isinstance(entry.get("commit"), str)
+                        and _LOCK_COMMIT_RE.match(entry["commit"]))
+                or not all(isinstance(entry.get(f), int)
+                           and not isinstance(entry.get(f), bool)
+                           for f in ("owner_id", "repo_id"))):
+            return bad
+        key_ref = key.partition("@")[2].strip()
+        if _LOCK_SHA40_RE.match(key_ref):
+            if entry["commit"] != f"sha1-{key_ref}":
+                return bad
+        elif entry["ref"] != key_ref:
+            return bad
+        uses = entry.get("uses", [])
+        if not isinstance(uses, list) or any(_lock_ref_key(u) is None for u in uses):
+            return bad
+        valid.add(k)
+        nested.update(_lock_ref_key(u) for u in uses)
+    per_workflow: dict[str, set[str]] = {}
+    for wf, refs in wfs.items():
+        if (not isinstance(wf, str) or not isinstance(refs, list)
+                or not _LOCK_WORKFLOW_KEY_RE.match(wf)
+                or os.path.normpath(wf) != wf or wf in per_workflow):
+            return bad
+        keys = [_lock_ref_key(r) for r in refs]
+        if any(k is None or k not in valid for k in keys):
+            return bad
+        per_workflow[wf] = set(keys)
+    if not nested <= valid:
+        return bad
+    return "valid", per_workflow
+
+
+def _lock_step_uses(doc: Any) -> Iterator[str]:
+    """Each step-level `uses:` value (`jobs.<id>.steps[].uses`), in order.
+
+    Deliberately NOT `_walk_uses_values`: GitHub's lockfile does not pin a
+    call to a reusable workflow (`jobs.<id>.uses`), so a lockfile entry for
+    one is never verified at run time, and an action input named `uses`
+    under `with:` is not a reference at all. Same rule as ci-score's
+    `_step_uses`."""
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return
+    for job in jobs.values():
+        steps = job.get("steps") if isinstance(job, dict) else None
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if isinstance(step, dict) and isinstance(step.get("uses"), str):
+                yield step["uses"].strip()
+
+
+def _lockfile_display_path(root: Path, state: str) -> str:
+    """The lockfile path to name: a case variant (`Actions.lock`) is named as
+    it is on disk, so the report never points at a file that is not there."""
+    if state != "invalid":
+        return _LOCKFILE_REL
+    try:
+        names = os.listdir(root / ".github" / "workflows")
+    except OSError:
+        return _LOCKFILE_REL
+    if "actions.lock" in names:
+        return _LOCKFILE_REL
+    variants = sorted(n for n in names if n.lower() == "actions.lock")
+    return f".github/workflows/{variants[0]}" if variants else _LOCKFILE_REL
+
+
+def _action_lockfile_summary(root: Path,
+                             workflow_files: list[Path]) -> dict[str, Any]:
+    """What the lockfile covers that P14.11 does not read.
+
+    Counts each step-level `uses:` occurrence, in a scanned workflow the
+    lockfile lists, whose ref is NOT a full commit and that the lockfile
+    locks for that workflow — the references whose commit lives only in the
+    lockfile. A full-commit pin is left to P14.11, which checks it directly;
+    a reusable-workflow call is never counted (the lockfile does not pin
+    it). Always returns the key set so report.py can rely on it."""
+    state, per_workflow = _load_action_lockfile(root)
+    covered = 0
+    covered_workflows: list[str] = []
+    if state == "valid":
+        for wf in workflow_files:
+            rel = _repo_relative(str(wf), root)
+            locked = per_workflow.get(rel)
+            if not locked:
+                continue
+            text = _read_text_safe(wf)
+            doc = _parse_yaml_text(text, wf, quiet=True) if text else None
+            if not isinstance(doc, dict):
+                continue  # an unparseable workflow is already a coverage gap
+            n = 0
+            for value in _lock_step_uses(doc):
+                k = _lock_ref_key(value)
+                if (k is None or value.startswith(("./", "docker://"))
+                        or _LOCK_SHA40_RE.match(k.rpartition("@")[2].lower())):
+                    continue
+                if k in locked:
+                    n += 1
+            if n:
+                covered += n
+                covered_workflows.append(rel)
+    logger.debug("action lockfile: state=%s, %d reference(s) in %d workflow(s)",
+                 state, covered, len(covered_workflows))
+    return {
+        "path": _lockfile_display_path(root, state),
+        "state": state,
+        "covered_references": covered,
+        "covered_workflows": covered_workflows,
+    }
+
+
 @lru_cache(maxsize=None)
 def _gh_repo_visible(repo: str) -> bool:
     """Can this `gh` identity see `repo` at all? The commit endpoint answers
@@ -6232,6 +6673,13 @@ def scan(
         # other (control steps hold no code), and the count is disclosed so
         # that is never left implicit.
         "parallel_steps": parallel_steps,
+        # The workflow lockfile (`.github/workflows/actions.lock`): its state
+        # and how many tag-pinned `uses:` references it locks to a commit in
+        # the workflows it lists. Informational, never a coverage gap: GitHub
+        # verifies each locked commit at run time, and P14.11 reads only
+        # full-commit `uses:` pins, so without this a locked repository's
+        # impostor check would go quiet with no sign of why.
+        "action_lockfile": _action_lockfile_summary(root, workflow_files),
         # Findings the scanner REACHED and deliberately did not report, above
         # all a fetch pinned to a full commit id. Informational: this must
         # never degrade coverage, or a repository that did exactly what the fix

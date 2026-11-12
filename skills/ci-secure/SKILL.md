@@ -167,8 +167,8 @@ spacing-sensitive — see the reference above):
 ```bash
 SLUG="$(printf '%s' "$(git rev-parse --show-toplevel)" | shasum | cut -c1-12)"; FINDINGS="${TMPDIR:-/tmp}/ci-secure-findings-${SLUG}.json"; REPORT="${TMPDIR:-/tmp}/ci-secure-report-${SLUG}.md"
 grep '^CI Secure' "$REPORT"                       # the banner (ENDS with the impostor word; `not recorded` is two)
-python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("gh_checks",{}).get("P14.11",""))' "$FINDINGS"  # status + pin detail
-grep '^| .*P14\.11' "$REPORT"                      # the ⚠️ vector-map row — only carries the reason on a skip/partial
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("gh_checks",{}).get("P14.11","")); print(d.get("action_lockfile",""))' "$FINDINGS"  # P14.11 status + pin detail, then the lockfile state + count
+grep '^| [^*].*P14\.11' "$REPORT"                  # the ⚠️ vector-map row — only carries the reason on a skip/partial
 grep '^| \*\*Coverage\*\* |' "$REPORT"               # the provenance row
 grep -A4 'Incomplete coverage' "$REPORT"          # only when Coverage says PARTIAL
 ```
