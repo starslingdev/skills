@@ -2131,6 +2131,10 @@ def test_a_partially_read_protection_is_never_reported_as_complete():
     so a consumer blends it as clean and fully measured."""
     for label, rulesets, classic in (
         ("classic errors", _RULESET_WITH_TEST, RuntimeError("HTTP 500")),
+        ("classic times out", _RULESET_WITH_TEST,
+         RuntimeError("request timed out")),
+        ("classic unavailable", _RULESET_WITH_TEST,
+         RuntimeError("HTTP 503 Service Unavailable")),
         ("rulesets errors", RuntimeError("HTTP 429 rate limit"),
          {"contexts": ["test"]}),
     ):
@@ -4054,6 +4058,18 @@ def test_a_plain_classic_not_found_uses_the_rulesets_answer():
     assert contexts == ["build", "lint", "test"], (contexts, detail)
     assert "read from rulesets only" in detail, detail
     assert "classic branch protection could not be read" in detail, detail
+
+
+def test_a_plain_rulesets_not_found_is_not_an_ordinary_partial_read():
+    """The exception is scoped to the admin-only classic endpoint."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(
+            RuntimeError("gh: Not Found (HTTP 404)"),
+            {"contexts": ["test"], "checks": []})):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts is None, (contexts, detail)
+    assert "rulesets" in detail, detail
 
 
 def test_a_branch_filtered_push_workflow_cannot_veto_the_real_producer(tmp_path):

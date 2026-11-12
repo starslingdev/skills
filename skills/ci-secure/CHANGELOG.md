@@ -333,6 +333,12 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-12 (#327)** — Required-check auditing now keeps a readable ruleset
+  answer when GitHub hides classic branch protection from a non-admin reader
+  behind a plain `404 Not Found`. The fact remains measured, names that classic
+  protection was unread, and still fails closed on rate limits, timeouts and
+  server errors.
+
 - **2026-11-11** (#331) — A GitHub CLI extension pinned to a tag on a
   release GitHub has locked as immutable is no longer reported (P14.24). That
   tag and its assets cannot move, but the offline scan could not see the
