@@ -24,12 +24,43 @@ _WARM = re.compile(
 _CACHED_COUNT = re.compile(
     r"(?i)\b(\d+)\s+(?:(?:packages?|tests?|steps?|lines?).{0,20}\(cached\)|"
     r"(?:go\s+)?cached(?:\s+lines?)?)")
+_CACHE_STEP_NAME = re.compile(r"(?i)\bcach(?:e|ed|ing)\b")
+_DIRECT_CACHE_ACTION_LOG = re.compile(
+    r"(?i)(?:actions/cache(?:/(?:restore|save))?|"
+    r"(?:ccache|sccache)-action|rust-cache)@")
+_CACHE_CAPABLE_SETUP_LOG = re.compile(
+    r"(?i)(?:actions/setup-(?:go|java|node|python)|setup-gradle|setup-ruby|"
+    r"setup-uv)@")
+_SETUP_CACHE_INPUT = re.compile(
+    r"(?im)^(?:\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s+)?"
+    r"\s*(?:cache|bundler-cache|enable-cache)\s*:\s*"
+    r"(?!false\s*$|none\s*$)\S+")
 
 # Job logs are the largest verification responses.  Bound both the number of
 # API reads per cohort and the amount of each response retained in the
 # persisted verification context.
 _VERIFY_LOG_JOB_CAP = 20
 _VERIFY_LOG_TOTAL_CHAR_CAP = 100_000
+
+
+def _cache_marker_lines(text: str) -> str:
+    """Keep cache-state evidence without spending the budget on other output."""
+    return "\n".join(
+        line for line in text.splitlines()
+        if _COLD.search(line) or _WARM.search(line) or _CACHED_COUNT.search(line))
+
+
+def _job_has_cache_step(job: dict[str, Any]) -> bool:
+    return any(
+        isinstance(step, dict)
+        and _CACHE_STEP_NAME.search(str(step.get("name") or ""))
+        for step in job.get("steps") or [])
+
+
+def _log_has_cache_step(text: str) -> bool:
+    return bool(_DIRECT_CACHE_ACTION_LOG.search(text) or (
+        _CACHE_CAPABLE_SETUP_LOG.search(text)
+        and _SETUP_CACHE_INPUT.search(text)))
 
 
 def _bounded_logs(*values: Any) -> list[str]:
@@ -411,6 +442,7 @@ class GhVerificationClient:
     def _job_logs(self, repo: str, jobs: list[dict[str, Any]]) -> dict[str, Any]:
         logs: list[str] = []
         calls = unreadable = omitted = truncated = 0
+        has_cache_step = any(_job_has_cache_step(job) for job in jobs)
         remaining = _VERIFY_LOG_TOTAL_CHAR_CAP
         for job in jobs:
             try:
@@ -426,10 +458,14 @@ class GhVerificationClient:
             calls += 1
             text = self._text(f"repos/{repo}/actions/jobs/{job_id}/logs")
             if text:
-                if len(text) > remaining:
+                has_cache_step = has_cache_step or _log_has_cache_step(text)
+                evidence = _cache_marker_lines(text)
+                if len(evidence) > remaining:
                     truncated += 1
-                logs.append(text[:remaining])
-                remaining -= len(logs[-1])
+                retained = evidence[:remaining]
+                if retained:
+                    logs.append(retained)
+                remaining -= len(retained)
             else:
                 unreadable += 1
         return {
@@ -438,6 +474,7 @@ class GhVerificationClient:
             "log_jobs_unreadable": unreadable,
             "log_jobs_omitted": omitted,
             "log_jobs_truncated": truncated,
+            "log_has_cache_step": has_cache_step,
         }
 
     def remote_head(self, repo: str, branch: str) -> str | None:
@@ -860,19 +897,28 @@ def _cache_class(cohort: dict[str, Any]) -> tuple[str, str]:
     omitted = int(cohort.get("log_jobs_omitted") or 0)
     truncated = int(cohort.get("log_jobs_truncated") or 0)
     calls = int(cohort.get("log_api_calls") or 0)
+    cold = _COLD.search(log)
+    warm = _WARM.search(log)
     if unreadable:
         return ("unknown", f"{unreadable} job log"
                 f"{'s' if unreadable != 1 else ''} unreadable")
-    if omitted:
-        return ("unknown", f"{omitted} job log"
-                f"{'s' if omitted != 1 else ''} omitted by cap")
     if truncated:
         return ("unknown", f"{truncated} job log"
                 f"{'s' if truncated != 1 else ''} truncated by cap")
-    cold = _COLD.search(log)
+    if cohort.get("log_has_cache_step") is False:
+        if cold:
+            return "cold", cold.group(0)
+        if warm:
+            return "warm", "log cache hit"
+        return (("cold", "first run")
+                if int(cohort.get("position") or 0) == 1
+                else ("warm", "later run"))
+    if omitted:
+        return ("unknown", f"{omitted} job log"
+                f"{'s' if omitted != 1 else ''} omitted by cap")
     if cold:
         return "cold", cold.group(0)
-    if _WARM.search(log):
+    if warm:
         return "warm", "log cache hit"
     if calls:
         return "unknown", "no cache marker in sampled job logs"

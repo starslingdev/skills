@@ -60,10 +60,17 @@ The one non-scripted field. Written once per pattern group and merged onto
 - `gh_checks` — per-network-gated-check status, `P14.11` above all: `ran` /
   `partial` / `skipped` plus the detail (pin counts, or the reason). An
   ABSENT `P14.11` key is the "not recorded" state — a coverage hole, never a
-  pass.
+  pass. `P14.24` is present only when the scan reached a GitHub CLI extension
+  pinned to a tag and then run: the release-immutability lookup's
+  `ran` / `partial` / `skipped` status, e.g. `ran: 2 tag-pinned GitHub CLI
+  extension install(s) looked up, 1 immutable (not reported), 1 reported`.
+  This lookup can only remove a finding, so a `partial` or `skipped` one
+  means some tag-pinned findings were kept without being checked, never that
+  a finding is missing. Its absence means no such install was reached.
 - `gh_check_details` — the per-check detail a `partial` status refers to,
-  including the unresolved-pin list. `gh_checks` gives the status word; this
-  is where the specifics live.
+  including the unresolved-pin list (for `P14.24`, each
+  `owner/repo@tag (file:line) — reason` that was not looked up). `gh_checks`
+  gives the status word; this is where the specifics live.
 - `scan_incomplete` — workflow files skipped or unreadable, with a reason
   each. Non-empty means coverage is PARTIAL.
 - `dropped_matches` and `coverage_notes` — the other two coverage channels.
@@ -95,6 +102,21 @@ The one non-scripted field. Written once per pattern group and merged onto
   found. Its file is not listed in `workflows` unless it also holds counted
   steps. Parallel steps are a github.com / GitHub Enterprise Cloud feature;
   the scan reads the syntax wherever it appears.
+- `action_lockfile` — the GitHub Actions workflow lockfile
+  (`.github/workflows/actions.lock`): `path` (a case variant such as
+  `Actions.lock` is named as it is on disk), `state` (`absent`, `valid`, or
+  `invalid` for a file that is not exactly that name, a symbolic link,
+  unreadable, unparseable, a format version the scan does not recognize, or
+  holding any malformed entry — invalid credits nothing),
+  `covered_references` (step-level `uses:` occurrences not pinned to a full
+  commit, in scanned workflows the lockfile lists, that it locks to a commit;
+  repeats count, and a reusable-workflow call is never counted because the
+  lockfile does not pin one) and `covered_workflows`. The key is always
+  present.
+  Informational, never a coverage gap: GitHub verifies each locked commit at
+  run time, and P14.11 checks only commit pins written in `uses:`, so these
+  are the references P14.11 leaves to GitHub. The report states them on its
+  **Action lockfile** row.
 - `security_score` — present in the JSON and **never rendered**. Phase 3
   forbids a score, ratio or `N/100` anywhere the user sees. It is listed here
   so it is recognized as out of bounds rather than mistaken for a summary

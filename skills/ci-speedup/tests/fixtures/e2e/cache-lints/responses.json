@@ -181,5 +181,9 @@
       }
     ]
   },
-  "logs": {}
+  "logs": {
+    "1101": "Cache not found for input keys: pnpm-linux-a\npnpm install --frozen-lockfile\n",
+    "1201": "Cache not found for input keys: pnpm-linux-b\npnpm install --frozen-lockfile\n",
+    "1301": "Cache restored from key: pnpm-linux-a\npnpm install --frozen-lockfile\n"
+  }
 }

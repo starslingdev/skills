@@ -540,6 +540,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for row in cache_rows)
     static_cache_rows = [row for row in cache_rows if row.get("static_cache_lint")]
     assert static_cache_rows
+    assert all(row.get("cache_family") for row in static_cache_rows)
     assert all(not (row.get("cache_log_confirmation") or {}).get("misses")
                for row in static_cache_rows)
     assert all(
@@ -663,6 +664,22 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert all(
         any(row.get("node") == "gate" for row in fact.get("job_projections") or [])
         for fact in path_facts if fact.get("partial") is not True)
+
+
+def test_path_filter_fixture_without_pr_numbers_stays_unmeasured(
+        monkeypatch, tmp_path):
+    doc, report, checks = run_fixture(
+        FIXTURE_ROOT / "path-filter-unmeasured", monkeypatch, tmp_path)
+    measurement = next((
+        row.get("path_filter_measurement")
+        for row in doc["findings"] if row.get("pattern") == "OPT32"
+    ), None)
+
+    assert measurement is not None
+    assert measurement["status"] == "unmeasured"
+    assert measurement["reason"] == "no PR number on sampled runs"
+    assert "hit rate not measured (no PR number on sampled runs)" in report
+    assert not [check for check in checks if not check.skipped and not check.ok]
 
 
 @pytest.mark.parametrize(("family", "pattern", "miss", "hit", "credited"), [
