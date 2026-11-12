@@ -130,9 +130,9 @@ two moved numbers.
   repository or no token, or when the answer cannot be completed (classic
   protection is admin-only, so a ruleset that does not require it plus an
   unreadable classic endpoint establishes nothing), the fact is unmeasured and
-  says why. Two answers settle classic protection without admin access: a 404
-  "Branch not protected" from its endpoint, and `protected: false` on the
-  public branch endpoint (that flag is set by rulesets as well as classic
+  says why. Two answers settle classic protection: a 404 "Branch not
+  protected" from its endpoint (GitHub sends it only to an admin), and, for
+  any reader, `protected: false` on the public branch endpoint (that flag is set by rulesets as well as classic
   protection, so `false` means neither exists; `true` settles nothing).
 - **`sec.trigger.fork-code-uncleared`** — no workflow with an untrusted-event
   trigger (`pull_request_target`, `workflow_run`, `issue_comment`, …) checks
@@ -499,9 +499,10 @@ two moved numbers.
   environments are locked. **Passes** when neither list holds a secret,
   including a repository with no secrets at all. **Fails** when either
   does; the evidence first states the consequence (any workflow pushed to
-  any branch receives these N secrets, so one leaked push credential
+  any branch can read these N secrets, so one leaked push credential
   exposes them all with no review and no merge, and the fix is an
-  environment only protected branches can use), then names them, up to
+  environment only protected branches can use, one that passes
+  `sec.environments.branch-restricted`), then names them, up to
   10 per list followed by `and N more`, repository and organisation
   separately, with a short deterministic hint (`PRIVATE_KEY`, `APP_ID`,
   `PYPI`, `NPM_TOKEN`, …) putting the likely high-value ones first — a
@@ -572,8 +573,8 @@ two moved numbers.
   **Unmeasured** when the settings cannot be read: no repository, no `gh`
   or no auth, the rules endpoint failing, or, when the rules alone do not
   hold, classic protection answering a non-admin with a 403. Two answers
-  settle classic protection without admin access: a 404 "Branch not
-  protected", and `protected: false` on the public branch endpoint
+  settle classic protection: a 404 "Branch not protected" (sent only to an
+  admin), and, for any reader, `protected: false` on the public branch endpoint
   (`protected: true` is set by rulesets too and settles nothing). A plain
   `Not Found (HTTP 404)` from classic protection is how GitHub hides it
   from a non-admin. Hidden classic protection can only add review rules:
@@ -593,8 +594,8 @@ two moved numbers.
   (admin-only) only when the rules alone do not hold. Grounded in the
   November 2026 compromised GitHub accounts CI secret stealer campaign
   ([Reference incidents](security-patterns.md#reference-incidents)), in
-  which stolen tokens with write access pushed a payload into the victims'
-  own repositories. **To fix a fail**: in a ruleset that targets the
+  which stolen tokens pushed a payload into every repository they could
+  write to. **To fix a fail**: in a ruleset that targets the
   default branch, or in its classic branch protection, turn on "Require a
   pull request before merging" with at least 1 required approval, plus
   "Dismiss stale pull request approvals when new commits are pushed" or

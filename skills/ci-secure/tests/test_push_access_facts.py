@@ -1975,7 +1975,7 @@ def test_a_secrets_fail_says_what_one_leaked_push_credential_reaches(
                              org_secrets=["SHARED_KEY"]),
                   tmp_path=tmp_path)
     ev = _fact(out, SCOPED)["evidence"]
-    assert ("any workflow pushed to any branch of this repository receives "
+    assert ("any workflow pushed to any branch of this repository can read "
             "these 3 secret(s)") in ev, ev
     assert "one leaked push credential exposes them all" in ev, ev
     assert "no review and no merge" in ev, ev
@@ -1990,7 +1990,7 @@ def test_a_secrets_fail_names_at_most_ten_per_list_and_counts_the_rest(
     out, _ = _run(_responses([_CLOSED_ENV], repo_secrets=names),
                   tmp_path=tmp_path)
     ev = _fact(out, SCOPED)["evidence"]
-    assert "receives these 13 secret(s)" in ev, ev
+    assert "can read these 13 secret(s)" in ev, ev
     for shown in names[:10]:
         assert f"`{shown}`" in ev, ev
     for hidden in names[10:]:
@@ -2023,10 +2023,21 @@ def test_secrets_reachable_from_any_branch_are_called_out_under_the_headline(
     top = md.split("## Critical findings", 1)[1].split("## 🔗 Vector map", 1)[0]
     assert "Secrets reachable from any branch" in top, top
     assert "3 secret(s)" in top, top
+    assert "any branch of this repository can read them" in top, top
+    # The fix only works once that environment passes its own check.
+    assert "sec.environments.branch-restricted" in top, top
     assert "one leaked push credential exposes them all" in top, top
     assert "(#if-a-push-credential-leaks)" in top, top
     # A callout, not a heading: the vector headline stays the only `## `.
     assert not any(line.startswith("#") for line in top.splitlines()[1:]), top
+
+
+def test_a_partial_secret_inventory_makes_the_callout_a_lower_bound(tmp_path):
+    responses = _responses([_CLOSED_ENV], repo_secrets=["RELEASE_TOKEN"])
+    responses[f"{R}/actions/organization-secrets?per_page=100"] = _SECRETS_403
+    out, _ = _run(responses, tmp_path=tmp_path)
+    md = _render(out)
+    assert "1 secret(s) (at least; one secret list could not be read)" in md, md
 
 
 @pytest.mark.parametrize("secrets", ["none", "unreadable"])

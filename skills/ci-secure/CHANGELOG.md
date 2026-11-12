@@ -31,9 +31,9 @@ entries are dated (UTC). Format loosely follows
   because the attacker already held a push credential. The environment
   secrets checks now say what is at stake: a failing
   `sec.secrets.environment-scoped` states that any workflow pushed to any
-  branch receives its N secrets, so one leaked push credential exposes them
+  branch can read its N secrets, so one leaked push credential exposes them
   all with no review and no merge, and that the fix is an environment only
-  protected branches can use; it names them (never values), up to 10 per
+  protected branches can use (one that passes the branch-restriction check); it names them (never values), up to 10 per
   list and then `and N more`. A failing `sec.environments.branch-restricted`
   says an environment any branch can use protects nothing from a pushed
   workflow. When the secrets check fails, the report also puts a short
@@ -340,7 +340,7 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
-- **2026-11-12 (#327)** — Required-check auditing now keeps a readable ruleset
+- **2026-11-12** (#341, closes #327) — Required-check auditing now keeps a readable ruleset
   answer when GitHub hides classic branch protection from a non-admin reader
   behind a plain `404 Not Found`. The fact remains measured, names that classic
   protection was unread, and still fails closed on rate limits, timeouts and

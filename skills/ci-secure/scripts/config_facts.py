@@ -2884,7 +2884,7 @@ P1_RULESET_ONLY_BRANCH_COUNTS_AS_PROTECTED = False
 #     `_NOT_PROTECTED_404_RE` reads for the required-checks fact).
 P6_NOT_FOUND_ANSWERS = {
     "branch": re.compile(r"branch not found", re.I),
-    "protection": re.compile(r"branch not protected", re.I),
+    "protection": re.compile(r"branch not protected \(HTTP 404\)", re.I),
 }
 
 _MANAGED_ENVIRONMENTS = frozenset({"github-pages", "copilot"})
@@ -4082,11 +4082,12 @@ def _secrets_scoped(inventory: dict[str, Any]) -> tuple[str, str]:
                   f" (the other list could not be read: {reason}, so this "
                   "may not be all of them)")
         return "fail", (
-            f"any workflow pushed to any branch of this repository receives "
+            f"any workflow pushed to any branch of this repository can read "
             f"these {total} secret(s), so one leaked push credential exposes "
             "them all, with no review and no merge — " + "; ".join(parts)
             + unread + ". The fix is to move them into an environment that "
-            "only protected branches can use. "
+            "only protected branches can use, one that passes "
+            "`sec.environments.branch-restricted`. "
             + _SCOPED_FIX + (_SCOPED_ORG_FIX if org_names else ""))
     if inventory.get("status") == "measured":
         return "pass", ("no repository or organisation secret is readable "
@@ -4151,33 +4152,34 @@ def _actor_label(actor: Any) -> str:
     return label
 
 
-def _ruleset_counts(src: Any, rule: dict) -> tuple[bool, str]:
-    """(counts, note) for one pull_request rule from the rules endpoint.
-    `counts` is False only when the ruleset's own detail says it is not
-    actively enforced; `note` names who may bypass it, or says that could
-    not be read."""
+def _ruleset_counts(src: Any, rule: dict) -> tuple[bool, str, bool]:
+    """(counts, note, unread) for one pull_request rule from the rules
+    endpoint. `counts` is False only when the ruleset's own detail says it is
+    not actively enforced; `note` names who may bypass it, or says that could
+    not be read, and `unread` says which of the two it is."""
     rid = rule.get("ruleset_id")
     if rid is None:
         return True, ("a pull request rule did not name its ruleset, so who "
-                      "may bypass it was not read")
+                      "may bypass it was not read"), True
     try:
         rs = src.ruleset(rid)
     except _Unread as exc:
-        return True, f"who may bypass ruleset {rid} could not be read ({exc})"
+        return (True, f"who may bypass ruleset {rid} could not be read "
+                f"({exc})", True)
     name = rs.get("name") or rid
     enforcement = rs.get("enforcement")
     if enforcement is not None and enforcement != "active":
         return False, (f"ruleset `{name}` requires review but is in "
-                       f"`{enforcement}` mode, which enforces nothing")
+                       f"`{enforcement}` mode, which enforces nothing"), False
     actors = rs.get("bypass_actors")
     if not isinstance(actors, list):
         return True, (f"ruleset `{name}`'s bypass list is not readable "
-                      "without the right to edit it")
+                      "without the right to edit it"), True
     if not actors:
-        return True, ""
+        return True, "", False
     return True, (f"ruleset `{name}` lets "
                   + _capped([_actor_label(a) for a in actors], 4, ", ")
-                  + " bypass it")
+                  + " bypass it"), False
 
 
 def _classic_review_params(body: dict) -> tuple[dict | None, str]:
@@ -4252,6 +4254,7 @@ def _review_verdict(src: Any) -> tuple[str, str]:
     label = f"`{branch}`"
     params: list[dict] = []
     notes: list[str] = []
+    unread_bypass: list[str] = []
     skipped: list[str] = []
     unread: list[str] = []
     sources: list[str] = []
@@ -4265,9 +4268,10 @@ def _review_verdict(src: Any) -> tuple[str, str]:
     for rule in rules:
         if rule.get("type") != "pull_request":
             continue
-        counts, note = _ruleset_counts(src, rule)
+        counts, note, bypass_unread = _ruleset_counts(src, rule)
         if note:
-            (notes if counts else skipped).append(note)
+            (skipped if not counts else
+             unread_bypass if bypass_unread else notes).append(note)
         if counts:
             p = rule.get("parameters")
             params.append(p if isinstance(p, dict) else {})
@@ -4314,8 +4318,12 @@ def _review_verdict(src: Any) -> tuple[str, str]:
                     "a leak of theirs is not covered: "
                     + "; ".join(dict.fromkeys(notes))
                     + ".")
-        elif not unread:
+        elif not unread and not unread_bypass:
             tail = " Nobody is listed as able to bypass it."
+        if unread_bypass:
+            # Unread is not an actor: said apart from who may skip review.
+            tail += (" Who may bypass it was not read: "
+                     + "; ".join(dict.fromkeys(unread_bypass)) + ".")
         if unread:
             tail += (" Not read: " + "; ".join(unread) + " — a source that "
                      "was not read can only add rules, so the pass stands.")

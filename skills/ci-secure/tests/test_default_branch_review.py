@@ -225,6 +225,8 @@ def test_an_unreadable_bypass_list_is_disclosed_on_a_pass(tmp_path):
                                      rulesets=[_ruleset(bypass=None)]))
     assert f["outcome"] == "pass", f
     assert "bypass list is not readable" in f["evidence"], f
+    # Unread is not an actor: it is never listed as able to skip review.
+    assert "Able to skip" not in f["evidence"], f
 
 
 def test_classic_admin_exemption_and_allowances_are_named_on_a_pass(tmp_path):
@@ -370,6 +372,7 @@ def test_a_hidden_classic_404_never_settles_an_unread_rules_endpoint(
 
 @pytest.mark.parametrize("err", [
     _api_error("gh: Bad Gateway (HTTP 502): upstream Not Found (HTTP 404)"),
+    _api_error("gh: Not Found (HTTP 404)\nupstream Bad Gateway (HTTP 502)"),
     _api_error("gh: API rate limit exceeded (HTTP 403)"),
     RuntimeError("timed out after 30s"),
 ])
@@ -378,6 +381,57 @@ def test_other_classic_failures_stay_unmeasured(tmp_path, err):
                                      rulesets=[_ruleset()],
                                      classic=err, protected=True))
     assert f["outcome"] == "unmeasured", f
+    # Unread, not GitHub's ordinary hide: the evidence must not say hidden.
+    assert "hidden from this reader" not in f["evidence"], f
+
+
+def test_a_5xx_quoting_branch_not_protected_is_not_an_answer(tmp_path):
+    """Only gh's own `Branch not protected (HTTP 404)` says the branch has no
+    classic protection; a 5xx whose body quotes those words was not read."""
+    err = _api_error('gh: Bad Gateway (HTTP 502)\n'
+                     '{"message":"Branch not protected","status":"404"}')
+    f, _ = _run(tmp_path, _responses(classic=err, protected=True))
+    assert f["outcome"] == "unmeasured", f
+
+
+def test_a_missing_stale_approval_setting_is_never_read_as_on(tmp_path):
+    rule = _pr_rule()
+    del rule["parameters"]["dismiss_stale_reviews_on_push"]
+    f, _ = _run(tmp_path, _responses(rules=[rule], rulesets=[_ruleset()]))
+    assert f["outcome"] == "unmeasured", f
+
+
+def test_an_unreadable_ruleset_detail_still_counts_its_rule(tmp_path):
+    """The rule came from the rules endpoint, which returns only active
+    rules; only who may bypass it is unread, and that is said apart."""
+    f, _ = _run(tmp_path, _responses(rules=[_pr_rule(dismiss=True)]))
+    assert f["outcome"] == "pass", f
+    ev = f["evidence"]
+    assert "who may bypass ruleset 7 could not be read" in ev, ev
+    assert "Able to skip" not in ev, ev
+
+
+def test_a_pass_discloses_an_unread_rules_endpoint(tmp_path):
+    responses = _responses(classic=_classic(dismiss=True))
+    responses[RULES] = _HTTP_502
+    f, _ = _run(tmp_path, responses)
+    assert f["outcome"] == "pass", f
+    assert "Not read:" in f["evidence"], f
+
+
+def test_classic_review_settings_of_unexpected_shape_are_unmeasured(tmp_path):
+    body = _classic()
+    body["required_pull_request_reviews"] = "on"
+    f, _ = _run(tmp_path, _responses(classic=body))
+    assert f["outcome"] == "unmeasured", f
+
+
+def test_a_verdict_crash_costs_only_this_check(tmp_path):
+    with mock.patch.object(cf, "_review_verdict",
+                           side_effect=KeyError("surprise")):
+        f, _ = _run(tmp_path, _responses())
+    assert f["outcome"] == "unmeasured", f
+    assert "could not be judged" in f["evidence"], f
 
 
 def test_a_pull_request_rule_of_unexpected_shape_is_unmeasured(tmp_path):

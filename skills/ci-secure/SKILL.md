@@ -38,8 +38,8 @@ only — this is not a comprehensive audit.*
 **Prereqs:** PyYAML (`pip install pyyaml` — the scanner's only third-party
 dep). `gh` is optional, used for the network-gated impostor-SHA check (P14.11
 — the one vector that cannot be answered from YAML alone), the dormancy note,
-and six config facts read over the API (required checks skippable, fork-PR
-approval, CODEOWNERS enforced, two environment checks, secrets). Everything
+and seven config facts read over the API (required checks, fork-PR approval,
+CODEOWNERS, two environment checks, secrets, default-branch review). Everything
 else runs locally in seconds. Troubleshooting: [references/troubleshooting.md](references/troubleshooting.md).
 
 **`<ci-secure>` in the commands below is this skill's own install directory** —
