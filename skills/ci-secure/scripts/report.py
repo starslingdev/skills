@@ -1319,6 +1319,40 @@ def _parallel_steps_cell(parallel_steps: dict[str, Any] | None) -> str:
     return "; ".join(parts)
 
 
+def _action_lockfile_cell(action_lockfile: dict[str, Any] | None) -> str:
+    """The provenance line for a GitHub Actions workflow lockfile, or "".
+
+    A lockfile moves an action's commit out of the `uses:` line, where the
+    impostor-SHA check (P14.11) reads pins, into `actions.lock`, where GitHub
+    verifies it at run time. Without this row a locked repository's impostor
+    check would report nothing to check and give no sign why. Informational,
+    never a coverage gap. A lockfile that is present but not well-formed is
+    named and credited with nothing.
+    """
+    entry = action_lockfile if isinstance(action_lockfile, dict) else {}
+    state = entry.get("state")
+    path = str(entry.get("path") or ".github/workflows/actions.lock")
+    if state == "invalid":
+        return (f"`{path}` is present but not a lockfile this scan can read "
+                "(misnamed, malformed, or a format version it does not "
+                "recognize), so none of its action references is counted as "
+                "locked; the impostor-SHA check (P14.11) checks only commit "
+                "pins written in `uses:`, so tag references here are checked "
+                "by neither")
+    n_refs = int(entry.get("covered_references") or 0)
+    workflows = entry.get("covered_workflows") or []
+    if state != "valid" or not n_refs:
+        return ""
+    return (
+        f"{n_refs} action reference(s) in {len(workflows)} workflow(s) are "
+        f"locked to a commit by `{path}`, not pinned in the `uses:` line. "
+        "GitHub verifies each locked commit at run time (it must be "
+        "reachable from its recorded ref, from the same repository); the "
+        "impostor-SHA check (P14.11) reads only commit pins written in "
+        "`uses:` and does not check these"
+    )
+
+
 def _header_table(
     findings: list[dict[str, Any]],
     scanned_workflows: int,
@@ -1331,6 +1365,7 @@ def _header_table(
     repo_root: str | None = None,
     repo_tree_dirty: bool = False,
     parallel_steps: dict[str, Any] | None = None,
+    action_lockfile: dict[str, Any] | None = None,
 ) -> str:
     """H1-adjacent provenance table — first thing after the title.
 
@@ -1418,6 +1453,9 @@ def _header_table(
     parallel_row = _parallel_steps_cell(parallel_steps)
     if parallel_row:
         rows.append(("Parallel steps", parallel_row))
+    lockfile_row = _action_lockfile_cell(action_lockfile)
+    if lockfile_row:
+        rows.append(("Action lockfile", lockfile_row))
     if dormant_count:
         rows.append(
             (
@@ -2729,6 +2767,7 @@ def render(
         repo_root=findings_json.get("repo_root"),
         repo_tree_dirty=bool(findings_json.get("repo_tree_dirty")),
         parallel_steps=findings_json.get("parallel_steps"),
+        action_lockfile=findings_json.get("action_lockfile"),
     ))
     out.append("")
 

@@ -395,7 +395,14 @@ def test_emulated_leaf_requires_a_single_native_builder_node():
         (_SINGLE_AMD64_BUILDER + compile_log).splitlines())
     assert one_node is not None and one_node["fix_key"] == "emulated-image-compile"
 
-    second_node = """Name:                  native-arm0
+    second_node = """Labels:
+ org.mobyproject.buildkit.worker.executor: oci
+ org.mobyproject.buildkit.worker.snapshotter: overlayfs
+GC Policy rule#0:
+ All: false
+ Keep Duration: 48h0m0s
+
+Name:                  native-arm0
 Endpoint:              tcp://native-arm.example:1234
 Status:                running
 BuildKit version:      v0.24.0
@@ -403,6 +410,23 @@ Platforms:             linux/arm64, linux/arm/v7
 """
     assert bp._emulated_image_compile_leaf(
         (_SINGLE_AMD64_BUILDER + second_node + compile_log).splitlines()) is None
+
+
+def test_an_inspect_after_the_build_does_not_relabel_earlier_layers():
+    native_arm_builder = _SINGLE_AMD64_BUILDER.replace(
+        "linux/amd64, linux/amd64/v2, linux/arm64, linux/arm/v7",
+        "linux/arm64, linux/arm/v7, linux/amd64",
+    )
+    compile_log = """#10 [linux/amd64 4/8] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 4/8] RUN go build ./...
+#15 DONE 100.0s
+"""
+
+    leaf = bp._emulated_image_compile_leaf(
+        (native_arm_builder + compile_log + _SINGLE_AMD64_BUILDER).splitlines())
+
+    assert leaf is None
 
 
 def test_no_inspect_dominant_foreign_compile_is_an_uncredited_check():
@@ -484,6 +508,109 @@ def test_builder_parser_stops_before_later_name_shaped_output():
 #15 [linux/arm64 build 2/3] RUN go build ./...
 #15 DONE 120.0s
 Name: release-artifact
+"""
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+    assert leaf["magnitude"] == {
+        "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
+    assert "builder_topology_unconfirmed" not in leaf
+
+
+def test_builder_parser_stops_at_a_later_docker_info_group():
+    log = _SINGLE_AMD64_BUILDER + """##[group]Docker info
+Server:
+ Name: runner-engine
+ Server Version: 27.5.1
+##[endgroup]
+#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+"""
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+    assert leaf["magnitude"] == {
+        "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
+    assert "builder_topology_unconfirmed" not in leaf
+
+
+def test_builder_parser_keeps_driver_options_before_platforms():
+    log = """docker buildx inspect --bootstrap
+Name:          builder
+Driver:        docker-container
+Nodes:
+Name:                  builder0
+Endpoint:              unix:///var/run/docker.sock
+Driver Options:        network=host
+Status:                running
+BuildKit version:      v0.24.0
+Platforms:             linux/amd64, linux/amd64/v2, linux/arm64
+#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+"""
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+    assert leaf["magnitude"] == {
+        "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
+    assert "builder_topology_unconfirmed" not in leaf
+
+
+def test_builder_parser_does_not_count_indented_metadata_names_as_nodes():
+    trailing_metadata_cases = (
+        """Server:
+ Name: runner-engine
+ Server Version: 27.5.1
+""",
+        """Devices:
+ Name: nvidia.com/gpu
+ Automatically allowed: false
+""",
+    )
+    build = """#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
+"""
+
+    for trailing_metadata in trailing_metadata_cases:
+        leaf = bp._parse_log(_SINGLE_AMD64_BUILDER + trailing_metadata + build)
+
+        assert leaf is not None and leaf["fix_key"] == "emulated-image-compile"
+        assert leaf["magnitude"] == {
+            "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
+        assert "builder_topology_unconfirmed" not in leaf
+
+
+def test_builder_parser_uses_the_last_complete_inspect_block():
+    log = """docker buildx inspect
+Name:          builder
+Driver:        docker-container
+Nodes:
+Name:                  builder0
+Endpoint:              unix:///var/run/docker.sock
+Status:                inactive
+Platforms:
+docker buildx inspect --bootstrap
+Name:          builder
+Driver:        docker-container
+Nodes:
+Name:                  builder0
+Endpoint:              unix:///var/run/docker.sock
+Status:                running
+BuildKit version:      v0.24.0
+Platforms:             linux/amd64, linux/amd64/v2, linux/arm64
+#10 [linux/amd64 build 2/3] RUN go build ./...
+#10 DONE 20.0s
+#15 [linux/arm64 build 2/3] RUN go build ./...
+#15 DONE 120.0s
 """
 
     leaf = bp._parse_log(log)
