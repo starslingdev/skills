@@ -776,25 +776,13 @@ def test_verification_has_one_persisted_baseline_log_budget(tmp_path):
     class BudgetClient(FakeClient):
         def __init__(self):
             super().__init__()
-            self.baseline_log_gets = []
+            self.log_gets = []
 
         def _text(self, endpoint):
-            self.baseline_log_gets.append(endpoint)
+            self.log_gets.append(endpoint)
             return "Cache restored from key: node-v1"
 
-        def _job_logs(self, repo, jobs, *, job_cap=20):
-            sampled = jobs[:job_cap]
-            logs = [self._text(
-                f"repos/{repo}/actions/jobs/{job['id']}/logs")
-                    for job in sampled]
-            return {
-                "logs": logs,
-                "log_api_calls": len(sampled),
-                "log_jobs_unreadable": 0,
-                "log_jobs_omitted": len(jobs) - len(sampled),
-                "log_jobs_truncated": 0,
-                "log_has_cache_step": True,
-            }
+        _job_logs = GhVerificationClient._job_logs
 
         def rerun_cohort(self, repo, cohort, *, trigger=True):
             self.events.append("rerun-trigger" if trigger else "rerun-poll")
@@ -832,20 +820,24 @@ def test_verification_has_one_persisted_baseline_log_budget(tmp_path):
         environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
 
     assert first["status"] == "waiting-for-first-cohort"
-    assert len(client.baseline_log_gets) <= 20
-    assert first["baseline_log_api_calls"] == len(client.baseline_log_gets)
-    assert first["baseline_log_api_budget"] == 20
+    assert len(client.log_gets) <= 20
+    assert first["verification_log_api_calls"] == len(client.log_gets)
+    assert first["verification_log_api_budget"] == 20
     saved = json.loads(context_path.read_text())
     assert saved["baseline"]
+    after_baseline = client._job_logs(
+        "o/r", [{"id": 1000 + index} for index in range(5)])
+    assert after_baseline["log_api_calls"] == 0
+    assert after_baseline["log_jobs_omitted"] == 5
 
-    client.baseline_log_gets.clear()
+    client.log_gets.clear()
     second = advance_verification(
         client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
         context_path=context_path, changed_files=[".github/workflows/ci.yml"],
         environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
     assert second["status"] == "waiting-for-first-cohort"
-    assert client.baseline_log_gets == []
-    assert second["baseline_log_api_calls"] == first["baseline_log_api_calls"]
+    assert client.log_gets == []
+    assert second["verification_log_api_calls"] == first["verification_log_api_calls"]
 
 
 def test_default_branch_sampling_maps_squash_merge_and_stops_at_a_gap():
