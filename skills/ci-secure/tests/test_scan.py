@@ -432,6 +432,63 @@ def test_p1410_modern_bare_inputs_context_is_caller_filled(
     assert "inputs." in scan._ATTACKER_FILLED_PREFIXES
 
 
+@pytest.mark.parametrize("expression", [
+    "inputs['max-items']",
+    'inputs [ "max-items" ]',
+    "github.event.inputs['max-items']",
+    'github.event.inputs [ "max-items" ]',
+    "github.event['inputs']['max-items']",
+    'github.event["client_payload"]["command"]',
+    "inputs.max_items",
+    "github.event.inputs.max_items",
+])
+def test_bracket_indexed_attacker_inputs_reach_both_shell_sinks(
+    tmp_path: Path, expression: str,
+) -> None:
+    direct = tmp_path / "direct"
+    _write_workflow(direct, "sink.yml", (
+        "on: workflow_dispatch\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f'      - run: echo "${{{{ {expression} }}}}"\n'
+    ))
+    assert "P14.10" in _patterns_for_file(_scan_dir(direct), "sink.yml")
+
+    deferred = tmp_path / "deferred"
+    _write_workflow(deferred, "sink.yml", (
+        "on: workflow_dispatch\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f'      - run: echo "VALUE=${{{{ {expression} }}}}" >> "$GITHUB_ENV"\n'
+    ))
+    assert "P14.15" in _patterns_for_file(_scan_dir(deferred), "sink.yml")
+
+
+@pytest.mark.parametrize("expression", [
+    "matrix['os']",
+    'steps["prepare"].outputs.value',
+])
+def test_bracket_indexing_does_not_promote_non_source_contexts(
+    tmp_path: Path, expression: str,
+) -> None:
+    _write_workflow(tmp_path, "safe.yml", (
+        "on: push\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f'      - run: echo "${{{{ {expression} }}}}"\n'
+        f'      - run: echo "VALUE=${{{{ {expression} }}}}" >> "$GITHUB_ENV"\n'
+    ))
+    patterns = _patterns_for_file(_scan_dir(tmp_path), "safe.yml")
+    assert "P14.10" not in patterns
+    assert "P14.15" not in patterns
+
+
 def test_shape_safe_allowlist_only_ever_touches_template_expressions() -> None:
     """The exclusion is an argument about `${{ … }}` VALUE SHAPES.
 
