@@ -346,8 +346,36 @@ def test_a_failing_rule_also_names_its_bypassers(tmp_path):
     ev = f["evidence"]
     assert "Dismiss stale pull request approvals" in ev, ev
     assert "app 101" in ev and "app 202" in ev, ev
-    assert "bypass list" in ev, ev
+    assert "can skip this rule from a bypass list" in ev, ev
+    assert "a leaked credential of any of these" in ev, ev
+    assert "leaving only admins" in ev, ev
     assert "organization admins" not in ev.lower(), ev
+
+
+def test_a_failing_rule_names_bypassers_from_every_source(tmp_path):
+    """A ruleset and classic protection that both fall short: bypassers of
+    each are named, and a "For pull requests only" one is named as such and
+    told that mode is not enough."""
+    f, _ = _run(tmp_path, _responses(
+        rules=[_pr_rule()],
+        rulesets=[_ruleset(bypass=[_actor("Integration", 303,
+                                          mode="pull_request")])],
+        classic=_classic(users=["release-bot"])))
+    assert f["outcome"] == "fail", f
+    ev = f["evidence"]
+    assert "app 303 (when merging a pull request)" in ev, ev
+    assert "user `release-bot`" in ev, ev
+    assert "\"For pull requests only\" bypass is not enough" in ev, ev
+
+
+def test_a_failing_rule_names_a_single_bypasser_in_the_singular(tmp_path):
+    f, _ = _run(tmp_path, _responses(
+        rules=[_pr_rule(count=0)],
+        rulesets=[_ruleset(bypass=[_actor("Integration", 101)])]))
+    assert f["outcome"] == "fail", f
+    ev = f["evidence"]
+    assert "app 101 can skip this rule from a bypass list" in ev, ev
+    assert "a leaked credential of this actor" in ev, ev
 
 
 def test_a_failing_rule_with_no_bypassers_names_none(tmp_path):
