@@ -540,6 +540,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for row in cache_rows)
     static_cache_rows = [row for row in cache_rows if row.get("static_cache_lint")]
     assert static_cache_rows
+    assert all(row.get("cache_family") for row in static_cache_rows)
     assert all(not (row.get("cache_log_confirmation") or {}).get("misses")
                for row in static_cache_rows)
     assert all(
@@ -663,6 +664,22 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert all(
         any(row.get("node") == "gate" for row in fact.get("job_projections") or [])
         for fact in path_facts if fact.get("partial") is not True)
+
+
+def test_path_filter_fixture_without_pr_numbers_stays_unmeasured(
+        monkeypatch, tmp_path):
+    doc, report, checks = run_fixture(
+        FIXTURE_ROOT / "path-filter-unmeasured", monkeypatch, tmp_path)
+    measurement = next((
+        row.get("path_filter_measurement")
+        for row in doc["findings"] if row.get("pattern") == "OPT32"
+    ), None)
+
+    assert measurement is not None
+    assert measurement["status"] == "unmeasured"
+    assert measurement["reason"] == "no PR number on sampled runs"
+    assert "hit rate not measured (no PR number on sampled runs)" in report
+    assert not [check for check in checks if not check.skipped and not check.ok]
 
 
 @pytest.mark.parametrize(("family", "pattern", "miss", "hit", "credited"), [
@@ -1186,6 +1203,23 @@ def test_builder_topology_and_foreign_only_shapes_run_through_collection(
         lambda log: log.replace(
             "#10 [linux/amd64 build 2/3]", second_node + "#10 [linux/amd64 build 2/3]"))
     assert "emulated-image-compile" not in multi_node["leaves"]
+
+    docker_info = (
+        "##[group]Docker info\n"
+        "Server:\n"
+        " Name: runner-engine\n"
+        " Server Version: 27.5.1\n"
+        "##[endgroup]\n")
+    _doc, _report, after_info = _run_multiarch_log_variant(
+        "multiarch-docker-info", monkeypatch, tmp_path,
+        lambda log: log.replace(
+            "#10 [linux/amd64 build 2/3]", docker_info + "#10 [linux/amd64 build 2/3]"))
+    emulated = next(
+        leaf for leaf in after_info["leaf_details"]
+        if leaf.get("fix_key") == "emulated-image-compile")
+    assert emulated["magnitude"] == {
+        "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
+    assert "builder_topology_unconfirmed" not in emulated
 
     def foreign_only(log: str) -> str:
         start = log.index("#10 [linux/amd64 build 2/3]")

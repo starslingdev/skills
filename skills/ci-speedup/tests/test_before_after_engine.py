@@ -132,6 +132,7 @@ def test_incomplete_cache_log_coverage_is_disclosed_and_withholds_attribution():
         sample["log_jobs_unreadable"] = 0
         sample["log_jobs_omitted"] = 0
         sample["log_jobs_truncated"] = 0
+        sample["log_has_cache_step"] = True
     after[1]["log_jobs_unreadable"] = 1
 
     result = compare_push_cohorts(
@@ -141,6 +142,24 @@ def test_incomplete_cache_log_coverage_is_disclosed_and_withholds_attribution():
     assert result["after"]["unknown"]["n"] == 1
     assert "Cache state: 0 cold, 1 warm and 1 unknown" in result["report"]
     assert "Cache log coverage: 4 API calls; 1 unreadable; 0 omitted and 0 truncated by cap" in result["report"]
+
+
+def test_cacheless_cohorts_fall_back_to_run_position_for_clean_attribution():
+    before = [_cohort("base", "b1", 40),
+              _cohort("base2", "b2", 40, position=2)]
+    after = [_cohort("fix", "a1", 20),
+             _cohort("fix", "a2", 20, position=2)]
+    for sample in [*before, *after]:
+        sample["log_api_calls"] = 1
+        sample["log_jobs_unreadable"] = 0
+        sample["log_jobs_omitted"] = 0
+        sample["log_jobs_truncated"] = 0
+        sample["log_has_cache_step"] = False
+
+    result = compare_push_cohorts(
+        before, after, changed_files=[".github/workflows/ci.yml"])
+
+    assert result["clean_attribution"] is True
 
 
 def test_report_carries_queue_work_compute_step_and_six_disclosures():

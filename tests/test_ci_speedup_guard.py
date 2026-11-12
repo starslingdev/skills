@@ -1,6 +1,7 @@
 """Differential policy tests for the repository-local ci-speedup guard."""
 from __future__ import annotations
 
+import copy
 import importlib.util
 import shutil
 import sys
@@ -166,6 +167,38 @@ def test_identical_same_identity_aggregate_findings_do_not_report_scope_growth(
     assert "scope grew" not in output
 
 
+def test_brand_new_aggregate_finding_is_not_also_reported_as_scope_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        "name: Test\non: pull_request\njobs: {}\n",
+        two_duplicate_setup_groups(),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT12" in output
+    assert "OPT12 scope grew" not in output
+
+
+def test_new_group_under_existing_identity_is_not_also_scope_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    merge_text = (two_duplicate_setup_groups()
+                  .replace("  guard-verify:\n", "  a:\n")
+                  .replace("  test:\n", "  b:\n")
+                  .replace("  lint:\n", "  c:\n")
+                  .replace("  docs:\n", "  d:\n"))
+    base_text = merge_text.split("  c:\n", 1)[0]
+    base, merge = trees(tmp_path, base_text, merge_text)
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "ci-speedup-guard warning: OPT12" in output
+    assert "OPT12 scope grew to jobs: c, d" not in output
+
+
 def test_same_identity_aggregate_finding_reports_only_the_added_job(
         guard, tmp_path, capsys, monkeypatch):
     base, merge = trees(
@@ -177,6 +210,7 @@ def test_same_identity_aggregate_finding_reports_only_the_added_job(
     assert code == 0
     growth = [line for line in output.splitlines() if "scope grew" in line]
     assert growth
+    assert any("OPT12 scope grew to jobs: added" in line for line in growth)
     assert all("added" in line for line in growth)
     assert all("guard-verify" not in line and "test" not in line for line in growth)
 
@@ -194,6 +228,7 @@ def test_shard_matrix_leg_growth_warns_with_repeated_setup(
     assert code == 0
     warnings = [line for line in output.splitlines() if "8 -> 16 legs" in line]
     assert len(warnings) == 1
+    assert warnings[0].startswith("::warning file=.github/workflows/ci.yml,line=1::")
     assert "shards" in warnings[0]
     assert "repeats checkout, install and build" in warnings[0]
     rendered = summary.read_text(encoding="utf-8")
@@ -429,6 +464,29 @@ def test_malformed_finding_schema_fails_closed(
     monkeypatch.setattr(guard, "BLOCKING_ALLOWLIST", frozenset())
     with pytest.raises(guard.OperationalFailure, match=message):
         guard.validate_scan(doc, module)
+
+
+def test_malformed_matrix_setup_facts_fail_closed(guard, tmp_path, monkeypatch):
+    root, _ = trees(
+        tmp_path, repeated_setup_matrix(shard_legs=8),
+        repeated_setup_matrix(shard_legs=8))
+    engine, _refs, _layout = guard.resolve_layout()
+    module = guard.load_engine(engine)
+    doc = guard.run_scan(engine, root, "main")
+    monkeypatch.setattr(guard, "BLOCKING_ALLOWLIST", frozenset())
+
+    mutations = (
+        lambda facts: facts.__setitem__(".github/workflows/ci.yml", []),
+        lambda facts: facts[".github/workflows/ci.yml"].__setitem__("shards", []),
+        lambda facts: facts[".github/workflows/ci.yml"]["shards"].__setitem__("legs", "8"),
+        lambda facts: facts[".github/workflows/ci.yml"]["shards"].__setitem__(
+            "repeated", ["checkout", 1]),
+    )
+    for mutate in mutations:
+        malformed = copy.deepcopy(doc)
+        mutate(malformed["matrix_setup_facts"])
+        with pytest.raises(guard.OperationalFailure, match="matrix_setup_facts"):
+            guard.validate_scan(malformed, module)
 
 
 def test_unknown_scan_gap_kind_fails_closed(guard, tmp_path, monkeypatch):
