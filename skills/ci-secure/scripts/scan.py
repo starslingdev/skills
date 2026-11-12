@@ -5727,6 +5727,221 @@ def _collect_sha_pins(
     return pins
 
 
+# ---- GitHub Actions workflow lockfile ---------------------------------------
+#
+# `gh actions-lock` writes `.github/workflows/actions.lock`: the workflow YAML
+# keeps `uses: owner/repo@v7.0.1` and the commit that runs lives only in the
+# lockfile. For a workflow listed under `workflows:`, GitHub runs the locked
+# commit and, at run time, rejects one that is not reachable from its recorded
+# ref or whose owner/repository identity no longer matches. P14.11 reads only
+# full-commit `uses:` pins, so on a locked repository it has nothing to check;
+# `_action_lockfile_summary` makes that visible instead of silent.
+#
+# A minimal, fail-closed reader of the same format ci-score credits (skills
+# install standalone, so no cross-skill import). Its accept/reject verdict is
+# pinned against ci-score's reader by tests/test_action_lockfile_parity.py at
+# the repo root. Shape (format v0.0.x):
+#   version: 'v0.0.3'
+#   workflows: {'.github/workflows/ci.yml': ['actions/checkout@v7.0.1', ...]}
+#   dependencies: {'actions/checkout@v7.0.1': {ref, commit: 'sha1-<40 hex>',
+#                                              owner_id, repo_id, uses?}}
+_LOCKFILE_REL = ".github/workflows/actions.lock"
+_LOCK_COMMIT_RE = re.compile(r"\Asha1-[0-9a-f]{40}\Z")
+_LOCK_VERSIONS = ("v0.0.2", "v0.0.3")  # the versions ci-score accepts (GitHub's docs show v0.0.3)
+_LOCK_WORKFLOW_KEY_RE = re.compile(r"\A\.github/workflows/[^/]+\Z")
+_LOCK_SHA40_RE = re.compile(r"\A[0-9a-f]{40}\Z")
+
+
+class _StrictLockLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a duplicated mapping key: plain yaml keeps the
+    LAST of two equal keys, so a malformed entry followed by a valid one would
+    read as valid."""
+
+
+def _lock_no_duplicate_keys(loader: yaml.SafeLoader, node: Any,
+                            deep: bool = False) -> Any:
+    seen: set[Any] = set()
+    for key_node, _value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            dup = key in seen
+            seen.add(key)
+        except TypeError:
+            raise yaml.YAMLError("unhashable mapping key")
+        if dup:
+            raise yaml.YAMLError(f"duplicated key {key!r}")
+    return loader.construct_mapping(node, deep=deep)
+
+
+_StrictLockLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _lock_no_duplicate_keys)
+
+
+def _lock_ref_key(text: Any) -> str | None:
+    """`owner/repo[/path]@ref` → the lookup key (owner/repo matched
+    case-insensitively, as GitHub resolves them; the ref exactly)."""
+    if not isinstance(text, str) or "@" not in text:
+        return None
+    action, _, ref = text.partition("@")
+    return f"{action.strip().lower()}@{ref.strip()}"
+
+
+def _load_action_lockfile(root: Path) -> tuple[str, dict[str, set[str]]]:
+    """(state, per_workflow): state is "absent", "valid" or "invalid";
+    per_workflow maps each listed workflow to the reference keys locked for it.
+
+    Fails CLOSED — anything this reader cannot fully vouch for is "invalid"
+    and covers nothing: a file not spelled exactly `actions.lock` (GitHub
+    reads only that path), a symbolic link, unreadable bytes, YAML that does
+    not parse or repeats a key, an unknown top-level key, an undocumented
+    format version, a commit that is not `sha1-` plus 40 hex, a missing ref /
+    owner_id / repo_id, an entry whose `ref` disagrees with its key, a
+    reference listed (or named in `uses:`) with no entry of its own, or a
+    workflow key that is not exactly `.github/workflows/<file>`."""
+    bad: tuple[str, dict[str, set[str]]] = ("invalid", {})
+    wf_dir = root / ".github" / "workflows"
+    try:
+        names = os.listdir(wf_dir)
+    except OSError:
+        return "absent", {}
+    if "actions.lock" not in names:
+        # A case variant is not GitHub's lockfile either; it covers nothing.
+        return ("invalid", {}) if any(n.lower() == "actions.lock" for n in names) \
+            else ("absent", {})
+    path = wf_dir / "actions.lock"
+    if path.is_symlink() or not path.is_file():
+        return bad
+    try:
+        loader = _StrictLockLoader(path.read_text(encoding="utf-8"))
+        try:
+            doc = loader.get_single_data()
+        finally:
+            loader.dispose()
+    except (OSError, ValueError, yaml.YAMLError):
+        return bad
+    if not isinstance(doc, dict) or set(doc) - {"version", "workflows", "dependencies"}:
+        return bad
+    wfs, deps = doc.get("workflows"), doc.get("dependencies")
+    if (doc.get("version") not in _LOCK_VERSIONS
+            or not isinstance(wfs, dict) or not isinstance(deps, dict)):
+        return bad
+    valid: set[str] = set()
+    nested: set[str] = set()
+    for key, entry in deps.items():
+        k = _lock_ref_key(key)
+        if (k is None or not isinstance(entry, dict)
+                or not isinstance(entry.get("ref"), str)
+                or not (isinstance(entry.get("commit"), str)
+                        and _LOCK_COMMIT_RE.match(entry["commit"]))
+                or not all(isinstance(entry.get(f), int)
+                           and not isinstance(entry.get(f), bool)
+                           for f in ("owner_id", "repo_id"))):
+            return bad
+        key_ref = key.partition("@")[2].strip()
+        if _LOCK_SHA40_RE.match(key_ref):
+            if entry["commit"] != f"sha1-{key_ref}":
+                return bad
+        elif entry["ref"] != key_ref:
+            return bad
+        uses = entry.get("uses", [])
+        if not isinstance(uses, list) or any(_lock_ref_key(u) is None for u in uses):
+            return bad
+        valid.add(k)
+        nested.update(_lock_ref_key(u) for u in uses)
+    per_workflow: dict[str, set[str]] = {}
+    for wf, refs in wfs.items():
+        if (not isinstance(wf, str) or not isinstance(refs, list)
+                or not _LOCK_WORKFLOW_KEY_RE.match(wf)
+                or os.path.normpath(wf) != wf or wf in per_workflow):
+            return bad
+        keys = [_lock_ref_key(r) for r in refs]
+        if any(k is None or k not in valid for k in keys):
+            return bad
+        per_workflow[wf] = set(keys)
+    if not nested <= valid:
+        return bad
+    return "valid", per_workflow
+
+
+def _lock_step_uses(doc: Any) -> Iterator[str]:
+    """Each step-level `uses:` value (`jobs.<id>.steps[].uses`), in order.
+
+    Deliberately NOT `_walk_uses_values`: GitHub's lockfile does not pin a
+    call to a reusable workflow (`jobs.<id>.uses`), so a lockfile entry for
+    one is never verified at run time, and an action input named `uses`
+    under `with:` is not a reference at all. Same rule as ci-score's
+    `_step_uses`."""
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return
+    for job in jobs.values():
+        steps = job.get("steps") if isinstance(job, dict) else None
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if isinstance(step, dict) and isinstance(step.get("uses"), str):
+                yield step["uses"].strip()
+
+
+def _lockfile_display_path(root: Path, state: str) -> str:
+    """The lockfile path to name: a case variant (`Actions.lock`) is named as
+    it is on disk, so the report never points at a file that is not there."""
+    if state != "invalid":
+        return _LOCKFILE_REL
+    try:
+        names = os.listdir(root / ".github" / "workflows")
+    except OSError:
+        return _LOCKFILE_REL
+    if "actions.lock" in names:
+        return _LOCKFILE_REL
+    variants = sorted(n for n in names if n.lower() == "actions.lock")
+    return f".github/workflows/{variants[0]}" if variants else _LOCKFILE_REL
+
+
+def _action_lockfile_summary(root: Path,
+                             workflow_files: list[Path]) -> dict[str, Any]:
+    """What the lockfile covers that P14.11 does not read.
+
+    Counts each step-level `uses:` occurrence, in a scanned workflow the
+    lockfile lists, whose ref is NOT a full commit and that the lockfile
+    locks for that workflow — the references whose commit lives only in the
+    lockfile. A full-commit pin is left to P14.11, which checks it directly;
+    a reusable-workflow call is never counted (the lockfile does not pin
+    it). Always returns the key set so report.py can rely on it."""
+    state, per_workflow = _load_action_lockfile(root)
+    covered = 0
+    covered_workflows: list[str] = []
+    if state == "valid":
+        for wf in workflow_files:
+            rel = _repo_relative(str(wf), root)
+            locked = per_workflow.get(rel)
+            if not locked:
+                continue
+            text = _read_text_safe(wf)
+            doc = _parse_yaml_text(text, wf, quiet=True) if text else None
+            if not isinstance(doc, dict):
+                continue  # an unparseable workflow is already a coverage gap
+            n = 0
+            for value in _lock_step_uses(doc):
+                k = _lock_ref_key(value)
+                if (k is None or value.startswith(("./", "docker://"))
+                        or _LOCK_SHA40_RE.match(k.rpartition("@")[2].lower())):
+                    continue
+                if k in locked:
+                    n += 1
+            if n:
+                covered += n
+                covered_workflows.append(rel)
+    logger.debug("action lockfile: state=%s, %d reference(s) in %d workflow(s)",
+                 state, covered, len(covered_workflows))
+    return {
+        "path": _lockfile_display_path(root, state),
+        "state": state,
+        "covered_references": covered,
+        "covered_workflows": covered_workflows,
+    }
+
+
 @lru_cache(maxsize=None)
 def _gh_repo_visible(repo: str) -> bool:
     """Can this `gh` identity see `repo` at all? The commit endpoint answers
@@ -6458,6 +6673,13 @@ def scan(
         # other (control steps hold no code), and the count is disclosed so
         # that is never left implicit.
         "parallel_steps": parallel_steps,
+        # The workflow lockfile (`.github/workflows/actions.lock`): its state
+        # and how many tag-pinned `uses:` references it locks to a commit in
+        # the workflows it lists. Informational, never a coverage gap: GitHub
+        # verifies each locked commit at run time, and P14.11 reads only
+        # full-commit `uses:` pins, so without this a locked repository's
+        # impostor check would go quiet with no sign of why.
+        "action_lockfile": _action_lockfile_summary(root, workflow_files),
         # Findings the scanner REACHED and deliberately did not report, above
         # all a fetch pinned to a full commit id. Informational: this must
         # never degrade coverage, or a repository that did exactly what the fix
