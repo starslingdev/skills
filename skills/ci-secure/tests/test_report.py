@@ -462,6 +462,10 @@ def test_p1418_cosmetic_occurrence_uses_its_hygiene_fix() -> None:
     assert md.count(guidance) == 2  # visible Fix + copyable fix prompt
     assert "Split into separate trusted / untrusted workflows" not in md
     assert "apply the catalog's documented restructure" not in md
+    assert "may remain only when every listed occurrence is MEDIUM" in md
+    assert "no checkout" in md
+    assert "no PR-code execution" in md
+    assert "no review/merge API" in md
 
 
 def test_p1418_mixed_group_uses_the_high_profile_not_first_member() -> None:

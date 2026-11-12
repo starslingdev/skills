@@ -968,6 +968,113 @@ jobs:
     assert reason in finding["evidence"].lower()
 
 
+@pytest.mark.parametrize(
+    "script",
+    [
+        """github.rest.issues.addLabels({
+ // \"
+})
+github.rest.pulls['mer'+'ge']({})
+// \"
+})""",
+        """github.rest.issues.addLabels({
+ /* \" */
+})
+github.rest.pulls['mer'+'ge']({})
+/* \" */
+})""",
+        """github.rest.issues.addLabels({
+ <!-- \"
+})
+github.rest.pulls['mer'+'ge']({})
+<!-- \"
+})""",
+        """github.rest.issues.addLabels({
+ matcher: /\"/,
+})
+github.rest.pulls['mer'+'ge']({})
+/\"/
+})""",
+    ],
+    ids=("line-comment", "block-comment", "html-comment", "regex-literal"),
+)
+def test_p1418_comment_and_regex_quotes_cannot_hide_merge_calls(
+    tmp_path: Path, script: str,
+) -> None:
+    """Unparsed JS shapes fail closed instead of desynchronising quote state."""
+    _write_workflow(
+        tmp_path,
+        "danger.yml",
+        """on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  danger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+%s
+""" % "\n".join(f"            {line}" for line in script.splitlines()),
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "HIGH"
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    (
+        "permissions: write-all\n",
+        "jobs:\n  danger:\n    permissions: write-all\n",
+    ),
+    ids=("workflow", "job"),
+)
+def test_p1418_write_all_grants_pull_request_write(
+    tmp_path: Path, permissions: str,
+) -> None:
+    jobs = (
+        _MINIMAL_JOB
+        if not permissions.startswith("jobs:")
+        else "    runs-on: ubuntu-latest\n    steps:\n      - run: echo unsafe\n"
+    )
+    _write_workflow(
+        tmp_path,
+        "danger.yml",
+        "on: pull_request_target\n" + permissions + jobs,
+    )
+    assert "P14.18" in _patterns_for_file(_scan_dir(tmp_path), "danger.yml")
+
+
+def test_p1418_workflow_write_all_narrowed_at_job_is_silent(tmp_path: Path) -> None:
+    _write_workflow(
+        tmp_path,
+        "narrowed.yml",
+        """on: pull_request_target
+permissions: write-all
+jobs:
+  narrowed:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo safe
+""",
+    )
+    assert "P14.18" not in _patterns_for_file(_scan_dir(tmp_path), "narrowed.yml")
+
+
+def test_p1418_pull_request_write_all_is_not_an_untrusted_trigger(tmp_path: Path) -> None:
+    _write_workflow(
+        tmp_path,
+        "pull-request.yml",
+        "on: pull_request\npermissions: write-all\n" + _MINIMAL_JOB,
+    )
+    assert "P14.18" not in _patterns_for_file(_scan_dir(tmp_path), "pull-request.yml")
+
+
 def test_p1418_classifies_only_the_job_that_owns_pr_write(tmp_path: Path) -> None:
     _write_workflow(
         tmp_path,

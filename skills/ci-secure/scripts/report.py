@@ -792,6 +792,24 @@ def _build_fix_prompt(
         "authenticated)."
         if is_impostor else ""
     )
+    is_cosmetic_pr_automation = (
+        pattern == "P14.18"
+        and representative.get("severity") == "MEDIUM"
+        and representative.get("fix_strategy") == "limit-cosmetic-pr-automation"
+    )
+    if is_cosmetic_pr_automation:
+        completion_oracle = (
+            "confirm the cosmetic boundary still holds. A P14.18 finding may "
+            "remain only when every listed occurrence is MEDIUM and its "
+            "evidence still says `no checkout`, `no PR-code execution`, and "
+            "`no review/merge API`; a HIGH occurrence or a missing boundary "
+            "marker means the fix is not complete"
+        )
+    else:
+        completion_oracle = (
+            "confirm the chain no longer fires: no finding with "
+            f"`\"pattern\": \"{pattern}\"` may remain in that JSON"
+        )
     risk = _risk_of_change(pattern, cat)
     risk_constraint = f"- Risk of the change: {risk}\n" if risk else ""
 
@@ -865,9 +883,8 @@ def _build_fix_prompt(
         "Verify (the oracle — you are done only when it passes): re-run "
         "the ci-secure scan over this repo — `python3 "
         f"<ci-secure>/scripts/run.py --root .{gh_flag} --out "
-        f"{recheck_ref}` — and confirm the chain no longer "
-        f"fires: no finding with `\"pattern\": \"{pattern}\"` may remain "
-        f"in that JSON.{impostor_guard} If one does, occurrences are left — "
+        f"{recheck_ref}` — and {completion_oracle}.{impostor_guard} If the "
+        "completion check fails, occurrences are left — "
         "fix them and re-run. If you also edited the rendered ci-secure "
         "report, `python3 <ci-secure>/tests/verify_report.py --report "
         "<report.md> --findings <the ci-secure findings JSON from your run "

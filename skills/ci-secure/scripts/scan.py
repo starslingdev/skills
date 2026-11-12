@@ -5647,6 +5647,10 @@ def _walk_pull_requests_write(
         )
         return
     if isinstance(node, dict):
+        permissions = node.get("permissions")
+        if isinstance(permissions, str) \
+                and permissions.strip().lower() == "write-all":
+            yield path + ("permissions",)
         if (
             "pull-requests" in node
             and isinstance(node["pull-requests"], str)
@@ -5765,6 +5769,12 @@ def _p1418_is_one_cosmetic_call(script: str) -> bool:
             elif char == quote:
                 quote = None
             continue
+        # This is a deliberately small recognizer, not a JavaScript parser.
+        # Quotes inside comments and regex literals have different lexical
+        # rules and can otherwise desynchronise the string state below.  Fail
+        # closed on every such shape instead of proving it cosmetic.
+        if char == "/" or script.startswith("<!--", index):
+            return False
         if char in ("'", '"', "`"):
             quote = char
         elif char == "(":
@@ -5822,6 +5832,11 @@ def _correlation_pr_write_and_untrusted_trigger(
     ) or 1
     risk_reasons: list[str] = []
     scoped_jobs = _p1418_write_scoped_jobs(doc)
+    # A job-level permissions block replaces the workflow-level grant.  A
+    # workflow-wide write-all declaration therefore exposes no PR-write token
+    # when every job narrows it to a read-only block.
+    if not scoped_jobs:
+        return
     all_scoped_jobs_cosmetic = bool(scoped_jobs)
     for _job_name, job in scoped_jobs:
         steps = _job_steps(job)

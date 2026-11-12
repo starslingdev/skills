@@ -545,7 +545,7 @@ correlation: pr-write-and-untrusted-trigger
 
 The org-level setting *"Allow GitHub Actions to create and approve pull requests"* should be **disabled** regardless; it is an org/repo setting, not a workflow fact, so no detector in this catalog can see it — verify it by hand. P14.18 catches the per-workflow opt-in even when the org-level setting allows it.
 
-`detector: yaml-workflow-correlated` with `correlation: pr-write-and-untrusted-trigger` — fires once per workflow whose `on:` keys include any untrusted-event family member AND that declares `pull-requests: write` **at any scope in the document**. The detector walks the whole parsed document for the declaration rather than tying it to a particular job, because a write granted anywhere in a workflow that an outsider's event can start is reachable; it does not attempt to prove which job would use it.
+`detector: yaml-workflow-correlated` with `correlation: pr-write-and-untrusted-trigger` — fires once per workflow whose `on:` keys include any untrusted-event family member AND whose effective workflow/job permissions grant `pull-requests: write` (including `write-all`). A job-level permissions block replaces the workflow-level block, so a job that narrows `write-all` to read-only does not inherit the write grant.
 
 **Sources**: StepSecurity "Prevent actions creating/approving PRs"; Wiz "Automated pull request creation/approval".
 
