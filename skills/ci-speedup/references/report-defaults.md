@@ -12,7 +12,9 @@ including the values rather than only the direction of change.
 
 ### `pr-gate-sample-size`
 
-**Current value:** 20 runs per workflow (`collect_runs.py`, `--max-runs`).
+**Current value:** 20 completed PR commits (`collect_runs.py::_REPR_PR_TARGET`).
+The unrelated `--max-runs` option bounds per-workflow timing history and does
+not set this population.
 
 **Report statements:** PR-gate P50/P90 durations, gate frequency, pole order,
 and every claim that describes a check as typical or rare.
@@ -21,7 +23,8 @@ and every claim that describes a check as typical or rare.
 burst and is too small to support a stable ordering.
 
 **Proposed decision:** **Change to at least 100 completed PR commits** under
-#306 and #311.
+#306 and #311. #315 centralizes the provisional value as
+`pr_sample_contract.PR_SAMPLE_TARGET`; it remains awaiting owner approval.
 
 ### `pr-gate-eligibility`
 
@@ -37,6 +40,7 @@ commit finishes. Partial commits remain useful coverage evidence.
 **Proposed decision:** **Change to completed PR commits only** under #306, and
 disclose excluded in-flight commits rather than treating them as zero or clean.
 
+**Approval status:** awaiting owner approval.
 ### `pr-gate-span`
 
 **Current value:** no minimum span; 20 observations can come from one hour.
@@ -48,8 +52,11 @@ claim derived from the gate population.
 temporary path mix. Five days covers most of a working week.
 
 **Proposed decision:** **Change to at least 5 distinct days** under #306 and
-#311, and print the first and last sampled dates.
+#311, and print the first and last sampled dates. #315 centralizes the
+provisional value in `pr_sample_contract.py`; it remains awaiting owner
+approval.
 
+**Approval status:** awaiting owner approval.
 ### `pr-candidate-pages`
 
 **Current value:** 3 pages per workflow (`_PR_CANDIDATE_PAGE_CAP`).
@@ -61,14 +68,15 @@ time span, and every downstream gate-frequency claim.
 consumed by incomplete or ineligible commits before reaching the target.
 
 **Proposed decision:** **Change the cap to 12 pages** with an early stop once
-100 eligible commits over 5 days are available. Approve the API cost ceiling
-together with the sample target.
+100 eligible commits over 5 days are available. #315 centralizes the
+provisional cap in `pr_sample_contract.py`. Approve the API cost ceiling
+together with the sample target; the value remains awaiting owner approval.
 
 ### `config-era-boundary`
 
 **Current value:** a post-change era needs 6 observations to stand alone
-(`_RARE_PRESENCE_MIN_PR`); candidate paging can also be shortened by a boundary
-outside the workflow being measured.
+(`_RARE_PRESENCE_MIN_PR`); candidate paging is disabled when any config-era
+fact exists, including a boundary outside the workflow being measured.
 
 **Report statements:** previous-configuration, current-configuration, and thin
 era warnings, plus every post-era P50.
@@ -79,6 +87,8 @@ One workflow's change does not invalidate another workflow's history.
 **Proposed decision:** **Change paging** under #306 so an era limits only its
 own PR-triggered workflow. **Keep 6** as the minimum sufficient post-change
 population pending a separate evidence-led review.
+
+**Approval status:** awaiting owner approval.
 
 ## Lookbacks and cohorts
 
@@ -96,6 +106,7 @@ calendar-month claim.
 **Proposed decision:** **Keep 30 days** and print the exact endpoints when
 available.
 
+**Approval status:** awaiting owner approval.
 ### `run-list-depth`
 
 **Current value:** 100 all-status runs per workflow (`_COST_RUNLIST_MAX`).
@@ -109,6 +120,7 @@ silently accepting the API's smaller default page.
 **Proposed decision:** **Keep 100.** Deeper walks need their own explicit cap
 and coverage disclosure.
 
+**Approval status:** awaiting owner approval.
 ### `default-branch-push-cohort`
 
 **Current value:** 10 commits (`_DEFAULT_BRANCH_PUSH_SAMPLE_MAX`).
@@ -121,6 +133,8 @@ into the merge gate.
 
 **Proposed decision:** **Keep 10.** Continue disclosing fetch failures and the
 sample cap.
+
+**Approval status:** awaiting owner approval.
 
 ## Pole selection and order
 
@@ -137,10 +151,14 @@ paths; the collector captures the same number of drill logs.
 **Proposed decision:** **Keep 5** and retain the collector/renderer equality
 invariant.
 
+**Approval status:** awaiting owner approval.
 ### `holds-up-threshold`
 
 **Current value:** a check is recurrent after finishing last on 2 sampled PRs
 (`_POLE_RECUR_FLOOR`); current main has no explicit two-group presentation.
+#318 provisionally keeps 2 as
+`gate_frequency_contract.POLE_HOLDS_UP_MIN_COUNT`, while #317 provisionally
+requires 5 as `gate_frequency_contract.GATE_MIN_COUNT_FOR_RANKING`.
 
 **Report statements:** recurring-gate framing and, after #305, membership in
 "Checks that hold up most PRs."
@@ -149,7 +167,9 @@ invariant.
 population and can elevate roughly one-percent events.
 
 **Proposed decision:** **Change to 5 last-finisher observations** under #305 and
-#311. The interval and span must also support ordering.
+#311. The interval and span must also support ordering. The fixed 2 in #318 and
+minimum 5 in #317 govern one ordering decision with two values; both remain
+awaiting owner approval, and the implementations must converge after approval.
 
 ### `rare-presence-rule`
 
@@ -166,6 +186,7 @@ sample, while six observations guards against a one- or two-run guess.
 **Proposed decision:** **Keep 50% and 6** for presence framing. Gate-group
 membership uses last-finisher count and uncertainty as a separate rule.
 
+**Approval status:** awaiting owner approval.
 ### `within-group-order`
 
 **Current value:** legacy selection prioritizes typical/recurrent checks and then
@@ -181,6 +202,7 @@ from the row itself.
 group** under #305. Equal P50 uses stable workflow/check identity only as a
 deterministic tiebreaker.
 
+**Approval status:** awaiting owner approval.
 ### `needs-chain-handling`
 
 **Current value:** serial `needs:` members add to a measured chain; the chain
@@ -197,10 +219,14 @@ the makespan guard keeps the sum consistent with observed developer wait.
 After #305 the Bottom line also identifies Long pole 1, or names a chain that
 contains it.
 
+**Approval status:** awaiting owner approval.
 ### `bookkeeping-cutoff`
 
-**Current value:** no general reader-facing gate-order cutoff. Detector-local
-one-minute thresholds do not define developer-wait bookkeeping.
+**Current value:** several reader-facing floors already shape the pole set:
+recovery uses `_TRIAGE_WALLCLOCK_FLOOR_S = 90`, while aggregate-gate,
+wall-clock long-pole, and no-op handling each use a 30-second floor
+(`_AGG_GATE_TRIVIAL_S`, `_WALL_CLOCK_LONG_POLE_FLOOR_S`, `_NOOP_FLOOR_S`).
+They do not yet form one general bookkeeping rule.
 
 **Report statements:** which short jobs appear as developer-wait poles and which
 are disclosed separately.
@@ -212,9 +238,13 @@ demote a confirmed gate or a stage on its required chain.
 short job separately only when it finished last and is outside the confirmed
 gate chain; always retain a qualifying gate.
 
+**Approval status:** awaiting owner approval.
 ### `ranking-minimum-count`
 
 **Current value:** no ranking floor beyond the 2-occurrence recurrence rule.
+#317 provisionally adds 5 through
+`gate_frequency_contract.GATE_MIN_COUNT_FOR_RANKING`; #318 provisionally uses
+2 through `POLE_HOLDS_UP_MIN_COUNT` for its first group.
 
 **Report statements:** pole 1, ranked close guidance, and Bottom-line gate
 identity.
@@ -223,7 +253,9 @@ identity.
 a precise order overstates the sample.
 
 **Proposed decision:** **Require at least 5 last-finisher observations** under
-#311, in addition to the multi-day and interval rules.
+#311, in addition to the multi-day and interval rules. This is the same
+owner decision as `holds-up-threshold`; both provisional values remain
+awaiting owner approval.
 
 ### `gate-frequency-interval`
 
@@ -237,6 +269,217 @@ evidence of stable order without pretending to forecast future CI.
 
 **Proposed decision:** **Add a two-sided 95% Wilson score interval** (`z = 1.96`)
 under #311. Overlap makes the order unsupported while observations remain shown.
+
+**Approval status:** awaiting owner approval.
+
+## Other output-shaping defaults
+
+### `workflow-timing-depth`
+
+**Current value:** most workflows are timed from 10 runs (`_SHALLOW_RUNS`),
+then at most 12 leading checks are deepened (`_DEEPEN_TOP_CHECKS`).
+
+**Report statements:** workflow and check P50/P90 values, long-pole evidence,
+and whether a row has enough observations for a measured saving.
+
+**Reason:** A shallow pass bounds API cost while targeted deepening spends reads
+on checks most likely to shape the report.
+
+**Proposed decision:** **Keep 10 shallow runs and 12 deepened checks.** Both
+values remain awaiting owner approval.
+
+### `required-suite-eligibility`
+
+**Current value:** when the required suite is observable, a representative PR
+commit is eligible only when all observable required checks ran; the selection
+is implemented by `collect_runs.py::_select_repr_shas`.
+
+**Report statements:** sample size and stop reason, required-suite scope,
+gate share, pole order, and the Bottom line.
+
+**Reason:** Mixing docs-only or path-filtered PRs into a full-suite population
+changes the denominator and can make required checks look rare.
+
+**Proposed decision:** **Keep full-required-suite eligibility** and disclose
+unobservable required checks. This semantic default remains awaiting owner
+approval.
+
+**Approval status:** awaiting owner approval.
+### `typical-floor-thresholds`
+
+**Current value:** a floor needs 80% near-universal presence
+(`_FLOOR_NEAR_UNIVERSAL_FRAC`) and 50% co-occurrence
+(`_FLOOR_COOCCUR_MAJORITY_FRAC`).
+
+**Report statements:** typical-PR floor, recurrent chain framing, and which
+check is treated as part of the common wait.
+
+**Reason:** The floor should describe a common path rather than a minority
+combination of checks.
+
+**Proposed decision:** **Keep 80% and 50%.** Both values remain awaiting owner
+approval.
+
+**Approval status:** awaiting owner approval.
+### `severity-cutoffs`
+
+**Current value:** 300 seconds is HIGH and 120 seconds is MEDIUM
+(`_SEV_HIGH_S`, `_SEV_MED_S`).
+
+**Report statements:** finding severity, section order, and the priority shown
+beside measured long-pole opportunities.
+
+**Reason:** These cutoffs distinguish multi-minute developer wait from smaller
+delays without changing measured durations.
+
+**Proposed decision:** **Keep 300 and 120 seconds.** Both values remain awaiting
+owner approval.
+
+**Approval status:** awaiting owner approval.
+### `success-only-caveat`
+
+**Current value:** the success-only caveat needs 10 runs and a 20% failure rate
+(`_SUCCESS_ONLY_CAVEAT_MIN_RUNS`, `_SUCCESS_ONLY_CAVEAT_FAILURE_RATE`).
+
+**Report statements:** whether a duration is labelled success-only and whether
+failed-run behavior is called out beside the estimate.
+
+**Reason:** Sparse failures should not dominate the report, while a sustained
+failure share must be visible before a success-only timing is used.
+
+**Proposed decision:** **Keep 10 runs and 20%.** Both values remain awaiting
+owner approval.
+
+**Approval status:** awaiting owner approval.
+### `minimum-timed-runs`
+
+**Current value:** a per-run compute mean needs 3 timed runs
+(`_MIN_TIMED_RUNS`).
+
+**Report statements:** compute means, monthly runner-minute projections, and
+whether a saving is measured or withheld.
+
+**Reason:** Fewer than three observations cannot show even basic run-to-run
+variation.
+
+**Proposed decision:** **Keep 3.** The value remains awaiting owner approval.
+
+### `rare-push-lane`
+
+**Current value:** fewer than 8 default-branch push runs in 30 days is treated
+as rare (`_PUSH_LANE_RARE_PER_30D`).
+
+**Report statements:** push-lane confidence, rarity caveats, and whether the
+after-merge lane is promoted as a recurring opportunity.
+
+**Reason:** A very small monthly push cohort should not carry the same weight as
+a routinely exercised lane.
+
+**Proposed decision:** **Keep 8 per 30 days.** The value remains awaiting owner
+approval.
+
+**Approval status:** awaiting owner approval.
+### `lifecycle-minimum`
+
+**Current value:** PR lifecycle analysis needs 10 measured PRs
+(`pr_lifecycle.MIN_MEASURED`).
+
+**Report statements:** lifecycle queue and merge-wait claims and their
+insufficient-sample caveats.
+
+**Reason:** Lifecycle distributions need a modest population before their
+percentiles are presented as representative.
+
+**Proposed decision:** **Keep 10.** The value remains awaiting owner approval.
+
+### `merge-queue-proof-thresholds`
+
+**Current value:** OPT98 requires 30 merges per day, 15 successful runs per
+event, a queue/PR median ratio from 0.8 through 1.5, a 30-PR churn sample, and a
+30-day window (`_OPT98_*`).
+
+**Report statements:** whether the merge queue is said to repeat the full suite
+and whether that result receives measured savings.
+
+**Reason:** The finding should require both high merge pressure and enough
+comparable PR and queue runs, while rejecting workflows that do materially
+different work.
+
+**Proposed decision:** **Keep 30 / 15 / 0.8 / 1.5 / 30 / 30 days.** Every value
+remains awaiting owner approval.
+
+### `timeout-recommendation-thresholds`
+
+**Current value:** OPT57 treats 95% of GitHub's 360-minute default as near the
+ceiling, needs 3 successful samples, recommends at least 15 minutes, adds a
+10-minute buffer or 1.5x the observed P99, and accepts 15 minutes of kill grace
+(`_OPT57_*`).
+
+**Report statements:** timeout-risk findings, the recommended timeout, and
+whether a failed job is described as reaching the platform ceiling.
+
+**Reason:** Recommendations need successful duration evidence and headroom,
+while remaining below the platform's hard stop.
+
+**Proposed decision:** **Keep 95% / 3 samples / 15 minutes / 10 minutes / 1.5x
+/ 15 minutes.** Every value remains awaiting owner approval.
+
+### `dependency-cache-floor`
+
+**Current value:** dependency-cache evidence needs 50% coverage before it can
+support the corresponding cache claim (`_DEPENDENCY_CACHE_FLOOR_PCT`).
+
+**Report statements:** dependency-cache confidence, saving credit, and
+withheld-evidence wording.
+
+**Reason:** A cache observed on fewer than half the relevant runs cannot
+describe the typical path.
+
+**Proposed decision:** **Keep 50%.** The value remains awaiting owner approval.
+
+### `cold-cache-miss-threshold`
+
+**Current value:** 99.5% is the cold-miss threshold
+(`_CACHE_COLD_MISS_PCT`).
+
+**Report statements:** cold-cache labels, cache saving credit, and the warning
+that a cache is effectively never warm.
+
+**Reason:** The label should be reserved for cohorts with virtually no useful
+hits while allowing small measurement noise.
+
+**Proposed decision:** **Keep 99.5%.** The value remains awaiting owner
+approval.
+
+**Approval status:** awaiting owner approval.
+### `ceiling-minimum-gates`
+
+**Current value:** the verifier needs 5 gating PRs to re-derive a stable saving
+ceiling (`verify_report.py::_CEILING_MIN_GATING_PR`).
+
+**Report statements:** whether a wall-clock saving ceiling is verified or
+reported as thin-sample evidence.
+
+**Reason:** A ceiling from only a few gating occurrences is too sensitive to
+one commit.
+
+**Proposed decision:** **Keep 5.** The value remains awaiting owner approval.
+
+### `partial-majority-rule`
+
+**Current value:** main has no centralized majority rule for the representative
+sample. #315 provisionally uses more than one half through
+`pr_sample_contract.PR_SAMPLE_PARTIAL_MAJORITY_NUMERATOR` and
+`PR_SAMPLE_PARTIAL_MAJORITY_DENOMINATOR`.
+
+**Report statements:** whether the sample is labelled mostly partial and
+whether gate frequency may be headlined.
+
+**Reason:** A population with more incomplete than complete commits cannot
+support a confident last-finisher ranking.
+
+**Proposed decision:** **Use strictly more than 1/2.** The #315 value remains
+awaiting owner approval.
 
 ## Finding thresholds and caps
 
@@ -254,6 +497,7 @@ cannot distinguish ordinary variation from warm/cold or other modes.
 **Proposed decision:** **Keep 25%.** It widens evidence collection and does not
 claim statistical significance.
 
+**Approval status:** awaiting owner approval.
 ### `bimodal-noise-band`
 
 **Current value:** at least 8 observations; each mode at least 30%; slow/fast
@@ -269,6 +513,7 @@ retaining a substantial, visibly separated slow mode.
 **Proposed decision:** **Keep 8 / 30% / 1.6x / 60 seconds.** A later change needs
 corpus evidence because it changes which checks enter the spine.
 
+**Approval status:** awaiting owner approval.
 ### `ten-percent-sizing-rules`
 
 **Current value:** 10% modeled occurrence for OPT29, OPT35, OPT38, and OPT44 in
@@ -285,6 +530,7 @@ compute.
 them as measured frequency. Replace each with measured or uncredited evidence
 when a bounded observable cohort exists.
 
+**Approval status:** awaiting owner approval.
 ### `per-pattern-minimums`
 
 **Current value:** representative report-bearing floors are OPT64: 3 retried
@@ -302,6 +548,7 @@ ranked saving while keeping the withheld reason visible.
 pattern must add its own named minimum and contract entry rather than borrowing
 an unrelated global threshold.
 
+**Approval status:** awaiting owner approval.
 ### `saving-caps`
 
 **Current value:** modeled cache savings use at most 90% of the available cache
@@ -319,6 +566,7 @@ compute or critical-path wait observed in the same population.
 Measured detectors may use stamped exact evidence but cannot cross physical
 bounds.
 
+**Approval status:** awaiting owner approval.
 ### `rendered-row-caps`
 
 **Current value:** 12 rows each for Also noticed, promoted runner-minute findings,
@@ -333,6 +581,8 @@ count preserves coverage honesty.
 **Proposed decision:** **Keep 12 / 12 / 12.** A cap may hide rows, never erase
 them from findings or omit the hidden count.
 
+**Approval status:** awaiting owner approval.
+
 ## Machine-readable contract
 
 The suite compares this block with named engine constants. Proposed values that
@@ -341,32 +591,337 @@ implementation lands.
 
 ```json report-defaults-contract
 {
-  "pr-candidate-pages": {"source": "collect_runs.py:_PR_CANDIDATE_PAGE_CAP", "value": 3},
-  "config-era-minimum": {"source": "collect_runs.py:_RARE_PRESENCE_MIN_PR", "value": 6},
-  "run-list-depth": {"source": "collect_runs.py:_COST_RUNLIST_MAX", "value": 100},
-  "push-cohort": {"source": "collect_runs.py:_DEFAULT_BRANCH_PUSH_SAMPLE_MAX", "value": 10},
-  "rare-presence-fraction": {"source": "collect_runs.py:_RARE_PRESENCE_FRAC", "value": 0.5},
-  "pole-recurrence-floor": {"source": "collect_runs.py:_POLE_RECUR_FLOOR", "value": 2},
-  "magnitude-wide-band": {"source": "collect_runs.py:_MAG_WIDE_REL", "value": 0.25},
-  "cache-budget-cap": {"source": "collect_runs.py:_CACHE_BUDGET_FULL_FRACTION", "value": 0.9},
-  "cache-tail-floor": {"source": "collect_runs.py:_CACHE_TAIL_MIN_FRAC", "value": 0.25},
-  "opt64-retried-runs": {"source": "collect_runs.py:_OPT64_MIN_RETRIED_RUNS", "value": 3},
-  "opt80-occurrences": {"source": "collect_runs.py:_OPT80_MIN_SAMPLED_OCCURRENCES", "value": 6},
-  "opt80-tail-multiple": {"source": "collect_runs.py:_OPT80_TAIL_P95_MULTIPLE", "value": 3.0},
-  "opt81-samples-per-label": {"source": "collect_runs.py:_OPT81_MIN_SAMPLES_PER_LABEL", "value": 8},
-  "opt81-gap-fraction": {"source": "collect_runs.py:_OPT81_MIN_GAP_FRAC", "value": 0.25},
-  "opt82-minimum-seconds": {"source": "collect_runs.py:_OPT82_MIN_LINT_P50_S", "value": 60.0},
-  "opt83-minimum-share": {"source": "collect_runs.py:_OPT83_MIN_SHARE", "value": 0.15},
-  "opt83-minimum-seconds": {"source": "collect_runs.py:_OPT83_MIN_STEP_S", "value": 20.0},
-  "opt84-minimum-seconds": {"source": "collect_runs.py:_OPT84_MIN_STEP_S", "value": 20.0},
-  "opt79-minimum-hits": {"source": "collect_runs.py:_OPT79_MIN_HITS", "value": 3},
-  "opt79-minimum-misses": {"source": "collect_runs.py:_OPT79_MIN_MISSES", "value": 3},
-  "opt79-minimum-waste": {"source": "collect_runs.py:_OPT79_MIN_WASTE_FRAC", "value": 0.2},
-  "rendered-poles": {"source": "blocking_path.py:_TOP_WORKFLOWS", "value": 5},
-  "chain-divergence-percent": {"source": "blocking_path.py:_CHAIN_MAKESPAN_DIVERGENCE_PCT", "value": 25.0},
-  "also-noticed-rows": {"source": "blocking_path.py:_ALSO_NOTICED_CAP", "value": 12},
-  "runner-minute-rows": {"source": "blocking_path.py:_TIER2_CAP", "value": 12},
-  "cost-spine-rows": {"source": "blocking_path.py:_RUNNER_MINUTE_SPINE_CAP", "value": 12}
+  "bimodal-noise-band": {
+    "decision": "bimodal-noise-band",
+    "symbols": [
+      "collect_runs.py:_bimodal_split"
+    ]
+  },
+  "bookkeeping-cutoffs": {
+    "decision": "bookkeeping-cutoff",
+    "planned_sources": {
+      "gate_frequency_contract.py:GATE_BOOKKEEPING_CUTOFF_S": 60.0
+    },
+    "sources": {
+      "blocking_path.py:_AGG_GATE_TRIVIAL_S": 30.0,
+      "blocking_path.py:_WALL_CLOCK_LONG_POLE_FLOOR_S": 30.0,
+      "collect_runs.py:_AGG_GATE_TRIVIAL_S": 30.0,
+      "collect_runs.py:_NOOP_FLOOR_S": 30.0,
+      "collect_runs.py:_TRIAGE_WALLCLOCK_FLOOR_S": 90.0,
+      "verify_report.py:_VR_AGG_GATE_TRIVIAL_S": 30.0,
+      "verify_report.py:_WALL_CLOCK_LONG_POLE_FLOOR_S": 30.0
+    }
+  },
+  "ceiling-minimum-gates": {
+    "decision": "ceiling-minimum-gates",
+    "sources": {
+      "verify_report.py:_CEILING_MIN_GATING_PR": 5
+    }
+  },
+  "chain-divergence": {
+    "decision": "needs-chain-handling",
+    "sources": {
+      "blocking_path.py:_CHAIN_MAKESPAN_DIVERGENCE_PCT": 25.0,
+      "verify_report.py:_VR_CHAIN_DIVERGENCE_PCT": 25.0
+    }
+  },
+  "cold-cache-miss-threshold": {
+    "decision": "cold-cache-miss-threshold",
+    "sources": {
+      "collect_runs.py:_CACHE_COLD_MISS_PCT": 99.5,
+      "verify_report.py:_VR_CACHE_COLD_MISS_PCT": 99.5
+    }
+  },
+  "config-era-minimum": {
+    "decision": "config-era-boundary",
+    "sources": {
+      "blocking_path.py:_RARE_PRESENCE_MIN_PR": 6,
+      "collect_runs.py:_RARE_PRESENCE_MIN_PR": 6,
+      "verify_report.py:_VR_RARE_PRESENCE_MIN_PR": 6
+    }
+  },
+  "dependency-cache-floor": {
+    "decision": "dependency-cache-floor",
+    "sources": {
+      "collect_runs.py:_DEPENDENCY_CACHE_FLOOR_PCT": 50.0
+    }
+  },
+  "gate-frequency-interval": {
+    "decision": "gate-frequency-interval",
+    "planned_sources": {
+      "gate_frequency_contract.py:GATE_INTERVAL_Z": 1.96
+    }
+  },
+  "holds-up-threshold": {
+    "decision": "holds-up-threshold",
+    "planned_sources": {
+      "gate_frequency_contract.py:GATE_MIN_COUNT_FOR_RANKING": 5,
+      "gate_frequency_contract.py:POLE_HOLDS_UP_MIN_COUNT": 2
+    },
+    "sources": {
+      "blocking_path.py:_POLE_RECUR_FLOOR": 2,
+      "collect_runs.py:_POLE_RECUR_FLOOR": 2,
+      "verify_report.py:_VR_POLE_RECUR_FLOOR": 2
+    }
+  },
+  "lifecycle-minimum": {
+    "decision": "lifecycle-minimum",
+    "sources": {
+      "pr_lifecycle.py:MIN_MEASURED": 10
+    }
+  },
+  "magnitude-wide-band": {
+    "decision": "magnitude-noise-band",
+    "sources": {
+      "blocking_path.py:_MAG_WIDE_REL": 0.25,
+      "collect_runs.py:_MAG_WIDE_REL": 0.25
+    }
+  },
+  "merge-queue-proof-thresholds": {
+    "decision": "merge-queue-proof-thresholds",
+    "sources": {
+      "collect_runs.py:_OPT98_CHURN_SAMPLE": 30,
+      "collect_runs.py:_OPT98_DIFFERENT_RATIO": 1.5,
+      "collect_runs.py:_OPT98_MIN_MERGES_PER_DAY": 30,
+      "collect_runs.py:_OPT98_MIN_RUNS": 15,
+      "collect_runs.py:_OPT98_REPROVE_RATIO": 0.8,
+      "collect_runs.py:_OPT98_WINDOW_DAYS": 30
+    }
+  },
+  "minimum-timed-runs": {
+    "decision": "minimum-timed-runs",
+    "sources": {
+      "collect_runs.py:_MIN_TIMED_RUNS": 3
+    }
+  },
+  "opt64-retried-runs": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "blocking_path.py:_OPT64_MIN_RETRIED_RUNS": 3,
+      "collect_runs.py:_OPT64_MIN_RETRIED_RUNS": 3,
+      "verify_report.py:_VR_OPT64_MIN_RETRIED_RUNS": 3
+    }
+  },
+  "opt79-minimums": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT79_MIN_HITS": 3,
+      "collect_runs.py:_OPT79_MIN_MISSES": 3,
+      "collect_runs.py:_OPT79_MIN_WASTE_FRAC": 0.2,
+      "verify_report.py:_VR_OPT79_MIN_HITS": 3,
+      "verify_report.py:_VR_OPT79_MIN_MISSES": 3,
+      "verify_report.py:_VR_OPT79_MIN_WASTE_FRAC": 0.2
+    }
+  },
+  "opt80-occurrences": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT80_MIN_SAMPLED_OCCURRENCES": 6,
+      "verify_report.py:_VR_OPT80_MIN_SAMPLED_OCCURRENCES": 6
+    }
+  },
+  "opt80-tail-multiple": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT80_TAIL_P95_MULTIPLE": 3.0,
+      "verify_report.py:_VR_OPT80_TAIL_P95_MULTIPLE": 3.0
+    }
+  },
+  "opt81-samples-and-gap": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT81_MIN_GAP_FRAC": 0.25,
+      "collect_runs.py:_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+      "verify_report.py:_VR_OPT81_MIN_GAP_FRAC": 0.25,
+      "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL": 8
+    }
+  },
+  "opt82-minimum-seconds": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT82_MIN_LINT_P50_S": 60.0
+    }
+  },
+  "opt83-minimums": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT83_MIN_SHARE": 0.15,
+      "collect_runs.py:_OPT83_MIN_STEP_S": 20.0,
+      "verify_report.py:_VR_OPT83_MIN_SHARE": 0.15,
+      "verify_report.py:_VR_OPT83_MIN_STEP_S": 20.0
+    }
+  },
+  "opt84-minimum-seconds": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT84_MIN_STEP_S": 20.0,
+      "verify_report.py:_VR_OPT84_MIN_STEP_S": 20.0
+    }
+  },
+  "partial-majority-rule": {
+    "decision": "partial-majority-rule",
+    "planned_sources": {
+      "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_DENOMINATOR": 2,
+      "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_NUMERATOR": 1
+    }
+  },
+  "pr-candidate-pages": {
+    "decision": "pr-candidate-pages",
+    "planned_sources": {
+      "pr_sample_contract.py:PR_SAMPLE_CANDIDATE_PAGE_CAP": 12
+    },
+    "sources": {
+      "collect_runs.py:_PR_CANDIDATE_PAGE_CAP": 3
+    }
+  },
+  "pr-sample-eligibility": {
+    "decision": "pr-gate-eligibility",
+    "symbols": [
+      "collect_runs.py:_select_repr_shas"
+    ]
+  },
+  "pr-sample-span": {
+    "decision": "pr-gate-span",
+    "planned_sources": {
+      "pr_sample_contract.py:PR_SAMPLE_MIN_DISTINCT_DAYS": 5
+    }
+  },
+  "pr-sample-target": {
+    "decision": "pr-gate-sample-size",
+    "planned_sources": {
+      "pr_sample_contract.py:PR_SAMPLE_TARGET": 100
+    },
+    "sources": {
+      "collect_runs.py:_REPR_PR_TARGET": 20
+    }
+  },
+  "push-cohort": {
+    "decision": "default-branch-push-cohort",
+    "sources": {
+      "collect_runs.py:_DEFAULT_BRANCH_PUSH_SAMPLE_MAX": 10,
+      "verify_report.py:_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX": 10
+    }
+  },
+  "ranking-minimum-count": {
+    "decision": "ranking-minimum-count",
+    "planned_sources": {
+      "gate_frequency_contract.py:GATE_MIN_COUNT_FOR_RANKING": 5,
+      "gate_frequency_contract.py:POLE_HOLDS_UP_MIN_COUNT": 2
+    },
+    "sources": {
+      "collect_runs.py:_POLE_RECUR_FLOOR": 2,
+      "verify_report.py:_VR_POLE_RECUR_FLOOR": 2
+    }
+  },
+  "rare-presence-rule": {
+    "decision": "rare-presence-rule",
+    "sources": {
+      "blocking_path.py:_RARE_PRESENCE_FRAC": 0.5,
+      "blocking_path.py:_RARE_PRESENCE_MIN_PR": 6,
+      "collect_runs.py:_RARE_PRESENCE_FRAC": 0.5,
+      "collect_runs.py:_RARE_PRESENCE_MIN_PR": 6,
+      "verify_report.py:_VR_RARE_PRESENCE_FRAC": 0.5,
+      "verify_report.py:_VR_RARE_PRESENCE_MIN_PR": 6
+    }
+  },
+  "rare-push-lane": {
+    "decision": "rare-push-lane",
+    "sources": {
+      "collect_runs.py:_PUSH_LANE_RARE_PER_30D": 8
+    }
+  },
+  "rendered-poles": {
+    "decision": "rendered-pole-count",
+    "sources": {
+      "blocking_path.py:_TOP_WORKFLOWS": 5
+    }
+  },
+  "rendered-row-caps": {
+    "decision": "rendered-row-caps",
+    "sources": {
+      "blocking_path.py:_ALSO_NOTICED_CAP": 12,
+      "blocking_path.py:_RUNNER_MINUTE_SPINE_CAP": 12,
+      "blocking_path.py:_TIER2_CAP": 12,
+      "verify_report.py:_VR_RUNNER_MINUTE_SPINE_CAP": 12,
+      "verify_report.py:_VR_TIER2_CAP": 12
+    }
+  },
+  "required-suite-eligibility": {
+    "decision": "required-suite-eligibility",
+    "symbols": [
+      "collect_runs.py:_select_repr_shas"
+    ]
+  },
+  "rolling-volume-window": {
+    "decision": "rolling-volume-window",
+    "symbols": [
+      "collect_runs.py:_window_30d"
+    ]
+  },
+  "run-list-depth": {
+    "decision": "run-list-depth",
+    "sources": {
+      "collect_runs.py:_COST_RUNLIST_MAX": 100
+    }
+  },
+  "saving-caps": {
+    "decision": "saving-caps",
+    "sources": {
+      "collect_runs.py:_CACHE_BUDGET_FULL_FRACTION": 0.9,
+      "collect_runs.py:_CACHE_TAIL_MIN_FRAC": 0.25,
+      "verify_report.py:_VR_CACHE_TAIL_MIN_FRAC": 0.25
+    }
+  },
+  "severity-cutoffs": {
+    "decision": "severity-cutoffs",
+    "sources": {
+      "blocking_path.py:_SEV_HIGH_S": 300.0,
+      "blocking_path.py:_SEV_MED_S": 120.0
+    }
+  },
+  "success-only-caveat": {
+    "decision": "success-only-caveat",
+    "sources": {
+      "collect_runs.py:_SUCCESS_ONLY_CAVEAT_FAILURE_RATE": 0.2,
+      "collect_runs.py:_SUCCESS_ONLY_CAVEAT_MIN_RUNS": 10
+    }
+  },
+  "ten-percent-sizing-rules": {
+    "decision": "ten-percent-sizing-rules",
+    "sources": {}
+  },
+  "timeout-recommendation-thresholds": {
+    "decision": "timeout-recommendation-thresholds",
+    "sources": {
+      "collect_runs.py:_OPT57_TIMEOUT_MULTIPLIER": 1.5,
+      "verify_report.py:_VR_OPT57_DEFAULT_TIMEOUT_MIN": 360.0,
+      "verify_report.py:_VR_OPT57_MIN_SUCCESS_SAMPLES": 3,
+      "verify_report.py:_VR_OPT57_TIMEOUT_MULTIPLIER": 1.5
+    },
+    "symbols": [
+      "collect_runs.py:_opt57_recommended_timeout_s"
+    ]
+  },
+  "typical-floor-thresholds": {
+    "decision": "typical-floor-thresholds",
+    "sources": {
+      "blocking_path.py:_FLOOR_COOCCUR_MAJORITY_FRAC": 0.5,
+      "blocking_path.py:_FLOOR_NEAR_UNIVERSAL_FRAC": 0.8
+    }
+  },
+  "within-group-order": {
+    "decision": "within-group-order",
+    "symbols": [
+      "blocking_path.py:_render_core"
+    ]
+  },
+  "workflow-timing-depth": {
+    "decision": "workflow-timing-depth",
+    "sources": {
+      "collect_runs.py:_DEEPEN_TOP_CHECKS": 12,
+      "collect_runs.py:_SHALLOW_RUNS": 10
+    }
+  }
 }
 ```
 

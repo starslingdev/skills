@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import functools
 import json
 import re
 from pathlib import Path
@@ -20,14 +21,56 @@ REQUIRED_DECISIONS = {
     "needs-chain-handling", "bookkeeping-cutoff", "ranking-minimum-count",
     "gate-frequency-interval", "magnitude-noise-band", "bimodal-noise-band",
     "ten-percent-sizing-rules", "per-pattern-minimums", "saving-caps",
-    "rendered-row-caps",
+    "rendered-row-caps", "workflow-timing-depth", "required-suite-eligibility",
+    "typical-floor-thresholds", "severity-cutoffs", "success-only-caveat",
+    "minimum-timed-runs", "rare-push-lane", "lifecycle-minimum",
+    "merge-queue-proof-thresholds", "timeout-recommendation-thresholds",
+    "dependency-cache-floor", "cold-cache-miss-threshold",
+    "ceiling-minimum-gates", "partial-majority-rule",
+}
+
+REQUIRED_VERIFIER_MIRRORS = {
+    "verify_report.py:_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX",
+    "verify_report.py:_VR_RARE_PRESENCE_MIN_PR",
+    "verify_report.py:_VR_RARE_PRESENCE_FRAC",
+    "verify_report.py:_VR_POLE_RECUR_FLOOR",
+    "verify_report.py:_VR_CHAIN_DIVERGENCE_PCT",
+    "verify_report.py:_VR_AGG_GATE_TRIVIAL_S",
+    "verify_report.py:_VR_TIER2_CAP",
+    "verify_report.py:_VR_RUNNER_MINUTE_SPINE_CAP",
+    "verify_report.py:_VR_OPT64_MIN_RETRIED_RUNS",
+    "verify_report.py:_VR_OPT79_MIN_HITS",
+    "verify_report.py:_VR_OPT79_MIN_MISSES",
+    "verify_report.py:_VR_OPT79_MIN_WASTE_FRAC",
+    "verify_report.py:_VR_OPT80_MIN_SAMPLED_OCCURRENCES",
+    "verify_report.py:_VR_OPT80_TAIL_P95_MULTIPLE",
+    "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL",
+    "verify_report.py:_VR_OPT81_MIN_GAP_FRAC",
+    "verify_report.py:_VR_OPT83_MIN_SHARE",
+    "verify_report.py:_VR_OPT83_MIN_STEP_S",
+    "verify_report.py:_VR_OPT84_MIN_STEP_S",
+    "verify_report.py:_VR_CACHE_TAIL_MIN_FRAC",
+    "verify_report.py:_VR_CACHE_COLD_MISS_PCT",
+}
+
+REQUIRED_PROVISIONAL_SOURCES = {
+    "pr_sample_contract.py:PR_SAMPLE_TARGET": 100,
+    "pr_sample_contract.py:PR_SAMPLE_MIN_DISTINCT_DAYS": 5,
+    "pr_sample_contract.py:PR_SAMPLE_CANDIDATE_PAGE_CAP": 12,
+    "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_NUMERATOR": 1,
+    "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_DENOMINATOR": 2,
+    "gate_frequency_contract.py:GATE_BOOKKEEPING_CUTOFF_S": 60.0,
+    "gate_frequency_contract.py:GATE_MIN_COUNT_FOR_RANKING": 5,
+    "gate_frequency_contract.py:GATE_INTERVAL_Z": 1.96,
+    "gate_frequency_contract.py:POLE_HOLDS_UP_MIN_COUNT": 2,
 }
 
 
+@functools.cache
 def _assignments(path: Path) -> dict[str, object]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
     out: dict[str, object] = {}
-    for node in tree.body:
+    for node in ast.walk(tree):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
@@ -38,6 +81,31 @@ def _assignments(path: Path) -> dict[str, object]:
                 except (ValueError, TypeError):
                     pass
     return out
+
+
+@functools.cache
+def _symbols(path: Path) -> set[str]:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return {
+        node.name for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+    } | set(_assignments(path))
+
+
+def _module(source: str) -> tuple[Path, str]:
+    module, symbol = source.split(":", 1)
+    if module == "verify_report.py":
+        return SKILL / "tests" / module, symbol
+    return SCRIPTS / module, symbol
+
+
+def _assert_value(source: str, expected: object) -> None:
+    path, symbol = _module(source)
+    assert path.exists(), f"missing contract module {path.name}"
+    assignments = _assignments(path)
+    assert symbol in assignments, f"unknown source {source}"
+    assert assignments[symbol] == expected, (
+        f"{source}: documented {expected!r}, engine has {assignments[symbol]!r}")
 
 
 def _contract(text: str) -> dict[str, dict[str, object]]:
@@ -57,27 +125,46 @@ def test_report_defaults_review_covers_every_owner_decision():
         for field in ("**Current value:**", "**Report statements:**", "**Reason:**",
                       "**Proposed decision:**"):
             assert field in section, f"{decision} lacks {field}"
+        assert "awaiting owner approval" in section, (
+            f"{decision} does not preserve its pending approval status")
     assert "references/report-defaults.md" in (SKILL / "SKILL.md").read_text(encoding="utf-8")
 
 
 def test_report_defaults_machine_contract_matches_the_engine():
     text = DOC.read_text(encoding="utf-8")
     contract = _contract(text)
-    modules = {
-        "collect_runs.py": _assignments(SCRIPTS / "collect_runs.py"),
-        "blocking_path.py": _assignments(SCRIPTS / "blocking_path.py"),
-    }
     assert contract, "the report-defaults contract cannot be empty"
+    assert {row.get("decision") for row in contract.values()} == REQUIRED_DECISIONS
+    sources = {
+        source
+        for row in contract.values()
+        for source in row.get("sources", {})
+    }
+    planned_sources = {
+        source: value
+        for row in contract.values()
+        for source, value in row.get("planned_sources", {}).items()
+    }
+    assert REQUIRED_VERIFIER_MIRRORS <= sources
+    assert REQUIRED_PROVISIONAL_SOURCES.items() <= planned_sources.items()
     for key, row in contract.items():
-        module, symbol = str(row["source"]).split(":", 1)
-        assert symbol in modules[module], f"{key}: unknown source {row['source']}"
-        assert row["value"] == modules[module][symbol], (
-            f"{key}: documented {row['value']!r}, engine has {modules[module][symbol]!r}")
+        for source, expected in row.get("sources", {}).items():
+            _assert_value(source, expected)
+        for source in row.get("symbols", []):
+            path, symbol = _module(source)
+            assert path.exists() and symbol in _symbols(path), f"{key}: unknown source {source}"
+        # #315/#317/#318 own these provisional modules. Pin the proposed values
+        # now; once a module is present on this branch, the same guard checks it.
+        for source, expected in row.get("planned_sources", {}).items():
+            path, symbol = _module(source)
+            if path.exists() and symbol in _assignments(path):
+                _assert_value(source, expected)
 
     collect_source = (SCRIPTS / "collect_runs.py").read_text(encoding="utf-8")
     assert re.search(r'add_argument\("--max-runs", type=int, default=20\)', collect_source)
     assert "end - _dt.timedelta(days=30)" in collect_source
-    assert "**Current value:** 20 runs per workflow" in text
+    assert "**Current value:** 20 completed PR commits" in text
+    assert re.search(r"does\s+not set this population", text)
     assert "**Current value:** 30 days" in text
 
     tree = ast.parse(collect_source)
