@@ -4480,7 +4480,20 @@ def _review_verdict(src: Any) -> tuple[str, str]:
                "most recent reviewable push\" is on, so a push credential "
                "pushes new code onto an approved pull request and merges it "
                "on the old approval")
-    return "fail", f"{why}. {_REVIEW_FIX}"
+    # Name the bypassers too, so one report lists every fix: fixing the rule
+    # alone would only turn this into a bypass fail on the next scan.
+    labels: dict = {}
+    for g in found:
+        labels.update(g.bypass or {})
+    also = ""
+    if labels:
+        also = (" Also, " + _capped(list(labels.values()), 6, ", ")
+                + " can skip this rule from a bypass list, so once it is "
+                "fixed a leaked credential of any of these could still land "
+                "code with no review unless another rule holds them; remove "
+                "them from the bypass list as well (\"For pull requests "
+                "only\" bypass is not enough), leaving only admins")
+    return "fail", f"{why}. {_REVIEW_FIX}.{also}"
 
 
 def _default_branch_review(repo: str | None, fetcher) -> tuple[str, str]:
