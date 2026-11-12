@@ -15,39 +15,40 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1] / "golden"
 _REPOSITORIES = {
     "home-assistant-core": (
-        "the busy PR stream can stop at the configuration-era door",
+        "the runner-minute triage stamp and reviewed Bottom line remain open",
         (
-            "sampled ",
-            "full report verifier failed: the fetch plan matches its call sites",
+            # Existing triage bookkeeping names a workflow with no cost-spine row.
             "full report verifier failed: runner-minute cost spine source block is re-derivable",
+            # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
     ),
     "vercel-nextjs": (
-        "the current Bottom line does not lead with the independently selected long pole",
+        "the population-floor headline and reviewed Bottom line remain open",
         (
-            "sampled ",
-            "full report verifier failed: the fetch plan matches its call sites",
-            "full report verifier failed: no spine-demoted pole carries the typical-gate framing",
-            "gate order differs:",
+            # Population-floor prose still disagrees with its stamped sibling split.
+            "full report verifier failed: headline reconciles a non-universal slowest check",
+            # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
     ),
     "ethereum-go-ethereum": (
         "a true lint-to-test predecessor chain is currently reported as redundant setup",
         (
-            "sampled ",
-            "full report verifier failed: the fetch plan matches its call sites",
+            # The workflow's real dependency edge is still classified as OPT21.
             "forbidden finding present: OPT21",
+            # Owner-reviewed headline text waits for that classification fix.
             "Bottom line does not contain reviewed text",
         ),
     ),
     "microsoft-playwright": (
-        "the current Bottom line does not lead with the month-wide longest meaningful gate",
+        "the replay's disclosed fetch gaps, push tag and reviewed Bottom line remain open",
         (
-            "sampled ",
-            "full report verifier failed: headline reconciles a non-universal slowest check",
-            "gate order differs:",
+            # Missing recorded job lists are now failed reads; stop-reason wording lags.
+            "full report verifier failed: PR gate sample stop reason matches its bounded collection facts",
+            # A static workflow-dispatch finding still omits its lane-only tag.
+            "full report verifier failed: default-branch push lane is isolated",
+            # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
     ),
@@ -310,6 +311,155 @@ def test_replay_exposes_month_wide_runs_and_jobs_as_deeper_api_pages(tmp_path: P
     assert [job["name"] for job in jobs_page_2["jobs"]] == ["tests-100"]
 
 
+def test_replay_preserves_run_identity_timestamps_and_missing_job_lists(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8")
+
+    def fixture(endpoint: str, payload: dict[str, object]) -> None:
+        target = api / (compare._fixture_name(endpoint) + ".gz")
+        with gzip.open(target, "wt", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+
+    fixture(
+        "repos/public/example/actions/workflows?per_page=100",
+        {"workflows": [
+            {"id": 11, "name": "CI", "path": ".github/workflows/ci.yml"},
+            {"id": 12, "name": "Docs", "path": ".github/workflows/docs.yml"},
+        ]},
+    )
+    for workflow_id in (11, 12):
+        fixture(
+            f"repos/public/example/actions/workflows/{workflow_id}/runs?per_page=100",
+            {"workflow_runs": [{
+                "head_sha": f"newer-{workflow_id}",
+                "created_at": "2026-11-02T00:00:00Z",
+            }]},
+        )
+    month = {"pr_commits": [{
+        "sha": "commit-000001", "created_at": "2026-11-01T00:00:00Z",
+        "completed": True,
+        "runs": [
+            {"run_key": "run-ci-1", "workflow": "CI", "status": "completed",
+             "created_at": "2026-11-01T00:00:00Z",
+             "updated_at": "2026-11-01T00:05:00Z", "jobs_recorded": True},
+            {"run_key": "run-ci-2", "workflow": "CI", "status": "completed",
+             "created_at": "2026-11-01T01:00:00Z",
+             "updated_at": "2026-11-01T01:08:00Z", "jobs_recorded": True},
+            {"run_key": "run-docs", "workflow": "Docs", "status": "completed",
+             "created_at": "2026-11-01T02:00:00Z",
+             "updated_at": "2026-11-01T02:01:00Z", "jobs_recorded": False},
+        ],
+        "jobs": [
+            {"run_key": "run-ci-1", "workflow": "CI", "name": "first",
+             "status": "completed", "conclusion": "success",
+             "started_at": "2026-11-01T00:00:10Z",
+             "completed_at": "2026-11-01T00:05:00Z"},
+            {"run_key": "run-ci-2", "workflow": "CI", "name": "second",
+             "status": "completed", "conclusion": "success",
+             "started_at": "2026-11-01T01:00:10Z",
+             "completed_at": "2026-11-01T01:08:00Z"},
+        ],
+    }]}
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump(month, stream)
+
+    replay = tmp_path / "replay"
+    compare._dynamic_replay_copy(recording, replay)
+
+    ci_page = json.loads((replay / compare._fixture_name(
+        "repos/public/example/actions/workflows/11/runs?per_page=100&page=2"
+    )).read_text(encoding="utf-8"))["workflow_runs"]
+    docs_page = json.loads((replay / compare._fixture_name(
+        "repos/public/example/actions/workflows/12/runs?per_page=100&page=2"
+    )).read_text(encoding="utf-8"))["workflow_runs"]
+    assert [row["created_at"] for row in ci_page] == [
+        "2026-11-01T01:00:00Z", "2026-11-01T00:00:00Z"]
+    assert {row["head_sha"] for row in ci_page + docs_page} == {"commit-000001"}
+    first_jobs = json.loads((replay / compare._fixture_name(
+        f"repos/public/example/actions/runs/{ci_page[0]['id']}/jobs?per_page=100"
+    )).read_text(encoding="utf-8"))["jobs"]
+    second_jobs = json.loads((replay / compare._fixture_name(
+        f"repos/public/example/actions/runs/{ci_page[1]['id']}/jobs?per_page=100"
+    )).read_text(encoding="utf-8"))["jobs"]
+    assert [job["name"] for job in first_jobs] == ["second"]
+    assert [job["name"] for job in second_jobs] == ["first"]
+    assert not (replay / compare._fixture_name(
+        f"repos/public/example/actions/runs/{docs_page[0]['id']}/jobs?per_page=100"
+    )).exists()
+
+
+def test_public_month_history_tags_jobs_with_their_run() -> None:
+    recorder = _load("record")
+    public = recorder._public_history({"pr_commits": [{
+        "sha": "private-sha", "created_at": "2026-11-01T00:00:00Z",
+        "completed": True,
+        "runs": [{"id": 101, "workflow": "CI", "jobs_recorded": True}],
+        "jobs": [{"id": 201, "run_id": 101, "workflow": "CI", "name": "test"}],
+    }]})
+
+    commit = public["pr_commits"][0]
+    assert commit["sha"] == "commit-000001"
+    assert commit["runs"][0]["run_key"] == commit["jobs"][0]["run_key"]
+    assert commit["runs"][0]["jobs_recorded"] is True
+
+
+def test_replay_uses_one_commit_identity_on_copied_and_synthetic_pages(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8")
+
+    def fixture(endpoint: str, payload: dict[str, object]) -> None:
+        with gzip.open(api / (compare._fixture_name(endpoint) + ".gz"),
+                       "wt", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+
+    fixture("repos/public/example/actions/workflows?per_page=100", {
+        "workflows": [{"id": 11, "name": "CI", "path": ".github/workflows/ci.yml"}],
+    })
+    fixture("repos/public/example/actions/workflows/11/runs?per_page=100", {
+        "workflow_runs": [{
+            "head_sha": "real-sha", "created_at": "2026-11-01T00:00:00Z",
+            "head_commit": {"id": "real-sha"},
+        }],
+    })
+    fixture("repos/public/example/commits/real-sha/check-runs?per_page=100", {
+        "check_runs": [],
+    })
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"pr_commits": [{
+            "sha": "commit-000001", "created_at": "2026-11-01T00:00:00Z",
+            "completed": True,
+            "runs": [{"workflow": "CI", "status": "completed",
+                      "created_at": "2026-11-01T00:00:00Z",
+                      "updated_at": "2026-11-01T00:01:00Z"}],
+            "jobs": [],
+        }]}, stream)
+
+    replay = tmp_path / "replay"
+    compare._dynamic_replay_copy(recording, replay)
+    page = json.loads((replay / compare._fixture_name(
+        "repos/public/example/actions/workflows/11/runs?per_page=100"
+    )).read_text(encoding="utf-8"))["workflow_runs"]
+    assert page[0]["head_sha"] == page[0]["head_commit"]["id"] == "commit-000001"
+    assert (replay / compare._fixture_name(
+        "repos/public/example/commits/commit-000001/check-runs?per_page=100"
+    )).is_file()
+
+
+def test_month_recording_job_list_reads_are_bounded() -> None:
+    recorder = _load("record")
+    assert recorder.MONTH_JOB_LIST_READ_CAP <= 400
+
+
 def test_every_proposed_expectation_waits_for_owner_signoff() -> None:
     expected_files = sorted((_ROOT / "repositories").glob("*/expected.json"))
     assert len(expected_files) == 4
@@ -398,7 +548,8 @@ def test_real_repository_report_matches_independent_expectation(
         tmp_path,
         repo_root=_ROOT.parents[2],
     )
-    differences = compare.compare(findings, expected, report)
+    differences = compare.compare(
+        findings, expected, report, recording=recording)
 
     if known_open_bug and differences:
         reason, allowed_differences = known_open_bug

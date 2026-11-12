@@ -4558,6 +4558,17 @@ class _JobFetchMemo:
                 lock = self._key_locks[key] = threading.Lock()
             return lock
 
+    def contains(self, fetch: Callable[..., Any], repo: str, run_id: Any) -> bool:
+        """Whether this successful job payload is already owned by the memo.
+
+        Prefetch planners use this before scheduling an endpoint.  The later
+        gather would be a memo hit either way, but prefetching the same endpoint
+        first would still issue an unnecessary GitHub request.
+        """
+        key = (self._flavour(fetch), repo, run_id)
+        with self._lock:
+            return key in self._hits
+
     @staticmethod
     def _flavour(fetch: Callable[..., Any]) -> str:
         """A key component that separates `filter=all` from `filter=latest` from the
@@ -29679,11 +29690,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # run-list page so a clean workflow cannot disappear merely because a
     # finding-bearing sibling already filled the commit target.
     for _wf_path in sorted(wf_by_path):
-        if _wf_path in all_status_runs_by_wf:
-            continue
         _wf_id = (wf_by_path.get(_wf_path) or {}).get("id")
         if _wf_id is None:
             continue
+        # The timing pass may already have cached this page, but its success
+        # sample is deliberately capped by ``max_runs``.  Candidate discovery
+        # needs every row on the cached page, so always fold the page here even
+        # when fetching it is free.
         _page_rows = _all_status_page(_wf_path, _wf_id)
         if _page_rows is None:
             continue
@@ -29744,11 +29757,32 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         by_sha: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for row in rows:
             by_sha[str(row["head_sha"])].append(row)
+        # A full page means older workflow history remains unseen.  Do not call
+        # a candidate complete when it predates that workflow's oldest observed
+        # row: a sibling run may exist on the next page and can still change the
+        # candidate's gate membership.  Once the workflow returns a short page,
+        # it leaves ``_candidate_active`` and its observed history is exhaustive.
+        active_horizons: list[str] = []
+        for wf_path in _candidate_active:
+            workflow_rows = (
+                list(all_status_runs_by_wf.get(wf_path) or [])
+                + list(_candidate_runs_by_wf.get(wf_path) or []))
+            timestamps = [
+                str(row.get("created_at") or row.get("updated_at") or "")
+                for row in workflow_rows
+                if str(row.get("event") or "") in _DEVELOPER_EVENTS
+                and (row.get("created_at") or row.get("updated_at"))
+            ]
+            if timestamps:
+                active_horizons.append(min(timestamps))
+        incomplete_horizon = max(active_horizons, default="")
         eligible_reps = {
             rep for rep, members in _rep_members.items()
             if all(by_sha.get(member) for member in members)
             and all(str(row.get("status") or "") == "completed"
                     for member in members for row in by_sha[member])
+            and (not incomplete_horizon
+                 or str(_rep_ts.get(rep) or "") >= incomplete_horizon)
         }
         return rows, by_sha, {
             sha: ts for sha, ts in _rep_ts.items() if sha in eligible_reps
@@ -29828,9 +29862,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _candidate_evaluated_count, len(evaluated_ts))
             if not observable:
                 # No Actions job in the newest sufficient population implements
-                # the readable required names. Preserve the external-gate fallback
-                # without paying to read older commits that cannot improve the
-                # count/date goal.
+                # the readable required names.  A full workflow page can still
+                # hide older commits that do implement them, so exhaust the
+                # active history horizon before declaring the suite external.
+                if evaluation_count < len(ordered_reps):
+                    evaluation_count = min(
+                        len(ordered_reps), evaluation_count + 25)
+                    continue
+                if _candidate_active:
+                    return False
                 _candidate_scoped_ts = evaluated_ts
                 return True
             _candidate_scoped_ts = {
@@ -30102,7 +30142,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # so every downstream consumer (pr_check_p50, poles, the detector loop) sees the post era.
         nonlocal jobs_fetch_failures, runs_sampled, jobs_sampled
         post_slice = post_runs[:max_runs]
-        _prefetch_json(client, [_run_jobs_endpoint(repo, r.get("id")) for r in post_slice])
+        _prefetch_json(client, [
+            _run_jobs_endpoint(repo, r.get("id")) for r in post_slice
+            if not job_memo.contains(_fetch_run_jobs, repo, r.get("id"))])
         kept_jobs, wf_failures = _gather_run_jobs(client, repo, post_slice, memo=job_memo)
         # Surface a post re-drill fetch failure through the SAME coverage machinery as every other
         # job-fetch path (issue #74 review): never swallow it into unmeasured-silence.
@@ -31380,7 +31422,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     }
     _prefetch_json(client, [
         _run_jobs_endpoint(repo, run.get("id"))
-        for runs in _opt21_outcome_runs.values() for run in runs])
+        for runs in _opt21_outcome_runs.values() for run in runs
+        if not job_memo.contains(_fetch_run_jobs, repo, run.get("id"))])
     _opt21_outcome_jobs: dict[str, list[list[dict[str, Any]]]] = {}
     for _wf in sorted(_opt21_workflows):
         _outcome_kept, _outcome_fetches = _gather_run_jobs(
@@ -32256,6 +32299,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _prefetch_json(client, [
                     _run_jobs_endpoint(repo, run.get("id"))
                     for run in _cancelled_runs
+                    if not job_memo.contains(
+                        _fetch_run_jobs, repo, run.get("id"))
                 ])
                 _cancelled_kept, _cancelled_failures = _gather_run_jobs(
                     client, repo, _cancelled_runs, memo=job_memo)

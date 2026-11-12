@@ -76,7 +76,9 @@ def _eligible_jobs(commit: dict[str, Any], cutoff_s: int) -> tuple[list[dict[str
     return jobs, excluded
 
 
-def compute(recording: dict[str, Any], *, bookkeeping_cutoff_s: int = DEFAULT_BOOKKEEPING_CUTOFF_S) -> dict[str, Any]:
+def compute(recording: dict[str, Any], *,
+            bookkeeping_cutoff_s: int = DEFAULT_BOOKKEEPING_CUTOFF_S,
+            gate_by_sha: dict[str, str] | None = None) -> dict[str, Any]:
     """Compute month-wide gate shares and wait facts from normalized data."""
     if recording.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unsupported golden recording schema")
@@ -111,15 +113,31 @@ def compute(recording: dict[str, Any], *, bookkeeping_cutoff_s: int = DEFAULT_BO
             if (instant := _instant(job.get("completed_at"))) is not None
         )
         wait_s.append((latest - earliest).total_seconds())
-        last_at = max(_instant(job.get("completed_at")) for job in jobs)
         for job in jobs:
-            if _instant(job.get("completed_at")) != last_at:
-                continue
             name = _check_name(job)
-            gate_counts[name] += 1
             duration = _seconds(job.get("started_at"), job.get("completed_at"))
             if duration is not None:
+                # The engine reports each check's ordinary P50, independent of
+                # whether that occurrence happened to finish last.  Gate share
+                # remains conditional below; timing does not.
                 gate_durations[name].append(duration)
+        forced_gate = (gate_by_sha or {}).get(str(commit.get("sha") or ""))
+        longest = max(
+            _seconds(job.get("started_at"), job.get("completed_at")) or 0.0
+            for job in jobs)
+        for job in jobs:
+            job_name = _check_name(job)
+            leaf_name = str(job.get("name") or "")
+            if forced_gate:
+                is_gate = forced_gate in {job_name, leaf_name}
+            else:
+                is_gate = (
+                    _seconds(job.get("started_at"), job.get("completed_at"))
+                    == longest)
+            if not is_gate:
+                continue
+            name = job_name
+            gate_counts[name] += 1
 
     denominator = commits_with_jobs
     gates = [

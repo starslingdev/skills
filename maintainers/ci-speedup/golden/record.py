@@ -45,6 +45,10 @@ _GITHUB_REPOSITORY_REFERENCE = re.compile(
 # snapshot; ``compare.replay`` restores the real name before the engine runs.
 SNAPSHOT_MANIFESTS = ("package.json", "pnpm-workspace.yaml", "pyproject.toml", "Cargo.toml", "go.mod")
 SNAPSHOT_SUFFIX = ".golden"
+# A busy repository can have hundreds of bookkeeping-only workflow runs before
+# five calendar days are represented.  Keep recording bounded; unrecorded job
+# lists replay as failed reads, never as successful empty payloads.
+MONTH_JOB_LIST_READ_CAP = 400
 _LONG_NUMBER = re.compile(r"(?<![0-9])[0-9]{9,}(?![0-9])")
 _PRIVATE_SHAPED_PARTS = (
     "sess" + "ion_",
@@ -473,7 +477,8 @@ def _month_history(repository: str, captured_at: datetime, state_path: Path) -> 
         temp.replace(state_path)
 
     completed_fetches = 0
-    while pending := pending_runs():
+    while completed_fetches < MONTH_JOB_LIST_READ_CAP and (pending := pending_runs()):
+        pending = pending[:MONTH_JOB_LIST_READ_CAP - completed_fetches]
         for offset in range(0, len(pending), 200):
             batch = pending[offset:offset + 200]
             with ThreadPoolExecutor(max_workers=40) as pool:
@@ -625,6 +630,11 @@ def _public_history(history: dict[str, Any]) -> dict[str, Any]:
     for index, row in enumerate(history.get("pr_commits") or [], start=1):
         if not isinstance(row, dict):
             continue
+        run_keys = {
+            int(run.get("id") or 0): f"run-{run_index:04d}"
+            for run_index, run in enumerate(row.get("runs") or [], start=1)
+            if isinstance(run, dict)
+        }
         commits.append({
             "sha": f"commit-{index:06d}",
             "created_at": row.get("created_at"),
@@ -633,13 +643,14 @@ def _public_history(history: dict[str, Any]) -> dict[str, Any]:
                 bool(run.get("jobs_recorded")) for run in row.get("runs") or []
             ),
             "runs": [
-                {key: value for key, value in run.items()
-                 if key not in {"id", "jobs_recorded"}}
+                {**{key: value for key, value in run.items() if key != "id"},
+                 "run_key": run_keys.get(int(run.get("id") or 0))}
                 for run in row.get("runs") or [] if isinstance(run, dict)
             ],
             "jobs": [
-                {key: value for key, value in job.items()
-                 if key not in {"id", "run_id"}}
+                {**{key: value for key, value in job.items()
+                    if key not in {"id", "run_id"}},
+                 "run_key": run_keys.get(int(job.get("run_id") or 0))}
                 for job in row.get("jobs") or [] if isinstance(job, dict)
             ],
         })

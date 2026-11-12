@@ -1801,7 +1801,7 @@ def _pr_sample_fixture(tmp_path: Path, *, second_page: bool,
     jobs = {
         str(row["id"]): [{
             "id": row["id"] + 100_000,
-            "name": "gate",
+            "name": ("gate" if row["head_sha"] in qualifying else "optional"),
             "labels": ["ubuntu-latest"],
             "created_at": row["created_at"],
             "started_at": row["created_at"],
@@ -1966,6 +1966,142 @@ def test_busy_pr_sample_uses_completed_commits_across_days_despite_non_pr_era(
     assert cp["sample_span_last"].startswith("2026-01-25")
     assert "2026-01-21" in report and "2026-01-25" in report
     assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_pr_sample_uses_every_completed_candidate_on_cached_first_page(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path)
+    (fixture / "workflows" / "ci.yml").write_text(
+        "name: CI\non: [pull_request]\njobs:\n  gate:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n",
+        encoding="utf-8")
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    workflow = recorded["workflows"][0]
+    completed = workflow["run_pages"][1]
+    workflow["run_pages"] = [completed]
+    workflow["runs_30d"] = len(completed)
+    for row in completed:
+        job = recorded["jobs"][str(row["id"])][0]
+        job["steps"] = [{
+            "name": "Run tests", "started_at": job["started_at"],
+            "completed_at": job["completed_at"], "conclusion": "success",
+        }]
+    sample_log = "\n".join([
+        "uv run pytest tests/integration",
+        "plugins: xdist-2.5.0, cov-4.1.0",
+        "collected 195 items",
+        "tests/integration/test_api.py ................................ [100%]",
+        "================== 195 passed in 295.00s (0:04:55) ==================",
+    ])
+    recorded["logs"] = {
+        str(job["id"]): sample_log
+        for row in completed for job in recorded["jobs"][str(row["id"])]
+    }
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-cached-first-page"
+    run_root.mkdir()
+
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] == 100
+    assert cp["sample_stop_reason"] == "target_met"
+    assert "100 of 100 PRs sampled: target met" in report
+    failed_checks = [check for check in checks if not check.skipped and not check.ok]
+    assert failed_checks == [], [(check.name, check.detail) for check in failed_checks]
+
+
+def test_pr_sample_walks_busy_sibling_to_candidate_history_horizon(
+        monkeypatch, tmp_path):
+    fixture = _busy_pr_sample_fixture(tmp_path)
+    (fixture / "workflows" / "sibling.yml").write_text(
+        "name: Sibling\non: [pull_request]\njobs:\n  long:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n",
+        encoding="utf-8")
+    (fixture / "workflows" / "ci.yml").write_text(
+        "name: CI\non: [pull_request]\njobs:\n  gate:\n"
+        "    runs-on: ubuntu-latest\n    steps:\n      - run: make test\n",
+        encoding="utf-8")
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    primary = recorded["workflows"][0]
+    candidates = primary["run_pages"][1]
+    primary["run_pages"] = [candidates]
+    primary["runs_30d"] = len(candidates)
+    recorded["required_checks"] = ["gate", "long"]
+    for row in candidates:
+        job = recorded["jobs"][str(row["id"])][0]
+        job["steps"] = [{
+            "name": "Run tests", "started_at": job["started_at"],
+            "completed_at": job["completed_at"], "conclusion": "success",
+        }]
+
+    def sibling_run(source: dict, number: int) -> dict:
+        row = dict(source)
+        row["id"] = 80_000 + number
+        return row
+
+    newest_shared = [sibling_run(row, index)
+                     for index, row in enumerate(candidates[:50])]
+    unrelated = []
+    for index, source in enumerate(candidates[:50], 50):
+        row = sibling_run(source, index)
+        row["head_sha"] = f"unrelated-{index}"
+        row["head_branch"] = f"unrelated-{index}"
+        row["created_at"] = "2026-01-26T23:59:00Z"
+        row["run_started_at"] = row["created_at"]
+        row["updated_at"] = "2026-01-26T23:59:30Z"
+        unrelated.append(row)
+    older_shared = [sibling_run(row, 100 + index)
+                    for index, row in enumerate(candidates[50:])]
+    sibling_rows = newest_shared + unrelated + older_shared
+    for row in sibling_rows:
+        started = datetime.fromisoformat(
+            row["run_started_at"].replace("Z", "+00:00"))
+        completed_at = datetime.fromtimestamp(
+            started.timestamp() + 600, timezone.utc).isoformat().replace(
+                "+00:00", "Z")
+        recorded["jobs"][str(row["id"])] = [{
+            "id": row["id"] + 100_000, "name": "long",
+            "labels": ["ubuntu-latest"], "created_at": row["created_at"],
+            "started_at": row["run_started_at"],
+            "completed_at": completed_at, "conclusion": "success",
+            "steps": [{
+                "name": "Run tests", "started_at": row["run_started_at"],
+                "completed_at": completed_at, "conclusion": "success",
+            }],
+        }]
+    recorded["workflows"].append({
+        "id": 312, "path": ".github/workflows/sibling.yml",
+        "name": "Sibling", "runs_30d": 150,
+        "run_pages": [newest_shared + unrelated, older_shared],
+    })
+    recorded["commits_by_workflow"][".github/workflows/sibling.yml"] = []
+    sample_log = "\n".join([
+        "uv run pytest tests/integration",
+        "plugins: xdist-2.5.0, cov-4.1.0",
+        "collected 195 items",
+        "tests/integration/test_api.py ................................ [100%]",
+        "================== 195 passed in 295.00s (0:04:55) ==================",
+    ])
+    recorded["logs"] = {
+        str(job["id"]): sample_log
+        for jobs in recorded["jobs"].values() for job in jobs
+    }
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-sibling-horizon"
+    run_root.mkdir()
+
+    doc, _report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    poles = {row["name"]: row["pole_n"] for row in cp["checks"]}
+    assert cp["sampled_pr_count"] == 100
+    assert poles["long"] == 100
+    assert cp["sample_candidate_pages_fetched"] == 2
+    failed_checks = [check for check in checks if not check.skipped and not check.ok]
+    assert failed_checks == [], [(check.name, check.detail) for check in failed_checks]
 
 
 def test_pr_sample_preserves_observable_required_suite_scope(
@@ -2343,6 +2479,8 @@ def test_walk_continues_past_ineligible_candidates(monkeypatch, tmp_path):
         encoding="utf-8")
     responses_path = fixture / "responses.json"
     recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    for jobs in recorded["jobs"].values():
+        jobs[0]["name"] = "gate"
     ci_pages = recorded["workflows"][0]["run_pages"]
     sibling_pages = []
     for page in ci_pages[:2]:
@@ -2447,7 +2585,7 @@ def test_pr_sample_stops_after_job_population_reaches_target(
     cp = doc["pr_critical_path"]
     assert cp["sampled_pr_count"] == 100
     assert cp["sample_stop_reason"] == "target_met"
-    assert cp["sample_candidate_pages_fetched"] == 2
+    assert cp["sample_candidate_pages_fetched"] == 3
     assert [c for c in checks if not c.skipped and not c.ok] == []
     assert "100 of 100 PRs sampled: target met" in report
 
@@ -2508,6 +2646,11 @@ def test_pr_sample_uses_completed_job_rows_without_check_row_filter(
         monkeypatch, tmp_path):
     fixture = _pr_sample_fixture(
         tmp_path, second_page=True, third_page=True)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    for jobs in recorded["jobs"].values():
+        jobs[0]["name"] = "gate"
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
     run_root = tmp_path / "run-page-cap"
     run_root.mkdir()
     doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
@@ -2515,7 +2658,7 @@ def test_pr_sample_uses_completed_job_rows_without_check_row_filter(
     cp = doc["pr_critical_path"]
     assert cp["sampled_pr_count"] == 100
     assert cp["sample_stop_reason"] == "target_met"
-    assert cp["sample_candidate_pages_fetched"] == 2
+    assert cp["sample_candidate_pages_fetched"] == 1
     assert cp["sample_candidate_page_cap"] == cr._PR_CANDIDATE_PAGE_CAP == 12
     assert [c for c in checks if not c.skipped and not c.ok] == []
     assert "100 of 100 PRs sampled: target met" in report
