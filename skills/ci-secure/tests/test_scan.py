@@ -920,6 +920,110 @@ jobs:
     assert reason in finding["evidence"].lower()
 
 
+@pytest.mark.parametrize(
+    ("uses", "script", "reason"),
+    [
+        (
+            "actions/github-script-evil@v1",
+            "github.rest.issues.addLabels({labels: ['triage']})",
+            "not limited to label/comment-only",
+        ),
+        (
+            "actions/github-script@v7",
+            """github.rest.issues.addLabels({labels: ['triage']})
+eval('${{ github.event.pull_request.title }}')""",
+            "executes attacker-controlled pr text",
+        ),
+        (
+            "actions/github-script@v7",
+            """github.rest.issues.addLabels({labels: ['triage']})
+github['rest']['pulls']['merge']({pull_number: context.issue.number})""",
+            "merge api",
+        ),
+    ],
+)
+def test_p1418_cosmetic_profile_fails_closed_on_unproved_script_shapes(
+    tmp_path: Path, uses: str, script: str, reason: str,
+) -> None:
+    _write_workflow(
+        tmp_path,
+        "danger.yml",
+        """on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  danger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: %s
+        with:
+          script: |
+%s
+""" % (uses, "\n".join(f"            {line}" for line in script.splitlines())),
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "HIGH"
+    assert reason in finding["evidence"].lower()
+
+
+def test_p1418_classifies_only_the_job_that_owns_pr_write(tmp_path: Path) -> None:
+    _write_workflow(
+        tmp_path,
+        "scoped.yml",
+        """on: pull_request_target
+jobs:
+  cosmetic:
+    permissions:
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.addLabels({labels: ['triage']})
+  unrelated:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+""",
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "MEDIUM"
+    assert "cosmetic" in finding["attacker_scenario"].lower()
+
+
+def test_p1418_reusable_job_with_pr_write_stays_high(tmp_path: Path) -> None:
+    _write_workflow(
+        tmp_path,
+        "reusable.yml",
+        """on: pull_request_target
+jobs:
+  privileged:
+    permissions:
+      pull-requests: write
+    uses: ./.github/workflows/reusable-child.yml
+  cosmetic-decoy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.addLabels({labels: ['triage']})
+""",
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "HIGH"
+    assert "not limited to label/comment-only" in finding["evidence"].lower()
+
+
 # -----------------------------------------------------------------------------
 # Coverage failures: a scan that could not check what it claims to have checked
 # must EXIT NON-ZERO, never emit a clean-looking result. Each test below is

@@ -458,8 +458,35 @@ def test_p1418_cosmetic_occurrence_uses_its_hygiene_fix() -> None:
         ),
     )
     md = _finding_section([finding])
-    assert "Keep this job limited to cosmetic labeling or commenting" in md
+    guidance = "Keep this job limited to cosmetic labeling or commenting"
+    assert md.count(guidance) == 2  # visible Fix + copyable fix prompt
     assert "Split into separate trusted / untrusted workflows" not in md
+    assert "apply the catalog's documented restructure" not in md
+
+
+def test_p1418_mixed_group_uses_the_high_profile_not_first_member() -> None:
+    cosmetic = _complete_finding(
+        id="cosmetic",
+        pattern="P14.18",
+        severity="MEDIUM",
+        title="Cosmetic pull request automation",
+        attacker_scenario="COSMETIC ONLY",
+        fix_strategy="limit-cosmetic-pr-automation",
+        fix_guidance="KEEP COSMETIC ONLY",
+    )
+    high = _complete_finding(
+        id="high",
+        pattern="P14.18",
+        severity="HIGH",
+        workflow_file=".github/workflows/z.yml",
+        attacker_scenario="HIGH MERGE PATH",
+        fix_strategy="split-trusted-untrusted-workflows",
+    )
+    md = _finding_section([cosmetic, high])
+    assert "**HIGH**" in md
+    assert "HIGH MERGE PATH" in md
+    assert "`split-trusted-untrusted-workflows`" in md
+    assert "KEEP COSMETIC ONLY" not in md
 
 
 def test_attacker_row_falls_back_to_catalog_capability() -> None:
