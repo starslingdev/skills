@@ -2886,6 +2886,23 @@ def test_demoted_frequency_pole_prompt_and_toc_drop_typical_gate_framing():
     assert "gates" not in gore_row
 
 
+def test_rarely_slowest_first_pole_is_not_framed_as_the_typical_gate():
+    # The first ordered pole is the frequency `blocker`, but under the `pole_n` schema that
+    # identity must not reclaim the typical-gate wording: `test` is the slowest check on only
+    # 1/20 sampled PRs (below the recurring floor), so its drill says "Rarely the merge pole",
+    # matching the verifier's spine-demoted rule (Next.js `Wait for preview tarball` shape).
+    doc = _doc_demoted_frequency_pole()
+    cp = doc["pr_critical_path"]
+    cp["checks"][0]["pole_n"] = 1
+    cp["checks"][1]["pole_n"] = 0
+    md = bp.render(doc, {"ci": _IMPORT_BOUND_LOG}, {},
+                   {"ci": "https://example.invalid/actions/runs/1"}, "2026-06-08")
+    start = md.index("Long pole 1:")
+    first = md[start:md.index("Long pole 2:", start)]
+    assert "Slowest check a typical PR waits on" not in first
+    assert "Rarely the merge pole" in first
+
+
 def test_bimodal_note_surfaces_a_fast_median_check_but_not_a_slow_median_one():
     # A check whose MEDIAN is the fast mode (bar under-states it) -> surfaced, so the
     # P50 ranking can't silently drop a frequent slow gate from the spine.
