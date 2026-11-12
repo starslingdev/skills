@@ -1761,6 +1761,19 @@ def _is_admin_only_403(message: str) -> bool:
     return bool(_ADMIN_ONLY_403_RE.search(message))
 
 
+# GitHub also hides the admin-only classic-protection endpoint from a
+# non-admin reader as a plain Not Found. Require both parts of that exact
+# response so a 5xx body that merely quotes a 404 is not treated as ordinary.
+_CLASSIC_HIDDEN_404_RE = re.compile(
+    r"\bHTTP\s+404\b.*\bnot found\b|\bnot found\b.*\bHTTP\s+404\b",
+    re.I | re.S,
+)
+
+
+def _is_classic_hidden_404(message: str) -> bool:
+    return bool(_CLASSIC_HIDDEN_404_RE.search(message))
+
+
 # `404 Branch not protected` from the classic protection endpoint. Matched on
 # the status AND the reason — which the comment used to claim while the regex
 # was a bare `\b404\b`, so a branch renamed between the two calls, a
@@ -1795,10 +1808,10 @@ def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
       * neither read — return `None` with "could not be read at all", listing
         both errors;
       * exactly one read — return the union ONLY when both of these hold: the
-        source that failed did so the ORDINARY way (`_is_admin_only_403` over
-        the recorded message: a 403, or "must have admin" — most readers of
-        this fact do not administer the repository they are auditing), AND the
-        source that answered actually found contexts. Otherwise return `None`
+        source that failed did so the ORDINARY way (an admin-only 403, or a
+        plain Not Found 404 from the classic endpoint, which GitHub also uses
+        for non-admin readers), AND the source that answered actually found
+        contexts. Otherwise return `None`
         with the "only part of branch protection ... could be read" reason,
         because a required check configured in the unread source would be
         invisible here.
@@ -1886,10 +1899,14 @@ def _required_contexts_via_gh(repo: str) -> tuple[list[str] | None, str]:
         return None, (f"branch protection for `{branch}` could not be read "
                       f"at all ({detail})")
     # One source answered. That is enough ONLY when the other failed the
-    # ordinary way — the admin-only 403 — and the one that answered found
-    # something. An empty answer from one source plus no answer from the other
-    # establishes nothing at all.
-    if not _is_admin_only_403(errors[-1]) or not contexts:
+    # ordinary way — the admin-only 403, or a plain Not Found 404 specifically
+    # from the classic endpoint — and the one that answered found something.
+    # An empty answer from one source plus no answer from the other establishes
+    # nothing at all.
+    ordinary_unread = _is_admin_only_403(errors[-1]) or (
+        rulesets_ok and _is_classic_hidden_404(errors[-1])
+    )
+    if not ordinary_unread or not contexts:
         return None, (
             f"only part of branch protection for `{branch}` could be read "
             f"({detail}) — a required check configured in the unread "
