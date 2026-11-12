@@ -1,10 +1,11 @@
-"""Keep the owner-reviewed report defaults tied to their engine constants."""
+"""Keep the proposed report defaults tied to their engine constants."""
 
 from __future__ import annotations
 
 import ast
 import functools
 import json
+import operator
 import re
 from pathlib import Path
 
@@ -51,6 +52,11 @@ REQUIRED_VERIFIER_MIRRORS = {
     "verify_report.py:_VR_OPT84_MIN_STEP_S",
     "verify_report.py:_VR_CACHE_TAIL_MIN_FRAC",
     "verify_report.py:_VR_CACHE_COLD_MISS_PCT",
+    "verify_report.py:_VR_CACHE_FLOOR_BY_FIX_KEY",
+    "verify_report.py:_VR_OPT57_NEAR_DEFAULT_TIMEOUT_S",
+    "verify_report.py:_VR_OPT57_DEFAULT_KILL_CEILING_S",
+    "verify_report.py:_VR_OPT57_MIN_TIMEOUT_S",
+    "verify_report.py:_VR_OPT57_TIMEOUT_BUFFER_S",
 }
 
 REQUIRED_PROVISIONAL_SOURCES = {
@@ -67,20 +73,58 @@ REQUIRED_PROVISIONAL_SOURCES = {
 
 
 @functools.cache
-def _assignments(path: Path) -> dict[str, object]:
+def _assignment_nodes(path: Path) -> dict[str, ast.expr]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    out: dict[str, object] = {}
+    out: dict[str, ast.expr] = {}
     for node in ast.walk(tree):
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         for target in targets:
-            if isinstance(target, ast.Name):
-                try:
-                    out[target.id] = ast.literal_eval(node.value)
-                except (ValueError, TypeError):
-                    pass
+            if isinstance(target, ast.Name) and node.value is not None:
+                out[target.id] = node.value
     return out
+
+
+_BINARY_OPS = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+}
+
+
+@functools.cache
+def _assignments(path: Path) -> dict[str, object]:
+    nodes = _assignment_nodes(path)
+    values: dict[str, object] = {}
+
+    def evaluate(node: ast.expr, stack: frozenset[str]) -> object:
+        try:
+            return ast.literal_eval(node)
+        except (ValueError, TypeError):
+            pass
+        if isinstance(node, ast.Name):
+            if node.id in stack or node.id not in nodes:
+                raise ValueError(node.id)
+            if node.id not in values:
+                values[node.id] = evaluate(nodes[node.id], stack | {node.id})
+            return values[node.id]
+        if isinstance(node, ast.BinOp) and type(node.op) in _BINARY_OPS:
+            return _BINARY_OPS[type(node.op)](
+                evaluate(node.left, stack), evaluate(node.right, stack))
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+            value = evaluate(node.operand, stack)
+            return value if isinstance(node.op, ast.UAdd) else -value
+        raise ValueError(ast.dump(node))
+
+    for name, node in nodes.items():
+        try:
+            values[name] = evaluate(node, frozenset({name}))
+        except (TypeError, ValueError, ZeroDivisionError):
+            continue
+    return values
 
 
 @functools.cache
@@ -89,7 +133,7 @@ def _symbols(path: Path) -> set[str]:
     return {
         node.name for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
-    } | set(_assignments(path))
+    } | set(_assignment_nodes(path))
 
 
 def _module(source: str) -> tuple[Path, str]:
@@ -157,15 +201,22 @@ def test_report_defaults_machine_contract_matches_the_engine():
         # now; once a module is present on this branch, the same guard checks it.
         for source, expected in row.get("planned_sources", {}).items():
             path, symbol = _module(source)
-            if path.exists() and symbol in _assignments(path):
-                _assert_value(source, expected)
+            if not path.exists():
+                continue
+            names = _assignment_nodes(path)
+            if path.name == "gate_frequency_contract.py" and symbol == "POLE_HOLDS_UP_MIN_COUNT":
+                # #317 creates the shared module; #318 adds this fourth value.
+                if symbol not in names:
+                    continue
+            assert symbol in names, f"missing provisional source {source}"
+            _assert_value(source, expected)
 
     collect_source = (SCRIPTS / "collect_runs.py").read_text(encoding="utf-8")
-    assert re.search(r'add_argument\("--max-runs", type=int, default=20\)', collect_source)
     assert "end - _dt.timedelta(days=30)" in collect_source
-    assert "**Current value:** 20 completed PR commits" in text
+    assert "**Current value:** up to 20 selected PR commits" in text
     assert re.search(r"does\s+not set this population", text)
     assert "**Current value:** 30 days" in text
+    assert "collect_runs.py::_window_30d" in text
 
     tree = ast.parse(collect_source)
     split = next(node for node in tree.body

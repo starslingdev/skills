@@ -443,7 +443,7 @@ Reference docs (read on demand — each links one level deep from here; outside 
   Measured compute counts completed job runs (timed-out, cancelled, and failed runs at or past the 6-hour timeout excluded, named in the spine footnote): modeled savings are capped at it; measured and failure-waste savings are checked against every sampled run.
 - [references/patterns/INDEX.md](references/patterns/INDEX.md) — the pattern index (every OPT-id; one file per pattern).
 - [references/spine-scoping.md](references/spine-scoping.md) — spine rules;
-  [references/report-defaults.md](references/report-defaults.md) — owner-reviewed report defaults.
+  [references/report-defaults.md](references/report-defaults.md) — proposed report defaults awaiting owner review.
 - [references/structural-track.md](references/structural-track.md) — the
   OPT70–75, OPT78, OPT83–85, OPT87 risk model + intent interrogation for structural prompts.
 - [references/gap-fill.md](references/gap-fill.md) — the coverage-gap

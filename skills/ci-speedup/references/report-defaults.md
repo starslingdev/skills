@@ -12,7 +12,9 @@ including the values rather than only the direction of change.
 
 ### `pr-gate-sample-size`
 
-**Current value:** 20 completed PR commits (`collect_runs.py::_REPR_PR_TARGET`).
+**Current value:** up to 20 selected PR commits
+(`collect_runs.py::_REPR_PR_TARGET`). They may still have queued or in-progress
+runs, as the eligibility entry below describes.
 The unrelated `--max-runs` option bounds per-workflow timing history and does
 not set this population.
 
@@ -94,7 +96,7 @@ population pending a separate evidence-led review.
 
 ### `rolling-volume-window`
 
-**Current value:** 30 days (`collect_runs.py::_utc_window`).
+**Current value:** 30 days (`collect_runs.py::_window_30d`).
 
 **Report statements:** monthly run volume, runs per month, runner-minutes per
 month, default-branch activity, and modeled monthly savings.
@@ -222,10 +224,11 @@ contains it.
 **Approval status:** awaiting owner approval.
 ### `bookkeeping-cutoff`
 
-**Current value:** several reader-facing floors already shape the pole set:
-recovery uses `_TRIAGE_WALLCLOCK_FLOOR_S = 90`, while aggregate-gate,
-wall-clock long-pole, and no-op handling each use a 30-second floor
-(`_AGG_GATE_TRIVIAL_S`, `_WALL_CLOCK_LONG_POLE_FLOOR_S`, `_NOOP_FLOOR_S`).
+**Current value:** several reader-facing floors already shape related output:
+triage recovery uses `_TRIAGE_WALLCLOCK_FLOOR_S = 90`; aggregate-gate handling
+uses `_AGG_GATE_TRIVIAL_S = 30`; wall-clock saving presentation uses
+`_WALL_CLOCK_LONG_POLE_FLOOR_S = 30`; and no-op classification uses
+`_NOOP_FLOOR_S = 30`.
 They do not yet form one general bookkeeping rule.
 
 **Report statements:** which short jobs appear as developer-wait poles and which
@@ -276,8 +279,10 @@ under #311. Overlap makes the order unsupported while observations remain shown.
 
 ### `workflow-timing-depth`
 
-**Current value:** most workflows are timed from 10 runs (`_SHALLOW_RUNS`),
-then at most 12 leading checks are deepened (`_DEEPEN_TOP_CHECKS`).
+**Current value:** job lists are fetched for the first 10 runs of each workflow
+(`_SHALLOW_RUNS`), then the owners of at most 12 leading checks are deepened to
+the full timing depth (`_DEEPEN_TOP_CHECKS`). Run lists and other measurements
+remain at full breadth.
 
 **Report statements:** workflow and check P50/P90 values, long-pole evidence,
 and whether a row has enough observations for a measured saving.
@@ -308,7 +313,7 @@ approval.
 ### `typical-floor-thresholds`
 
 **Current value:** a floor needs 80% near-universal presence
-(`_FLOOR_NEAR_UNIVERSAL_FRAC`) and 50% co-occurrence
+(`_FLOOR_NEAR_UNIVERSAL_FRAC`) and strictly more than 50% co-occurrence
 (`_FLOOR_COOCCUR_MAJORITY_FRAC`).
 
 **Report statements:** typical-PR floor, recurrent chain framing, and which
@@ -317,8 +322,8 @@ check is treated as part of the common wait.
 **Reason:** The floor should describe a common path rather than a minority
 combination of checks.
 
-**Proposed decision:** **Keep 80% and 50%.** Both values remain awaiting owner
-approval.
+**Proposed decision:** **Keep 80% and strictly more than 50%.** Both values
+remain awaiting owner approval.
 
 **Approval status:** awaiting owner approval.
 ### `severity-cutoffs`
@@ -326,11 +331,11 @@ approval.
 **Current value:** 300 seconds is HIGH and 120 seconds is MEDIUM
 (`_SEV_HIGH_S`, `_SEV_MED_S`).
 
-**Report statements:** finding severity, section order, and the priority shown
-beside measured long-pole opportunities.
+**Report statements:** the colored severity dot on Long pole headings and their
+Contents rows.
 
-**Reason:** These cutoffs distinguish multi-minute developer wait from smaller
-delays without changing measured durations.
+**Reason:** These cutoffs make the measured long-pole wait visually scannable
+without changing generic finding severity, section order, or measured duration.
 
 **Proposed decision:** **Keep 300 and 120 seconds.** Both values remain awaiting
 owner approval.
@@ -426,14 +431,15 @@ while remaining below the platform's hard stop.
 
 ### `dependency-cache-floor`
 
-**Current value:** dependency-cache evidence needs 50% coverage before it can
-support the corresponding cache claim (`_DEPENDENCY_CACHE_FLOOR_PCT`).
+**Current value:** dependency-cache evidence needs a median miss rate of at
+least 50% before it can support the corresponding cache claim
+(`_DEPENDENCY_CACHE_FLOOR_PCT`).
 
 **Report statements:** dependency-cache confidence, saving credit, and
 withheld-evidence wording.
 
-**Reason:** A cache observed on fewer than half the relevant runs cannot
-describe the typical path.
+**Reason:** A cache that misses on fewer than half of the relevant runs is
+mostly warm and should not receive cold-cache saving credit.
 
 **Proposed decision:** **Keep 50%.** The value remains awaiting owner approval.
 
@@ -643,7 +649,10 @@ implementation lands.
   "dependency-cache-floor": {
     "decision": "dependency-cache-floor",
     "sources": {
-      "collect_runs.py:_DEPENDENCY_CACHE_FLOOR_PCT": 50.0
+      "collect_runs.py:_DEPENDENCY_CACHE_FLOOR_PCT": 50.0,
+      "verify_report.py:_VR_CACHE_FLOOR_BY_FIX_KEY": {
+        "dependency-cache": 50.0
+      }
     }
   },
   "gate-frequency-interval": {
@@ -893,9 +902,19 @@ implementation lands.
   "timeout-recommendation-thresholds": {
     "decision": "timeout-recommendation-thresholds",
     "sources": {
+      "collect_runs.py:_GHA_DEFAULT_JOB_TIMEOUT_S": 21600.0,
+      "collect_runs.py:_OPT57_DEFAULT_KILL_CEILING_S": 22500.0,
+      "collect_runs.py:_OPT57_KILL_GRACE_S": 900.0,
+      "collect_runs.py:_OPT57_MIN_TIMEOUT_S": 900.0,
+      "collect_runs.py:_OPT57_NEAR_DEFAULT_TIMEOUT_S": 20520.0,
+      "collect_runs.py:_OPT57_TIMEOUT_BUFFER_S": 600.0,
       "collect_runs.py:_OPT57_TIMEOUT_MULTIPLIER": 1.5,
+      "verify_report.py:_VR_OPT57_DEFAULT_KILL_CEILING_S": 22500.0,
       "verify_report.py:_VR_OPT57_DEFAULT_TIMEOUT_MIN": 360.0,
       "verify_report.py:_VR_OPT57_MIN_SUCCESS_SAMPLES": 3,
+      "verify_report.py:_VR_OPT57_MIN_TIMEOUT_S": 900.0,
+      "verify_report.py:_VR_OPT57_NEAR_DEFAULT_TIMEOUT_S": 20520.0,
+      "verify_report.py:_VR_OPT57_TIMEOUT_BUFFER_S": 600.0,
       "verify_report.py:_VR_OPT57_TIMEOUT_MULTIPLIER": 1.5
     },
     "symbols": [
