@@ -4091,7 +4091,8 @@ def _actor_label(actor: Any) -> str:
     if label is None and kind == "RepositoryRole":
         label = _ROLE_NAMES.get(aid, f"repository role {aid}")
     if label is None:
-        label = f"{str(kind or 'actor').lower()} {aid}"
+        word = "app" if kind == "Integration" else str(kind or "actor").lower()
+        label = f"{word} {aid}"
     if actor.get("bypass_mode") == "pull_request":
         label += " (when merging a pull request)"
     return label
@@ -4250,7 +4251,8 @@ def _review_verdict(src: Any) -> tuple[str, str]:
         tail = ""
         if notes:
             tail = (" Able to skip that review with their own credential, so "
-                    "a leak of theirs is not covered: " + "; ".join(notes)
+                    "a leak of theirs is not covered: "
+                    + "; ".join(dict.fromkeys(notes))
                     + ".")
         elif not unread:
             tail = " Nobody is listed as able to bypass it."
