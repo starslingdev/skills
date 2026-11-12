@@ -7403,8 +7403,34 @@ def test_poles_render_in_two_duration_ordered_groups_and_bottom_names_pole_one()
         assert f"P50 {p50}" in row and f"finishes last on {gates} PRs" in row
     d_row = next(line for line in contents.splitlines() if "[D]" in line)
     assert "a slower check usually ran alongside" in d_row
+    assert "**Frequency group:** Checks that hold up most PRs." in _pole_section(report, "A")
+    assert "**Frequency group:** Long but rarely the last to finish." in _pole_section(
+        report, "D")
     bottom = next(line for line in report.splitlines() if line.startswith("> **Bottom line.**"))
-    assert "Long pole 1" in bottom and "`A`" in bottom
+    assert bottom.startswith("> **Bottom line.** Long pole 1, `A`,")
+
+
+def test_phase_six_handoff_uses_the_report_frequency_groups():
+    text = (_SCRIPTS.parent / "SKILL.md").read_text(encoding="utf-8")
+    assert "Open with the report's Long pole 1" in text
+    assert "Checks that hold up most PRs" in text
+    assert "Long but rarely the last to finish" in text
+    assert re.search(r"do not call a\s+rare-last row a gating check", text, re.I)
+
+
+def test_pole_group_renderer_and_verifier_use_the_population_denominator(tmp_path):
+    doc = _pole_order_agreement_doc()
+    doc["pr_critical_path"]["populations"] = doc["pr_critical_path"]["populations"][:-1]
+
+    report = bp.render(doc)
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+    assert "finishes last on 9/19 PRs" in contents
+
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+    assert check.ok, check.detail
 
 
 def test_pole_groups_sort_by_the_p50_the_rows_display():
@@ -8403,6 +8429,26 @@ def test_aggregation_upstream_inherits_the_terminal_verdict_frequency(tmp_path):
     findings.write_text(json.dumps(doc), encoding="utf-8")
     check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
     assert check.ok, check.detail
+
+
+def test_aggregation_upstream_names_its_terminal_gate_reason():
+    doc = _agg_gate_doc()
+    for check in doc["pr_critical_path"]["checks"]:
+        check["pole_n"] = 1 if check["name"] == "thank you, build" else 0
+    doc["pr_critical_path"]["poles"].append({
+        "check": "stable - x86_64-linux", "p50_s": 355.0,
+        "workflow_file": _AGG_DEPLOY, "job": "native",
+        "dominant_step": "Build native", "dominant_p50_s": 350.0,
+        "steps": [{"step": "Build native", "category": "build", "p50_s": 350.0}],
+    })
+
+    report = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+    upstream_row = next(line for line in contents.splitlines()
+                        if "[stable - x86_64-linux]" in line)
+    assert "feeds the terminal `needs:` gate" in upstream_row
+    assert "a slower check usually ran alongside" not in upstream_row
 
 
 def test_aggregation_gate_pole_role_line_is_a_registered_claim():

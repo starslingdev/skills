@@ -12855,10 +12855,16 @@ def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
     shrinking denominator is surfaced, not silent."""
     counts: dict[str, int] = {}
     n = dropped = 0
+    unconfirmed = {
+        str(row.get("name") or row.get("check") or "")
+        for row in _as_list(cp.get("checks"))
+        if isinstance(row, dict) and row.get("required_reachable") is False
+    }
     for entry in _as_list(cp.get("populations")):
         try:
             _share, cks = entry
-            pos = [(str(nm), float(p)) for nm, p in cks if float(p) > 0]
+            pos = [(str(nm), float(p)) for nm, p in cks
+                   if float(p) > 0 and str(nm) not in unconfirmed]
         except (TypeError, ValueError):
             dropped += 1
             continue
@@ -13057,6 +13063,8 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
     by_name = {_cmp_name(str(row.get("name") or row.get("check") or "")): row
                for row in checks}
     inherited_counts = _aggregation_upstream_gate_counts(data)
+    _population_counts, population_n, _dropped = _populations_pole_counts(cp)
+    expected_denominator = population_n or int(_num(cp.get("check_present_n_pr")) or 0)
     first_name = ""
     first_full_name = ""
     for index, match in enumerate(rows, 1):
@@ -13076,7 +13084,9 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
         else:
             groups[group].append(seconds)
         if group == "rare-last" and not (
-                "ran on few PRs" in tail or "a slower check usually ran alongside" in tail):
+                "ran on few PRs" in tail
+                or "a slower check usually ran alongside" in tail
+                or "feeds the terminal `needs:` gate" in tail):
             failures.append(f"`{label}` has no reason in the rare-last group")
         # Contents labels are deliberately width-limited for readability.  Join
         # through the corresponding full drill heading before looking up the
@@ -13108,7 +13118,7 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
             if seconds is not None and stamped_p50 is not None and abs(seconds - stamped_p50) > 1.0:
                 failures.append(
                     f"`{label}` renders P50 {_fmt_clock(seconds)}, stamped {_fmt_clock(stamped_p50)}")
-        if total != int(cp.get("check_present_n_pr") or total):
+        if expected_denominator and total != expected_denominator:
             failures.append(f"`{label}` renders denominator {total}, not the sampled population")
 
     for group, values in groups.items():
@@ -13123,8 +13133,9 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
 
     bottom = next((line for line in report.splitlines()
                    if line.startswith("> **Bottom line.**")), "")
-    if not first_name or f"Long pole 1, `{first_name}`," not in bottom:
-        failures.append(f"Bottom line does not name Long pole 1 `{first_name}`")
+    expected_open = f"> **Bottom line.** Long pole 1, `{first_name}`,"
+    if not first_name or not bottom.startswith(expected_open):
+        failures.append(f"Bottom line does not open with Long pole 1 `{first_name}`")
     if not first_full_name:
         failures.append("Contents pole 1 has no corresponding drill heading")
 

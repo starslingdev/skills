@@ -30,7 +30,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
-- **2026-11-11** — Split long poles into frequent and rarely-last groups, sort each group by P50, show the finish-last count on every row, and keep the Bottom line aligned with Long pole 1.
+- **2026-11-11** — Split long poles into frequent and rarely-last groups, sort each group by P50, show the finish-last count on every row using the renderer's sampled-population denominator, open the Bottom line with Long pole 1, and carry each pole's frequency group and `needs:`-upstream reason into the report and chat hand-off (#318).
 - **2026-11-11** — Exclude matrix legs whose dominant test step was skipped when their only remaining steps ran on every leg, while preserving platform-specific legs as real work.
 
 ### Added

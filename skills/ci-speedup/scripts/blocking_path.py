@@ -7635,6 +7635,7 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
             count = max(int(frequencies.get(key(p)[0]) or 0),
                         upstream_frequency.get(key(p), 0))
             p["_display_gate_count"] = count
+            p["_upstream_gate_member"] = key(p) in upstream_frequency
             if reachability.get(key(p)[0]) is False:
                 p["_pole_group"] = "unconfirmed"
             else:
@@ -7804,8 +7805,11 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
             frequency = f" · finishes last on {own_count}/{npop} PRs"
             if group == "rare-last":
                 present = int(p.get("_present") or 0)
-                reason = ("ran on few PRs" if present <= npop * _RARE_PRESENCE_FRAC
-                          else "a slower check usually ran alongside")
+                reason = (
+                    "feeds the terminal `needs:` gate"
+                    if p.get("_upstream_gate_member") else
+                    "ran on few PRs" if present <= npop * _RARE_PRESENCE_FRAC else
+                    "a slower check usually ran alongside")
                 frequency += f" · {reason}"
             lead = f"P50 {p50_dur}"
         else:
@@ -14916,9 +14920,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             else "Long but rarely the last to finish")
         for _i in range(len(out) - 1, -1, -1):
             if out[_i].startswith("> **Bottom line.**"):
-                out[_i] = out[_i].rstrip() + (
-                    f" Long pole 1, `{_pole_one}`, is the longest check in "
-                    f"**{_pole_one_group}**.")
+                _rest = out[_i][len("> **Bottom line.**"):].lstrip()
+                out[_i] = (
+                    f"> **Bottom line.** Long pole 1, `{_pole_one}`, is the longest "
+                    f"check in **{_pole_one_group}**. {_rest}")
                 break
     # Owner UX edit (2026-07-19): TOP MATTER = metadata table → ONE Bottom-line blockquote
     # → Contents, nothing else. Everything that used to render as its own blockquote between
@@ -15787,6 +15792,14 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out.append(f"## {_severity_dot(head_s)} Long pole {i}: "
                    f"{_safe_span(wf_base)} ▸ {_safe_span(check)} — {dur}")
         out.append("")
+        _frequency_group = {
+            "holds-up": "Checks that hold up most PRs",
+            "rare-last": "Long but rarely the last to finish",
+            "unconfirmed": "Could not confirm this check blocks merging",
+        }.get(str(p.get("_pole_group") or ""))
+        if _frequency_group:
+            out.append(f"**Frequency group:** {_frequency_group}.")
+            out.append("")
         out.append(f"_{role}_" if not role.startswith("**") else role)
         out.append("")
         replay = p.get("replayed_test_results")
