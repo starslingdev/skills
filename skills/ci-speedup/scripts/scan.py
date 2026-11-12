@@ -4822,7 +4822,6 @@ def _detect_opt61(
                     "none of its `restore-keys` can restore the rolling saved-key "
                     "family on a later edit",
                     _static_cache_family(
-                        *restore,
                         cache_key=key,
                         cache_paths=cache_paths_by_step.get(id(step), [])),
                 ))

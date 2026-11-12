@@ -112,6 +112,29 @@ def test_opt61_uses_the_specific_key_word_after_an_unlisted_prefix(tmp_path) -> 
         assert unrelated_status == "unknown"
 
 
+def test_opt61_restore_key_cannot_relabel_the_saved_key_family(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/tool
+          key: tool-${{ runner.os }}-${{ github.sha }}
+          restore-keys: pnpm-${{ runner.os }}-
+      - run: tool build
+""")
+    row = next(item for item in rows if item["pattern"] == "OPT61"
+               and "restore" in item["evidence"].lower())
+    own_status, _line = collect_runs._cache_status_from_log(
+        "Cache not found for input keys: tool-Linux-deadbeef",
+        collect_runs._cache_keywords_for_finding(row),
+    )
+    unrelated_status, _line = collect_runs._cache_status_from_log(
+        "Cache not found for input keys: pnpm-Linux-deadbeef",
+        collect_runs._cache_keywords_for_finding(row),
+    )
+    assert row["cache_family"] == "tool"
+    assert own_status == "miss"
+    assert unrelated_status == "unknown"
+
+
 def test_opt61_accepts_a_matching_rolling_restore_prefix(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:
