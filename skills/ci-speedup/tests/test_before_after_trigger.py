@@ -772,6 +772,79 @@ def test_collected_baseline_and_real_adapter_use_the_same_work_identity():
     assert result["workload_state"] == "same"
 
 
+def test_verification_has_one_persisted_baseline_log_budget(tmp_path):
+    class BudgetClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.baseline_log_gets = []
+
+        def _text(self, endpoint):
+            self.baseline_log_gets.append(endpoint)
+            return "Cache restored from key: node-v1"
+
+        def _job_logs(self, repo, jobs, *, job_cap=20):
+            sampled = jobs[:job_cap]
+            logs = [self._text(
+                f"repos/{repo}/actions/jobs/{job['id']}/logs")
+                    for job in sampled]
+            return {
+                "logs": logs,
+                "log_api_calls": len(sampled),
+                "log_jobs_unreadable": 0,
+                "log_jobs_omitted": len(jobs) - len(sampled),
+                "log_jobs_truncated": 0,
+                "log_has_cache_step": True,
+            }
+
+        def rerun_cohort(self, repo, cohort, *, trigger=True):
+            self.events.append("rerun-trigger" if trigger else "rerun-poll")
+            return None
+
+    client = BudgetClient()
+    facts = []
+    job_id = 1
+    for fact_number in range(6):
+        jobs = []
+        fact_size = 19 if fact_number == 5 else 20
+        for _ in range(fact_size):
+            jobs.append({
+                **_job(f"base-{fact_number}", 1),
+                "id": job_id,
+                "workflow_file": "ci.yml",
+            })
+            job_id += 1
+        facts.append({
+            "sha": f"base-{fact_number}",
+            "event": "pull_request",
+            "jobs": jobs,
+        })
+    baseline = tmp_path / "base.json"
+    baseline.write_text(json.dumps({
+        "per_workflow_monthly_volume": {"ci.yml": 40},
+        "pr_critical_path": {"commit_wall_clock": {"facts": facts}},
+    }))
+    context_path = tmp_path / "verify.json"
+
+    first = advance_verification(
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        context_path=context_path, changed_files=[".github/workflows/ci.yml"],
+        environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
+
+    assert len(client.baseline_log_gets) <= 20
+    assert first["baseline_log_api_calls"] == len(client.baseline_log_gets)
+    assert first["baseline_log_api_budget"] == 20
+    saved = json.loads(context_path.read_text())
+    assert saved["baseline"]
+
+    client.baseline_log_gets.clear()
+    second = advance_verification(
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        context_path=context_path, changed_files=[".github/workflows/ci.yml"],
+        environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
+    assert client.baseline_log_gets == []
+    assert second["baseline_log_api_calls"] == first["baseline_log_api_calls"]
+
+
 def test_default_branch_sampling_maps_squash_merge_and_stops_at_a_gap():
     commits = [{"sha": "newer"}, {"sha": "merge"}, {"sha": "older"}]
     merge_run = _api_run(30, 3, "push", "merge")
