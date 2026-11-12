@@ -468,6 +468,20 @@ def test_p1418_cosmetic_occurrence_uses_its_hygiene_fix() -> None:
     assert "no review/merge API" in md
 
 
+def test_p1418_cosmetic_phase5_oracle_allows_reviewed_medium_finding() -> None:
+    """The orchestrator prompt must not demand removal of a reviewed finding."""
+    prompts = (_SKILL_DIR / "references" / "prompts.md").read_text(
+        encoding="utf-8"
+    )
+    skill = (_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    completion = (
+        "may remain only when every listed occurrence is MEDIUM and its "
+        "evidence still says"
+    )
+    assert completion in prompts
+    assert "P14.18 MEDIUM cosmetic exception" in skill
+
+
 def test_p1418_mixed_group_uses_the_high_profile_not_first_member() -> None:
     cosmetic = _complete_finding(
         id="cosmetic",

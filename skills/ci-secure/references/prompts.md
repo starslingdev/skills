@@ -28,6 +28,14 @@ and the subagent's own oracle — "the finding is gone" — passes without the
 fix ever being tested. `on` makes `run.py` exit 2 in that situation instead
 of skipping, so a fix that cannot be verified fails loudly.
 
+Substitute `{completion_oracle}` from the finding profile. For every ordinary
+finding it is: `no finding carrying "pattern": "{pattern}" may remain in that
+JSON`. For a MEDIUM P14.18 label/comment-only finding it is instead: `a P14.18 finding may remain only when every listed occurrence is MEDIUM and its evidence still says
+no checkout, no PR-code execution, and no review/merge API; a HIGH
+occurrence or a missing boundary marker means the fix is not complete`. That
+exception lets an intentionally cosmetic job retain the permission it needs
+without turning the oracle into an impossible demand.
+
 The re-scan the oracle runs writes ONE file, `ci-secure-recheck-<slug>.json`
 in tmp, scoped by the same per-repo slug SKILL.md's Phase 2 block derives. That is
 the documented exception to SKILL.md's two-file budget (it cannot overwrite
@@ -110,10 +118,9 @@ SLUG="$(printf '%s' "$ROOT" | shasum | cut -c1-12)"
 RECHECK="${TMPDIR:-/tmp}/ci-secure-recheck-${SLUG}.json"
 python3 <ci-secure>/scripts/run.py --root . --out "$RECHECK" {gh_impostor_flag}
 
-Confirm the chain no longer fires: no finding carrying
-`"pattern": "{pattern}"` may remain in that JSON. If one does, occurrences
-are still open — fix them and re-run. Report the re-scan result in your
-summary; a fix you could not verify this way is reported as unverified,
+Confirm this completion condition: {completion_oracle}. If it fails,
+occurrences are still open — fix them and re-run. Report the re-scan result in
+your summary; a fix you could not verify this way is reported as unverified,
 never as done.
 
 Absence is only evidence if the check actually RAN. The P14.11 detector
