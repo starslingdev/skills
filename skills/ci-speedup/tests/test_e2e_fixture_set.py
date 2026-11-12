@@ -2576,6 +2576,63 @@ def test_pr_sample_page_cap_and_offline_query_budget_are_pinned(
     assert [check for check in full_checks if not check.skipped and not check.ok] == []
 
 
+def test_pr_sample_job_list_reads_stop_at_the_shared_contract_cap(
+        monkeypatch, tmp_path):
+    fixture = _pr_sample_fixture(tmp_path, second_page=False)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    template_run = recorded["workflows"][0]["run_pages"][0][0]
+    template_job = recorded["jobs"][str(template_run["id"])][0]
+    pages = []
+    jobs = {}
+    for page_number in range(cr._PR_CANDIDATE_PAGE_CAP):
+        page = []
+        for offset in range(100):
+            number = page_number * 100 + offset
+            row = dict(template_run)
+            day = 25 - min(number // 20, 20)
+            stamp = f"2026-01-{day:02d}T{offset % 20:02d}:00:00Z"
+            row.update(id=290_000 + number, head_branch=f"budget-{number}",
+                       head_sha=f"budget-sha-{number}", created_at=stamp,
+                       run_started_at=stamp,
+                       updated_at=stamp.replace(":00Z", ":30Z"))
+            page.append(row)
+            job = dict(template_job)
+            job.update(id=390_000 + number, name="path-conditional",
+                       created_at=row["created_at"],
+                       started_at=row["run_started_at"],
+                       completed_at=row["updated_at"])
+            jobs[str(row["id"])] = [job]
+        pages.append(page)
+    recorded["workflows"][0]["run_pages"] = pages
+    recorded["workflows"][0]["runs_30d"] = 1200
+    sibling = dict(recorded["workflows"][0])
+    sibling.update(id=811, path=".github/workflows/sibling-budget.yml",
+                   name="Sibling budget", runs_30d=100)
+    sibling_page = []
+    for offset, source in enumerate(pages[0]):
+        row = dict(source)
+        row["id"] = 490_000 + offset
+        sibling_page.append(row)
+        jobs[str(row["id"])] = [
+            dict(jobs[str(source["id"])][0], id=590_000 + offset)
+        ]
+    sibling["run_pages"] = [sibling_page]
+    recorded["workflows"].append(sibling)
+    recorded["jobs"] = jobs
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-job-list-cap"
+    run_root.mkdir()
+
+    doc, report, _checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sample_job_list_reads"] == cr._PR_SAMPLE_JOB_LIST_READ_CAP == 1200
+    assert cp["sample_job_list_cap_hit"] is True
+    assert cp["sample_stop_reason"] == "job_list_cap"
+    assert "1200 of at most 1200; cap reached" in report
+
+
 def test_pr_sample_does_not_treat_fallback_as_target_through_full_pipeline(
         monkeypatch, tmp_path):
     fixture = _pr_sample_fixture(

@@ -48,6 +48,7 @@ from typing import Any, Callable
 
 from pr_sample_contract import (
     PR_SAMPLE_CANDIDATE_PAGE_CAP as _PR_CANDIDATE_PAGE_CAP,
+    PR_SAMPLE_JOB_LIST_READ_CAP as _PR_SAMPLE_JOB_LIST_READ_CAP,
     PR_SAMPLE_MIN_DISTINCT_DAYS as _PR_SAMPLE_MIN_DISTINCT_DAYS,
     PR_SAMPLE_TARGET as _PR_SAMPLE_TARGET,
 )
@@ -5042,6 +5043,10 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
         "sample_candidate_pages_fetched": sample_diag.get("candidate_pages_fetched", 1),
         "sample_candidate_page_cap": sample_diag.get(
             "candidate_page_cap", _PR_CANDIDATE_PAGE_CAP),
+        "sample_job_list_reads": sample_diag.get("job_list_reads", 0),
+        "sample_job_list_read_cap": sample_diag.get(
+            "job_list_read_cap", _PR_SAMPLE_JOB_LIST_READ_CAP),
+        "sample_job_list_cap_hit": sample_diag.get("job_list_cap_hit", False),
         "sample_candidate_pages_exhausted": sample_diag.get(
             "candidate_pages_exhausted", True),
         "sample_candidate_page_fetch_failures": sample_diag.get(
@@ -29738,8 +29743,31 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _candidate_observable_required: frozenset[str] = frozenset()
     _candidate_unobservable_required: frozenset[str] = frozenset()
     _candidate_evaluated_count = 0
+    _candidate_job_list_reads = 0
+    _candidate_job_list_cap_hit = False
     _candidate_repo_published_required = frozenset(_repo_published_required(
         req_names, findings_doc.get("workflow_status_publishers")))
+
+    def _budget_candidate_job_runs(
+            runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep memo hits plus at most the remaining PR-sample job-read budget."""
+        nonlocal _candidate_job_list_reads, _candidate_job_list_cap_hit
+        allowed: list[dict[str, Any]] = []
+        seen: set[Any] = set()
+        for run in runs:
+            run_id = run.get("id")
+            if run_id in seen:
+                continue
+            seen.add(run_id)
+            if job_memo.contains(_fetch_run_jobs, repo, run_id):
+                allowed.append(run)
+                continue
+            if _candidate_job_list_reads >= _PR_SAMPLE_JOB_LIST_READ_CAP:
+                _candidate_job_list_cap_hit = True
+                continue
+            _candidate_job_list_reads += 1
+            allowed.append(run)
+        return allowed
 
     def _candidate_snapshot() -> tuple[
             list[dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, str]]:
@@ -29826,15 +29854,31 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 break
             run_rep: dict[Any, str] = {}
             selected_runs: list[dict[str, Any]] = []
+            run_ids_by_rep: dict[str, set[Any]] = defaultdict(set)
             for rep in batch_reps:
-                evaluated_reps.add(rep)
                 for member in _rep_members.get(rep, [rep]):
                     for row in rows_by_sha.get(member, []):
                         rid = row.get("id")
                         if rid in run_rep:
                             continue
                         run_rep[rid] = rep
+                        run_ids_by_rep[rep].add(rid)
                         selected_runs.append(row)
+            selected_runs = _budget_candidate_job_runs(selected_runs)
+            selected_ids = {run.get("id") for run in selected_runs}
+            completed_reps = {
+                rep for rep, run_ids in run_ids_by_rep.items()
+                if run_ids <= selected_ids
+            }
+            evaluated_reps.update(completed_reps)
+            run_rep = {
+                run_id: rep for run_id, rep in run_rep.items()
+                if rep in completed_reps
+            }
+            selected_runs = [
+                run for run in selected_runs
+                if run_rep.get(run.get("id")) in completed_reps
+            ]
             kept_jobs, _failures = _gather_run_jobs(
                 client, repo, selected_runs, keep_empty=True, memo=job_memo)
             fetched_ids = {run.get("id") for run, _jobs in kept_jobs}
@@ -29882,6 +29926,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             if (len(_candidate_scoped_ts) >= _REPR_PR_TARGET
                     and len(scoped_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS):
                 return True
+            if _candidate_job_list_cap_hit:
+                return False
             if evaluation_count >= len(ordered_reps):
                 break
             evaluation_count = min(len(ordered_reps), evaluation_count + 25)
@@ -29892,6 +29938,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # pages when the apparent target is later removed by an in-flight sibling.
     while (_candidate_active
            and _candidate_page < _PR_CANDIDATE_PAGE_CAP
+           and not _candidate_job_list_cap_hit
            and not _candidate_sample_ready()):
         _candidate_page += 1
         _next_active: set[str] = set()
@@ -30012,6 +30059,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # workflow job sample has already been read; do not retry failed job pages
         # merely to decorate a sample that cannot meet the representative contract.
         _selected_runs = []
+    _selected_runs = _budget_candidate_job_runs(_selected_runs)
     _sample_kept_jobs, _sample_job_failures = _gather_run_jobs(
         client, repo, _selected_runs, keep_empty=True, memo=job_memo)
     jobs_fetch_failures += _sample_job_failures
@@ -30078,7 +30126,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "partial_count": _partial_reps,
     })
 
-    if (len(repr_shas) >= _REPR_PR_TARGET
+    if (_candidate_job_list_cap_hit):
+        sample_diag["stop_reason"] = "job_list_cap"
+    elif (len(repr_shas) >= _REPR_PR_TARGET
             and len(_sample_dates) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
             and not sample_diag.get("required_suite_unsatisfiable")):
         sample_diag["stop_reason"] = "target_met"
@@ -30109,6 +30159,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "candidate_page_fetch_failures": (
             _candidate_page_failures + len(all_status_failed)),
         "candidate_era_door": _candidate_era_door,
+        "job_list_reads": _candidate_job_list_reads,
+        "job_list_read_cap": _PR_SAMPLE_JOB_LIST_READ_CAP,
+        "job_list_cap_hit": _candidate_job_list_cap_hit,
     })
     # Config-era thin-flip (issue #74, direction (a): the timing spine flips WITH the rule). Now that
     # the PR gate sample (`per_sha_checks`) is in hand we can tell whether a `disclosed_pre` straddle's

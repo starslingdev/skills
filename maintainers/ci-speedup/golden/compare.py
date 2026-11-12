@@ -33,11 +33,13 @@ def engine_facts(findings: dict[str, Any]) -> dict[str, Any]:
         typical = wall.get("p50_s")
     return {
         "sampled_pr_count": int(critical.get("sampled_pr_count") or 0),
+        "gate_population_count": int(critical.get("check_present_n_pr") or 0),
         "typical_pr_wait_s": float(typical or 0.0),
         "gate_order": [str(row.get("name") or "") for row in checks if int(row.get("pole_n") or 0) > 0],
         "gates": {
             str(row.get("name") or ""): {
                 "last_on": int(row.get("pole_n") or 0),
+                "present_on": int(row.get("present_on") or 0),
                 "p50_s": float(row.get("p50_s") or 0.0),
             }
             for row in checks if int(row.get("pole_n") or 0) > 0
@@ -77,20 +79,13 @@ def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = ""
     for verifier_failure in verifier_failures:
         differences.append("full report verifier failed: " + str(verifier_failure))
     expected_completed = int((oracle.get("sample") or {}).get("completed_with_eligible_jobs") or 0)
+    observed_denominator = int(actual.get("gate_population_count") or 0)
     if actual["sampled_pr_count"] < min(100, expected_completed):
         differences.append(
             f"sampled {actual['sampled_pr_count']} PR commits; independent recording has {expected_completed} completed commits"
         )
     oracle_rows = [row for row in oracle.get("gates") or [] if isinstance(row, dict)]
-    # A bounded sample cannot support an exact ordering among low-frequency
-    # gates whose shares fit inside the comparison's uncertainty band.
-    ordered_names = {
-        str(row.get("check") or "") for row in oracle_rows
-        if float(row.get("share") or 0.0) >= 0.15
-    }
-    expected_order = [
-        name for name in oracle.get("gate_order") or []
-        if not oracle_rows or str(name) in ordered_names]
+    expected_order = list(oracle.get("gate_order") or [])
     comparable = [
         match for name in expected_order
         if (match := _matching_gate(str(name), actual["gates"])) is not None
@@ -124,7 +119,7 @@ def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = ""
         # is unavailable.  Compare counts over that same eligible denominator;
         # the report still discloses the broader sampled-pr count separately.
         actual_share = (float(actual_gate["last_on"])
-                        / max(1, expected_completed))
+                        / max(1, observed_denominator or expected_completed))
         if abs(actual_share - oracle_share) > 0.15:
             differences.append(
                 f"gate share differs for {expected_name!r}: "
@@ -132,7 +127,7 @@ def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = ""
             )
         oracle_p50 = float(row.get("p50_s") or 0.0)
         actual_p50 = float(actual_gate["p50_s"] or 0.0)
-        if oracle_p50 and abs(actual_p50 - oracle_p50) > max(240.0, oracle_p50 * 0.35):
+        if oracle_p50 and abs(actual_p50 - oracle_p50) > max(120.0, oracle_p50 * 0.35):
             differences.append(
                 f"gate p50 differs for {expected_name!r}: "
                 f"engine={actual_p50:.1f}s, oracle={oracle_p50:.1f}s"
@@ -177,69 +172,132 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     critical = findings.get("pr_critical_path") or {}
     first = str(critical.get("sample_span_first") or "")
     last = str(critical.get("sample_span_last") or "")
-    engine_names = {
+    def latest_attempt_view(source: dict[str, Any]) -> dict[str, Any]:
+        """Rebuild each workflow at its latest recorded run, independently."""
+        runs = [run for run in source.get("runs") or [] if isinstance(run, dict)]
+        if not runs:
+            return dict(source)
+        by_workflow: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+        for index, run in enumerate(runs):
+            by_workflow.setdefault(str(run.get("workflow") or ""), []).append(
+                (index, run))
+        chosen = {
+            max(rows, key=lambda pair: (
+                str(pair[1].get("created_at") or pair[1].get("updated_at") or ""),
+                pair[0],
+            ))[0]
+            for rows in by_workflow.values()
+        }
+        key_to_index = {
+            str(run.get("run_key")): index
+            for index, run in enumerate(runs) if run.get("run_key")
+        }
+        jobs_by_run: dict[int, list[dict[str, Any]]] = {
+            index: [] for index in range(len(runs))
+        }
+        for job in source.get("jobs") or []:
+            if not isinstance(job, dict):
+                continue
+            tagged = key_to_index.get(str(job.get("run_key") or ""))
+            candidates = [
+                index for index, run in enumerate(runs)
+                if str(run.get("workflow") or "") == str(job.get("workflow") or "")
+            ]
+            if tagged is not None:
+                selected = tagged
+            elif candidates:
+                job_end = str(job.get("completed_at") or job.get("started_at") or "")
+                selected = min(candidates, key=lambda index: (
+                    abs((datetime.fromisoformat(
+                        str(runs[index].get("updated_at") or runs[index].get("created_at"))
+                        .replace("Z", "+00:00"))
+                         - datetime.fromisoformat(job_end.replace("Z", "+00:00")))
+                        .total_seconds())
+                    if job_end and (runs[index].get("updated_at")
+                                    or runs[index].get("created_at"))
+                    else float("inf"),
+                    index,
+                ))
+            else:
+                continue
+            jobs_by_run[selected].append(job)
+        row = dict(source)
+        row["runs"] = [run for index, run in enumerate(runs) if index in chosen]
+        row["jobs"] = [job for index in chosen for job in jobs_by_run[index]]
+        return row
+
+    required_names = {
+        str(name) for name in findings.get("required_checks") or [] if name
+    }
+    gate_definition = {
         str(row.get("name") or "")
         for row in critical.get("checks") or []
         if isinstance(row, dict) and row.get("required_reachable") is not False
     }
-    selected_shas = {
-        str(row.get("sha") or "")
-        for row in critical.get("chain_facts") or [] if isinstance(row, dict)
-    }
-    gate_by_sha = {
-        str(row.get("sha") or ""): str((row.get("chain") or [""])[-1])
-        for row in critical.get("chain_facts") or []
-        if isinstance(row, dict) and row.get("sha") and row.get("chain")
-    }
-    month_shas = {
-        str(row.get("sha") or "")
-        for row in month.get("pr_commits") or [] if isinstance(row, dict)
-    }
-    exact_selection = selected_shas & month_shas
-
-    def included_job(job: dict[str, Any]) -> bool:
-        workflow = str(job.get("workflow") or "").strip()
-        name = str(job.get("name") or "").strip()
-        qualified = f"{workflow} / {name}" if workflow and name else name or workflow
-        return any(
-            candidate == qualified or candidate == name
-            or qualified.endswith(" / " + candidate)
-            or candidate.endswith(" / " + name)
-            for candidate in engine_names
-        )
-
-    commits = []
+    in_span = []
     for source in month.get("pr_commits") or []:
         if not isinstance(source, dict):
             continue
         created = str(source.get("created_at") or "")
-        if exact_selection:
-            if str(source.get("sha") or "") not in exact_selection:
-                continue
-        elif (first and created < first) or (last and created > last):
+        if (first and created < first) or (last and created > last):
+            continue
+        in_span.append(latest_attempt_view(source))
+
+    def matches_required(job: dict[str, Any], required: str) -> bool:
+        name = str(job.get("name") or "").strip()
+        workflow = str(job.get("workflow") or "").strip()
+        qualified = f"{workflow} / {name}" if workflow and name else name or workflow
+        return (required in {name, qualified}
+                or qualified.endswith(" / " + required)
+                or required.endswith(" / " + name))
+
+    sample_count = int(critical.get("sampled_pr_count") or 0)
+    if critical.get("sample_job_list_cap_hit"):
+        sample_count = max(
+            0, sample_count - int(critical.get("sample_partial_count") or 0)
+        )
+    # Path-conditional required checks can describe disjoint PR types.  The
+    # representative walk scopes only to a required name that can actually
+    # supply its requested complete population; a four-commit release gate
+    # must not replace an 86-commit ordinary-PR sample.  Re-derive that choice
+    # from recording jobs rather than accepting the engine's selected SHAs.
+    representative_required = {
+        name for name in required_names
+        if sum(
+            any(matches_required(job, name)
+                for job in source.get("jobs") or [] if isinstance(job, dict))
+            for source in in_span
+        ) >= int(critical.get("check_present_n_pr") or sample_count)
+    }
+    eligible = []
+    for source in in_span:
+        jobs = [job for job in source.get("jobs") or [] if isinstance(job, dict)]
+        if (representative_required
+                and not all(any(matches_required(job, name) for job in jobs)
+                            for name in representative_required)):
+            continue
+        if (representative_required
+                and any(any(matches_required(job, name) for job in jobs)
+                        for name in required_names - representative_required)):
             continue
         row = dict(source)
-        included_jobs = [
-            job for job in source.get("jobs") or []
-            if isinstance(job, dict) and included_job(job)]
-        row["jobs"] = included_jobs
-        included_run_keys = {
-            str(job.get("run_key")) for job in included_jobs if job.get("run_key")}
-        included_run_ids = {
-            int(job.get("run_id") or 0) for job in included_jobs if job.get("run_id")}
-        included_workflows = {
-            str(job.get("workflow") or "") for job in included_jobs
-            if job.get("workflow")}
-        row["runs"] = [
-            run for run in source.get("runs") or []
-            if isinstance(run, dict) and (
-                (run.get("run_key") and str(run.get("run_key")) in included_run_keys)
-                or (run.get("id") and int(run.get("id") or 0) in included_run_ids)
-                or (not run.get("run_key") and not run.get("id")
-                    and str(run.get("workflow") or "") in included_workflows)
-            )
-        ]
-        commits.append(row)
+        if required_names and gate_definition:
+            row["jobs"] = [
+                job for job in jobs
+                if any(matches_required(job, name) for name in gate_definition)
+            ]
+            included_workflows = {
+                str(job.get("workflow") or "") for job in row["jobs"]
+            }
+            row["runs"] = [
+                run for run in source.get("runs") or []
+                if isinstance(run, dict)
+                and str(run.get("workflow") or "") in included_workflows
+            ]
+        eligible.append(row)
+    commits = sorted(
+        eligible, key=lambda row: str(row.get("created_at") or ""), reverse=True
+    )[:sample_count or None]
     scoped = dict(month)
     scoped["pr_commits"] = commits
 
@@ -248,10 +306,15 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # The engine's gate population has no duration-only bookkeeping cutoff.
-    # Eligibility comes from required/reachable checks above.
+    # The comparison aligns only the public timestamp span. Commit identities,
+    # check names, and each commit's last-finishing gate all come from the
+    # recording so the engine cannot provide its own answer to the oracle.
+    gate_caps = {
+        str(row.get("name") or ""): float(row.get("p50_s") or 0.0)
+        for row in critical.get("checks") or [] if isinstance(row, dict)
+    }
     return module.compute(
-        scoped, bookkeeping_cutoff_s=0, gate_by_sha=gate_by_sha)
+        scoped, bookkeeping_cutoff_s=0, gate_caps=gate_caps)
 
 
 def _fixture_name(endpoint: str) -> str:
@@ -297,6 +360,10 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
     # copied page rows to the month identity by workflow + run timestamp before
     # deduplication, and alias the corresponding check-run fixture.
     commits_by_workflow_time: dict[tuple[str, str], set[str]] = {}
+    month_shas = {
+        str(commit.get("sha") or "")
+        for commit in month.get("pr_commits") or [] if isinstance(commit, dict)
+    }
     for commit in month.get("pr_commits") or []:
         if not isinstance(commit, dict):
             continue
@@ -307,9 +374,10 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                 ).add(str(commit.get("sha") or ""))
 
     existing_heads: dict[int, set[str]] = {}
-    existing_oldest: dict[int, str] = {}
-    existing_times: dict[int, set[str]] = {}
     existing_pages: dict[int, dict[str, Any]] = {}
+    existing_runs_by_workflow_time: dict[
+        tuple[str, str], list[dict[str, Any]]
+    ] = {}
     for workflow in workflows.values():
         workflow_id = int(workflow.get("id") or 0)
         endpoint = f"repos/{repository}/actions/workflows/{workflow_id}/runs?per_page=100"
@@ -327,6 +395,7 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                 old_sha = str(run.get("head_sha") or "")
                 if replacement:
                     run["head_sha"] = replacement
+                    run["pull_requests"] = []
                     if isinstance(run.get("head_commit"), dict):
                         run["head_commit"]["id"] = replacement
                     old_token = _fixture_name(
@@ -337,6 +406,17 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                     new_check = destination / new_token
                     if old_check.is_file() and not new_check.exists():
                         shutil.copy2(old_check, new_check)
+                existing_runs_by_workflow_time.setdefault((
+                    str(workflow.get("name") or workflow.get("path") or ""),
+                    str(run.get("created_at") or ""),
+                ), []).append(run)
+            payload["workflow_runs"] = [
+                run for run in payload.get("workflow_runs") or []
+                if (not isinstance(run, dict)
+                    or str(run.get("event") or "")
+                    not in {"pull_request", "pull_request_target", "merge_group"}
+                    or str(run.get("head_sha") or "") in month_shas)
+            ]
             fixture.write_text(
                 json.dumps(payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8")
@@ -345,18 +425,6 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                 str(run.get("head_sha") or "")
                 for run in payload.get("workflow_runs") or [] if isinstance(run, dict)
             }
-            existing_times[workflow_id] = {
-                str(run.get("created_at") or "")
-                for run in payload.get("workflow_runs") or []
-                if isinstance(run, dict) and run.get("created_at")
-            }
-            created = sorted(
-                str(run.get("created_at") or "")
-                for run in payload.get("workflow_runs") or []
-                if isinstance(run, dict) and run.get("created_at")
-            )
-            if created:
-                existing_oldest[workflow_id] = created[0]
 
     runs_by_workflow: dict[int, list[dict[str, Any]]] = {}
     run_serial = 0
@@ -434,13 +502,8 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
             head_sha = str(commit.get("sha") or "")
             created_at = str(source_run.get("created_at")
                              or commit.get("created_at") or "")
-            if (not workflow_id or not head_sha
-                    or created_at in existing_times.get(workflow_id, set())
-                    or (existing_oldest.get(workflow_id)
-                        and created_at >= existing_oldest[workflow_id])):
+            if not workflow_id or not head_sha:
                 continue
-            run_serial += 1
-            run_id = 71_000_000 + run_serial
             starts = sorted(str(job.get("started_at") or "") for job in jobs
                             if job.get("started_at"))
             ends = sorted(str(job.get("completed_at") or "") for job in jobs
@@ -448,29 +511,53 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
             completed = (bool(commit.get("completed"))
                          and str(source_run.get("status") or "completed") == "completed")
             failed = any(job.get("conclusion") not in (None, "success", "skipped") for job in jobs)
-            runs_by_workflow.setdefault(workflow_id, []).append({
-                "id": run_id,
-                "name": workflow_name,
-                "head_branch": "golden-recording",
-                "head_sha": head_sha,
-                "path": workflow.get("path"),
-                "display_title": "Recorded pull request commit",
-                "run_number": run_serial,
-                "event": "pull_request",
-                "status": "completed" if completed else "in_progress",
-                "conclusion": ("failure" if failed else "success") if completed else None,
-                "workflow_id": workflow_id,
-                "created_at": created_at,
-                "updated_at": source_run.get("updated_at") or (
-                    ends[-1] if ends else created_at),
-                "run_started_at": starts[0] if starts else created_at,
-                "run_attempt": 1,
-                "head_commit": {"id": head_sha, "timestamp": commit.get("created_at")},
-                "pull_requests": [],
-            })
+            copied_matches = [
+                row for row in existing_runs_by_workflow_time.get(
+                    (workflow_name, created_at), [])
+                if str(row.get("head_sha") or "") == head_sha and row.get("id")
+            ]
+            copied_run = len(copied_matches) == 1
+            if copied_run:
+                run_id = int(copied_matches[0]["id"])
+            else:
+                run_serial += 1
+                run_id = 71_000_000 + run_serial
+                runs_by_workflow.setdefault(workflow_id, []).append({
+                    "id": run_id,
+                    "name": workflow_name,
+                    "head_branch": "golden-recording",
+                    "head_sha": head_sha,
+                    "path": workflow.get("path"),
+                    "display_title": "Recorded pull request commit",
+                    "run_number": run_serial,
+                    "event": "pull_request",
+                    "status": "completed" if completed else "in_progress",
+                    "conclusion": ("failure" if failed else "success") if completed else None,
+                    "workflow_id": workflow_id,
+                    "created_at": created_at,
+                    "updated_at": source_run.get("updated_at") or (
+                        ends[-1] if ends else created_at),
+                    "run_started_at": starts[0] if starts else created_at,
+                    "run_attempt": 1,
+                    "head_commit": {"id": head_sha, "timestamp": commit.get("created_at")},
+                    "pull_requests": [],
+                })
+            copied_jobs_by_name: dict[str, list[dict[str, Any]]] = {}
+            if copied_run:
+                copied_fixture = destination / _fixture_name(
+                    f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100")
+                if copied_fixture.is_file():
+                    for copied_job in load(copied_fixture).get("jobs") or []:
+                        if isinstance(copied_job, dict):
+                            copied_jobs_by_name.setdefault(
+                                str(copied_job.get("name") or ""), []
+                            ).append(copied_job)
             recorded_jobs: list[dict[str, Any]] = []
             for source_job in jobs:
                 job_serial += 1
+                copied_job_rows = copied_jobs_by_name.get(
+                    str(source_job.get("name") or ""), [])
+                copied_job = copied_job_rows.pop(0) if copied_job_rows else {}
                 recorded_jobs.append({
                     "id": 72_000_000 + job_serial,
                     "run_id": run_id,
@@ -479,8 +566,8 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                     "conclusion": source_job.get("conclusion"),
                     "started_at": source_job.get("started_at"),
                     "completed_at": source_job.get("completed_at"),
-                    "runner_name": "golden-recording",
-                    "steps": [],
+                    "runner_name": copied_job.get("runner_name") or "golden-recording",
+                    "steps": copied_job.get("steps") or [],
                 })
             jobs_recorded = (bool(source_run.get("jobs_recorded"))
                              if "jobs_recorded" in source_run else bool(jobs))
@@ -488,6 +575,13 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                 # No fixture means the replay client observes a failed read.
                 # An empty successful payload would turn missing evidence into
                 # a clean run and shrink the gate sample silently.
+                if copied_run:
+                    for filter_suffix in ("", "&filter=all"):
+                        endpoint = (
+                            f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100"
+                            f"{filter_suffix}"
+                        )
+                        (destination / _fixture_name(endpoint)).unlink(missing_ok=True)
                 continue
             for offset in range(0, max(1, len(recorded_jobs)), 100):
                 page = 1 + offset // 100
@@ -497,29 +591,32 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                     "jobs": recorded_jobs[offset:offset + 100],
                 }
                 for filter_suffix in ("", "&filter=all"):
-                    _write_fixture(
-                        destination,
+                    endpoint = (
                         f"repos/{repository}/actions/runs/{run_id}/jobs?per_page=100"
-                        f"{filter_suffix}{page_suffix}",
-                        payload,
+                        f"{filter_suffix}{page_suffix}"
                     )
+                    _write_fixture(destination, endpoint, payload)
 
-    for workflow_id, runs in runs_by_workflow.items():
+    workflow_ids = {
+        int(workflow.get("id") or 0) for workflow in workflows.values()
+        if int(workflow.get("id") or 0)
+    }
+    for workflow_id in sorted(workflow_ids):
+        runs = runs_by_workflow.get(workflow_id, [])
         runs.sort(key=lambda run: str(run.get("created_at") or ""), reverse=True)
         total = len(runs) + len(existing_heads.get(workflow_id, set()))
         first_payload = dict(existing_pages.get(workflow_id) or {})
         first_rows = list(first_payload.get("workflow_runs") or [])
         first_count = min(len(runs), max(0, 100 - len(first_rows)))
-        if first_count:
-            first_payload["total_count"] = total
-            first_payload["workflow_runs"] = first_rows + runs[:first_count]
-            for suffix in ("", "&event=pull_request"):
-                _write_fixture(
-                    destination,
-                    f"repos/{repository}/actions/workflows/{workflow_id}/runs"
-                    f"?per_page=100{suffix}",
-                    first_payload,
-                )
+        first_payload["total_count"] = total
+        first_payload["workflow_runs"] = first_rows + runs[:first_count]
+        for suffix in ("", "&event=pull_request"):
+            _write_fixture(
+                destination,
+                f"repos/{repository}/actions/workflows/{workflow_id}/runs"
+                f"?per_page=100{suffix}",
+                first_payload,
+            )
         remaining = runs[first_count:]
         for offset in range(0, len(remaining), 100):
             page = 2 + offset // 100

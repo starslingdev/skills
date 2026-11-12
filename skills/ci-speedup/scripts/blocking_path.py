@@ -6748,6 +6748,17 @@ def _capture_relation(captured_at: str, scanned_at: str) -> str:
     return "newer than" if c > s else "older than"
 
 
+def _pr_sample_job_list_budget_line(doc: dict[str, Any]) -> str:
+    """Return the bounded PR-sample job-list read disclosure, when stamped."""
+    cp = doc.get("pr_critical_path") or {}
+    reads = cp.get("sample_job_list_reads")
+    cap = cp.get("sample_job_list_read_cap")
+    if not isinstance(reads, int) or not isinstance(cap, int):
+        return ""
+    cap_note = "; cap reached" if cp.get("sample_job_list_cap_hit") else ""
+    return f"> - **PR-sample job-list reads:** {reads} of at most {cap}{cap_note}."
+
+
 def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[str]:
     """Spell out WHERE the numbers come from: levels 1–2 are P50 from the committed
     ci-speedup audit (its own sample size + window + gate-sample completeness);
@@ -6907,6 +6918,7 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
         short_reasons = {
             "fetch failures": "some candidate or check-run history was unreadable",
             "page cap": "the bounded candidate-page walk stopped before reaching the target",
+            "job list cap": "the bounded job-list read budget stopped before reaching the target",
             "era door": "older PRs from a different workflow configuration were excluded",
             "candidates exhausted": "the visible candidate history contained too few qualifying PRs",
             "required suite empty": "no commit ran every observable required check",
@@ -6987,6 +6999,9 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "typical PR** (observed), not a *confirmed required* check. Slow "
                    "checks that run on only a minority of PRs are shown as a footnote, "
                    "not the headline.")
+    job_list_budget = _pr_sample_job_list_budget_line(doc)
+    if job_list_budget:
+        out.append(job_list_budget)
     dropped = cp.get("dropped_non_pr_checks") or []
     if dropped:
         shown = ", ".join(f"`{_clean_label(n)}`" for n in dropped[:4])
@@ -8877,7 +8892,12 @@ def _metadata_table(doc: dict[str, Any], repo: str) -> list[str]:
                 if span_first and span_last else "")
         sample_size = (f"{spr} PRs sampled (minimum target {tgt})"
                        if spr > tgt else f"{spr} of {tgt} PRs sampled")
-        rows.append(("PR gate sample", f"{sample_size}: {reason}{span}"))
+        budget = ""
+        reads = cp.get("sample_job_list_reads")
+        cap = cp.get("sample_job_list_read_cap")
+        if isinstance(reads, int) and isinstance(cap, int):
+            budget = f"; {reads}/{cap} job-list reads"
+        rows.append(("PR gate sample", f"{sample_size}: {reason}{span}{budget}"))
     if skill.startswith("installed:"):
         # Content-hash provenance for an installed skill copy (issue #2): not a
         # commit, so a plain identity string with NO commit permalink to fabricate.
@@ -13895,7 +13915,8 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     _era_lines = _config_era_disclosure_lines(cp, captured_at)
     if _era_lines:
         out += ["---", "", *_era_lines]
-    out += _data_sources_footer(doc, repo)
+    _budget_line = _pr_sample_job_list_budget_line(doc)
+    out += _data_sources_footer(doc, repo, lead=[_budget_line] if _budget_line else None)
     out += _starsling_footer()
     return _strip_emdashes("\n".join(out))
 
@@ -15160,14 +15181,21 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         }
     # Stamp `_demoted_gate_framing` = "the header framed this pole 'Rarely the merge gate' /
     # 'Opt-in / rare' / 'Required · path-conditional'" — EXACTLY the per-pole header's demotion
-    # branch (npop present, NOT typical, NOT the blocker, NOT a chain member). The TOC row and the
+    # branch (npop present, NOT typical, NOT a chain member). A workflow-frequency blocker can
+    # still be a rarely-slowest check; blocker identity must not let its hand-off reclaim the
+    # typical-gate wording that its per-PR pole frequency disowns. The TOC row and the
     # agent-prompt gate line read this stamp so a demoted pole isn't handed the typical-gate framing
     # its own header disowns (caddy goreleaser-check). Stamped HERE, after `blocker`/`chain` exist
     # and before both the TOC and the per-pole loop, so all three render sites agree.
     _chain_set = set(_chain_modal) if chain_active else set()
     for p in pole_wfs:
+        _demoted_by_schema = (
+            not _typical_check(str(p.get("check", "")))
+            if _have_pole_n
+            else (not _pole_typical(p) and p is not blocker)
+        )
         p["_demoted_gate_framing"] = bool(
-            npop and not _pole_typical(p) and p is not blocker
+            npop and _demoted_by_schema
             and str(p.get("check", "")) not in _chain_set)
     # `top_is_gate` carries the removed Level-1 chart's ◀-is-the-gate condition to the
     # Contents' first row: the frequency gate is the slowest single check AND the gate is

@@ -16,19 +16,15 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1] / "golden"
 _REPOSITORIES = {
     "home-assistant-core": (
-        "the runner-minute triage stamp and reviewed Bottom line remain open",
+        "the reviewed Bottom line remains open",
         (
-            # Existing triage bookkeeping names a workflow with no cost-spine row.
-            "full report verifier failed: runner-minute cost spine source block is re-derivable",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
     ),
     "vercel-nextjs": (
-        "the population-floor headline and reviewed Bottom line remain open",
+        "the reviewed Bottom line remains open",
         (
-            # Population-floor prose still disagrees with its stamped sibling split.
-            "full report verifier failed: headline reconciles a non-universal slowest check",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -43,12 +39,8 @@ _REPOSITORIES = {
         ),
     ),
     "microsoft-playwright": (
-        "the replay's disclosed fetch gaps, push tag and reviewed Bottom line remain open",
+        "the reviewed Bottom line remains open",
         (
-            # Missing recorded job lists are now failed reads; stop-reason wording lags.
-            "full report verifier failed: PR gate sample stop reason matches its bounded collection facts",
-            # A static workflow-dispatch finding still omits its lane-only tag.
-            "full report verifier failed: default-branch push lane is isolated",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -313,7 +305,44 @@ def test_replay_exposes_month_wide_runs_and_jobs_as_deeper_api_pages(tmp_path: P
     assert [job["name"] for job in jobs_page_2["jobs"]] == ["tests-100"]
 
 
-def test_engine_span_oracle_ignores_runs_without_included_gate_jobs(
+def test_replay_records_pull_request_pages_for_every_workflow(tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
+
+    def fixture(endpoint: str, payload: dict[str, object]) -> None:
+        with gzip.open(api / (compare._fixture_name(endpoint) + ".gz"),
+                       "wt", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+
+    fixture("repos/public/example/actions/workflows?per_page=100", {
+        "workflows": [
+            {"id": 11, "name": "CI", "path": ".github/workflows/ci.yml"},
+            {"id": 12, "name": "Docs", "path": ".github/workflows/docs.yml"},
+        ],
+    })
+    for workflow_id in (11, 12):
+        fixture(f"repos/public/example/actions/workflows/{workflow_id}/runs?per_page=100", {
+            "workflow_runs": [],
+        })
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"pr_commits": []}, stream)
+
+    replay = tmp_path / "replay"
+    compare._dynamic_replay_copy(recording, replay)
+
+    for workflow_id in (11, 12):
+        assert (replay / compare._fixture_name(
+            f"repos/public/example/actions/workflows/{workflow_id}/runs"
+            "?per_page=100&event=pull_request"
+        )).is_file()
+
+
+def test_engine_span_oracle_uses_every_recorded_run_without_engine_filtering(
         tmp_path: Path) -> None:
     compare = _load("compare")
     recording = tmp_path / "recording"
@@ -348,7 +377,135 @@ def test_engine_span_oracle_ignores_runs_without_included_gate_jobs(
 
     oracle = compare._oracle_for_engine_span(recording, findings)
 
-    assert oracle["typical_pr_wait_s"] == 600
+    assert oracle["typical_pr_wait_s"] == 1200
+
+
+def test_engine_span_oracle_derives_population_and_gates_without_chain_facts(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({
+            "schema_version": 1,
+            "pr_commits": [
+                {
+                    "sha": "commit-1", "created_at": "2026-11-01T00:00:00Z",
+                    "completed": True,
+                    "jobs": [{
+                        "workflow": "CI", "name": "test", "status": "completed",
+                        "started_at": "2026-11-01T00:00:00Z",
+                        "completed_at": "2026-11-01T00:10:00Z",
+                    }],
+                },
+                {
+                    "sha": "commit-2", "created_at": "2026-11-02T00:00:00Z",
+                    "completed": True,
+                    "jobs": [{
+                        "workflow": "Lint", "name": "lint", "status": "completed",
+                        "started_at": "2026-11-02T00:00:00Z",
+                        "completed_at": "2026-11-02T00:05:00Z",
+                    }],
+                },
+            ],
+        }, stream)
+    findings = {"pr_critical_path": {
+        "sample_span_first": "2026-11-01T00:00:00Z",
+        "sample_span_last": "2026-11-02T00:00:00Z",
+        "checks": [{"name": "invented / engine-only", "required_reachable": True}],
+        "chain_facts": [{"sha": "commit-1", "chain": ["invented / engine-only"]}],
+    }}
+
+    oracle = compare._oracle_for_engine_span(recording, findings)
+
+    assert oracle["sample"]["completed_with_eligible_jobs"] == 2
+    assert oracle["gate_order"] == ["CI / test", "Lint / lint"]
+
+
+def test_engine_span_oracle_matches_the_most_specific_nested_gate_cap(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({
+            "schema_version": 1,
+            "pr_commits": [{
+                "sha": "commit-1", "created_at": "2026-11-01T00:00:00Z",
+                "completed": True,
+                "jobs": [
+                    {"workflow": "CI", "name": "test / build",
+                     "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:03:20Z"},
+                    {"workflow": "CI", "name": "lint",
+                     "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:02:00Z"},
+                ],
+            }],
+        }, stream)
+    findings = {"pr_critical_path": {
+        "sample_span_first": "2026-11-01T00:00:00Z",
+        "sample_span_last": "2026-11-01T00:00:00Z",
+        "checks": [
+            {"name": "test / build", "p50_s": 100},
+            {"name": "build", "p50_s": 50},
+            {"name": "lint", "p50_s": 120},
+        ],
+    }}
+
+    oracle = compare._oracle_for_engine_span(recording, findings)
+
+    assert oracle["gate_order"][0] == "CI / lint"
+
+
+def test_engine_span_oracle_rederives_the_representative_required_pr_type(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    commits = []
+    for index in range(4):
+        jobs = [
+            {"workflow": "CI", "name": "common gate", "status": "completed",
+             "started_at": f"2026-11-0{index + 1}T00:00:00Z",
+             "completed_at": f"2026-11-0{index + 1}T00:02:00Z"},
+        ]
+        if index == 3:
+            jobs.append({
+                "workflow": "Release", "name": "release gate", "status": "completed",
+                "started_at": "2026-11-04T00:00:00Z",
+                "completed_at": "2026-11-04T00:20:00Z",
+            })
+        commits.append({
+            "sha": f"commit-{index}",
+            "created_at": f"2026-11-0{index + 1}T00:00:00Z",
+            "completed": True,
+            "jobs": jobs,
+        })
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"schema_version": 1, "pr_commits": commits}, stream)
+    findings = {
+        "required_checks": ["common gate", "release gate"],
+        "pr_critical_path": {
+            "sample_span_first": "2026-11-01T00:00:00Z",
+            "sample_span_last": "2026-11-04T00:00:00Z",
+            "sampled_pr_count": 4,
+            "sample_partial_count": 1,
+            "sample_job_list_cap_hit": True,
+            "check_present_n_pr": 3,
+            "checks": [
+                {"name": "common gate", "p50_s": 120},
+                {"name": "release gate", "p50_s": 1200},
+            ],
+        },
+    }
+
+    oracle = compare._oracle_for_engine_span(recording, findings)
+
+    assert oracle["sample"]["completed_with_eligible_jobs"] == 3
+    assert oracle["gate_order"] == ["CI / common gate"]
 
 
 def test_replay_preserves_run_identity_timestamps_and_missing_job_lists(
@@ -467,12 +624,23 @@ def test_replay_uses_one_commit_identity_on_copied_and_synthetic_pages(
     })
     fixture("repos/public/example/actions/workflows/11/runs?per_page=100", {
         "workflow_runs": [{
-            "head_sha": "real-sha", "created_at": "2026-11-01T00:00:00Z",
+            "id": 99, "head_sha": "real-sha",
+            "created_at": "2026-11-01T00:00:00Z",
             "head_commit": {"id": "real-sha"},
         }],
     })
     fixture("repos/public/example/commits/real-sha/check-runs?per_page=100", {
         "check_runs": [],
+    })
+    fixture("repos/public/example/actions/runs/99/jobs?per_page=100", {
+        "total_count": 1,
+        "jobs": [{
+            "id": 100, "name": "test", "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-11-01T00:00:00Z",
+            "completed_at": "2026-11-01T00:00:30Z",
+            "steps": [{"name": "Run test", "number": 1}],
+        }],
     })
     with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
         json.dump({"pr_commits": [{
@@ -480,8 +648,14 @@ def test_replay_uses_one_commit_identity_on_copied_and_synthetic_pages(
             "completed": True,
             "runs": [{"workflow": "CI", "status": "completed",
                       "created_at": "2026-11-01T00:00:00Z",
-                      "updated_at": "2026-11-01T00:01:00Z"}],
-            "jobs": [],
+                      "updated_at": "2026-11-01T00:01:00Z",
+                      "jobs_recorded": True}],
+            "jobs": [{
+                "workflow": "CI", "name": "test", "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-11-01T00:00:00Z",
+                "completed_at": "2026-11-01T00:01:00Z",
+            }],
         }]}, stream)
 
     replay = tmp_path / "replay"
@@ -493,6 +667,12 @@ def test_replay_uses_one_commit_identity_on_copied_and_synthetic_pages(
     assert (replay / compare._fixture_name(
         "repos/public/example/commits/commit-000001/check-runs?per_page=100"
     )).is_file()
+    copied_jobs = json.loads((replay / compare._fixture_name(
+        "repos/public/example/actions/runs/99/jobs?per_page=100"
+    )).read_text(encoding="utf-8"))["jobs"]
+    assert [job["name"] for job in copied_jobs] == ["test"]
+    assert copied_jobs[0]["completed_at"] == "2026-11-01T00:01:00Z"
+    assert copied_jobs[0]["steps"] == [{"name": "Run test", "number": 1}]
 
 
 def test_replay_does_not_merge_ambiguous_same_second_commits(tmp_path: Path) -> None:
@@ -531,7 +711,8 @@ def test_replay_does_not_merge_ambiguous_same_second_commits(tmp_path: Path) -> 
     page = json.loads((replay / compare._fixture_name(
         "repos/public/example/actions/workflows/11/runs?per_page=100"
     )).read_text(encoding="utf-8"))["workflow_runs"]
-    assert [row["head_sha"] for row in page] == ["copied-a", "copied-b"]
+    assert [row["head_sha"] for row in page] == [
+        "copied-a", "copied-b", "commit-a", "commit-b"]
 
 
 def test_replay_keeps_distinct_runs_for_one_commit(tmp_path: Path) -> None:
@@ -579,7 +760,8 @@ def test_replay_keeps_distinct_runs_for_one_commit(tmp_path: Path) -> None:
         "repos/public/example/actions/workflows/11/runs?per_page=100"
     )).read_text(encoding="utf-8"))["workflow_runs"]
     assert [row["created_at"] for row in page] == [
-        "2026-11-01T02:00:00Z", "2026-11-01T01:00:00Z"]
+        "2026-11-01T02:00:00Z", "2026-11-01T02:00:00Z",
+        "2026-11-01T01:00:00Z"]
 
 
 def test_month_recording_job_list_reads_are_bounded(
@@ -682,6 +864,57 @@ def test_comparison_rejects_wrong_month_wide_measurements() -> None:
     assert any("gate share differs" in row for row in differences)
     assert any("gate p50 differs" in row for row in differences)
     assert any("frequent gate absent" in row for row in differences)
+
+
+def test_comparison_keeps_the_reviewed_120_second_gate_p50_tolerance() -> None:
+    compare = _load("compare")
+    findings = {
+        "pr_critical_path": {
+            "sampled_pr_count": 100,
+            "checks": [{"name": "CI / tests", "pole_n": 100, "p50_s": 300}],
+        },
+        "findings": [],
+    }
+    expected = {"oracle": {
+        "sample": {"completed_with_eligible_jobs": 100},
+        "gate_order": ["CI / tests"],
+        "gates": [{
+            "check": "CI / tests", "last_on": 100, "out_of": 100,
+            "share": 1.0, "p50_s": 100,
+        }],
+    }, "human_review": {}}
+
+    differences = compare.compare(findings, expected)
+
+    assert any("gate p50 differs" in row for row in differences)
+
+
+def test_comparison_does_not_hide_order_changes_below_fifteen_percent() -> None:
+    compare = _load("compare")
+    findings = {
+        "pr_critical_path": {
+            "sampled_pr_count": 100,
+            "checks": [
+                {"name": "CI / second", "pole_n": 9, "p50_s": 90},
+                {"name": "CI / first", "pole_n": 10, "p50_s": 100},
+            ],
+        },
+        "findings": [],
+    }
+    expected = {"oracle": {
+        "sample": {"completed_with_eligible_jobs": 100},
+        "gate_order": ["CI / second", "CI / first"],
+        "gates": [
+            {"check": "CI / second", "last_on": 9, "out_of": 100,
+             "share": 0.09, "p50_s": 90},
+            {"check": "CI / first", "last_on": 10, "out_of": 100,
+             "share": 0.10, "p50_s": 100},
+        ],
+    }, "human_review": {}}
+
+    differences = compare.compare(findings, expected)
+
+    assert any("gate order differs" in row for row in differences)
 
 
 def test_bottom_line_expectation_does_not_match_a_later_section() -> None:
