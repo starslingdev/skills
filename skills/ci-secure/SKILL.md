@@ -100,10 +100,7 @@ files.** A run leaves at most two files: the findings JSON (in tmp) and — only
 on the user's save pick — the report. One exception, not a scratch file: a
 Phase 5 fix subagent writes its verification re-scan to
 `${TMPDIR:-/tmp}/ci-secure-recheck-${SLUG}.json` (same per-repo slug), because
-its oracle is "re-run the scan and satisfy the finding's completion condition",
-which cannot overwrite `$FINDINGS`. The P14.18 MEDIUM cosmetic exception may
-remain only while every listed occurrence stays MEDIUM and retains all three
-cosmetic-boundary evidence markers; every other finding must be gone.
+its oracle is "re-run the scan and satisfy the finding's completion condition", which cannot overwrite `$FINDINGS`. The P14.18 MEDIUM cosmetic exception may remain only while every listed occurrence stays MEDIUM and retains all three cosmetic-boundary evidence markers; every other finding must be gone.
 
 If `run.py` exits non-zero — OR exits zero but `$FINDINGS` is missing or
 unparseable — that is a **coverage failure, not a clean result**: surface
