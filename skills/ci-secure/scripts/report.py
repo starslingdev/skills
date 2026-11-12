@@ -1904,6 +1904,41 @@ _PUSH_ACCESS_PREFIX = "sec.environments."
 _PUSH_ACCESS_IDS = frozenset({"sec.secrets.environment-scoped"})
 
 
+def _exposed_secrets_callout(security_score: Any) -> str:
+    """A short callout under the headline when `sec.secrets.environment-scoped`
+    FAILS: how many secrets any workflow pushed to any branch can read, and a
+    link to the sub-section that names them. Nothing on a pass, an unmeasured
+    or a missing row: the callout never stands in for an unread list. It is
+    a blockquote, not a heading, and adds no count to the vector headline."""
+    if not isinstance(security_score, dict):
+        return ""
+    facts = security_score.get("facts")
+    row = next((f for f in facts if isinstance(f, dict)
+                and f.get("fact_id") == "sec.secrets.environment-scoped"),
+               None) if isinstance(facts, list) else None
+    if not row or row.get("outcome") != "fail":
+        return ""
+    block = security_score.get("push_access")
+    inv = block.get("inventory") if isinstance(block, dict) else None
+    inv = inv if isinstance(inv, dict) else {}
+    lists = [inv.get(k) for k in ("repo_secrets", "org_secrets")]
+    total = sum(len(x) for x in lists if isinstance(x, list))
+    count = (f"{total} secret(s)" if total else "Repository or organization "
+             "secrets")
+    partial = (" (at least; one secret list could not be read)"
+               if inv.get("status") == "partial" else "")
+    return (
+        f"> [!CAUTION]\n> **Secrets reachable from any branch.** {count}"
+        f"{partial} sit outside every environment, so any workflow pushed to "
+        "any branch of this repository can read them: one leaked push "
+        "credential exposes them all, with no review and no merge. This is a "
+        "configuration gap, not one of the attack vectors counted above. "
+        "Move them into an environment that only protected branches can use "
+        "(one that passes `sec.environments.branch-restricted`); "
+        "the names and steps are under "
+        "[If a push credential leaks](#if-a-push-credential-leaks).")
+
+
 def _fact_row(f: dict[str, Any]) -> str:
     mark = _OUTCOME_MARKS.get(str(f.get("outcome")), str(f.get("outcome")))
     return f"| {mark} | {_cell(f.get('fact'))} | {_cell(f.get('evidence'))} |"
@@ -2891,6 +2926,14 @@ def render(
     out.append(_headline_block(groups, scanned_workflows, n_vectors,
                                coverage_complete))
     out.append("")
+
+    # Secrets any pushed workflow receives: a hygiene row, not a vector, but
+    # the one whose failure decides what a single leaked push credential
+    # takes, so it is named here and not only in the table further down.
+    exposed = _exposed_secrets_callout(findings_json.get("security_score"))
+    if exposed:
+        out.append(exposed)
+        out.append("")
 
     # The vector map — the analog of ci-score's check table and ci-speedup's
     # long-pole map. It renders in BOTH cases: on a clean report the ten ✅
