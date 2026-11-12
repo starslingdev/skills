@@ -322,6 +322,24 @@ entries are dated (UTC). Format loosely follows
   reads complete. The reader's accept/reject verdict is pinned against
   ci-score's by a repo-root parity test.
 
+- **2026-11-11** — Unverified remote code execution now covers a GitHub CLI
+  extension installed at a mutable reference (#330). A job that runs
+  `gh extension install OWNER/REPO` with no `--pin` (the latest release) or
+  with `--pin` set to a tag, branch or abbreviated commit, and then runs that
+  extension in the same job (`gh <name> …` or `gh extension exec <name>`),
+  is reported: whoever can move that tag or branch decides what the next run
+  executes with the job's token. A binary extension's tag on a release
+  published as immutable cannot move, which the offline scan cannot see; the
+  finding and catalog say so and give the fix for each extension kind (a
+  commit pin for a script extension; an immutable-release tag, or a
+  digest-verified download, for a binary one). A full 40-hex `--pin`, a local install
+  and an install of the scanned repository are not reported; an install with
+  no visible run of the extension is recorded as a coverage note. Covers the
+  `ext` alias, `--pin=X`, `--force`, flag order, `HOST/OWNER/REPO` and URL
+  targets, multi-line `run:` blocks, and a run captured with `$( … )` after
+  the install on the same line; a `$( … )` inside single quotes is printed
+  text and is read as neither half.
+
 - **2026-11-09** — A crafted workflow line can no longer freeze the scan. The
   install-command matcher (dependency install scripts in a job that holds
   secrets) offered two readings of the same text in four places: an
