@@ -618,7 +618,9 @@ def test_render_plan_returns_every_group_no_trim() -> None:
     assert set(included) == set(_HIGH_PATTERNS) | set(_MEDIUM_PATTERNS)
     # HIGH groups sort ahead of MEDIUM ones in render order
     assert set(included[:8]) == set(_HIGH_PATTERNS)
-    assert all(set(g) == {"pattern", "dormant"} for g in plan)
+    # `verdict` carries the agent's one-line judgment for the terminal summary
+    # ("" here: these findings have no scenario).
+    assert all(set(g) == {"pattern", "dormant", "verdict"} for g in plan)
 
 
 def test_every_group_renders_in_the_report_body() -> None:
@@ -1246,24 +1248,26 @@ def test_chain_status_marks_a_skipped_network_gated_chain_as_not_a_pass() -> Non
     assert "SKIPPED" in row and "NOT a pass" in row
 
 
-def test_finding_opens_with_a_stakes_first_line_from_its_attacker_text() -> None:
-    """Sibling recommendation shape: one bold plain-English line saying what
-    is at stake, derived from this finding's own attacker text — never
-    invented, and never a restatement of the pattern id."""
+def test_finding_opens_with_its_plain_sections_not_catalog_material() -> None:
+    """A finding opens with the agent's plain sections (here an older
+    one-paragraph scenario, which fills only the attacker section). The bold
+    stakes line that used to lead was the attacker text's first sentence
+    printed twice; the plain headings replace it."""
     f = _mk()
     f["attacker_scenario"] = (
         "Any GitHub user can open a fork PR and run code with the repo's write "
         "token. That token can push commits to protected branches."
     )
     md = report.render({"findings": [f], "repo": "x/y", "scanned_workflows": 1})
-    # The anchor precedes the heading (ci-speedup convention), so the stakes
-    # line is the first thing after the HEADING, not after the anchor.
+    # The anchor precedes the heading (ci-speedup convention), so the first
+    # section is the first thing after the HEADING, not after the anchor.
     after_anchor = md.split('<a id="finding-1"></a>', 1)[1]
     body = after_anchor.split("\n## ", 1)[1].split("\n", 1)[1]
     assert body.lstrip().startswith(
-        "**Any GitHub user can open a fork PR and run code with the repo's "
-        "write token.**"
+        "#### What an attacker could do then\n\nAny GitHub user can open a "
+        "fork PR and run code with the repo's write token."
     )
+    assert body.count("Any GitHub user can open a fork PR") == 1
 
 
 def test_fix_block_states_the_risk_of_the_change_and_passes_it_to_the_agent() -> None:
@@ -1442,7 +1446,9 @@ def test_multiline_catalog_tldr_renders_without_breaking_markdown() -> None:
     assert "| Field | Value |" not in md
 
     # 2. Every datum the old table carried is still present, one bullet each.
-    body = md.split("#### 🔍 Evidence")[0]
+    # The definition list is the catalog-reference block; the plain sections
+    # above it are prose paragraphs by design.
+    body = md.split("#### 🔍 Evidence")[0].split("#### 📋 Catalog reference", 1)[1]
     for label in (
         "Pattern", "TL;DR", "Severity of this kind of setup",
         "Workflow activity", "Occurrences",
@@ -1465,16 +1471,16 @@ def test_multiline_catalog_tldr_renders_without_breaking_markdown() -> None:
         assert re.match(r"^(- |#|<|>|\*\*)", line), f"bare continuation line: {line!r}"
 
 
-def test_attacker_scenario_bullet_is_present_when_supplied() -> None:
-    """The scenario datum survives the table→list conversion."""
+def test_attacker_scenario_section_is_present_when_supplied() -> None:
+    """The scenario datum renders under its plain heading."""
     m = _mk(pattern="P14.9", evidence="")
     m["attacker_scenario"] = "Any fork PR author runs code with your token."
     md = report._finding_group_section(
         1, [m], report._load_catalog_sections(None), "x/y", "abc1234", "",
     )
     assert (
-        "- **What an attacker could do:** Any fork PR author runs code with "
-        "your token." in md
+        "#### What an attacker could do then\n\nAny fork PR author runs code "
+        "with your token." in md
     )
 
 
@@ -1996,16 +2002,19 @@ def test_fallback_attacker_prose_says_it_is_the_catalog_description() -> None:
     printed twice, once as the bold lead and once as the row."""
     md = report.render({"findings": [_mk(pattern="P14.10")], "repo": "x/y",
                         "scanned_workflows": 1})
-    row = next(ln for ln in md.splitlines()
-               if "**What an attacker could do:**" in ln)
+    row = _attacker_section_line(md)
     assert "catalog description" in row, row
     assert "run the full skill" in row
 
-    body = row.split("**What an attacker could do:**", 1)[1]
     lead = next((ln for ln in md.splitlines()
                  if ln.startswith("**") and ln.endswith("**")
-                 and ln.strip("*") in body), None)
-    assert lead is None, f"the bold lead duplicates the row verbatim: {lead}"
+                 and ln.strip("*") in row), None)
+    assert lead is None, f"a bold lead duplicates the section verbatim: {lead}"
+
+
+def _attacker_section_line(md: str) -> str:
+    """The first paragraph under a finding's attacker heading."""
+    return md.split("#### What an attacker could do then\n\n", 1)[1].split("\n", 1)[0]
 
 
 def test_authored_scenario_is_not_marked_as_the_catalog_description() -> None:
@@ -2016,8 +2025,7 @@ def test_authored_scenario_is_not_marked_as_the_catalog_description() -> None:
     )
     md = report.render({"findings": [authored], "repo": "x/y",
                         "scanned_workflows": 1})
-    row = next(ln for ln in md.splitlines()
-               if "**What an attacker could do:**" in ln)
+    row = _attacker_section_line(md)
     assert "catalog description" not in row
     assert "fork PR against this repo" in row
 

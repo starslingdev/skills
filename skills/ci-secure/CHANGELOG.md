@@ -13,6 +13,17 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- **2026-11-12** — P14.18 findings carry GitHub's "Allow GitHub Actions to
+  create and approve pull requests" repository setting as
+  `actions_can_approve_prs` (`state` `true`, `false` or `unread`, with a
+  `detail`), read once per scan from
+  `repos/{owner}/{repo}/actions/permissions/workflow` when a P14.18 finding
+  exists and the scan has `--repo` and a signed-in gh. It is never guessed:
+  the reference block says yes, no or not checked, and an unread setting adds
+  a sentence under "What an attacker could do then" saying it could not be
+  checked. The render plan (`report.py --render-plan`) now carries each
+  group's `verdict`, which the terminal summary prints as one line per finding.
+
 - **2026-11-12** (#341) — ci-secure: a new API-gated config hygiene check,
   `sec.default-branch.review-required`, and the incident that grounds it.
   The check passes when the default branch, through an active ruleset or
@@ -224,6 +235,24 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-11-12** — Every finding now opens with six plain-English sections
+  written for a reader who is not an engineer: What this workflow does, Why
+  ci-secure flagged it, What would have to go wrong first, What an attacker
+  could do then, Verdict, and How to close it. The catalog material (pattern
+  link, severity of this kind of setup, occurrences, activity, fix strategy,
+  platform note, TL;DR) moves below them into a compact "Catalog reference"
+  block, followed by the evidence and the catalog's fix recipe (now headed
+  "Fix recipe (catalog)"). The bold one-line lead is gone. Anchors, pattern
+  ids and catalog links are unchanged. The agent-written `attacker_scenario`
+  is now an object with one field per section (`what_it_does`, `why_flagged`,
+  `what_must_go_wrong`, `attacker_could`, `verdict`, `how_to_close`); an
+  older one-paragraph scenario still renders, under "What an attacker could
+  do then". The verdict may honestly say low. `verify_report.py`'s scenario
+  check now reads the sections: a finding without every section counts as
+  not repo-specific, as the catalog stand-in always has, and a report where
+  no finding has them fails. SKILL.md Phase 2.5 and
+  `references/scenario-authoring.md` describe the fields, and Phase 3 prints
+  one verdict line per finding.
 - **2026-11-12** — The P14.18 finding reads in plain English. Its title is now
   "Workflow That Outside Activity Can Start Has `pull-requests: write`" (the
   catalog anchor tail changes with it; the `P14.18` ID and the in-report

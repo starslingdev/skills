@@ -43,17 +43,45 @@ to a live workflow unless the distinction is kept. Dormancy drives a mandatory
 note in the report and the `all` fix selection, so read the report's rendered
 dormancy state rather than inferring one from a missing flag.
 
+**P14.18 findings only** also carry `actions_can_approve_prs`: GitHub's
+"Allow GitHub Actions to create and approve pull requests" repository setting
+(`can_approve_pull_request_reviews` from
+`GET repos/{owner}/{repo}/actions/permissions/workflow`), read once per scan
+when a P14.18 finding exists. `state` is `"true"`, `"false"` or `"unread"`,
+and `detail` says where the answer came from or why it could not be read (no
+`--repo`, gh not signed in, an API error). It is never guessed: an unread
+setting renders as "not checked" in the finding's reference block and as a
+sentence under "What an attacker could do then".
+
+```json
+"actions_can_approve_prs": {"state": "true", "detail": "read from the repository's Actions settings"}
+```
+
 ## The attacker_scenario merged in at Phase 2.5
 
 The one non-scripted field. Written once per pattern group and merged onto
-**every member** of that group:
+**every member** of that group. One field per plain section the report
+renders at the top of the finding, in this order (rules per field:
+[scenario-authoring.md](scenario-authoring.md)):
 
 ```json
 {
   ...,
-  "attacker_scenario": "Any GitHub user can open a fork PR — no prior access to the repo. Because bench.yml runs on pull_request_target and checks out the fork's code, the attacker's install scripts execute holding the repo's write token and secrets: they can push commits, mint releases, or exfiltrate credentials."
+  "attacker_scenario": {
+    "what_it_does": "Runs the benchmark suite on every pull request and posts the timings as a comment.",
+    "why_flagged": "It is started by pull requests from forks, runs with this repo's write pass and secrets, and then runs the pull request's own code.",
+    "what_must_go_wrong": "Nothing hard:\n- anyone with a GitHub account can open a fork pull request;\n- the job checks out that pull request's code and runs its install step.\nNo prior access to the repo is needed.",
+    "attacker_could": "Their install step runs holding the repo's write pass and secrets, so they could push commits or read every secret the job has.",
+    "verdict": "High: any stranger can reach it today.",
+    "how_to_close": "1. Run the benchmark on `pull_request` instead, where fork runs get no secrets and a read-only pass.\n2. If the comment must stay, post it from a second workflow that never runs the pull request's code."
+  }
 }
 ```
+
+A field may also be a list of strings (one line each). An older run's single
+string is still accepted and renders under "What an attacker could do then"
+alone; `tests/verify_report.py` then counts that finding as not
+repo-specific, exactly like the catalog's generic stand-in.
 
 ## Top-level blocks
 
