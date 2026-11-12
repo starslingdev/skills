@@ -340,6 +340,7 @@ _CITED_INCIDENTS = (
     "Codecov",
     "Miasma",
     "July 28 2026",
+    "Compromised GitHub accounts",
 )
 
 
