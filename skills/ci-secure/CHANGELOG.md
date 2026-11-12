@@ -305,6 +305,26 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-11** (#PR_NUMBER) — A GitHub CLI extension pinned to a tag on a
+  release GitHub has locked as immutable is no longer reported (P14.24). That
+  tag and its assets cannot move, but the offline scan could not see the
+  setting, so roughly a third of real gh-extension findings were this case,
+  including GitHub's own recommended lockfile-check workflow. With the GitHub
+  API lookups on (`--gh-impostor`, the same switch as P14.11, default `auto`),
+  the scan asks GitHub for the release at that tag once per repository and
+  tag, and reads its `immutable` field: `true` is recorded as a suppression
+  naming the release; `false` or no release at that tag (a branch or bare
+  tag) stays a finding that says which. No `--pin` and an abbreviated commit
+  stay findings with no lookup. When the lookup is off, `gh` is unavailable,
+  or it fails (timeouts and server errors are retried up to three times; a
+  rate limit or authentication failure is not), the finding is kept with its
+  offline wording and `gh_checks["P14.24"]` records `skipped` or `partial`
+  with the reason; the report shows this as a note, not as a missing
+  finding. Also fixed in the same finding text: a `--pin` written as a
+  `${{ }}` expression showed the scanner's internal placeholder instead of
+  the expression, and an abbreviated `--pin` was described as something git
+  re-resolves, which a gh extension install does not do.
+
 - **2026-11-11** (#329) — A repository that adopts GitHub's workflow lockfile no
   longer loses the impostor-SHA check (P14.11) in silence. With a lockfile,
   `uses:` lines carry tags and the commit lives only in

@@ -10,10 +10,12 @@ Usage:
     scan.py [--catalog PATH] [--root PATH] [--repo OWNER/REPO]
             [--gh-impostor auto|on|off]
 
-`--gh-impostor` gates the one network-gated detector (P14.11). `auto`
-(the default) runs it iff `gh` is authenticated; `on` requires it; `off`
-skips it. Every outcome is recorded in the output's `gh_checks` — a skip
-is never silence.
+`--gh-impostor` gates every GitHub API lookup the vectors make: the
+network-gated detector P14.11, and P14.24's release-immutability lookup for
+a GitHub CLI extension pinned to a tag. `auto` (the default) runs them iff
+`gh` is authenticated; `on` requires it; `off` skips them, so the scan stays
+offline. Every outcome is recorded in the output's `gh_checks` — a skip is
+never silence.
 
 Exit codes:
     0  success (with or without findings)
@@ -3714,7 +3716,9 @@ def _ref_description(ref: str | None) -> str:
         # it stays a NOUN PHRASE — a trailing clause here produced a sentence
         # that ran on through the rest of the finding.
         return f"`{ref}` (an ABBREVIATED commit id git re-resolves at fetch time)"
-    return f"`{ref}`"
+    # `_as_written`: a `${{ }}` ref is held as an internal stand-in token, and
+    # that token reached the reader's finding text verbatim.
+    return f"`{_as_written(ref)}`"
 
 
 def _git_subcommand(tokens: list[str]) -> tuple[str | None, str | None, list[str]]:
@@ -4838,6 +4842,193 @@ def _gh_extension_executions(
     return pairs
 
 
+def _gh_extension_ref_description(ref: str | None) -> str:
+    """`_ref_description` in the GitHub CLI's terms, not git's: `--pin` is
+    resolved by `gh` when the job installs the extension, and a binary
+    extension reads it as a release TAG name."""
+    if ref is None:
+        return "its latest release (no `--pin`)"
+    if _ABBREV_SHA_RE.match(ref):
+        return (f"`{ref}` (an ABBREVIATED commit id: the GitHub CLI resolves "
+                f"it when the job installs the extension, and a binary "
+                f"extension reads it as a release tag name, so it names no "
+                f"one fixed commit)")
+    return f"`{_as_written(ref)}`"
+
+
+# --- P14.24, gh extension arm: the release-immutability lookup -------------
+#
+# A binary extension's `--pin` names a release TAG. A release GitHub publishes
+# as IMMUTABLE locks its tag and assets, so that pin cannot move — but the
+# setting lives on GitHub, not in the workflow. With the network checks on
+# (the same `--gh-impostor` switch as P14.11, so `off` keeps the whole scan
+# offline), each tag-pinned install that the job then runs is looked up once
+# per (repository, tag) per scan:
+#
+#   GET /repos/{owner}/{repo}/releases/tags/{tag}   → the release's
+#   `immutable` boolean.
+#
+# Only a confirmed `immutable: true` removes a finding, and it is recorded as a
+# suppression. Everything else — `false`, a 404 (a branch or a bare tag, not a
+# release), an error, a rate limit, the lookup switched off — keeps today's
+# finding, and `gh_checks["P14.24"]` says how many lookups ran and why any did
+# not. The lookup can only ever remove a finding, never add one.
+_RELEASE_LOOKUP_ATTEMPTS = 3
+_RELEASE_LOOKUP_BACKOFF_S = 1.0
+_GITHUB_HOSTS = ("github.com", "www.github.com")
+
+
+@dataclass
+class _ReleaseLookupState:
+    enabled: bool = False
+    skip_reason: str = ""
+    root: Path | None = None
+    # (owner/repo lowercased, tag) → (verdict, reason). verdict is one of
+    # "immutable", "mutable", "not_release", "unknown".
+    cache: dict[tuple[str, str], tuple[str, str]] | None = None
+    # Every tag-pinned install that was paired with a run, in scan order:
+    # (shown as repo@tag (file:line), verdict, reason).
+    reached: list[tuple[str, str, str]] | None = None
+
+
+_RELEASE_LOOKUP = _ReleaseLookupState(cache={}, reached=[])
+
+
+def _reset_release_lookup(enabled: bool, skip_reason: str,
+                          root: Path | None) -> None:
+    global _RELEASE_LOOKUP
+    _RELEASE_LOOKUP = _ReleaseLookupState(
+        enabled=enabled, skip_reason=skip_reason, root=root,
+        cache={}, reached=[])
+
+
+def _extension_repo_slug(target: str) -> str | None:
+    """`owner/repo` for an extension hosted on github.com, else None."""
+    t = target
+    if "://" in t:
+        t = t.split("://", 1)[1]
+    parts = [p for p in t.rstrip("/").split("/") if p]
+    if len(parts) == 3 and parts[0].lower() in _GITHUB_HOSTS:
+        parts = parts[1:]
+    if len(parts) != 2:
+        return None
+    owner, repo = parts
+    if repo.endswith(".git"):
+        repo = repo[: -len(".git")]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or \
+            not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+        return None
+    return f"{owner}/{repo}"
+
+
+def _gh_release_immutability(slug: str, tag: str) -> tuple[str, str]:
+    """(verdict, reason) for the release at `tag` in `slug`.
+
+    Transient failures (a timeout, a server error) are retried up to
+    ``_RELEASE_LOOKUP_ATTEMPTS`` times; a rate limit or an authentication
+    failure is not, since retrying cannot change it. The reason never carries
+    a response body — only a classification.
+    """
+    from urllib.parse import quote
+    from gh_utils import check_auth_error, check_rate_limit_error  # noqa: E402
+    endpoint = f"repos/{slug}/releases/tags/{quote(tag, safe='')}"
+    last = "the lookup did not complete"
+    for attempt in range(_RELEASE_LOOKUP_ATTEMPTS):
+        if attempt:
+            time.sleep(_RELEASE_LOOKUP_BACKOFF_S * attempt)
+        try:
+            result = subprocess.run(
+                ["gh", "api", endpoint],
+                capture_output=True, text=True, timeout=30,
+            )
+        except FileNotFoundError:
+            return "unknown", "gh is not installed"
+        except subprocess.TimeoutExpired:
+            last = "the GitHub API timed out"
+            continue
+        logger.debug("gh api %s — exit=%s, response %d bytes", endpoint,
+                     result.returncode, len(result.stdout or ""))
+        if result.returncode == 0:
+            try:
+                body = json.loads(result.stdout or "{}")
+            except ValueError:
+                return "unknown", "the release response was not JSON"
+            flag = body.get("immutable") if isinstance(body, dict) else None
+            if flag is True:
+                return "immutable", ""
+            if flag is False:
+                return "mutable", ""
+            return "unknown", "the release response carried no `immutable` field"
+        stderr = result.stderr or ""
+        if "HTTP 404" in stderr or "Not Found" in stderr:
+            return "not_release", ""
+        if check_rate_limit_error(stderr)[0]:
+            return "unknown", "GitHub API rate limit reached"
+        if check_auth_error(stderr):
+            return "unknown", "gh authentication failed (run gh auth login)"
+        last = "the GitHub API returned an error"
+    return "unknown", f"{last} ({_RELEASE_LOOKUP_ATTEMPTS} attempts)"
+
+
+def _release_lookup(inst: "_GhExtensionInstall",
+                    file_path: Path) -> tuple[str, str]:
+    """Look up (or recall) the release an install's tag pin names, record the
+    outcome for `gh_checks`, and return (verdict, reason)."""
+    state = _RELEASE_LOOKUP
+    assert inst.ref is not None
+    shown_ref = _as_written(inst.ref)
+    shown_repo = _as_written(inst.repo)
+    try:
+        rel = (str(file_path.relative_to(state.root)) if state.root
+               else file_path.name)
+    except ValueError:
+        rel = file_path.name
+    label = f"{shown_repo}@{shown_ref} ({rel}:{inst.line})"
+    slug = _extension_repo_slug(inst.repo)
+    if not state.enabled:
+        verdict, reason = "unknown", state.skip_reason
+    elif "$EXPR" in inst.ref or "\x00" in inst.ref or "$" in inst.ref:
+        verdict, reason = ("unknown", "the pin is set at run time, so the "
+                           "release it names cannot be looked up")
+    elif slug is None:
+        verdict, reason = ("unknown", "the extension is not hosted on "
+                           "github.com")
+    else:
+        key = (slug.lower(), inst.ref)
+        assert state.cache is not None
+        if key not in state.cache:
+            state.cache[key] = _gh_release_immutability(slug, inst.ref)
+        verdict, reason = state.cache[key]
+    assert state.reached is not None
+    state.reached.append((label, verdict, reason))
+    return verdict, reason
+
+
+def _release_lookup_status() -> tuple[str | None, list[str]]:
+    """The `gh_checks["P14.24"]` status and its unverified list, or
+    (None, []) when the scan reached no tag-pinned extension that runs."""
+    state = _RELEASE_LOOKUP
+    reached = state.reached or []
+    if not reached:
+        return None, []
+    n = len(reached)
+    if not state.enabled:
+        return (f"skipped: {state.skip_reason} (release-immutability lookup "
+                f"did NOT run; {n} tag-pinned GitHub CLI extension install(s) "
+                f"kept as findings)"), []
+    immutable = sum(1 for _, v, _ in reached if v == "immutable")
+    unknown = [(label, reason) for label, v, reason in reached
+               if v == "unknown"]
+    kept = n - immutable
+    if unknown:
+        return (f"partial: {n - len(unknown)} of {n} tag-pinned GitHub CLI "
+                f"extension install(s) looked up, {immutable} immutable (not "
+                f"reported), {len(unknown)} UNVERIFIED — kept as findings"), \
+            [f"{label} — {reason}" for label, reason in unknown]
+    return (f"ran: {n} tag-pinned GitHub CLI extension install(s) looked up, "
+            f"{immutable} immutable (not reported), {kept} reported"), []
+
+
 def _pin_races(pin_line: int | None, lines: tuple[int, ...],
                racing: Callable[[int, int], bool], concurrency: bool) -> bool:
     """A pin may run at the same time as one of `lines` (the fetch, the
@@ -4904,7 +5095,7 @@ def _correlation_unverified_remote_code_execution(
                 # line byte-identical and the second chain vanished with no
                 # record anywhere.
                 match_text=(f"fetch into {_as_written(fetch.dest)} at "
-                            f"{fetch.ref or 'HEAD'}"),
+                            f"{_as_written(fetch.ref or 'HEAD')}"),
                 derived_note=(
                     (f"jobs.{job_name} checks out `{fetch.source}` at "
                      if fetch.source else
@@ -4923,13 +5114,30 @@ def _correlation_unverified_remote_code_execution(
         for inst, exec_line, invoked in _gh_extension_executions(
             text, job_range, _gap, file_path,
         ):
-            ref_text = ("its latest release (no `--pin`)" if inst.ref is None
-                        else _ref_description(inst.ref))
+            ref_text = _gh_extension_ref_description(inst.ref)
+            observed = ""
+            if inst.ref is not None and not _ABBREV_SHA_RE.match(inst.ref):
+                verdict, _reason = _release_lookup(inst, file_path)
+                if verdict == "immutable":
+                    _gap(f"a GitHub CLI extension `{_as_written(inst.repo)}` "
+                         f"on line {inst.line} is pinned to release tag "
+                         f"`{_as_written(inst.ref)}`, which GitHub reports as "
+                         f"an immutable release (its tag and assets cannot "
+                         f"change), so it is deliberately not reported",
+                         kind=_KIND_SUPPRESSED)
+                    continue
+                if verdict == "mutable":
+                    observed = (" GitHub reports this release is NOT "
+                                "immutable, so its tag can be moved.")
+                elif verdict == "not_release":
+                    observed = (" GitHub has no published release at this "
+                                "tag, so it is a branch or a bare tag, and "
+                                "either can be moved.")
             yield RawHit(
                 line=inst.line,
                 evidence=f"{inst.line:>4}: {inst.raw}  <-- here",
                 match_text=(f"gh extension {_as_written(inst.repo)} at "
-                            f"{inst.ref or 'latest release'}"),
+                            f"{_as_written(inst.ref or 'latest release')}"),
                 derived_note=(
                     f"jobs.{job_name} installs the GitHub CLI extension "
                     f"`{_as_written(inst.repo)}` at {ref_text} — a MUTABLE "
@@ -4942,7 +5150,7 @@ def _correlation_unverified_remote_code_execution(
                     f"tag, which is fixed only when that release is published "
                     f"as immutable (not visible offline) — otherwise download "
                     f"the release asset, verify its digest and run the local "
-                    f"copy."
+                    f"copy." + observed
                 ),
             )
 
@@ -6246,6 +6454,9 @@ def scan(
 ) -> dict[str, Any]:
     _DROPPED_MATCHES.clear()
     _reset_expression_tokens()
+    # P14.24's release-immutability lookup rides the same network switch as
+    # P14.11, so `--gh-impostor off` keeps the whole scan offline.
+    _reset_release_lookup(gh_impostor, gh_skip_reason, root)
     _PARSE_FAILURES_LOGGED.clear()
     workflow_files = all_workflow_files(root)
     missed = _undiscovered_workflows(root, workflow_files)
@@ -6583,6 +6794,17 @@ def scan(
     # report's "…were NOT scanned…" headline — a computed `working-directory:`
     # is a real gap the headline does not describe, and a pin suppression is
     # not a gap at all.
+    # Recorded only when the scan reached a tag-pinned GitHub CLI extension
+    # that its job runs: every other repository's output is unchanged.
+    lookup_status, lookup_unverified = _release_lookup_status()
+    # Back to offline: a detector called outside a scan never reaches the
+    # network on the strength of an earlier scan's switch.
+    _reset_release_lookup(False, _DEFAULT_GH_SKIP_REASON, None)
+    if lookup_status is not None:
+        gh_checks["P14.24"] = lookup_status
+        if lookup_unverified:
+            gh_check_details["P14.24"] = {"unverified": lookup_unverified}
+
     dropped_matches: list[dict[str, str]] = []
     coverage_notes: list[dict[str, str]] = []
     suppressed_findings: list[dict[str, str]] = []
@@ -6793,9 +7015,10 @@ def main(argv: list[str] | None = None) -> int:
         choices=["auto", "on", "off"],
         default="auto",
         help=(
-            "The P14.11 impostor-SHA check needs the GitHub API. auto "
-            "(default): run iff gh is authenticated; on: require it (error "
-            "if gh unavailable); off: skip (recorded loudly in gh_checks)."
+            "The P14.11 impostor-SHA check and P14.24's release-"
+            "immutability lookup need the GitHub API. auto (default): run "
+            "iff gh is authenticated; on: require it (error if gh "
+            "unavailable); off: skip (recorded loudly in gh_checks)."
         ),
     )
     args = parser.parse_args(argv)

@@ -727,6 +727,35 @@ def test_gh_checks_ran_renders_as_a_completed_check() -> None:
     assert "SKIPPED" not in md
 
 
+def test_release_lookup_skip_is_disclosed_without_calling_findings_missing() -> None:
+    """The P14.24 release-immutability lookup can only REMOVE a finding, so a
+    lookup that did not run hides nothing: the tag-pinned findings are all
+    still listed. Its skip must be disclosed, named, and must not borrow the
+    impostor check's "absence from the findings is NOT a pass" warning, which
+    would be false here. A P14.11 skip in the same report keeps that warning.
+    """
+    block = report._gh_checks_block({
+        "P14.24": "skipped: disabled via --gh-impostor=off (release-"
+                  "immutability lookup did NOT run; 1 tag-pinned GitHub CLI "
+                  "extension install(s) kept as findings)",
+    })
+    assert "P14.24 release-immutability lookup" in block
+    assert "SKIPPED" in block and "did NOT run" in block
+    assert "NOT a pass" not in block
+    assert "immutable" in block
+    both = report._gh_checks_block({
+        "P14.11": "skipped: gh not authenticated (run gh auth login) "
+                  "(network-gated check did NOT run)",
+        "P14.24": "partial: 0 of 1 release(s) looked up, 1 UNVERIFIED — kept "
+                  "as findings",
+    }, {"P14.24": {"unverified": ["github/gh-actions-lock@v0.4.1 "
+                                  "(.github/workflows/l.yml:12) — rate limit"]}})
+    warning, _, rest = both.partition("[!NOTE]")
+    assert "P14.11 impostor-SHA check: SKIPPED" in warning
+    assert "P14.24" not in warning
+    assert "PARTIAL" in rest and "github/gh-actions-lock@v0.4.1" in rest
+
+
 def test_gh_checks_block_empty_when_scan_recorded_none() -> None:
     """No `gh_checks` key (or an empty one) → no block, no invented status."""
     assert report._gh_checks_block(None) == ""
