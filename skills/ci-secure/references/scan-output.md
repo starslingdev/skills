@@ -60,10 +60,17 @@ The one non-scripted field. Written once per pattern group and merged onto
 - `gh_checks` — per-network-gated-check status, `P14.11` above all: `ran` /
   `partial` / `skipped` plus the detail (pin counts, or the reason). An
   ABSENT `P14.11` key is the "not recorded" state — a coverage hole, never a
-  pass.
+  pass. `P14.24` is present only when the scan reached a GitHub CLI extension
+  pinned to a tag and then run: the release-immutability lookup's
+  `ran` / `partial` / `skipped` status, e.g. `ran: 2 tag-pinned GitHub CLI
+  extension install(s) looked up, 1 immutable (not reported), 1 reported`.
+  This lookup can only remove a finding, so a `partial` or `skipped` one
+  means some tag-pinned findings were kept without being checked, never that
+  a finding is missing. Its absence means no such install was reached.
 - `gh_check_details` — the per-check detail a `partial` status refers to,
-  including the unresolved-pin list. `gh_checks` gives the status word; this
-  is where the specifics live.
+  including the unresolved-pin list (for `P14.24`, each
+  `owner/repo@tag (file:line) — reason` that was not looked up). `gh_checks`
+  gives the status word; this is where the specifics live.
 - `scan_incomplete` — workflow files skipped or unreadable, with a reason
   each. Non-empty means coverage is PARTIAL.
 - `dropped_matches` and `coverage_notes` — the other two coverage channels.

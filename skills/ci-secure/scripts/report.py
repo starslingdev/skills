@@ -94,7 +94,14 @@ _SCOPE_HONESTY_LINE = (
 # `gh_checks` map. Falls back to the bare pattern id when unmapped.
 _GH_CHECK_LABELS = {
     "P14.11": "impostor-SHA",
+    "P14.24": "release-immutability lookup",
 }
+
+# Network lookups that can only REMOVE a finding (P14.24 asks GitHub whether a
+# tag-pinned extension's release is immutable). When one does not fully run,
+# nothing is missing from the findings, so it is disclosed as a NOTE rather
+# than under the WARNING that says an absent finding is NOT a pass.
+_GH_LOOKUPS_THAT_ONLY_SUPPRESS = frozenset({"P14.24"})
 
 # Every finding comes from one source now (the ci-secure catalog). The
 # constant survives as the group key's first slot, which keeps the grouping
@@ -2040,26 +2047,55 @@ def _gh_checks_block(
 
     def _label(pid: str) -> str:
         name = _GH_CHECK_LABELS.get(pid)
+        if name and name.endswith("lookup"):
+            return f"{pid} {name}"
         return f"{pid} {name} check" if name else f"{pid} network-gated check"
 
     def _unverified(pid: str) -> list[str]:
         entry = details.get(pid) or {}
         pins = entry.get("unverified") if isinstance(entry, dict) else None
-        return [str(p) for p in pins] if isinstance(pins, list) else []
+        # Each label names the scanned workflow path and the pin as written,
+        # both controlled by the repository under audit, and lands in an
+        # inline code span below.
+        return ([_flatten_scanned(p) for p in pins]
+                if isinstance(pins, list) else [])
 
     skipped: list[tuple[str, str]] = []
     partial: list[tuple[str, str]] = []
     ran: list[tuple[str, str]] = []
+    lookup_notes: list[tuple[str, str, str]] = []
     for pid in sorted(gh_checks):
         status = str(gh_checks[pid] or "").strip()
         detail = status.split(":", 1)[-1].strip() or status
-        if status.lower().startswith("skipped"):
+        state = status.lower().split(":", 1)[0]
+        if pid in _GH_LOOKUPS_THAT_ONLY_SUPPRESS and state in ("skipped", "partial"):
+            # Its findings are all still listed below, so the WARNING's
+            # "absence from the findings is NOT a pass" would be false.
+            lookup_notes.append((pid, state, detail or "reason not recorded"))
+        elif state == "skipped":
             skipped.append((pid, detail or "reason not recorded"))
-        elif status.lower().startswith("partial"):
+        elif state == "partial":
             partial.append((pid, detail))
         else:
             ran.append((pid, detail))
 
+    note: list[str] = []
+    if lookup_notes:
+        note.append("> [!NOTE]")
+        for pid, state, reason in lookup_notes:
+            word = "SKIPPED" if state == "skipped" else "PARTIAL"
+            note.append(f"> **{_label(pid)}: {word} — {reason}.**")
+            for pin in _unverified(pid):
+                note.append(f">   - `{pin}`")
+        note.append(">")
+        note.append(
+            "> Every tag-pinned GitHub CLI extension finding is still listed "
+            "below. The lookup only removes one whose release GitHub has "
+            "locked as immutable. To have it check these, sign in to gh "
+            "(`gh auth login`) and re-run; a pin set at run time can never "
+            "be checked."
+        )
+        note.append("")
     out: list[str] = []
     if skipped or partial:
         out.append("> [!WARNING]")
@@ -2091,6 +2127,7 @@ def _gh_checks_block(
         else:
             out.append("> Re-run once the check can complete to close this gap.")
         out.append("")
+    out.extend(note)
     # Only the checks that RAN get a plain bullet list. Repeating the
     # skipped/partial bullets here reprinted the `[!WARNING]` callout's own
     # lines byte-for-byte one blank line below it.

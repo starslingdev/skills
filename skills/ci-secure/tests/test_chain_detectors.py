@@ -5248,3 +5248,384 @@ def test_catalog_scan_end_to_end_fires_p14_24_on_a_gh_extension(tmp_path):
     assert len(hits) == 1, hits
     assert hits[0]["severity"] == "MEDIUM"
     assert hits[0]["affected_jobs"] == ["lockfile"]
+
+
+# ---------------------------------------------------------------------------
+# P14.24, gh extension arm — the release-immutability lookup.
+#
+# A binary extension's `--pin` names a release TAG. GitHub's immutable
+# releases lock that tag and its assets, so a tag on an immutable release
+# cannot move. The scan cannot see that setting offline; with the network
+# checks on it asks `GET /repos/{owner}/{repo}/releases/tags/{tag}` and reads
+# the response's `immutable` boolean. Every outcome but a confirmed immutable
+# release keeps today's finding, and a lookup that did not run says so in
+# `gh_checks`. No test here touches the network: `gh api` is stubbed.
+# ---------------------------------------------------------------------------
+
+_RELEASE_NOT_FOUND = "gh: Not Found (HTTP 404)"
+
+
+def _release_stub(answers, calls):
+    """Stub `gh api` for release-by-tag lookups.
+
+    ``answers`` maps a ``repos/OWNER/REPO/releases/tags/TAG`` endpoint to a
+    value: a dict is a 200 JSON body, a str is a failing stderr, an
+    exception instance is raised. Unknown endpoints answer 404. Local `git`
+    calls (the scan's own provenance probes) run for real.
+    """
+    real_run = subprocess.run
+
+    def _run(argv, **kw):
+        if argv[:1] != ["gh"]:
+            return real_run(argv, **kw)
+        assert argv[:2] == ["gh", "api"], argv
+        path = argv[2]
+        calls.append(path)
+        answer = answers.get(path, _RELEASE_NOT_FOUND)
+        if isinstance(answer, BaseException):
+            raise answer
+        if isinstance(answer, dict):
+            return mock.Mock(returncode=0, stdout=json.dumps(answer), stderr="")
+        return mock.Mock(returncode=1, stdout="", stderr=answer)
+
+    return _run
+
+
+_LOCK_RELEASE = "repos/github/gh-actions-lock/releases/tags/v0.4.1"
+
+
+def _scan_with_releases(tmp_path, answers, *, lookup=True, workflows=None,
+                        skip_reason=None):
+    for name, body in (workflows or {"lockfile.yml": _GH_EXT_LOCKFILE}).items():
+        _wf(tmp_path, name, body)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    calls: list[str] = []
+    kwargs = {"gh_impostor": lookup}
+    if skip_reason is not None:
+        kwargs["gh_skip_reason"] = skip_reason
+    with mock.patch.object(scan.subprocess, "run",
+                           side_effect=_release_stub(answers, calls)), \
+            mock.patch.object(scan.time, "sleep", return_value=None):
+        result = scan.scan(catalog, tmp_path, **kwargs)
+    hits = [f for f in result["findings"] if f["pattern"] == "P14.24"]
+    releases = [c for c in calls if "/releases/tags/" in c]
+    return result, hits, releases
+
+
+def test_p1424_gh_extension_immutable_release_is_suppressed(tmp_path):
+    """GitHub's own recommended lockfile check pins a tag whose release is
+    immutable: the tag cannot move, so it is not a finding. It is recorded
+    as a suppression naming the release, never dropped in silence."""
+    result, hits, releases = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: {"tag_name": "v0.4.1", "immutable": True},
+    })
+    assert hits == [], hits
+    assert releases == [_LOCK_RELEASE]
+    reasons = [s["reason"] for s in result["suppressed_findings"]]
+    assert any("github/gh-actions-lock" in r and "v0.4.1" in r
+               and "immutable" in r.lower() for r in reasons), reasons
+    status = result["gh_checks"]["P14.24"]
+    assert status.startswith("ran:"), status
+    assert "1 immutable" in status
+
+
+def test_p1424_gh_extension_mutable_release_is_a_finding(tmp_path):
+    result, hits, releases = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: {"tag_name": "v0.4.1", "immutable": False},
+    })
+    assert len(hits) == 1, hits
+    assert releases == [_LOCK_RELEASE]
+    assert "NOT immutable" in hits[0]["derived_note"]
+    # The lookup ran, so the note must not also say the setting cannot be seen.
+    assert "not visible offline" not in hits[0]["derived_note"]
+    assert result["gh_checks"]["P14.24"].startswith("ran:")
+
+
+def test_p1424_gh_extension_tag_with_no_release_is_a_finding(tmp_path):
+    """A 404 means the pin names no published release: a branch or a bare
+    tag, either of which can move."""
+    result, hits, releases = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: _RELEASE_NOT_FOUND,
+    })
+    assert len(hits) == 1, hits
+    assert releases == [_LOCK_RELEASE]
+    assert "no published release" in hits[0]["derived_note"]
+    # GitHub answers the same 404 for a repository that is missing or not
+    # visible to the token, so the note must not claim it is a branch or tag.
+    assert "so it is a branch or a bare tag" not in hits[0]["derived_note"]
+    assert "cannot see" in hits[0]["derived_note"]
+    assert result["gh_checks"]["P14.24"].startswith("ran:")
+
+
+def test_p1424_gh_extension_lookup_asks_github_com_whatever_gh_host_says(
+        tmp_path, monkeypatch):
+    """Only an extension hosted on github.com is looked up, so the answer
+    must come from github.com. `gh api` otherwise follows `GH_HOST` (or the
+    user's default host), and an Enterprise Server host could answer for a
+    same-named repository there."""
+    monkeypatch.setenv("GH_HOST", "ghes.example.internal")
+    for name, body in {"lockfile.yml": _GH_EXT_LOCKFILE}.items():
+        _wf(tmp_path, name, body)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    argvs: list[list[str]] = []
+    stub = _release_stub({_LOCK_RELEASE: {"tag_name": "v0.4.1",
+                                          "immutable": True}}, [])
+
+    def _spy(argv, **kw):
+        if argv[:1] == ["gh"]:
+            argvs.append(list(argv))
+        return stub(argv, **kw)
+
+    with mock.patch.object(scan.subprocess, "run", side_effect=_spy), \
+            mock.patch.object(scan.time, "sleep", return_value=None):
+        scan.scan(catalog, tmp_path, gh_impostor=True)
+    lookups = [a for a in argvs if "/releases/tags/" in a[2]]
+    assert lookups, argvs
+    for argv in lookups:
+        assert "--hostname" in argv, argv
+        assert argv[argv.index("--hostname") + 1] == "github.com", argv
+
+
+def test_p1424_gh_extension_failed_scan_leaves_the_lookup_offline(tmp_path):
+    """A scan that raises (here: zero workflows, a CoverageError) must not
+    leave the release lookup switched on. Otherwise a caller that catches the
+    error and then calls the detector directly reaches the network, and can
+    suppress a finding, on the strength of a scan that never finished."""
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    (tmp_path / "empty" / ".github" / "workflows").mkdir(parents=True)
+    with pytest.raises(scan.CoverageError):
+        scan.scan(catalog, tmp_path / "empty", gh_impostor=True)
+    calls: list[str] = []
+    with mock.patch.object(scan.subprocess, "run", side_effect=_release_stub(
+            {_LOCK_RELEASE: {"tag_name": "v0.4.1", "immutable": True}}, calls)):
+        hits = _remote_exec_hits(tmp_path / "direct", _GH_EXT_LOCKFILE)
+    assert [c for c in calls if "/releases/tags/" in c] == []
+    assert len(hits) == 1, hits
+
+
+def test_p1424_gh_extension_lookup_off_keeps_todays_finding(tmp_path):
+    """Off (or gh unavailable): no network call, today's finding and wording
+    byte for byte, and `gh_checks` says the lookup did NOT run and why."""
+    offline = _remote_exec_hits(tmp_path / "direct", _GH_EXT_LOCKFILE)
+    result, hits, releases = _scan_with_releases(
+        tmp_path / "scan", {}, lookup=False,
+        skip_reason="disabled via --gh-impostor=off",
+    )
+    assert releases == []
+    assert len(hits) == 1, hits
+    assert hits[0]["derived_note"] == offline[0].derived_note
+    status = result["gh_checks"]["P14.24"]
+    assert status.startswith("skipped: disabled via --gh-impostor=off"), status
+    assert "did NOT run" in status
+
+
+def test_p1424_gh_extension_lookup_error_keeps_the_finding_and_says_why(tmp_path):
+    """A server error is retried a bounded number of times, then surfaced:
+    the finding stays, and the status and details name the unverified pin."""
+    result, hits, releases = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: "gh: Internal Server Error (HTTP 500)",
+    })
+    assert len(hits) == 1, hits
+    assert releases == [_LOCK_RELEASE] * 3      # bounded retry, then surface
+    status = result["gh_checks"]["P14.24"]
+    assert status.startswith("partial:"), status
+    unverified = result["gh_check_details"]["P14.24"]["unverified"]
+    assert len(unverified) == 1
+    assert "github/gh-actions-lock@v0.4.1" in unverified[0]
+    assert "lockfile.yml:" in unverified[0]
+
+
+def test_p1424_gh_extension_rate_limit_is_not_retried_and_is_surfaced(tmp_path):
+    result, hits, releases = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: "gh: API rate limit exceeded (HTTP 403)",
+    })
+    assert len(hits) == 1, hits
+    assert releases == [_LOCK_RELEASE]
+    assert result["gh_checks"]["P14.24"].startswith("partial:")
+    assert "rate limit" in result["gh_check_details"]["P14.24"]["unverified"][0]
+
+
+def test_p1424_gh_extension_auth_failure_is_not_retried_and_is_surfaced(tmp_path):
+    result, hits, releases = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: "gh: Bad credentials (HTTP 401)",
+    })
+    assert len(hits) == 1, hits
+    assert releases == [_LOCK_RELEASE]
+    assert result["gh_checks"]["P14.24"].startswith("partial:")
+    assert "authentication" in \
+        result["gh_check_details"]["P14.24"]["unverified"][0]
+
+
+def test_p1424_gh_extension_cache_is_per_tag_not_per_repo(tmp_path):
+    """Two tags of one extension are two releases. An immutable v0.4.1 must
+    not stand in for a mutable v0.4.2."""
+    v2 = _LOCK_RELEASE.replace("v0.4.1", "v0.4.2")
+    result, hits, releases = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: {"tag_name": "v0.4.1", "immutable": True},
+        v2: {"tag_name": "v0.4.2", "immutable": False},
+    }, workflows={
+        "a.yml": _GH_EXT_LOCKFILE,
+        "b.yml": _GH_EXT_LOCKFILE.replace("v0.4.1", "v0.4.2"),
+    })
+    assert sorted(releases) == sorted([_LOCK_RELEASE, v2])
+    assert len(hits) == 1, hits
+    assert "v0.4.2" in hits[0]["derived_note"]
+
+
+@pytest.mark.parametrize("flag", ["true", 1, "false", {}])
+def test_p1424_gh_extension_non_bool_immutable_is_unverified(tmp_path, flag):
+    """Only the JSON boolean `true` suppresses; a string or number is not
+    GitHub's answer, so the finding stays and the pin is UNVERIFIED."""
+    result, hits, _ = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: {"tag_name": "v0.4.1", "immutable": flag},
+    })
+    assert len(hits) == 1, hits
+    assert result["gh_checks"]["P14.24"].startswith("partial:")
+
+
+@pytest.mark.parametrize("body", [
+    {"tag_name": "v9.9.9", "immutable": True},
+    {"tag_name": "v0.4.1", "immutable": True, "draft": True},
+])
+def test_p1424_gh_extension_immutable_answer_for_another_release_is_unverified(
+        tmp_path, body):
+    """`immutable: true` only counts for the release that was asked about:
+    a published (not draft) release whose tag is exactly the pin."""
+    result, hits, _ = _scan_with_releases(tmp_path, {_LOCK_RELEASE: body})
+    assert len(hits) == 1, hits
+    assert result["gh_checks"]["P14.24"].startswith("partial:")
+
+
+def test_p1424_gh_extension_gh_that_cannot_run_keeps_the_finding(tmp_path):
+    """A `gh` that exists but cannot be executed is a failed lookup, not a
+    crashed scan: every other finding must still be reported."""
+    result, hits, _ = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: PermissionError("gh"),
+    })
+    assert len(hits) == 1, hits
+    assert result["gh_checks"]["P14.24"].startswith("partial:")
+
+
+def test_p1424_gh_extension_empty_pin_is_the_latest_release(tmp_path):
+    """`--pin=` with no value installs the latest release, exactly like no
+    `--pin`: no lookup, and the finding says latest release."""
+    wf = _GH_EXT_LOCKFILE.replace("--pin v0.4.1", "--pin=")
+    result, hits, releases = _scan_with_releases(
+        tmp_path, {}, workflows={"lockfile.yml": wf})
+    assert releases == []
+    assert len(hits) == 1, hits
+    assert "latest release" in hits[0]["derived_note"]
+    assert "P14.24" not in result["gh_checks"]
+
+
+def test_p1424_gh_extension_run_time_pin_is_not_looked_up(tmp_path):
+    """With the lookup on, a `${{ }}` pin is never sent to the API (its
+    value is unknown until the job runs); the finding stays, UNVERIFIED."""
+    wf = _GH_EXT_LOCKFILE.replace("--pin v0.4.1", "--pin ${{ env.LOCK_V }}")
+    result, hits, releases = _scan_with_releases(
+        tmp_path, {}, workflows={"lockfile.yml": wf})
+    assert releases == []
+    assert len(hits) == 1, hits
+    assert "no published release" not in hits[0]["derived_note"]
+    assert "run time" in result["gh_check_details"]["P14.24"]["unverified"][0]
+
+
+def test_p1424_gh_extension_off_github_com_is_not_looked_up(tmp_path):
+    wf = _GH_EXT_LOCKFILE.replace(
+        "install github/gh-actions-lock",
+        "install ghes.example.internal/github/gh-actions-lock")
+    result, hits, releases = _scan_with_releases(
+        tmp_path, {}, workflows={"lockfile.yml": wf})
+    assert releases == []
+    assert len(hits) == 1, hits
+    assert "github.com" in \
+        result["gh_check_details"]["P14.24"]["unverified"][0]
+
+
+def test_p1424_gh_extension_lookup_timeout_keeps_the_finding(tmp_path):
+    result, hits, releases = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: subprocess.TimeoutExpired("gh", 30),
+    })
+    assert len(hits) == 1, hits
+    assert releases == [_LOCK_RELEASE] * 3
+    assert result["gh_checks"]["P14.24"].startswith("partial:")
+
+
+def test_p1424_gh_extension_release_without_immutable_field_is_unverified(tmp_path):
+    """A 200 that does not carry the field is noise, not a verdict."""
+    result, hits, _ = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: {"tag_name": "v0.4.1"},
+    })
+    assert len(hits) == 1, hits
+    assert result["gh_checks"]["P14.24"].startswith("partial:")
+
+
+def test_p1424_gh_extension_no_pin_is_a_finding_without_a_lookup(tmp_path):
+    """No `--pin` installs the latest release, which changes with every
+    release: nothing to look up, and no lookup status is invented."""
+    result, hits, releases = _scan_with_releases(tmp_path, {}, workflows={
+        "x.yml": _gh_ext_job("gh extension install github/gh-actions-lock",
+                             "gh actions-lock --verify"),
+    })
+    assert len(hits) == 1, hits
+    assert releases == []
+    assert "P14.24" not in result["gh_checks"]
+
+
+def test_p1424_gh_extension_short_sha_pin_is_a_finding_without_a_lookup(tmp_path):
+    result, hits, releases = _scan_with_releases(tmp_path, {}, workflows={
+        "x.yml": _gh_ext_job(
+            "gh extension install github/gh-actions-lock --pin abc1234",
+            "gh actions-lock --verify"),
+    })
+    assert len(hits) == 1, hits
+    assert releases == []
+
+
+def test_p1424_gh_extension_lookup_is_cached_per_repo_and_tag(tmp_path):
+    """One lookup per (repository, tag) per scan, however many jobs pin it."""
+    second = _GH_EXT_LOCKFILE.replace("name: lockfile", "name: again")
+    result, hits, releases = _scan_with_releases(tmp_path, {
+        _LOCK_RELEASE: {"tag_name": "v0.4.1", "immutable": True},
+    }, workflows={"lockfile.yml": _GH_EXT_LOCKFILE, "again.yml": second})
+    assert hits == [], hits
+    assert releases == [_LOCK_RELEASE]
+
+
+def test_p1424_gh_extension_expression_pin_does_not_leak_a_placeholder(tmp_path):
+    """A `${{ }}` pin reached the reader as the scanner's own internal
+    stand-in token. The finding must show the expression as written."""
+    hits = _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install github/gh-actions-lock --pin ${{ env.LOCK_VERSION }}",
+        "gh actions-lock --verify",
+    ))
+    assert len(hits) == 1, hits
+    for text in (hits[0].derived_note or "", hits[0].match_text or ""):
+        assert "$EXPR" not in text and "\x00" not in text, repr(text)
+    assert "${{ env.LOCK_VERSION }}" in (hits[0].derived_note or "")
+
+
+def test_p1424_gh_extension_abbreviated_pin_is_not_worded_as_git(tmp_path):
+    """An abbreviated `--pin` is resolved by the GitHub CLI at install time
+    (and read as a release tag name for a binary extension) — not by a git
+    fetch the job never ran."""
+    hits = _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install github/gh-actions-lock --pin abc1234",
+        "gh actions-lock --verify",
+    ))
+    note = hits[0].derived_note or ""
+    assert "ABBREVIATED" in note
+    assert "git re-resolves" not in note
+    assert "GitHub CLI" in note and "install" in note
+
+
+def test_p1424_clone_at_an_expression_ref_shows_it_as_written(tmp_path):
+    """The clone arm shares `_ref_description` with the gh extension arm: a
+    ref set by a `${{ }}` expression must read as written in the note and in
+    `match_text`, never as the scanner's internal placeholder."""
+    body = _MUTABLE_FETCH.replace("--branch main", "--branch ${{ inputs.ref }}")
+    hits = _remote_exec_hits(tmp_path, body)
+    assert len(hits) == 1, hits
+    for text in (hits[0].derived_note or "", hits[0].match_text or ""):
+        assert "$EXPR" not in text and "\x00" not in text, text
+        assert "${{ inputs.ref }}" in text, text
