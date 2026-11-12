@@ -5348,7 +5348,40 @@ def test_p1424_gh_extension_tag_with_no_release_is_a_finding(tmp_path):
     assert len(hits) == 1, hits
     assert releases == [_LOCK_RELEASE]
     assert "no published release" in hits[0]["derived_note"]
+    # GitHub answers the same 404 for a repository that is missing or not
+    # visible to the token, so the note must not claim it is a branch or tag.
+    assert "so it is a branch or a bare tag" not in hits[0]["derived_note"]
+    assert "cannot see" in hits[0]["derived_note"]
     assert result["gh_checks"]["P14.24"].startswith("ran:")
+
+
+def test_p1424_gh_extension_lookup_asks_github_com_whatever_gh_host_says(
+        tmp_path, monkeypatch):
+    """Only an extension hosted on github.com is looked up, so the answer
+    must come from github.com. `gh api` otherwise follows `GH_HOST` (or the
+    user's default host), and an Enterprise Server host could answer for a
+    same-named repository there."""
+    monkeypatch.setenv("GH_HOST", "ghes.example.internal")
+    for name, body in {"lockfile.yml": _GH_EXT_LOCKFILE}.items():
+        _wf(tmp_path, name, body)
+    catalog = scan.load_catalog(_SKILL / "references" / "security-patterns.md")
+    argvs: list[list[str]] = []
+    stub = _release_stub({_LOCK_RELEASE: {"tag_name": "v0.4.1",
+                                          "immutable": True}}, [])
+
+    def _spy(argv, **kw):
+        if argv[:1] == ["gh"]:
+            argvs.append(list(argv))
+        return stub(argv, **kw)
+
+    with mock.patch.object(scan.subprocess, "run", side_effect=_spy), \
+            mock.patch.object(scan.time, "sleep", return_value=None):
+        scan.scan(catalog, tmp_path, gh_impostor=True)
+    lookups = [a for a in argvs if "/releases/tags/" in a[2]]
+    assert lookups, argvs
+    for argv in lookups:
+        assert "--hostname" in argv, argv
+        assert argv[argv.index("--hostname") + 1] == "github.com", argv
 
 
 def test_p1424_gh_extension_failed_scan_leaves_the_lookup_offline(tmp_path):

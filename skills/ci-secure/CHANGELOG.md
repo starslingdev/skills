@@ -312,11 +312,12 @@ entries are dated (UTC). Format loosely follows
   including GitHub's own recommended lockfile-check workflow. With the GitHub
   API lookups on (`--gh-impostor`, the same switch as P14.11, default `auto`),
   the scan asks GitHub for the release at that tag once per repository and
-  tag, and reads its `immutable` field: `true` is recorded as a suppression
-  naming the release; `false` or no release at that tag (a branch or bare
-  tag) stays a finding that says which. No `--pin` and an abbreviated commit
+  tag (always on github.com, whatever `GH_HOST` names), and reads its
+  `immutable` field: `true` is recorded as a suppression
+  naming the release; `false` or no published release at that tag (a
+  branch, a bare tag, or a repository the scan cannot see) stays a finding that says which. No `--pin` and an abbreviated commit
   stay findings with no lookup. When the lookup is off, `gh` is unavailable,
-  or it fails (timeouts and server errors are retried up to three times; a
+  or it fails (timeouts and server errors are tried up to three times in all; a
   rate limit or authentication failure is not), the finding is kept with its
   offline wording and `gh_checks["P14.24"]` records `skipped` or `partial`
   with the reason; the report shows this as a note, not as a missing

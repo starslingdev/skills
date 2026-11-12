@@ -4869,7 +4869,7 @@ def _gh_extension_ref_description(ref: str | None) -> str:
 #   `immutable` boolean.
 #
 # Only a confirmed `immutable: true` removes a finding, and it is recorded as a
-# suppression. Everything else — `false`, a 404 (a branch or a bare tag, not a
+# suppression. Everything else — `false`, a 404 (no published release there, not a
 # release), an error, a rate limit, the lookup switched off — keeps today's
 # finding, and `gh_checks["P14.24"]` says how many lookups ran and why any did
 # not. The lookup can only ever remove a finding, never add one.
@@ -4924,7 +4924,7 @@ def _extension_repo_slug(target: str) -> str | None:
 def _gh_release_immutability(slug: str, tag: str) -> tuple[str, str]:
     """(verdict, reason) for the release at `tag` in `slug`.
 
-    Transient failures (a timeout, a server error) are retried up to
+    Transient failures (a timeout, a server error) are tried up to
     ``_RELEASE_LOOKUP_ATTEMPTS`` times; a rate limit or an authentication
     failure is not, since retrying cannot change it. The reason never carries
     a response body — only a classification.
@@ -4938,7 +4938,9 @@ def _gh_release_immutability(slug: str, tag: str) -> tuple[str, str]:
             time.sleep(_RELEASE_LOOKUP_BACKOFF_S * attempt)
         try:
             result = subprocess.run(
-                ["gh", "api", endpoint],
+                # github.com only: `_extension_repo_slug` admits no other
+                # host, and `GH_HOST` must not send the question elsewhere.
+                ["gh", "api", endpoint, "--hostname", "github.com"],
                 capture_output=True, text=True, timeout=30,
             )
         except FileNotFoundError:
@@ -5130,9 +5132,10 @@ def _correlation_unverified_remote_code_execution(
                     observed = (" GitHub reports this release is NOT "
                                 "immutable, so its tag can be moved.")
                 elif verdict == "not_release":
-                    observed = (" GitHub has no published release at this "
-                                "tag, so it is a branch or a bare tag, and "
-                                "either can be moved.")
+                    observed = (" GitHub returned no published release at "
+                                "this tag: it may be a branch, a bare tag or "
+                                "a repository this scan cannot see, and "
+                                "nothing shows it is locked.")
             yield RawHit(
                 line=inst.line,
                 evidence=f"{inst.line:>4}: {inst.raw}  <-- here",
