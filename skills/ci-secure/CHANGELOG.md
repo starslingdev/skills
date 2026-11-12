@@ -305,7 +305,7 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
-- **2026-11-11** (#PR_NUMBER) — A GitHub CLI extension pinned to a tag on a
+- **2026-11-11** (#331) — A GitHub CLI extension pinned to a tag on a
   release GitHub has locked as immutable is no longer reported (P14.24). That
   tag and its assets cannot move, but the offline scan could not see the
   setting, so roughly a third of real gh-extension findings were this case,
