@@ -1297,6 +1297,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-11** — Keep only cache-state evidence from verification job logs, so markers beyond long unrelated output remain visible, and use run position for cache-less cohorts instead of withholding an otherwise clean comparison.
 - **2026-11-11** — Keep path-filter findings visible when sampled pull-request runs have no PR number, and disclose the measured share when only part of the run sample can be mapped to pull requests.
 - **2026-11-11** — Bound Buildx node parsing to complete inspect blocks, so later `docker info` output cannot invent builder nodes and a bootstrapped inspect supersedes an earlier inactive snapshot.
 - **2026-11-11** — Report a newly introduced aggregate finding once instead of also describing all of its jobs as scope growth; existing aggregate findings still warn when their job scope expands.

@@ -626,16 +626,74 @@ def test_real_adapter_caps_and_counts_job_log_calls():
     assert len(client.text_gets) == 20
     assert cohort["log_api_calls"] == 20
     assert cohort["log_jobs_omitted"] == 2
+    assert _cache_class({**cohort, "position": 2}) == ("warm", "later run")
 
 
 def test_real_adapter_bounds_total_retained_log_text():
-    client = AdapterFixture({"actions/jobs/": "x" * 60_000})
+    client = AdapterFixture({"actions/jobs/": "cache hit " + "x" * 60_000})
     sample = client._job_logs("o/r", [_api_job(job_id) for job_id in range(1, 4)])
 
     assert sum(len(log) for log in sample["logs"]) == 100_000
     assert sample["log_api_calls"] == 2
     assert sample["log_jobs_omitted"] == 1
     assert sample["log_jobs_truncated"] == 1
+
+
+def test_real_adapter_finds_cache_markers_after_a_long_log_prefix():
+    log = "ordinary output\n" * 11_000 + "Cache restored from key: node-v1\n"
+    client = AdapterFixture({"actions/jobs/": log})
+
+    sample = client._job_logs("o/r", [_api_job()])
+
+    assert sample["logs"] == ["Cache restored from key: node-v1"]
+    assert sample["log_jobs_truncated"] == 0
+    assert _cache_class({"position": 1, **sample})[0] == "warm"
+
+
+def test_renamed_cache_actions_without_a_marker_stay_unknown():
+    for action in ("actions/cache@v4", "actions/cache/restore@v4",
+                   "actions/cache/save@v4"):
+        client = AdapterFixture({
+            "actions/jobs/": (
+                f"##[group]Run {action}\n"
+                "with:\n"
+                "  path: node_modules\n"),
+        })
+        job = _api_job()
+        job["steps"][0]["name"] = "Restore dependencies"
+
+        sample = client._job_logs("o/r", [job])
+
+        assert sample["log_has_cache_step"] is True, action
+        assert _cache_class({"position": 2, **sample}) == (
+            "unknown", "no cache marker in sampled job logs"), action
+
+    client = AdapterFixture({
+        "actions/jobs/": (
+            "2026-11-11T08:14:03.1234567Z ##[group]Run actions/setup-node@v4\n"
+            "2026-11-11T08:14:03.1235678Z with:\n"
+            "2026-11-11T08:14:03.1236789Z   cache: npm\n"
+            "2026-11-11T08:14:04.2345678Z npm cache is not found\n"),
+    })
+    job = _api_job()
+    job["steps"][0]["name"] = "Set up Node.js"
+
+    sample = client._job_logs("o/r", [job])
+
+    assert sample["log_has_cache_step"] is True
+    assert _cache_class({"position": 2, **sample}) == (
+        "unknown", "no cache marker in sampled job logs")
+
+
+def test_unreadable_renamed_step_cannot_prove_cache_absence():
+    client = AdapterFixture({})
+    job = _api_job()
+    job["steps"][0]["name"] = "Restore dependencies"
+
+    sample = client._job_logs("o/r", [job])
+
+    assert _cache_class({"position": 2, **sample}) == (
+        "unknown", "1 job log unreadable")
 
 
 def test_real_adapter_discloses_jobs_without_readable_ids():
