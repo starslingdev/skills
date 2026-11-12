@@ -458,6 +458,21 @@ hits while allowing small measurement noise.
 approval.
 
 **Approval status:** awaiting owner approval.
+### `cache-partial-miss-floor`
+
+**Current value:** 40% is the general partial-miss floor
+(`blocking_path.py::_PARTIAL_MISS_FLOOR_PCT`).
+
+**Report statements:** whether a cache is described as mostly warm rather than
+churning, and whether its remediation can become the report's BIGGEST LEVER.
+
+**Reason:** A cache whose miss share stays below two fifths is predominantly
+warm; treating that cohort as churn would overstate both the problem and its
+available saving.
+
+**Proposed decision:** **Keep 40%.** The value remains awaiting owner approval.
+
+**Approval status:** awaiting owner approval.
 ### `ceiling-minimum-gates`
 
 **Current value:** the verifier needs 5 gating PRs to re-derive a stable saving
@@ -540,9 +555,12 @@ when a bounded observable cohort exists.
 ### `per-pattern-minimums`
 
 **Current value:** representative report-bearing floors are OPT64: 3 retried
-runs; OPT80: 6 occurrences and a 3x tail; OPT81: 8 samples per label and a 25%
-gap; OPT82: 60 seconds; OPT83: 15% and 20 seconds; OPT84: 20 seconds; OPT79:
-3 hits, 3 misses, and 20% waste.
+runs; OPT79: 3 hits, 3 misses, 5 seconds and 20% waste, a 25% tail share, and
+1 second of long-pole headroom; OPT80: 6 occurrences, a 3x or 30-second tail,
+2 tail runs, 2 proven tail runs, a 20-second gap, and at most 4 log probes;
+OPT81: 8 samples per label, a 30-second and 25% gap, 50% covered time, and a
+30-second cache-lever floor; OPT82: 60 seconds; OPT83: 15% and 20 seconds;
+OPT84: 0% minimum share and 20 seconds.
 
 **Report statements:** whether each named pattern is promoted, withheld, or
 uncredited, plus its evidence and saving.
@@ -577,14 +595,15 @@ bounds.
 
 **Current value:** 12 rows each for Also noticed, promoted runner-minute findings,
 and the cost spine (`_ALSO_NOTICED_CAP`, `_TIER2_CAP`,
-`_RUNNER_MINUTE_SPINE_CAP`).
+`_RUNNER_MINUTE_SPINE_CAP`), plus 5 displayed withheld job names
+(`_WITHHELD_JOBS_SHOWN`).
 
 **Report statements:** visible row counts and every "+N more" disclosure.
 
 **Reason:** Twelve keeps each secondary section scannable while the hidden-row
 count preserves coverage honesty.
 
-**Proposed decision:** **Keep 12 / 12 / 12.** A cap may hide rows, never erase
+**Proposed decision:** **Keep 12 / 12 / 12 / 5.** A cap may hide rows, never erase
 them from findings or omit the hidden count.
 
 **Approval status:** awaiting owner approval.
@@ -636,6 +655,13 @@ implementation lands.
     "sources": {
       "collect_runs.py:_CACHE_COLD_MISS_PCT": 99.5,
       "verify_report.py:_VR_CACHE_COLD_MISS_PCT": 99.5
+    }
+  },
+  "cache-partial-miss-floor": {
+    "decision": "cache-partial-miss-floor",
+    "sources": {
+      "blocking_path.py:_PARTIAL_MISS_FLOOR_PCT": 40.0,
+      "verify_report.py:_VR_PARTIAL_MISS_FLOOR_PCT": 40.0
     }
   },
   "config-era-minimum": {
@@ -716,33 +742,55 @@ implementation lands.
     "sources": {
       "collect_runs.py:_OPT79_MIN_HITS": 3,
       "collect_runs.py:_OPT79_MIN_MISSES": 3,
+      "collect_runs.py:_OPT79_MIN_WASTE_S": 5.0,
       "collect_runs.py:_OPT79_MIN_WASTE_FRAC": 0.2,
+      "collect_runs.py:_CACHE_TAIL_MIN_FRAC": 0.25,
+      "collect_runs.py:_OPT79_POLE_MIN_HEADROOM_S": 1.0,
       "verify_report.py:_VR_OPT79_MIN_HITS": 3,
       "verify_report.py:_VR_OPT79_MIN_MISSES": 3,
-      "verify_report.py:_VR_OPT79_MIN_WASTE_FRAC": 0.2
+      "verify_report.py:_VR_OPT79_MIN_WASTE_S": 5.0,
+      "verify_report.py:_VR_OPT79_MIN_WASTE_FRAC": 0.2,
+      "verify_report.py:_VR_OPT79_TAIL_MIN_FRAC": 0.25,
+      "verify_report.py:_VR_OPT79_POLE_MIN_HEADROOM_S": 1.0
     }
   },
   "opt80-occurrences": {
     "decision": "per-pattern-minimums",
     "sources": {
       "collect_runs.py:_OPT80_MIN_SAMPLED_OCCURRENCES": 6,
-      "verify_report.py:_VR_OPT80_MIN_SAMPLED_OCCURRENCES": 6
+      "collect_runs.py:_OPT80_MIN_TAIL_RUNS": 2,
+      "collect_runs.py:_OPT80_MIN_PROVEN_TAIL_RUNS": 2,
+      "collect_runs.py:_OPT80_MIN_GAP_S": 20.0,
+      "collect_runs.py:_OPT80_LOG_PROBE_MAX": 4,
+      "verify_report.py:_VR_OPT80_MIN_SAMPLED_OCCURRENCES": 6,
+      "verify_report.py:_VR_OPT80_MIN_TAIL_RUNS": 2,
+      "verify_report.py:_VR_OPT80_MIN_PROVEN_TAIL_RUNS": 2,
+      "verify_report.py:_VR_OPT80_MIN_GAP_S": 20.0,
+      "verify_report.py:_VR_OPT80_LOG_PROBE_MAX": 4
     }
   },
   "opt80-tail-multiple": {
     "decision": "per-pattern-minimums",
     "sources": {
       "collect_runs.py:_OPT80_TAIL_P95_MULTIPLE": 3.0,
-      "verify_report.py:_VR_OPT80_TAIL_P95_MULTIPLE": 3.0
+      "collect_runs.py:_OPT80_TAIL_P95_ABS_S": 30.0,
+      "verify_report.py:_VR_OPT80_TAIL_P95_MULTIPLE": 3.0,
+      "verify_report.py:_VR_OPT80_TAIL_P95_ABS_S": 30.0
     }
   },
   "opt81-samples-and-gap": {
     "decision": "per-pattern-minimums",
     "sources": {
       "collect_runs.py:_OPT81_MIN_GAP_FRAC": 0.25,
+      "collect_runs.py:_OPT81_MIN_GAP_S": 30.0,
       "collect_runs.py:_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+      "collect_runs.py:_OPT81_COVERED_FRAC": 0.5,
+      "collect_runs.py:_OPT81_CACHE_LEVER_MIN_S": 30.0,
       "verify_report.py:_VR_OPT81_MIN_GAP_FRAC": 0.25,
-      "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL": 8
+      "verify_report.py:_VR_OPT81_MIN_GAP_S": 30.0,
+      "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+      "verify_report.py:_VR_OPT81_COVERED_FRAC": 0.5,
+      "verify_report.py:_VR_OPT81_CACHE_LEVER_MIN_S": 30.0
     }
   },
   "opt82-minimum-seconds": {
@@ -763,7 +811,9 @@ implementation lands.
   "opt84-minimum-seconds": {
     "decision": "per-pattern-minimums",
     "sources": {
+      "collect_runs.py:_OPT84_MIN_SHARE": 0.0,
       "collect_runs.py:_OPT84_MIN_STEP_S": 20.0,
+      "verify_report.py:_VR_OPT84_MIN_SHARE": 0.0,
       "verify_report.py:_VR_OPT84_MIN_STEP_S": 20.0
     }
   },
@@ -851,8 +901,10 @@ implementation lands.
       "blocking_path.py:_ALSO_NOTICED_CAP": 12,
       "blocking_path.py:_RUNNER_MINUTE_SPINE_CAP": 12,
       "blocking_path.py:_TIER2_CAP": 12,
+      "blocking_path.py:_WITHHELD_JOBS_SHOWN": 5,
       "verify_report.py:_VR_RUNNER_MINUTE_SPINE_CAP": 12,
-      "verify_report.py:_VR_TIER2_CAP": 12
+      "verify_report.py:_VR_TIER2_CAP": 12,
+      "verify_report.py:_VR_WITHHELD_JOBS_SHOWN": 5
     }
   },
   "required-suite-eligibility": {

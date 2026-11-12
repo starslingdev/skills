@@ -27,6 +27,7 @@ REQUIRED_DECISIONS = {
     "minimum-timed-runs", "rare-push-lane", "lifecycle-minimum",
     "merge-queue-proof-thresholds", "timeout-recommendation-thresholds",
     "dependency-cache-floor", "cold-cache-miss-threshold",
+    "cache-partial-miss-floor",
     "ceiling-minimum-gates", "partial-majority-rule",
 }
 
@@ -43,13 +44,25 @@ REQUIRED_VERIFIER_MIRRORS = {
     "verify_report.py:_VR_OPT79_MIN_HITS",
     "verify_report.py:_VR_OPT79_MIN_MISSES",
     "verify_report.py:_VR_OPT79_MIN_WASTE_FRAC",
+    "verify_report.py:_VR_OPT79_MIN_WASTE_S",
+    "verify_report.py:_VR_OPT79_TAIL_MIN_FRAC",
+    "verify_report.py:_VR_OPT79_POLE_MIN_HEADROOM_S",
     "verify_report.py:_VR_OPT80_MIN_SAMPLED_OCCURRENCES",
     "verify_report.py:_VR_OPT80_TAIL_P95_MULTIPLE",
+    "verify_report.py:_VR_OPT80_TAIL_P95_ABS_S",
+    "verify_report.py:_VR_OPT80_MIN_TAIL_RUNS",
+    "verify_report.py:_VR_OPT80_MIN_PROVEN_TAIL_RUNS",
+    "verify_report.py:_VR_OPT80_MIN_GAP_S",
+    "verify_report.py:_VR_OPT80_LOG_PROBE_MAX",
     "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL",
     "verify_report.py:_VR_OPT81_MIN_GAP_FRAC",
+    "verify_report.py:_VR_OPT81_MIN_GAP_S",
+    "verify_report.py:_VR_OPT81_COVERED_FRAC",
+    "verify_report.py:_VR_OPT81_CACHE_LEVER_MIN_S",
     "verify_report.py:_VR_OPT83_MIN_SHARE",
     "verify_report.py:_VR_OPT83_MIN_STEP_S",
     "verify_report.py:_VR_OPT84_MIN_STEP_S",
+    "verify_report.py:_VR_OPT84_MIN_SHARE",
     "verify_report.py:_VR_CACHE_TAIL_MIN_FRAC",
     "verify_report.py:_VR_CACHE_COLD_MISS_PCT",
     "verify_report.py:_VR_CACHE_FLOOR_BY_FIX_KEY",
@@ -57,6 +70,17 @@ REQUIRED_VERIFIER_MIRRORS = {
     "verify_report.py:_VR_OPT57_DEFAULT_KILL_CEILING_S",
     "verify_report.py:_VR_OPT57_MIN_TIMEOUT_S",
     "verify_report.py:_VR_OPT57_TIMEOUT_BUFFER_S",
+    "verify_report.py:_VR_WITHHELD_JOBS_SHOWN",
+    "verify_report.py:_VR_PARTIAL_MISS_FLOOR_PCT",
+}
+
+PROVISIONAL_MODULE_LANDING_MARKERS = {
+    "pr_sample_contract.py": "(#333)",
+    "gate_frequency_contract.py": "(#317)",
+}
+
+PROVISIONAL_SYMBOL_LANDING_MARKERS = {
+    "gate_frequency_contract.py:POLE_HOLDS_UP_MIN_COUNT": "(#318)",
 }
 
 REQUIRED_PROVISIONAL_SOURCES = {
@@ -69,6 +93,132 @@ REQUIRED_PROVISIONAL_SOURCES = {
     "gate_frequency_contract.py:GATE_MIN_COUNT_FOR_RANKING": 5,
     "gate_frequency_contract.py:GATE_INTERVAL_Z": 1.96,
     "gate_frequency_contract.py:POLE_HOLDS_UP_MIN_COUNT": 2,
+}
+
+REQUIRED_CURRENT_SOURCES = {
+    "blocking_path.py:_AGG_GATE_TRIVIAL_S": 30.0,
+    "blocking_path.py:_ALSO_NOTICED_CAP": 12,
+    "blocking_path.py:_CHAIN_MAKESPAN_DIVERGENCE_PCT": 25.0,
+    "blocking_path.py:_FLOOR_COOCCUR_MAJORITY_FRAC": 0.5,
+    "blocking_path.py:_FLOOR_NEAR_UNIVERSAL_FRAC": 0.8,
+    "blocking_path.py:_MAG_WIDE_REL": 0.25,
+    "blocking_path.py:_OPT64_MIN_RETRIED_RUNS": 3,
+    "blocking_path.py:_PARTIAL_MISS_FLOOR_PCT": 40.0,
+    "blocking_path.py:_POLE_RECUR_FLOOR": 2,
+    "blocking_path.py:_RARE_PRESENCE_FRAC": 0.5,
+    "blocking_path.py:_RARE_PRESENCE_MIN_PR": 6,
+    "blocking_path.py:_RUNNER_MINUTE_SPINE_CAP": 12,
+    "blocking_path.py:_SEV_HIGH_S": 300.0,
+    "blocking_path.py:_SEV_MED_S": 120.0,
+    "blocking_path.py:_TIER2_CAP": 12,
+    "blocking_path.py:_TOP_WORKFLOWS": 5,
+    "blocking_path.py:_WALL_CLOCK_LONG_POLE_FLOOR_S": 30.0,
+    "blocking_path.py:_WITHHELD_JOBS_SHOWN": 5,
+    "collect_runs.py:_AGG_GATE_TRIVIAL_S": 30.0,
+    "collect_runs.py:_CACHE_BUDGET_FULL_FRACTION": 0.9,
+    "collect_runs.py:_CACHE_COLD_MISS_PCT": 99.5,
+    "collect_runs.py:_CACHE_TAIL_MIN_FRAC": 0.25,
+    "collect_runs.py:_COST_RUNLIST_MAX": 100,
+    "collect_runs.py:_DEEPEN_TOP_CHECKS": 12,
+    "collect_runs.py:_DEFAULT_BRANCH_PUSH_SAMPLE_MAX": 10,
+    "collect_runs.py:_DEPENDENCY_CACHE_FLOOR_PCT": 50.0,
+    "collect_runs.py:_GHA_DEFAULT_JOB_TIMEOUT_S": 21600.0,
+    "collect_runs.py:_MAG_WIDE_REL": 0.25,
+    "collect_runs.py:_MIN_TIMED_RUNS": 3,
+    "collect_runs.py:_NOOP_FLOOR_S": 30.0,
+    "collect_runs.py:_OPT57_DEFAULT_KILL_CEILING_S": 22500.0,
+    "collect_runs.py:_OPT57_KILL_GRACE_S": 900.0,
+    "collect_runs.py:_OPT57_MIN_TIMEOUT_S": 900.0,
+    "collect_runs.py:_OPT57_NEAR_DEFAULT_TIMEOUT_S": 20520.0,
+    "collect_runs.py:_OPT57_TIMEOUT_BUFFER_S": 600.0,
+    "collect_runs.py:_OPT57_TIMEOUT_MULTIPLIER": 1.5,
+    "collect_runs.py:_OPT64_MIN_RETRIED_RUNS": 3,
+    "collect_runs.py:_OPT79_MIN_HITS": 3,
+    "collect_runs.py:_OPT79_MIN_MISSES": 3,
+    "collect_runs.py:_OPT79_MIN_WASTE_FRAC": 0.2,
+    "collect_runs.py:_OPT79_MIN_WASTE_S": 5.0,
+    "collect_runs.py:_OPT79_POLE_MIN_HEADROOM_S": 1.0,
+    "collect_runs.py:_OPT80_LOG_PROBE_MAX": 4,
+    "collect_runs.py:_OPT80_MIN_GAP_S": 20.0,
+    "collect_runs.py:_OPT80_MIN_PROVEN_TAIL_RUNS": 2,
+    "collect_runs.py:_OPT80_MIN_SAMPLED_OCCURRENCES": 6,
+    "collect_runs.py:_OPT80_MIN_TAIL_RUNS": 2,
+    "collect_runs.py:_OPT80_TAIL_P95_ABS_S": 30.0,
+    "collect_runs.py:_OPT80_TAIL_P95_MULTIPLE": 3.0,
+    "collect_runs.py:_OPT81_CACHE_LEVER_MIN_S": 30.0,
+    "collect_runs.py:_OPT81_COVERED_FRAC": 0.5,
+    "collect_runs.py:_OPT81_MIN_GAP_FRAC": 0.25,
+    "collect_runs.py:_OPT81_MIN_GAP_S": 30.0,
+    "collect_runs.py:_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+    "collect_runs.py:_OPT82_MIN_LINT_P50_S": 60.0,
+    "collect_runs.py:_OPT83_MIN_SHARE": 0.15,
+    "collect_runs.py:_OPT83_MIN_STEP_S": 20.0,
+    "collect_runs.py:_OPT84_MIN_SHARE": 0.0,
+    "collect_runs.py:_OPT84_MIN_STEP_S": 20.0,
+    "collect_runs.py:_OPT98_CHURN_SAMPLE": 30,
+    "collect_runs.py:_OPT98_DIFFERENT_RATIO": 1.5,
+    "collect_runs.py:_OPT98_MIN_MERGES_PER_DAY": 30,
+    "collect_runs.py:_OPT98_MIN_RUNS": 15,
+    "collect_runs.py:_OPT98_REPROVE_RATIO": 0.8,
+    "collect_runs.py:_OPT98_WINDOW_DAYS": 30,
+    "collect_runs.py:_POLE_RECUR_FLOOR": 2,
+    "collect_runs.py:_PR_CANDIDATE_PAGE_CAP": 3,
+    "collect_runs.py:_PUSH_LANE_RARE_PER_30D": 8,
+    "collect_runs.py:_RARE_PRESENCE_FRAC": 0.5,
+    "collect_runs.py:_RARE_PRESENCE_MIN_PR": 6,
+    "collect_runs.py:_REPR_PR_TARGET": 20,
+    "collect_runs.py:_SHALLOW_RUNS": 10,
+    "collect_runs.py:_SUCCESS_ONLY_CAVEAT_FAILURE_RATE": 0.2,
+    "collect_runs.py:_SUCCESS_ONLY_CAVEAT_MIN_RUNS": 10,
+    "collect_runs.py:_TRIAGE_WALLCLOCK_FLOOR_S": 90.0,
+    "pr_lifecycle.py:MIN_MEASURED": 10,
+    "verify_report.py:_CEILING_MIN_GATING_PR": 5,
+    "verify_report.py:_VR_AGG_GATE_TRIVIAL_S": 30.0,
+    "verify_report.py:_VR_CACHE_COLD_MISS_PCT": 99.5,
+    "verify_report.py:_VR_CACHE_FLOOR_BY_FIX_KEY": {
+        "dependency-cache": 50.0
+    },
+    "verify_report.py:_VR_CACHE_TAIL_MIN_FRAC": 0.25,
+    "verify_report.py:_VR_CHAIN_DIVERGENCE_PCT": 25.0,
+    "verify_report.py:_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX": 10,
+    "verify_report.py:_VR_OPT57_DEFAULT_KILL_CEILING_S": 22500.0,
+    "verify_report.py:_VR_OPT57_DEFAULT_TIMEOUT_MIN": 360.0,
+    "verify_report.py:_VR_OPT57_MIN_SUCCESS_SAMPLES": 3,
+    "verify_report.py:_VR_OPT57_MIN_TIMEOUT_S": 900.0,
+    "verify_report.py:_VR_OPT57_NEAR_DEFAULT_TIMEOUT_S": 20520.0,
+    "verify_report.py:_VR_OPT57_TIMEOUT_BUFFER_S": 600.0,
+    "verify_report.py:_VR_OPT57_TIMEOUT_MULTIPLIER": 1.5,
+    "verify_report.py:_VR_OPT64_MIN_RETRIED_RUNS": 3,
+    "verify_report.py:_VR_OPT79_MIN_HITS": 3,
+    "verify_report.py:_VR_OPT79_MIN_MISSES": 3,
+    "verify_report.py:_VR_OPT79_MIN_WASTE_FRAC": 0.2,
+    "verify_report.py:_VR_OPT79_MIN_WASTE_S": 5.0,
+    "verify_report.py:_VR_OPT79_POLE_MIN_HEADROOM_S": 1.0,
+    "verify_report.py:_VR_OPT79_TAIL_MIN_FRAC": 0.25,
+    "verify_report.py:_VR_OPT80_LOG_PROBE_MAX": 4,
+    "verify_report.py:_VR_OPT80_MIN_GAP_S": 20.0,
+    "verify_report.py:_VR_OPT80_MIN_PROVEN_TAIL_RUNS": 2,
+    "verify_report.py:_VR_OPT80_MIN_SAMPLED_OCCURRENCES": 6,
+    "verify_report.py:_VR_OPT80_MIN_TAIL_RUNS": 2,
+    "verify_report.py:_VR_OPT80_TAIL_P95_ABS_S": 30.0,
+    "verify_report.py:_VR_OPT80_TAIL_P95_MULTIPLE": 3.0,
+    "verify_report.py:_VR_OPT81_CACHE_LEVER_MIN_S": 30.0,
+    "verify_report.py:_VR_OPT81_COVERED_FRAC": 0.5,
+    "verify_report.py:_VR_OPT81_MIN_GAP_FRAC": 0.25,
+    "verify_report.py:_VR_OPT81_MIN_GAP_S": 30.0,
+    "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+    "verify_report.py:_VR_OPT83_MIN_SHARE": 0.15,
+    "verify_report.py:_VR_OPT83_MIN_STEP_S": 20.0,
+    "verify_report.py:_VR_OPT84_MIN_SHARE": 0.0,
+    "verify_report.py:_VR_OPT84_MIN_STEP_S": 20.0,
+    "verify_report.py:_VR_PARTIAL_MISS_FLOOR_PCT": 40.0,
+    "verify_report.py:_VR_POLE_RECUR_FLOOR": 2,
+    "verify_report.py:_VR_RARE_PRESENCE_FRAC": 0.5,
+    "verify_report.py:_VR_RARE_PRESENCE_MIN_PR": 6,
+    "verify_report.py:_VR_RUNNER_MINUTE_SPINE_CAP": 12,
+    "verify_report.py:_VR_TIER2_CAP": 12,
+    "verify_report.py:_VR_WITHHELD_JOBS_SHOWN": 5,
+    "verify_report.py:_WALL_CLOCK_LONG_POLE_FLOOR_S": 30.0
 }
 
 
@@ -189,7 +339,14 @@ def test_report_defaults_machine_contract_matches_the_engine():
         for row in contract.values()
         for source, value in row.get("planned_sources", {}).items()
     }
+    documented_sources = {
+        source: value
+        for row in contract.values()
+        for source, value in row.get("sources", {}).items()
+    }
+    changelog = (SKILL / "CHANGELOG.md").read_text(encoding="utf-8")
     assert REQUIRED_VERIFIER_MIRRORS <= sources
+    assert documented_sources == REQUIRED_CURRENT_SOURCES
     assert REQUIRED_PROVISIONAL_SOURCES.items() <= planned_sources.items()
     for key, row in contract.items():
         for source, expected in row.get("sources", {}).items():
@@ -202,11 +359,17 @@ def test_report_defaults_machine_contract_matches_the_engine():
         for source, expected in row.get("planned_sources", {}).items():
             path, symbol = _module(source)
             if not path.exists():
+                marker = PROVISIONAL_MODULE_LANDING_MARKERS[path.name]
+                assert marker not in changelog, (
+                    f"missing landed provisional module {path.name} ({marker})")
                 continue
             names = _assignment_nodes(path)
             if path.name == "gate_frequency_contract.py" and symbol == "POLE_HOLDS_UP_MIN_COUNT":
                 # #317 creates the shared module; #318 adds this fourth value.
                 if symbol not in names:
+                    marker = PROVISIONAL_SYMBOL_LANDING_MARKERS[source]
+                    assert marker not in changelog, (
+                        f"missing landed provisional source {source} ({marker})")
                     continue
             assert symbol in names, f"missing provisional source {source}"
             _assert_value(source, expected)
