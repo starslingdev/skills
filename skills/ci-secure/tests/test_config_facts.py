@@ -2135,6 +2135,12 @@ def test_a_partially_read_protection_is_never_reported_as_complete():
          RuntimeError("request timed out")),
         ("classic unavailable", _RULESET_WITH_TEST,
          RuntimeError("HTTP 503 Service Unavailable")),
+        ("classic 5xx quotes a 404", _RULESET_WITH_TEST,
+         RuntimeError(
+             "HTTP 503 Service Unavailable: upstream returned "
+             "Not Found (HTTP 404)")),
+        ("classic rate limited with 403", _RULESET_WITH_TEST,
+         RuntimeError("gh: API rate limit exceeded (HTTP 403)")),
         ("rulesets errors", RuntimeError("HTTP 429 rate limit"),
          {"contexts": ["test"]}),
     ):
