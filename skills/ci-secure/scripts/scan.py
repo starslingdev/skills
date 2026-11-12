@@ -36,6 +36,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -6461,6 +6462,13 @@ def _dedupe_occurrences(findings: list[Finding]) -> list[Finding]:
 _DEFAULT_GH_SKIP_REASON = "gh not authenticated (run gh auth login)"
 
 
+def _gh_unavailable_reason() -> str:
+    """Specific guidance when the optional gh-backed checks cannot run."""
+    if shutil.which("gh") is None:
+        return "gh not installed (install the GitHub CLI)"
+    return _DEFAULT_GH_SKIP_REASON
+
+
 def scan(
     catalog: list[CatalogEntry],
     root: Path,
@@ -7084,13 +7092,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    gh_skip_reason = _DEFAULT_GH_SKIP_REASON
+    gh_skip_reason = _gh_unavailable_reason()
     if args.gh_impostor == "on":
         from gh_utils import check_prereqs  # noqa: E402
         if not check_prereqs():
             print(
-                "ERROR: --gh-impostor=on but gh is not authenticated "
-                "(gh auth login)",
+                f"ERROR: --gh-impostor=on but {gh_skip_reason}",
                 file=sys.stderr,
             )
             return 2

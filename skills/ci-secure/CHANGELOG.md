@@ -345,6 +345,11 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-12** (#332) — Optional GitHub checks now distinguish a missing
+  `gh` executable from an installed CLI that is not authenticated, so the
+  skip guidance tells users whether to install or log in. The README count is
+  updated to the two network lookups plus seven API-gated config facts.
+
 - **2026-11-12** (#341, closes #327) — Required-check auditing now keeps a readable ruleset
   answer when GitHub hides classic branch protection from a non-admin reader
   behind a plain `404 Not Found`. The fact remains measured, names that classic

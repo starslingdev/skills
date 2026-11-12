@@ -44,7 +44,7 @@ or CI state; requests that do are routed to the GitHub CLI.
 |---|---|---|
 | <code>ci&#8209;speedup</code> | Python 3.9+, PyYAML, authenticated `gh` | Reads GitHub run history through the GitHub API |
 | <code>ci&#8209;score</code> | Python 3.9+, PyYAML | Fully offline |
-| <code>ci&#8209;secure</code> | Python 3.9+, PyYAML; `gh` optional | Runs locally; `gh` enables four additional checks |
+| <code>ci&#8209;secure</code> | Python 3.9+, PyYAML; `gh` optional | Runs locally; `gh` enables nine additional checks |
 | `sling` | StarSling account, `sling` CLI, login, and StarSling GitHub App | Queries your account through StarSling's control plane |
 
 The repository-audit skills do not send audit results or repository contents
