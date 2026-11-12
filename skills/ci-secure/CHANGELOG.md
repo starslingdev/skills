@@ -311,8 +311,11 @@ entries are dated (UTC). Format loosely follows
   with `--pin` set to a tag, branch or abbreviated commit, and then runs that
   extension in the same job (`gh <name> …` or `gh extension exec <name>`),
   is reported: whoever can move that tag or branch decides what the next run
-  executes with the job's token. GitHub's own recommended lockfile-check job
-  had this shape and scanned clean. A full 40-hex `--pin`, a local install
+  executes with the job's token. A binary extension's tag on a release
+  published as immutable cannot move, which the offline scan cannot see; the
+  finding and catalog say so and give the fix for each extension kind (a
+  commit pin for a script extension; an immutable-release tag, or a
+  digest-verified download, for a binary one). A full 40-hex `--pin`, a local install
   and an install of the scanned repository are not reported; an install with
   no visible run of the extension is recorded as a coverage note. Covers the
   `ext` alias, `--pin=X`, `--force`, flag order, `HOST/OWNER/REPO` and URL

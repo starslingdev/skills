@@ -5038,8 +5038,9 @@ def _gh_ext_job(*runs: str) -> str:
 
 
 def test_p1424_gh_extension_pinned_to_a_tag_then_invoked(tmp_path):
-    """GitHub's own recommended lockfile-verification job: the extension is
-    pinned to a release TAG, which its owner can re-point, and then run."""
+    """A lockfile-verification job: the extension is pinned to a release TAG
+    and then run. Offline, a tag is reported: only a release published as
+    immutable locks it, and that setting is not in the workflow."""
     hits = _remote_exec_hits(tmp_path, _GH_EXT_LOCKFILE)
     assert len(hits) == 1, hits
     assert "gh extension install" in hits[0].evidence
@@ -5076,7 +5077,7 @@ def test_p1424_gh_extension_spellings(tmp_path):
         "alias": _gh_ext_job("gh ext install --force github/gh-actions-lock",
                              "gh actions-lock --verify"),
         "url": _gh_ext_job(
-            "gh extension install https://github.com/github/gh-actions-lock --pin v1",
+            "gh extension install " + _url("github/gh-actions-lock") + " --pin v1",
             "gh actions-lock --verify"),
         "exec": _gh_ext_job("gh extension install github/gh-actions-lock",
                             "gh extension exec actions-lock --verify"),
@@ -5187,6 +5188,56 @@ def test_p1424_gh_extension_single_quoted_substitution_is_text(tmp_path):
         "echo '$(gh extension install github/gh-actions-lock)'",
         "echo '$(gh actions-lock --verify)'",
     )) == []
+
+
+def test_p1424_gh_extension_install_of_the_scanned_repository_is_silent(tmp_path):
+    """The repository's own extension, by expression, slug or URL, is its own
+    code. The positive control below keeps the guard from swallowing all."""
+    (tmp_path / ".git").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = ' + _url("owner/gh-self" + _DOT_GIT) + "\n")
+    for target in (_SELF_REPO, "owner/gh-self", _url("owner/gh-self")):
+        wf = _wf(tmp_path, "wf.yml", _gh_ext_job(
+            f"gh extension install {target}", "gh self --help"))
+        assert list(scan._correlation_unverified_remote_code_execution(wf)) == [], target
+    wf = _wf(tmp_path, "wf.yml", _gh_ext_job(
+        "gh extension install other/gh-self", "gh self --help"))
+    assert len(list(scan._correlation_unverified_remote_code_execution(wf))) == 1
+
+
+def test_p1424_gh_extension_full_sha_pin_is_recorded_as_a_suppression(tmp_path):
+    """Silence is not a silent drop: the full-SHA pin is recorded."""
+    before = len(scan._DROPPED_MATCHES)
+    assert _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install github/gh-actions-lock --pin " + "c" * 40,
+        "gh actions-lock --verify",
+    )) == []
+    added = scan._DROPPED_MATCHES[before:]
+    assert any("gh-actions-lock" in g["reason"] and "full commit id" in g["reason"]
+               for g in added), added
+
+
+def test_p1424_gh_extension_unparseable_install_is_a_gap(tmp_path):
+    """An install line shlex cannot read is a coverage note, not a pass."""
+    before = len(scan._DROPPED_MATCHES)
+    assert _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install github/gh-actions-lock --pin 'v1",
+        "gh actions-lock --verify",
+    )) == []
+    added = scan._DROPPED_MATCHES[before:]
+    assert any("could not be parsed" in g["reason"] for g in added), added
+
+
+def test_p1424_gh_extension_reinstall_is_judged_on_its_own(tmp_path):
+    """A later install of the same extension replaces the earlier one, so a
+    run after both is reported once, against the later install."""
+    hits = _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install github/gh-actions-lock --pin v1",
+        "gh extension install --force github/gh-actions-lock --pin v2",
+        "gh actions-lock --verify",
+    ))
+    assert len(hits) == 1, hits
+    assert "v2" in (hits[0].derived_note or "")
 
 
 def test_catalog_scan_end_to_end_fires_p14_24_on_a_gh_extension(tmp_path):

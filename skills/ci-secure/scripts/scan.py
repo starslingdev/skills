@@ -4936,9 +4936,13 @@ def _correlation_unverified_remote_code_execution(
                     f"reference, so what is installed is whatever that "
                     f"repository's owner publishes under it at the moment the "
                     f"job runs — and then runs it as `{invoked}` at line "
-                    f"{exec_line}. A full 40-character commit id passed to "
-                    f"`--pin` is the only reference that cannot change under "
-                    f"you."
+                    f"{exec_line}. For a script extension, a full "
+                    f"40-character commit id passed to `--pin` cannot change "
+                    f"under you; a binary extension's `--pin` names a release "
+                    f"tag, which is fixed only when that release is published "
+                    f"as immutable (not visible offline) — otherwise download "
+                    f"the release asset, verify its digest and run the local "
+                    f"copy."
                 ),
             )
 

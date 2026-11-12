@@ -617,7 +617,7 @@ what makes those unsafe is the pipe into a shell, not the address being
 fetched; the `deno run` form is the exception — it has no pipe, so that arm
 does key on a literal URL.)
 
-*Shape 2 — the mutable fetch*: within ONE job, a `git clone` / `git fetch` / `actions/checkout` of another repository at a mutable reference, followed by a command that executes out of the directory it landed in.
+*Shape 2 — the mutable fetch*: within ONE job, a `git clone` / `git fetch` / `actions/checkout` of another repository, or a `gh extension install`, at a mutable reference, followed by a command that executes out of the directory it landed in.
 
 ```yaml
 # WRONG — `main` is whatever that branch points at when the job runs
@@ -647,11 +647,11 @@ Execution shapes matched: an interpreter running a fetched file (`python3`/`node
 - **A clone of your OWN repository is not reported.** `${{ github.repository }}` is the scanned repo by definition, and a literal `github.com/<owner>/<repo>` is compared against the checkout's `origin` remote — including the authenticated spelling that carries a token in the URL's userinfo. No third party is involved in re-cloning yourself, and the fix this entry recommends (pin to a full commit id) is unactionable for a release workflow that must run at the branch head. In an exported tree with no `.git`, `origin` is unknown and the literal form is reported like any other clone.
 - **`working-directory:` is followed** — on the step, and through `defaults.run.working-directory` on the job and on the workflow. A `working-directory:` computed at run time (`apps/${{ matrix.app }}`) is not knowable, so it becomes an opaque directory: a fetch and an execution both inside it still connect to each other, and nothing inside it can match a directory anywhere else.
 - **`actions/checkout` of another `repository:` is covered too**, since it is how most workflows fetch a second repository. The same rules apply: a full 40-hex `ref:` is silent, your own repository is silent, and something in a LATER step of the same job has to execute out of the `path:` it landed in. With NO `path:` the checkout replaces the workspace, so anything the job runs afterwards counts. A `repository:`, `ref:` or `path:` computed at run time is recorded as a coverage gap rather than guessed at.
-- **A GitHub CLI extension installed at a mutable ref is covered too.** `gh extension install OWNER/REPO` (or `gh ext install`, a `HOST/OWNER/REPO`, or an `https://` URL) downloads the extension at its LATEST release, or at the ref `--pin` names — a release tag or branch that the extension's owner can move, so the next run executes different code with the job's token. It follows the clone rule: the finding needs the install AND a later run of the extension in the same job — `gh <name> …`, where `<name>` is the repository name without its `gh-` prefix, or `gh extension exec <name>`. No `--pin`, a tag, a branch or an abbreviated commit id is reported; `--pin <full-40-hex-commit>` (either spelling, `--pin X` or `--pin=X`) is immutable and is NOT a finding, and is recorded as a suppression. A local install (`gh extension install .`, or any path) and an install of your own repository are not reported. An install with no visible run of the extension in that job — it may run from a script or a build driver this scan cannot read — is recorded as a coverage note, not a finding.
+- **A GitHub CLI extension installed at a mutable ref is covered too.** `gh extension install OWNER/REPO` (or `gh ext install`, a `HOST/OWNER/REPO`, or an `https://` URL) downloads the extension at its LATEST release, or at the ref `--pin` names. For a binary extension (one whose release carries assets) `--pin` names a release TAG; for a script extension it names a tag, branch or commit. Anything but a full commit id can be moved by the extension's owner, so the next run executes different code with the job's token. The one exception the scan cannot see offline is a binary extension's tag on a release published as IMMUTABLE: GitHub locks that tag and its assets, so the pin cannot change. That case is still reported — confirm the release is marked immutable and dismiss it. It follows the clone rule: the finding needs the install AND a later run of the extension in the same job — `gh <name> …`, where `<name>` is the repository name without its `gh-` prefix, or `gh extension exec <name>`. No `--pin`, a tag, a branch or an abbreviated commit id is reported; `--pin <full-40-hex-commit>` (either spelling, `--pin X` or `--pin=X`) is immutable and is NOT a finding, and is recorded as a suppression. A local install (`gh extension install .`) and an install of your own repository are not reported. An install with no visible run of the extension in that job — it may run from a script or a build driver this scan cannot read — is recorded as a coverage note, not a finding.
 
   ```yaml
-  # WRONG — v0.4.1 is a tag; whatever it points at next run is what runs
-  - run: gh extension install <owner>/gh-<name> --pin v0.4.1
+  # WRONG — no --pin: whatever the latest release is next run is what runs
+  - run: gh extension install <owner>/gh-<name>
   - run: gh <name> --verify
   ```
 
@@ -675,7 +675,7 @@ PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same clas
     bash install.sh
 ```
 
-A GitHub CLI extension is pinned the same way: `gh extension install <owner>/gh-<name> --pin <full-40-hex-commit>`. Where an extension ships only as release binaries and its install does not accept a commit, download the release asset, verify a known digest, and run the local copy — or vendor it.
+A GitHub CLI SCRIPT extension is pinned the same way: `gh extension install <owner>/gh-<name> --pin <full-40-hex-commit>`. A BINARY extension's `--pin` accepts only a release tag, so a commit id fails the install: pin it to a tag whose release is marked immutable, or download the release asset, verify a known digest, and run the local copy — or vendor it.
 
 Prefer a package manager or a SHA-pinned action over an ad-hoc installer where one exists. For tools distributed only as a piped installer, or a repository you must build from source, vendor the code into the repo (so it is reviewed and pinned by git) and run the local copy.
 
