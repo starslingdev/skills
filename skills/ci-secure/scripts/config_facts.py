@@ -1758,7 +1758,11 @@ def _render_templated_name(
 # fact are auditing a repository they do not administer. Any other failure
 # (rate limit, timeout, 5xx, malformed body) is not ordinary, and must not be
 # laundered into the same "expected" bucket.
-_ADMIN_ONLY_403_RE = re.compile(r"\b403\b|must have admin", re.I)
+_ADMIN_ONLY_403_RE = re.compile(
+    r"(?:\bHTTP\s+403\b.*(?:must have admin|resource not accessible)"
+    r"|(?:must have admin|resource not accessible).*\bHTTP\s+403\b)",
+    re.I | re.S,
+)
 
 
 def _is_admin_only_403(message: str) -> bool:
@@ -1769,8 +1773,10 @@ def _is_admin_only_403(message: str) -> bool:
 # non-admin reader as a plain Not Found. Require both parts of that exact
 # response so a 5xx body that merely quotes a 404 is not treated as ordinary.
 _CLASSIC_HIDDEN_404_RE = re.compile(
-    r"\bHTTP\s+404\b.*\bnot found\b|\bnot found\b.*\bHTTP\s+404\b",
-    re.I | re.S,
+    r"^(?:classic branch protection:\s*)?"
+    r"(?:API call failed:\s*)?(?:gh:\s*)?"
+    r"(?:not found\s*\(HTTP\s+404\)|HTTP\s+404\s*:?\s*not found)\s*$",
+    re.I,
 )
 
 
