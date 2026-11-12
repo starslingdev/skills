@@ -202,17 +202,15 @@ def advance_verification(
     initial = saved.get("initial") if same_binding else None
     if not isinstance(initial, dict):
         initial = client.completed_cohort(repo, head, branch)
-    if initial is None:
-        return {"status": "waiting-for-first-cohort", "head_sha": head,
-                "verdict": None, **baseline_log_result}
-
-    samples = list(saved.get("samples") or []) if same_binding else [initial]
+    samples = (list(saved.get("samples") or []) if same_binding else
+               ([initial] if isinstance(initial, dict) else []))
     context: dict[str, Any] = {
         **binding,
         "binding": binding,
         "initial": initial,
-        "workflow_identities": list(initial.get("expected_workflows") or
-                                    initial.get("workflows") or []),
+        "workflow_identities": list(
+            initial.get("expected_workflows") or initial.get("workflows") or []
+        ) if isinstance(initial, dict) else [],
         "samples": samples,
         "run_attempt_ids": [item for sample in samples
                             for item in sample.get("run_attempt_ids") or []],
@@ -230,6 +228,11 @@ def advance_verification(
             json.dumps(context, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8")
         temporary.replace(context_file)
+
+    if initial is None:
+        persist()
+        return {"status": "waiting-for-first-cohort", "head_sha": head,
+                "verdict": None, **baseline_log_result}
 
     def preflight_refused_result(cohort: dict[str, Any] | None,
                                  current_samples: list[dict[str, Any]]
