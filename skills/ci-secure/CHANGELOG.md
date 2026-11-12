@@ -13,7 +13,7 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
-- **2026-11-12** (#PRNUM) — ci-secure: a new API-gated config hygiene check,
+- **2026-11-12** (#341) — ci-secure: a new API-gated config hygiene check,
   `sec.default-branch.review-required`, and the incident that grounds it.
   The check passes when the default branch, through an active ruleset or
   classic branch protection, needs a pull request with at least one approval
