@@ -12,7 +12,7 @@ not measured: lifecycle data was not collected
 | **PR gate sample** | 20 of 20 PRs sampled: target met |
 | **Audit** | ran 2026-07-25 · ci-speedup skill commit [`2f048be`](https://github.com/starslingdev/skills/commit/2f048be) |
 
-> **Bottom line.** A typical PR waits **41m 12s** for all checks to finish. The biggest single measured win is **~13m 24s** off the slowest fixable check, `Windows (firefox)` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever. Long pole 1, `Windows (firefox)`, is the longest check in **Checks that hold up most PRs**.
+> **Bottom line.** Long pole 1, `Windows (firefox)`, is the longest check in **Checks that hold up most PRs**. A typical PR waits **41m 12s** for all checks to finish. The biggest single measured win is **~13m 24s** off the slowest fixable check, `Windows (firefox)` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
 >
 > **41m 12s until all checks finish** - `Windows (firefox)` is the slowest check a typical PR waits on (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s. 
 >
@@ -22,7 +22,7 @@ not measured: lifecycle data was not collected
 >
 > **`.github/workflows/publish_release.yml` changed ~119 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_bidi.yml` changed ~123 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_bidi.yml` changed ~124 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **`.github/workflows/tests_secondary.yml` changed ~131 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
@@ -94,6 +94,8 @@ Each ◀ marks the blocker the next level opens. Long pole 1 below drills the ma
 <a id="pole-1"></a>
 
 ## 🔴 Long pole 1: `tests_secondary.yml` ▸ `Windows (firefox)` - 72m 57s
+
+**Frequency group:** Checks that hold up most PRs.
 
 **The slowest check a typical PR waits on.**
 
@@ -177,6 +179,8 @@ DELIVER & VERIFY
 <a id="pole-2"></a>
 
 ## 🔴 Long pole 2: `tests_primary.yml` ▸ `ubuntu-22.04 (webkit - Node.js 20)` - 41m 21s
+
+**Frequency group:** Checks that hold up most PRs.
 
 _Runs concurrently behind `Windows (firefox)` (72m 57s); it becomes the gate only once every slower concurrent check drops below 41m 21s._
 
@@ -263,6 +267,8 @@ DELIVER & VERIFY
 
 ## 🔴 Long pole 3: `tests_mcp.yml` ▸ `windows-latest - firefox` - 40m 15s
 
+**Frequency group:** Checks that hold up most PRs.
+
 _Runs concurrently behind `Windows (firefox)` (72m 57s); it becomes the gate only once every slower concurrent check drops below 40m 15s._
 
 > **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~8m 24s (the next leg, `macos-latest - firefox`, is 31m 51s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `macos-latest - chromium` (20m 14s), for up to **~20m 00s** of merge wait. Per-PR split: 0 on 14 of 20 PRs where another check runs longer; up to 20s on 1 of 20 PRs; up to 1m 28s on 1 of 20 PRs; up to 3m 10s on 1 of 20 PRs; up to 20m 04s on 1 of 20 PRs; up to 20m 08s on 1 of 20 PRs; up to 20m 18s on 1 of 20 PRs.
@@ -345,6 +351,8 @@ DELIVER & VERIFY
 <a id="pole-4"></a>
 
 ## 🔴 Long pole 4: `tests_secondary.yml` ▸ `Test chrome on macos-latest` - 59m 33s
+
+**Frequency group:** Long but rarely the last to finish.
 
 **Rarely the merge gate - the actual slowest check a PR waits on, on only 1/20 sampled PRs.** Present on 5/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 59m 33s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait.
 
@@ -429,6 +437,8 @@ DELIVER & VERIFY
 <a id="pole-5"></a>
 
 ## 🔴 Long pole 5: `tests_secondary.yml` ▸ `Test msedge on windows-latest` - 46m 01s
+
+**Frequency group:** Long but rarely the last to finish.
 
 **Rarely the merge gate - the actual slowest check a PR waits on, on only 0/20 sampled PRs.** Present on 5/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 46m 01s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait.
 
@@ -1574,7 +1584,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `1052a8c`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `ebcb369`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

@@ -12855,16 +12855,10 @@ def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
     shrinking denominator is surfaced, not silent."""
     counts: dict[str, int] = {}
     n = dropped = 0
-    unconfirmed = {
-        str(row.get("name") or row.get("check") or "")
-        for row in _as_list(cp.get("checks"))
-        if isinstance(row, dict) and row.get("required_reachable") is False
-    }
     for entry in _as_list(cp.get("populations")):
         try:
             _share, cks = entry
-            pos = [(str(nm), float(p)) for nm, p in cks
-                   if float(p) > 0 and str(nm) not in unconfirmed]
+            pos = [(str(nm), float(p)) for nm, p in cks if float(p) > 0]
         except (TypeError, ValueError):
             dropped += 1
             continue
