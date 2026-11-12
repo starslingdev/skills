@@ -305,6 +305,77 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-11** (#331) — A GitHub CLI extension pinned to a tag on a
+  release GitHub has locked as immutable is no longer reported (P14.24). That
+  tag and its assets cannot move, but the offline scan could not see the
+  setting, so roughly a third of real gh-extension findings were this case,
+  including GitHub's own recommended lockfile-check workflow. With the GitHub
+  API lookups on (`--gh-impostor`, the same switch as P14.11, default `auto`),
+  the scan asks GitHub for the release at that tag once per repository and
+  tag (always on github.com, whatever `GH_HOST` names), and reads its
+  `immutable` field: `true` is recorded as a suppression
+  naming the release; `false` or no published release at that tag (a
+  branch, a bare tag, or a repository the scan cannot see) stays a finding that says which. No `--pin` and an abbreviated commit
+  stay findings with no lookup. When the lookup is off, `gh` is unavailable,
+  or it fails (timeouts and server errors are tried up to three times in all; a
+  rate limit or authentication failure is not), the finding is kept with its
+  offline wording and `gh_checks["P14.24"]` records `skipped` or `partial`
+  with the reason; the report shows this as a note, not as a missing
+  finding, and each unverified pin it lists is flattened like any other
+  scanned text, so a workflow path or `--pin` value cannot add Markdown of
+  its own. A scan that stops with an error switches the lookup back off, as
+  a finished one does. Only the published release whose tag is exactly the
+  pin can vouch for it; a `gh` that cannot be run is a failed lookup, not a
+  crashed scan; `--pin=` with no value is read as no pin (latest release);
+  and a finding whose release was looked up no longer says the setting is
+  not visible offline. Also fixed in the same finding text: a `--pin` written as a
+  `${{ }}` expression showed the scanner's internal placeholder instead of
+  the expression (a git clone/fetch/checkout at an expression ref had the
+  same bug in its finding text and `match_text`, fixed by the same change),
+  and an abbreviated `--pin` was described as something git re-resolves,
+  which a gh extension install does not do. The CI gate treats an
+  unfinished P14.24 lookup as a `::notice::`, not as missing coverage: it
+  never reds a `CI_SECURE_GH_STRICT=1` run, since its findings are all still
+  reported and a run-time pin can never be looked up. The report note and
+  terminal summary now say to sign in to gh and re-run, not to dismiss
+  the finding; the Phase 3 one-liner prints the P14.24 status, and
+  SKILL.md says `--gh-impostor` gates both lookups.
+
+- **2026-11-11** (#329) — A repository that adopts GitHub's workflow lockfile no
+  longer loses the impostor-SHA check (P14.11) in silence. With a lockfile,
+  `uses:` lines carry tags and the commit lives only in
+  `.github/workflows/actions.lock`, so P14.11 had nothing to check and the
+  report gave no sign of it. The scan now reads the lockfile (fail-closed: an
+  unreadable or malformed one credits nothing) and records an informational
+  `action_lockfile` block; the report adds an **Action lockfile** row naming
+  how many references in how many workflows are locked, that GitHub verifies
+  each locked commit at run time, and that P14.11 checks only commit pins
+  written in `uses:`. Only step-level `uses:` count: a call to a reusable
+  workflow is never counted, since the lockfile does not pin one. A lockfile
+  the scan cannot read is named by its real path and the row says its tag
+  references are checked by neither. The terminal summary reads the state
+  from the findings JSON. Coverage is unchanged: a locked repository still
+  reads complete. The reader's accept/reject verdict is pinned against
+  ci-score's by a repo-root parity test.
+
+- **2026-11-11** — Unverified remote code execution now covers a GitHub CLI
+  extension installed at a mutable reference (#330). A job that runs
+  `gh extension install OWNER/REPO` with no `--pin` (the latest release) or
+  with `--pin` set to a tag, branch or abbreviated commit, and then runs that
+  extension in the same job (`gh <name> …` or `gh extension exec <name>`),
+  is reported: whoever can move that tag or branch decides what the next run
+  executes with the job's token. A binary extension's tag on a release
+  published as immutable cannot move, which the offline scan cannot see; the
+  finding and catalog say so and give the fix for each extension kind (a
+  commit pin for a script extension; an immutable-release tag, or a
+  digest-verified download, for a binary one). A full 40-hex `--pin`, a local install
+  and an install of the scanned repository are not reported; an install with
+  no visible run of the extension is recorded as a coverage note. Covers the
+  `ext` alias, `--pin=X`, `--force`, flag order, `HOST/OWNER/REPO` and URL
+  targets, multi-line `run:` blocks, and a run captured with `$( … )` after
+  the install on the same line; a `$( … )` inside single quotes is printed
+  text and is read as neither half.
+
 - **2026-11-09** — A crafted workflow line can no longer freeze the scan. The
   install-command matcher (dependency install scripts in a job that holds
   secrets) offered two readings of the same text in four places: an

@@ -70,7 +70,7 @@ Detector semantics (only the types this catalog uses):
 - `regex` — applied to each file's content with `re.MULTILINE`. One finding per match.
 - `yaml-run-injection` — a regex applied to `jobs.*.steps.*.run` scalars only, so template expressions that are harmless in `with:`/`env:` blocks don't false-positive.
 - `yaml-job-correlated` / `yaml-workflow-correlated` — named correlation functions in `scan.py` that fire only when multiple predicates hold on the same job / workflow. The chain detectors.
-- `gh-impostor-sha` — the one network-gated detector (see P14.11): runs when `gh` is authenticated, is explicitly recorded as skipped otherwise.
+- `gh-impostor-sha` — the one network-gated detector (see P14.11): runs when `gh` is authenticated, is explicitly recorded as skipped otherwise. The same `--gh-impostor` switch also gates P14.24's release-immutability lookup, which can only remove a finding (see P14.24's GitHub CLI extension bullet).
 
 `fix-surface` is `yaml` when the fix is an edit to workflow YAML and
 `non-yaml` when it is an org setting, registry configuration, or manual
@@ -351,7 +351,10 @@ miss flags every occurrence. When `gh` is unavailable the check is SKIPPED
 and the scan output + report say so explicitly — silence is never treated as
 a pass. False-positive note: a commit reachable only from a tag (a release
 commit) still exists in the repo and passes the API check; this detector
-flags only commits the canonical repo does not contain at all.
+flags only commits the canonical repo does not contain at all. The same
+`--gh-impostor` switch also runs P14.24's release-immutability lookup for a
+GitHub CLI extension pinned to a tag; that lookup can only remove a finding,
+and its own status is `gh_checks["P14.24"]`.
 
 **Detector limitation — the fork gap, stated because this pattern's own
 attacker story is the part it does not fully cover.** Both endpoints the
@@ -366,6 +369,17 @@ deleted, dangling or never-pushed object — the tj-actions shape, and the
 reason the check earns its place. Closing the fork gap needs a
 ref-reachability test the REST API does not offer; until then, read a clean
 P14.11 as "not dangling", not as "provably the maintainer's commit".
+
+**Workflow lockfiles.** A repository that adopts GitHub's workflow lockfile
+(`.github/workflows/actions.lock`, written by `gh actions-lock`) keeps a tag in
+the `uses:` line and records the commit only in the lockfile. This check reads
+commit pins written in `uses:` and does not check locked commits; for a
+workflow the lockfile lists, GitHub verifies the locked commit at run time
+(reachable from its recorded ref, same repository). The scan counts those
+references in `action_lockfile` and the report states them on its **Action
+lockfile** row, so a locked repository never reads as a silent pass. A
+lockfile that is not readable and well-formed is named and credited with
+nothing.
 
 **Fix recipe**: Re-pin to a SHA from the upstream's own history — typically
 the commit the latest release tag points at:
@@ -593,7 +607,7 @@ fix-surface: yaml
 title_template: "Unverified remote code execution in {basename}"
 -->
 
-**TL;DR.** A job executes remotely-fetched code that nothing pins — a script piped straight into a shell, or another repository fetched at a mutable ref (by `git clone`, `git fetch`, or `actions/checkout`) and then run out of. **The piped installer**: a `run:` step pipes a remotely-fetched script straight into a shell — `curl … | bash`, `wget … | sh`, `bash <(curl …)`, or `deno run <url>`. **The mutable fetch**: a job clones or fetches a git tree at a BRANCH, TAG, `HEAD`, or an abbreviated commit id — anything but a full 40-hex commit — and then executes a file out of that tree. Both run whatever the other side serves *at that moment*, with no integrity check, at full job privilege. A fetch pinned to a full 40-character commit id is immutable and is NOT a finding: that is the same trust model this catalog recommends for action pins.
+**TL;DR.** A job executes remotely-fetched code that nothing pins — a script piped straight into a shell, or another repository fetched at a mutable ref (by `git clone`, `git fetch`, `actions/checkout`, or `gh extension install`) and then run out of. **The piped installer**: a `run:` step pipes a remotely-fetched script straight into a shell — `curl … | bash`, `wget … | sh`, `bash <(curl …)`, or `deno run <url>`. **The mutable fetch**: a job clones or fetches a git tree at a BRANCH, TAG, `HEAD`, or an abbreviated commit id — anything but a full 40-hex commit — and then executes a file out of that tree. Both run whatever the other side serves *at that moment*, with no integrity check, at full job privilege. A fetch pinned to a full 40-character commit id is immutable and is NOT a finding: that is the same trust model this catalog recommends for action pins.
 
 **What an attacker can do.** Whoever controls the fetched code — the upstream host, a hijacked CDN, a maintainer account on the cloned repository — runs arbitrary code on your runner with the job's secrets and `GITHUB_TOKEN`. The mutable-fetch shape needs no host compromise at all: a branch or tag is *designed* to move, so anyone who can push to (or re-point a tag on) that repository changes what your next CI run executes, and nothing in your repo has to change for it to happen. Unlike a SHA-pinned action, both shapes re-resolve live on every run, so a one-time compromise hits every subsequent run until someone notices.
 
@@ -617,7 +631,7 @@ what makes those unsafe is the pipe into a shell, not the address being
 fetched; the `deno run` form is the exception — it has no pipe, so that arm
 does key on a literal URL.)
 
-*Shape 2 — the mutable fetch*: within ONE job, a `git clone` / `git fetch` / `actions/checkout` of another repository at a mutable reference, followed by a command that executes out of the directory it landed in.
+*Shape 2 — the mutable fetch*: within ONE job, a `git clone` / `git fetch` / `actions/checkout` of another repository, or a `gh extension install`, at a mutable reference, followed by a command that executes out of the directory it landed in.
 
 ```yaml
 # WRONG — `main` is whatever that branch points at when the job runs
@@ -632,7 +646,7 @@ Execution shapes matched: an interpreter running a fetched file (`python3`/`node
 - **A full 40-hex pin silences it — a short sha does not, and neither does a late one.** `git clone … && git -C dir checkout <40-hex>` is immutable and never reported, and the pin has to land BETWEEN the fetch and the execution: pinning is a claim about the code that ran, so a pin before the fetch pinned the tree as it stood and a pin after the execution pinned nothing that had already run. Every suppression is recorded — in the scan's `suppressed_findings`, which is informational and never counts against coverage. An abbreviated id (`a1b2c3d`) is re-resolved by git at fetch time and is treated as mutable.
 - **A destination the scanner cannot see is not reported.** `git clone "$TOOLS_URL"` with no explicit target directory leaves the destination unknowable, so no connection is claimed and no finding is raised — a deliberate false negative in favour of never inventing a chain. It is recorded as a coverage note, so "no finding" is distinguishable from "nothing here". Shell the scanner cannot parse (an unbalanced quote) contributes nothing; it is recorded as a coverage note when the text it could not read mentions a fetch or an execution, and only an unreadable `cd` abandons the rest of the step, since that is the case that leaves the working directory stale.
 - **`git fetch` fires only for a third-party remote** — a URL, a variable holding one, or a name this job just added with `git remote add <name> <url>` — that something then brings into the tree (`git checkout FETCH_HEAD`, or `reset` / `switch` / `merge` / `rebase` on it). `git fetch origin main` pulls the repository's own history and is not this vector. Unlike the clone arm, a `git fetch` lands in the job's working directory, so the destination is that directory and the finding renders it as `.`.
-- **The shell arm reads `git clone`, `git fetch` and `git remote add`, and nothing else.** Everything below is the same trust model and is NOT reported — a clean P14.24 is not a statement that the repo has no mutable fetch-and-run, only that no `git`-spelled one is visible:
+- **The shell arm reads `git clone`, `git fetch`, `git remote add` and `gh extension install`, and nothing else.** Everything below is the same trust model and is NOT reported — a clean P14.24 is not a statement that the repo has no mutable fetch-and-run, only that no `git`- or `gh extension`-spelled one is visible:
   - other fetchers: `gh repo clone`, `svn checkout`, `git submodule update --remote`, and package managers pointed at a git ref (`pip install "git+…@main"`, `go install …@latest`, an npm/cargo git dependency);
   - a tarball fetched with `curl`/`wget`, unpacked, and then run;
   - a fetch and its execution separated by a rename (`mv tools built && python3 built/setup.py`);
@@ -647,6 +661,13 @@ Execution shapes matched: an interpreter running a fetched file (`python3`/`node
 - **A clone of your OWN repository is not reported.** `${{ github.repository }}` is the scanned repo by definition, and a literal `github.com/<owner>/<repo>` is compared against the checkout's `origin` remote — including the authenticated spelling that carries a token in the URL's userinfo. No third party is involved in re-cloning yourself, and the fix this entry recommends (pin to a full commit id) is unactionable for a release workflow that must run at the branch head. In an exported tree with no `.git`, `origin` is unknown and the literal form is reported like any other clone.
 - **`working-directory:` is followed** — on the step, and through `defaults.run.working-directory` on the job and on the workflow. A `working-directory:` computed at run time (`apps/${{ matrix.app }}`) is not knowable, so it becomes an opaque directory: a fetch and an execution both inside it still connect to each other, and nothing inside it can match a directory anywhere else.
 - **`actions/checkout` of another `repository:` is covered too**, since it is how most workflows fetch a second repository. The same rules apply: a full 40-hex `ref:` is silent, your own repository is silent, and something in a LATER step of the same job has to execute out of the `path:` it landed in. With NO `path:` the checkout replaces the workspace, so anything the job runs afterwards counts. A `repository:`, `ref:` or `path:` computed at run time is recorded as a coverage gap rather than guessed at.
+- **A GitHub CLI extension installed at a mutable ref is covered too.** `gh extension install OWNER/REPO` (or `gh ext install`, a `HOST/OWNER/REPO`, or an `https://` URL) downloads the extension at its LATEST release, or at the ref `--pin` names. For a binary extension (gh decides from whether the LATEST release carries platform assets) `--pin` names a release TAG; for a script extension it names a tag, branch or commit. Anything but a full commit id can be moved by the extension's owner, so the next run executes different code with the job's token. The one exception is a tag on a release published as IMMUTABLE: GitHub locks that tag and its assets, so the pin cannot change. That setting is not in the workflow, so when the GitHub API lookups are on (`--gh-impostor`, the same switch as P14.11; `auto` runs them when `gh` is authenticated) the scan asks `GET /repos/{owner}/{repo}/releases/tags/{tag}` once per repository and tag and reads the release's `immutable` field. `immutable: true` is NOT a finding and is recorded as a suppression naming the release. `immutable: false` or a 404 (no published release at that tag: a branch, a bare tag, or a repository the scan cannot see) is reported, and the finding says which. When the lookup is off, `gh` is unavailable, or a lookup fails (a timeout or server error is tried up to three times in all; a rate limit or an authentication failure is not), the finding is kept exactly as the offline scan words it, and `gh_checks["P14.24"]` records the lookup as `skipped` or `partial` with the reason; signing in to gh and re-running lets the lookup check them. No `--pin` and an abbreviated commit id are reported without a lookup. It follows the clone rule: the finding needs the install AND a later run of the extension in the same job — `gh <name> …`, where `<name>` is the repository name without its `gh-` prefix, or `gh extension exec <name>`. No `--pin` (or an empty `--pin=`), a tag (unless its release is immutable, above), a branch or an abbreviated commit id is reported; `--pin <full-40-hex-commit>` (either spelling, `--pin X` or `--pin=X`) is immutable and is NOT a finding, and is recorded as a suppression. A local install (`gh extension install .`) and an install of your own repository are not reported. An install with no visible run of the extension in that job — it may run from a script or a build driver this scan cannot read — is recorded as a coverage note, not a finding.
+
+  ```yaml
+  # WRONG — no --pin: whatever the latest release is next run is what runs
+  - run: gh extension install <owner>/gh-<name>
+  - run: gh <name> --verify
+  ```
 
 PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same class on Windows runners but is not matched here (casing / Windows-runner rarity); flag it in manual review if you run Windows jobs.
 
@@ -667,6 +688,8 @@ PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same clas
     echo "<known-sha256>  install.sh" | sha256sum -c -
     bash install.sh
 ```
+
+A GitHub CLI SCRIPT extension is pinned the same way: `gh extension install <owner>/gh-<name> --pin <full-40-hex-commit>`. A BINARY extension's `--pin` accepts only a release tag, so a commit id fails the install: pin it to a tag whose release is marked immutable, or download the release asset, verify a known digest, and run the local copy — or vendor it.
 
 Prefer a package manager or a SHA-pinned action over an ad-hoc installer where one exists. For tools distributed only as a piped installer, or a repository you must build from source, vendor the code into the repo (so it is reviewed and pinned by git) and run the local copy.
 

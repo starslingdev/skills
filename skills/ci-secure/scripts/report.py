@@ -94,7 +94,14 @@ _SCOPE_HONESTY_LINE = (
 # `gh_checks` map. Falls back to the bare pattern id when unmapped.
 _GH_CHECK_LABELS = {
     "P14.11": "impostor-SHA",
+    "P14.24": "release-immutability lookup",
 }
+
+# Network lookups that can only REMOVE a finding (P14.24 asks GitHub whether a
+# tag-pinned extension's release is immutable). When one does not fully run,
+# nothing is missing from the findings, so it is disclosed as a NOTE rather
+# than under the WARNING that says an absent finding is NOT a pass.
+_GH_LOOKUPS_THAT_ONLY_SUPPRESS = frozenset({"P14.24"})
 
 # Every finding comes from one source now (the ci-secure catalog). The
 # constant survives as the group key's first slot, which keeps the grouping
@@ -1319,6 +1326,40 @@ def _parallel_steps_cell(parallel_steps: dict[str, Any] | None) -> str:
     return "; ".join(parts)
 
 
+def _action_lockfile_cell(action_lockfile: dict[str, Any] | None) -> str:
+    """The provenance line for a GitHub Actions workflow lockfile, or "".
+
+    A lockfile moves an action's commit out of the `uses:` line, where the
+    impostor-SHA check (P14.11) reads pins, into `actions.lock`, where GitHub
+    verifies it at run time. Without this row a locked repository's impostor
+    check would report nothing to check and give no sign why. Informational,
+    never a coverage gap. A lockfile that is present but not well-formed is
+    named and credited with nothing.
+    """
+    entry = action_lockfile if isinstance(action_lockfile, dict) else {}
+    state = entry.get("state")
+    path = str(entry.get("path") or ".github/workflows/actions.lock")
+    if state == "invalid":
+        return (f"`{path}` is present but not a lockfile this scan can read "
+                "(misnamed, malformed, or a format version it does not "
+                "recognize), so none of its action references is counted as "
+                "locked; the impostor-SHA check (P14.11) checks only commit "
+                "pins written in `uses:`, so tag references here are checked "
+                "by neither")
+    n_refs = int(entry.get("covered_references") or 0)
+    workflows = entry.get("covered_workflows") or []
+    if state != "valid" or not n_refs:
+        return ""
+    return (
+        f"{n_refs} action reference(s) in {len(workflows)} workflow(s) are "
+        f"locked to a commit by `{path}`, not pinned in the `uses:` line. "
+        "GitHub verifies each locked commit at run time (it must be "
+        "reachable from its recorded ref, from the same repository); the "
+        "impostor-SHA check (P14.11) reads only commit pins written in "
+        "`uses:` and does not check these"
+    )
+
+
 def _header_table(
     findings: list[dict[str, Any]],
     scanned_workflows: int,
@@ -1331,6 +1372,7 @@ def _header_table(
     repo_root: str | None = None,
     repo_tree_dirty: bool = False,
     parallel_steps: dict[str, Any] | None = None,
+    action_lockfile: dict[str, Any] | None = None,
 ) -> str:
     """H1-adjacent provenance table — first thing after the title.
 
@@ -1418,6 +1460,9 @@ def _header_table(
     parallel_row = _parallel_steps_cell(parallel_steps)
     if parallel_row:
         rows.append(("Parallel steps", parallel_row))
+    lockfile_row = _action_lockfile_cell(action_lockfile)
+    if lockfile_row:
+        rows.append(("Action lockfile", lockfile_row))
     if dormant_count:
         rows.append(
             (
@@ -2002,26 +2047,55 @@ def _gh_checks_block(
 
     def _label(pid: str) -> str:
         name = _GH_CHECK_LABELS.get(pid)
+        if name and name.endswith("lookup"):
+            return f"{pid} {name}"
         return f"{pid} {name} check" if name else f"{pid} network-gated check"
 
     def _unverified(pid: str) -> list[str]:
         entry = details.get(pid) or {}
         pins = entry.get("unverified") if isinstance(entry, dict) else None
-        return [str(p) for p in pins] if isinstance(pins, list) else []
+        # Each label names the scanned workflow path and the pin as written,
+        # both controlled by the repository under audit, and lands in an
+        # inline code span below.
+        return ([_flatten_scanned(p) for p in pins]
+                if isinstance(pins, list) else [])
 
     skipped: list[tuple[str, str]] = []
     partial: list[tuple[str, str]] = []
     ran: list[tuple[str, str]] = []
+    lookup_notes: list[tuple[str, str, str]] = []
     for pid in sorted(gh_checks):
         status = str(gh_checks[pid] or "").strip()
         detail = status.split(":", 1)[-1].strip() or status
-        if status.lower().startswith("skipped"):
+        state = status.lower().split(":", 1)[0]
+        if pid in _GH_LOOKUPS_THAT_ONLY_SUPPRESS and state in ("skipped", "partial"):
+            # Its findings are all still listed below, so the WARNING's
+            # "absence from the findings is NOT a pass" would be false.
+            lookup_notes.append((pid, state, detail or "reason not recorded"))
+        elif state == "skipped":
             skipped.append((pid, detail or "reason not recorded"))
-        elif status.lower().startswith("partial"):
+        elif state == "partial":
             partial.append((pid, detail))
         else:
             ran.append((pid, detail))
 
+    note: list[str] = []
+    if lookup_notes:
+        note.append("> [!NOTE]")
+        for pid, state, reason in lookup_notes:
+            word = "SKIPPED" if state == "skipped" else "PARTIAL"
+            note.append(f"> **{_label(pid)}: {word} — {reason}.**")
+            for pin in _unverified(pid):
+                note.append(f">   - `{pin}`")
+        note.append(">")
+        note.append(
+            "> Every tag-pinned GitHub CLI extension finding is still listed "
+            "below. The lookup only removes one whose release GitHub has "
+            "locked as immutable. To have it check these, sign in to gh "
+            "(`gh auth login`) and re-run; a pin set at run time can never "
+            "be checked."
+        )
+        note.append("")
     out: list[str] = []
     if skipped or partial:
         out.append("> [!WARNING]")
@@ -2053,6 +2127,7 @@ def _gh_checks_block(
         else:
             out.append("> Re-run once the check can complete to close this gap.")
         out.append("")
+    out.extend(note)
     # Only the checks that RAN get a plain bullet list. Repeating the
     # skipped/partial bullets here reprinted the `[!WARNING]` callout's own
     # lines byte-for-byte one blank line below it.
@@ -2729,6 +2804,7 @@ def render(
         repo_root=findings_json.get("repo_root"),
         repo_tree_dirty=bool(findings_json.get("repo_tree_dirty")),
         parallel_steps=findings_json.get("parallel_steps"),
+        action_lockfile=findings_json.get("action_lockfile"),
     ))
     out.append("")
 

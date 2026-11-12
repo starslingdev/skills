@@ -29,7 +29,6 @@ _REPOSITORIES = {
             "sampled ",
             "full report verifier failed: the fetch plan matches its call sites",
             "full report verifier failed: no spine-demoted pole carries the typical-gate framing",
-            "full report verifier failed: default-branch push lane is isolated",
             "gate order differs:",
             "Bottom line does not contain reviewed text",
         ),
