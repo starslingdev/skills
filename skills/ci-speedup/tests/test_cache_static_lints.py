@@ -459,6 +459,18 @@ def test_opt61_ignores_non_build_steps_after_a_saved_build_override(
         "echo ok | tee log.txt",
         "git diff --exit-code",
         "cat Cargo.lock",
+        "npm --version",
+        "pnpm --version",
+        "yarn --version",
+        "bun --version",
+        "just --list",
+        "task --version",
+        "task --list",
+        "cargo clippy --version",
+        "cargo +nightly clippy --version",
+        "rustc   --version",
+        "rustc -Vv",
+        "rustc --print target-list",
     )
     false_positives: list[str] = []
     for index, command in enumerate(commands):
@@ -500,6 +512,13 @@ def test_opt61_checks_declared_sccache_directory_for_unlisted_consumers(
         "./scripts/build.sh",
         "python scripts/build.py",
         "bash ci/compile.sh",
+        "python build.py",
+        "python3.12 -I build.py",
+        "bash build.sh",
+        "sh compile.sh",
+        "cargo xtask build",
+        "cargo run --bin xtask -- build",
+        "$GITHUB_WORKSPACE/scripts/build.sh",
         "task build",
     )
     undetected: list[str] = []

@@ -4872,16 +4872,25 @@ def _detect_opt61(
             r"(?:^|[\s;&|])(ccache|sccache)(?=\s|$)", re.IGNORECASE)
         compiler_cache_consumer_re = re.compile(
             r"(?:^|[\s;&|`$(])(?:"
-            r"cargo\s+(?:\+\S+\s+)?(?:build|test|check|bench|doc|clippy|"
-            r"nextest\s+run|hack\b|llvm-cov\b)|"
+            r"cargo\s+(?:\+\S+\s+)?(?:build|test|check|bench|doc|hack|"
+            r"llvm-cov|run|xtask)\b|"
+            r"cargo\s+(?:\+\S+\s+)?nextest\s+run\b|"
+            r"cargo\s+(?:\+\S+\s+)?clippy\b"
+            r"(?![^;&|]*(?:--version|-V)(?:\s|$))|"
             r"cross\s+(?:build|test|check|bench)\b|"
             r"cmake\s+--build\b|meson\s+compile\b|make\b|ninja\b|"
-            r"bazel(?:isk)?\s+(?:build|test)\b|just\s+\S+|task\s+\S+|"
-            r"(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?\S+|"
-            r"rustc\s+(?!--version\b|-V\b)|"
-            r"(?:python(?:3(?:\.\d+)?)?|bash|sh)\s+(?:-[A-Za-z]+\s+)*"
-            r"(?:\./)?(?:scripts?|ci|tools?)/\S+|"
-            r"(?:\./|(?:scripts?|ci|tools?)/)\S+"
+            r"bazel(?:isk)?\s+(?:build|test)\b|"
+            r"(?:just|task)[ \t]++(?!-)\S+|"
+            r"npm\s+(?:run|exec|test|start)\b|"
+            r"(?:pnpm|yarn|bun)[ \t]++(?!-)"
+            r"(?!(?:version|help|info|list|config|cache)\b)\S+|"
+            r"rustc[ \t]++(?!(?:--version|-Vv?|--print|--explain)"
+            r"(?:[ \t]|$))|"
+            r"(?:python(?:3(?:\.\d+)?)?|bash|sh)[ \t]+"
+            r"(?:-[A-Za-z]+[ \t]+)*[^\s;&|]+\.(?:py|sh|js|ts)\b|"
+            r"(?:\./|\$GITHUB_WORKSPACE/|"
+            r"\$\{\{\s*github\.workspace\s*\}\}/|"
+            r"(?:scripts?|ci|tools?)/)\S+"
             r")",
             re.IGNORECASE,
         )
