@@ -826,6 +826,311 @@ def test_p1418_fires_on_pr_write_under_untrusted_trigger_not_safe(tmp_path: Path
     assert "P14.18" not in _patterns_for_file(_scan_dir(safe_root), "pr.yml")
 
 
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "github.rest.issues.addLabels({owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, labels: ['triage']})",
+        "github.rest.issues.createComment({owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: 'Thanks'})",
+    ],
+)
+def test_p1418_cosmetic_github_script_without_checkout_is_hygiene(
+    tmp_path: Path, operation: str,
+) -> None:
+    """A base-code label/comment bot has no path to PR code or review bypass."""
+    _write_workflow(
+        tmp_path,
+        "cosmetic.yml",
+        """on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  cosmetic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            %s
+""" % operation,
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "MEDIUM"
+    assert "cosmetic" in finding["attacker_scenario"].lower()
+    assert "no checkout" in finding["evidence"].lower()
+    assert "no pr-code execution" in finding["evidence"].lower()
+    assert "no review/merge api" in finding["evidence"].lower()
+    assert "workflow_run" not in finding["fix_guidance"]
+
+
+@pytest.mark.parametrize(
+    ("steps", "reason"),
+    [
+        (
+            """      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm test
+""",
+            "checks out attacker-head pr code",
+        ),
+        (
+            """      - run: ${{ github.event.pull_request.title }}
+""",
+            "executes attacker-controlled pr text",
+        ),
+        (
+            """      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.pulls.createReview({owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number, event: 'APPROVE'})
+""",
+            "review api",
+        ),
+        (
+            """      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.pulls.merge({owner: context.repo.owner, repo: context.repo.repo, pull_number: context.issue.number})
+""",
+            "merge api",
+        ),
+    ],
+)
+def test_p1418_keeps_high_for_pr_code_and_review_merge_paths(
+    tmp_path: Path, steps: str, reason: str,
+) -> None:
+    _write_workflow(
+        tmp_path,
+        "danger.yml",
+        """on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  danger:
+    runs-on: ubuntu-latest
+    steps:
+""" + steps,
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "HIGH"
+    assert reason in finding["evidence"].lower()
+
+
+@pytest.mark.parametrize(
+    ("uses", "script", "reason"),
+    [
+        (
+            "actions/github-script-evil@v1",
+            "github.rest.issues.addLabels({labels: ['triage']})",
+            "not limited to label/comment-only",
+        ),
+        (
+            "actions/github-script@v7",
+            """github.rest.issues.addLabels({labels: ['triage']})
+eval('${{ github.event.pull_request.title }}')""",
+            "executes attacker-controlled pr text",
+        ),
+        (
+            "actions/github-script@v7",
+            """github.rest.issues.addLabels({labels: ['triage']})
+github['rest']['pulls']['merge']({pull_number: context.issue.number})""",
+            "merge api",
+        ),
+    ],
+)
+def test_p1418_cosmetic_profile_fails_closed_on_unproved_script_shapes(
+    tmp_path: Path, uses: str, script: str, reason: str,
+) -> None:
+    _write_workflow(
+        tmp_path,
+        "danger.yml",
+        """on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  danger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: %s
+        with:
+          script: |
+%s
+""" % (uses, "\n".join(f"            {line}" for line in script.splitlines())),
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "HIGH"
+    assert reason in finding["evidence"].lower()
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        """github.rest.issues.addLabels({
+ // \"
+})
+github.rest.pulls['mer'+'ge']({})
+// \"
+})""",
+        """github.rest.issues.addLabels({
+ /* \" */
+})
+github.rest.pulls['mer'+'ge']({})
+/* \" */
+})""",
+        """github.rest.issues.addLabels({
+ <!-- \"
+})
+github.rest.pulls['mer'+'ge']({})
+<!-- \"
+})""",
+        """github.rest.issues.addLabels({
+ matcher: /\"/,
+})
+github.rest.pulls['mer'+'ge']({})
+/\"/
+})""",
+    ],
+    ids=("line-comment", "block-comment", "html-comment", "regex-literal"),
+)
+def test_p1418_comment_and_regex_quotes_cannot_hide_merge_calls(
+    tmp_path: Path, script: str,
+) -> None:
+    """Unparsed JS shapes fail closed instead of desynchronising quote state."""
+    _write_workflow(
+        tmp_path,
+        "danger.yml",
+        """on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  danger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+%s
+""" % "\n".join(f"            {line}" for line in script.splitlines()),
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "HIGH"
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    (
+        "permissions: write-all\n",
+        "jobs:\n  danger:\n    permissions: write-all\n",
+    ),
+    ids=("workflow", "job"),
+)
+def test_p1418_write_all_grants_pull_request_write(
+    tmp_path: Path, permissions: str,
+) -> None:
+    jobs = (
+        _MINIMAL_JOB
+        if not permissions.startswith("jobs:")
+        else "    runs-on: ubuntu-latest\n    steps:\n      - run: echo unsafe\n"
+    )
+    _write_workflow(
+        tmp_path,
+        "danger.yml",
+        "on: pull_request_target\n" + permissions + jobs,
+    )
+    assert "P14.18" in _patterns_for_file(_scan_dir(tmp_path), "danger.yml")
+
+
+def test_p1418_workflow_write_all_narrowed_at_job_is_silent(tmp_path: Path) -> None:
+    _write_workflow(
+        tmp_path,
+        "narrowed.yml",
+        """on: pull_request_target
+permissions: write-all
+jobs:
+  narrowed:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo safe
+""",
+    )
+    assert "P14.18" not in _patterns_for_file(_scan_dir(tmp_path), "narrowed.yml")
+
+
+def test_p1418_pull_request_write_all_is_not_an_untrusted_trigger(tmp_path: Path) -> None:
+    _write_workflow(
+        tmp_path,
+        "pull-request.yml",
+        "on: pull_request\npermissions: write-all\n" + _MINIMAL_JOB,
+    )
+    assert "P14.18" not in _patterns_for_file(_scan_dir(tmp_path), "pull-request.yml")
+
+
+def test_p1418_classifies_only_the_job_that_owns_pr_write(tmp_path: Path) -> None:
+    _write_workflow(
+        tmp_path,
+        "scoped.yml",
+        """on: pull_request_target
+jobs:
+  cosmetic:
+    permissions:
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.addLabels({labels: ['triage']})
+  unrelated:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+""",
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "MEDIUM"
+    assert "cosmetic" in finding["attacker_scenario"].lower()
+
+
+def test_p1418_reusable_job_with_pr_write_stays_high(tmp_path: Path) -> None:
+    _write_workflow(
+        tmp_path,
+        "reusable.yml",
+        """on: pull_request_target
+jobs:
+  privileged:
+    permissions:
+      pull-requests: write
+    uses: ./.github/workflows/reusable-child.yml
+  cosmetic-decoy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.addLabels({labels: ['triage']})
+""",
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "HIGH"
+    assert "not limited to label/comment-only" in finding["evidence"].lower()
+
+
 # -----------------------------------------------------------------------------
 # Coverage failures: a scan that could not check what it claims to have checked
 # must EXIT NON-ZERO, never emit a clean-looking result. Each test below is

@@ -101,6 +101,9 @@ class FindingExtra(Finding, total=False):
     # report renders as its "What an attacker could do" row. Absent → the
     # report falls back to the catalog's static capability line.
     attacker_scenario: str
+    # Detector-specific guidance for findings whose evidence changes the
+    # appropriate remediation within one catalog pattern.
+    fix_guidance: str
     audit_id: str
     audit_url: str
     # "source" (evidence quotes the workflow verbatim) or "derived" (evidence
@@ -426,6 +429,12 @@ class RawHit:
     # `evidence` would either lose the verbatim quote or dress the derived half
     # as source; a separate field keeps both honest.
     derived_note: str | None = None
+    # A small number of evidence-sensitive patterns have a catalog default
+    # severity but can prove a narrower risk profile for this occurrence.
+    severity_override: Severity | None = None
+    attacker_scenario: str | None = None
+    fix_strategy_override: str | None = None
+    fix_guidance: str | None = None
 
 
 def detect_regex(file_path: Path, pattern: str) -> Iterator[RawHit]:
@@ -5638,6 +5647,10 @@ def _walk_pull_requests_write(
         )
         return
     if isinstance(node, dict):
+        permissions = node.get("permissions")
+        if isinstance(permissions, str) \
+                and permissions.strip().lower() == "write-all":
+            yield path + ("permissions",)
         if (
             "pull-requests" in node
             and isinstance(node["pull-requests"], str)
@@ -5693,6 +5706,107 @@ def _find_pull_requests_write_line(lines: list[str]) -> int | None:
     return None
 
 
+def _p1418_grants_pr_write(permissions: Any) -> bool:
+    """Whether one workflow/job permissions value grants PR write access."""
+    if isinstance(permissions, str):
+        return permissions.strip().lower() == "write-all"
+    if not isinstance(permissions, dict):
+        return False
+    value = permissions.get("pull-requests")
+    return isinstance(value, str) and value.strip().lower() == "write"
+
+
+def _p1418_write_scoped_jobs(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Jobs whose effective permissions include ``pull-requests: write``.
+
+    A job-level permissions block replaces the workflow-level block; an
+    unrelated read-only job therefore cannot lend its steps to the job that
+    owns the write token, or make that token look more dangerous than it is.
+    """
+    workflow_write = _p1418_grants_pr_write(doc.get("permissions"))
+    scoped: list[tuple[str, dict[str, Any]]] = []
+    for name, job in _walk_jobs(doc):
+        if "permissions" in job:
+            has_write = _p1418_grants_pr_write(job.get("permissions"))
+        else:
+            has_write = workflow_write
+        if has_write:
+            scoped.append((name, job))
+    return scoped
+
+
+_P1418_COSMETIC_CALL_RE = re.compile(
+    r"^\s*(?:await\s+)?(?:github\.)?(?:rest\.)?issues\."
+    r"(?:addLabels|createComment)\s*\(",
+    re.I,
+)
+
+
+def _p1418_is_one_cosmetic_call(script: str) -> bool:
+    """Prove the narrow inline-script shape eligible for MEDIUM.
+
+    The accepted program is exactly one label/comment API call. Its argument
+    may be an object or arrays of literal labels, but it may not contain a
+    nested call, a template expression, or trailing JavaScript. This is
+    intentionally a positive proof rather than a deny-list of dangerous JS.
+    """
+    if "${{" in script or "`" in script:
+        return False
+    match = _P1418_COSMETIC_CALL_RE.match(script)
+    if match is None:
+        return False
+    opening = match.end() - 1
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(opening, len(script)):
+        char = script[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        # This is a deliberately small recognizer, not a JavaScript parser.
+        # Quotes inside comments and regex literals have different lexical
+        # rules and can otherwise desynchronise the string state below.  Fail
+        # closed on every such shape instead of proving it cosmetic.
+        if char == "/" or script.startswith("<!--", index):
+            return False
+        if char in ("'", '"', "`"):
+            quote = char
+        elif char == "(":
+            depth += 1
+            if depth > 1:
+                return False
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return not script[index + 1:].strip().strip(";").strip()
+            if depth < 0:
+                return False
+    return False
+
+
+def _p1418_script_risk(script: str) -> str | None:
+    """Specific HIGH reason for a script, before the generic fail-closed one."""
+    for expression in re.findall(r"\$\{\{.*?\}\}", script, re.S):
+        lowered = expression.lower()
+        if ("github.event.pull_request." in lowered or "github.head_ref" in lowered) \
+                and not _is_shape_safe_expression(expression):
+            return "executes attacker-controlled PR text"
+    flattened = re.sub(r"[\s.\[\]'\"]+", ".", script.lower())
+    if "pulls.createreview" in flattened \
+            or re.search(r"/pulls/[^'\"\s]+/reviews\b", script, re.I):
+        return "review API"
+    if "pulls.merge" in flattened \
+            or re.search(r"/pulls/[^'\"\s]+/merge\b", script, re.I):
+        return "merge API"
+    return None
+
+
 def _correlation_pr_write_and_untrusted_trigger(
     file_path: Path,
 ) -> Iterator[RawHit]:
@@ -5716,14 +5830,93 @@ def _correlation_pr_write_and_untrusted_trigger(
     line = _find_pull_requests_write_line(text.splitlines()) or _find_line_for_top_level_key(
         text.splitlines(), "permissions"
     ) or 1
+    risk_reasons: list[str] = []
+    scoped_jobs = _p1418_write_scoped_jobs(doc)
+    # A job-level permissions block replaces the workflow-level grant.  A
+    # workflow-wide write-all declaration therefore exposes no PR-write token
+    # when every job narrows it to a read-only block.
+    if not scoped_jobs:
+        return
+    all_scoped_jobs_cosmetic = bool(scoped_jobs)
+    for _job_name, job in scoped_jobs:
+        steps = _job_steps(job)
+        job_is_cosmetic = len(steps) == 1
+        if not steps:
+            job_is_cosmetic = False
+        for step in steps:
+            uses = step.get("uses")
+            with_block = step.get("with")
+            if isinstance(uses, str) and uses.startswith("actions/checkout") \
+                    and isinstance(with_block, dict) \
+                    and any(_attacker_head_ref(with_block.get(key))
+                            for key in ("ref", "repository")):
+                risk_reasons.append("checks out attacker-head PR code")
+            run = step.get("run")
+            if isinstance(run, str) and re.search(
+                r"\$\{\{\s*(?:github\.event\.pull_request\.(?!number\b|id\b|commits\b|sha\b|head_sha\b|merge_commit_sha\b|fork\b|merged\b|author_association\b)|github\.head_ref\b)",
+                run,
+            ):
+                risk_reasons.append("executes attacker-controlled PR text")
+            script = with_block.get("script") if isinstance(with_block, dict) else None
+            action_id = uses.split("@", 1)[0].lower() if isinstance(uses, str) else ""
+            is_github_script = (
+                action_id == "actions/github-script"
+                and isinstance(script, str)
+            )
+            if is_github_script:
+                specific_risk = _p1418_script_risk(script)
+                if specific_risk:
+                    risk_reasons.append(specific_risk)
+                if not _p1418_is_one_cosmetic_call(script):
+                    job_is_cosmetic = False
+            else:
+                job_is_cosmetic = False
+        all_scoped_jobs_cosmetic = all_scoped_jobs_cosmetic and job_is_cosmetic
+
+    # Preserve order while keeping the evidence compact when two risky legs
+    # coexist in one workflow.
+    risk_reasons = list(dict.fromkeys(risk_reasons))
+    if not risk_reasons and not all_scoped_jobs_cosmetic:
+        risk_reasons.append(
+            "workflow is not limited to label/comment-only github-script automation"
+        )
+    if risk_reasons:
+        profile = "; HIGH because " + ", ".join(risk_reasons)
+        severity_override: Severity | None = None
+        attacker_scenario = None
+        fix_strategy_override = None
+        fix_guidance = None
+    else:
+        profile = (
+            "; MEDIUM hygiene: no checkout, no PR-code execution, and no "
+            "review/merge API"
+        )
+        severity_override = "MEDIUM"
+        attacker_scenario = (
+            "A pull request author can influence cosmetic label or comment "
+            "automation, but this workflow does not execute PR content or "
+            "call review or merge APIs."
+        )
+        fix_strategy_override = "limit-cosmetic-pr-automation"
+        fix_guidance = (
+            "Keep the job limited to cosmetic labeling or commenting; remove "
+            "`pull-requests: write` if it is unused, and do not add PR-head "
+            "checkout, PR-controlled execution, or review/merge API calls."
+        )
+
     yield RawHit(
         line=line,
         evidence=(
             f"{line:>4}: workflow triggers on {sorted(untrusted)} AND "
-            f"grants `pull-requests: write` at scope `{sample_scope}` <-- here"
+            f"grants `pull-requests: write` at scope `{sample_scope}`"
+            f"{profile} <-- here"
         ),
         match_text=sample_scope,
         derived=True,
+        severity_override=severity_override,
+        attacker_scenario=attacker_scenario,
+        fix_strategy_override=fix_strategy_override,
+        fix_guidance=fix_guidance,
     )
 
 
@@ -6738,7 +6931,7 @@ def _scan_once(
                 fmt_vars = {
                     "basename": basename,
                     "pattern": entry.pattern,
-                    "severity": entry.severity,
+                    "severity": hit.severity_override or entry.severity,
                     "match_text": hit.match_text,
                 }
                 try:
@@ -6755,7 +6948,7 @@ def _scan_once(
                 findings.append({
                     "id": f"f{finding_seq}",
                     "pattern": entry.pattern,
-                    "severity": entry.severity,
+                    "severity": hit.severity_override or entry.severity,
                     "title": title,
                     "workflow_file": rel,
                     "line": hit.line,
@@ -6776,7 +6969,13 @@ def _scan_once(
                     # the two differently so a derived sentence is never
                     # dressed as source the reader can go and find.
                     "evidence_kind": "derived" if hit.derived else "source",
-                    "fix_strategy": entry.fix_strategy,
+                    "fix_strategy": (
+                        hit.fix_strategy_override or entry.fix_strategy
+                    ),
+                    **({"attacker_scenario": hit.attacker_scenario}
+                       if hit.attacker_scenario else {}),
+                    **({"fix_guidance": hit.fix_guidance}
+                       if hit.fix_guidance else {}),
                     "fix_recipe_anchor": entry.anchor,
                     # `risk` and `risk_note` are deliberately absent.
                     # The orchestrator scores them per group against
