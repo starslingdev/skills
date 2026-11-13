@@ -13,6 +13,46 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
+- **2026-11-12** (#341) — ci-secure: a new API-gated config hygiene check,
+  `sec.default-branch.review-required`, and the incident that grounds it.
+  The check passes when the default branch, through an active ruleset or
+  classic branch protection, needs a pull request with at least one approval
+  and either dismisses stale approvals on a new push or requires approval of
+  the most recent push; it fails when no pull request is required, the
+  approval count is 0, or neither stale-approval setting is on, naming which.
+  Anyone short of an admin who can skip the review fails it, named in the
+  evidence: a ruleset bypass actor that is an app, a deploy key, a team, a
+  user or a non-admin role (including "For pull requests only" bypass,
+  which still lets them merge without the approval), and classic
+  protection's bypass allowances; repositories with such bypassers fail
+  this check. Admins qualify a pass in its evidence. An unreadable bypass
+  list, like any unreadable setting, is unmeasured, never a pass. The
+  environment checks and this one share one reading of a bypass actor. It reads the rules endpoint first (read access)
+  and classic protection only when the rules alone do not hold. Fourteen
+  facts now; up to seven are API-gated. The catalog's Reference incidents
+  records the November 2026 compromised GitHub accounts CI secret stealer
+  campaign as the grounding for this check and for
+  `sec.secrets.environment-scoped`; it is not cited as a vector incident,
+  because the attacker already held a push credential. The environment
+  secrets checks now say what is at stake: a failing
+  `sec.secrets.environment-scoped` states that any workflow pushed to any
+  branch can read its N secrets, so one leaked push credential exposes them
+  all with no review and no merge, and that the fix is an environment only
+  protected branches can use (one that passes the branch-restriction check); it names them (never values), up to 10 per
+  list and then `and N more`. A failing `sec.environments.branch-restricted`
+  says an environment any branch can use protects nothing from a pushed
+  workflow. When the secrets check fails, the report also puts a short
+  **Secrets reachable from any branch** callout under its headline (a
+  blockquote linking to the "If a push credential leaks" section; it adds
+  nothing to the vector count), and the terminal summary leads its hygiene
+  clause with it. The findings JSON shape is unchanged. The new check also
+  recognizes a plain `Not Found (HTTP 404)` from classic branch protection
+  as GitHub's ordinary hide from a non-admin reader (the same reading as the
+  required-checks fix below, #327). Hidden classic protection can only add
+  review rules, so rulesets that hold on their own still pass, and rulesets
+  that fall short are unmeasured, never a fail: the evidence says classic
+  protection is hidden from this reader and an admin can confirm. A 5xx
+  quoting a 404, a rate limit or a timeout stays unmeasured.
 - ci-secure: "If a push credential leaks" — three new config hygiene checks,
   read over the GitHub API the way the required-checks and fork-approval
   checks already are. A credential that can push workflow files (GitHub's
@@ -304,6 +344,18 @@ entries are dated (UTC). Format loosely follows
   no detector, catalog entry, pattern id or count changes.
 
 ### Fixed
+
+- **2026-11-12** (#345) — ci-secure: the default-branch review check, when it
+  fails on the rule's own settings, now also names anyone short of an admin
+  on a bypass list (with the classic or ruleset setting to change) and any
+  bypass list it could not read, so one report lists every fix instead of a
+  second fail or unmeasured after the first fix.
+
+- **2026-11-12** (#341, closes #327) — Required-check auditing now keeps a readable ruleset
+  answer when GitHub hides classic branch protection from a non-admin reader
+  behind a plain `404 Not Found`. The fact remains measured, names that classic
+  protection was unread, and still fails closed on rate limits, timeouts and
+  server errors.
 
 - **2026-11-11** (#331) — A GitHub CLI extension pinned to a tag on a
   release GitHub has locked as immutable is no longer reported (P14.24). That

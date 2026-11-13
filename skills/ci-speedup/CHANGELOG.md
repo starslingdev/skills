@@ -1298,6 +1298,7 @@ unversioned and updates by reinstall from `main`.
 ### Fixed
 
 - **2026-11-11** — Check the declared compiler-cache directory used by any build command before accepting a similarly named persisted path, while ignoring steps that only inspect files or install toolchain components.
+- **2026-11-11** — Keep shard-growth warnings visible when matrix legs upload reports or download report-only artifacts, even from a job that also builds; preserve ordinary artifact-handoff exemptions and recognise an `index` matrix axis when it feeds the runner's `--shard` argument.
 - **2026-11-11** — Bind static cache-lint confirmation to the cache family named by its saved key, so an unrelated path or package-cache miss cannot confirm or size a BuildKit, compiler, analysis, Go, or Jest cache finding.
 - **2026-11-11** — Keep only cache-state evidence from verification job logs, so markers beyond long unrelated output remain visible, and use run position for cache-less cohorts instead of withholding an otherwise clean comparison.
 - **2026-11-11** — Keep path-filter findings visible when sampled pull-request runs have no PR number, and disclose the measured share when only part of the run sample can be mapped to pull requests.

@@ -3751,6 +3751,26 @@ _MATRIX_SETUP_BUILD_RE = re.compile(
     r"gradle\w*\s+build|bazel\s+build)\b", re.I)
 
 
+def _matrix_axis_feeds_shard(job: dict, key: object) -> bool:
+    """Whether one matrix key describes the shard selected by the command."""
+    key_text = str(key)
+    if _SHARD_AXIS_RE.search(key_text):
+        return True
+    if key_text.casefold() != "index":
+        return False
+    matrix_ref = (
+        rf"matrix(?:\.{re.escape(key_text)}|"
+        rf"\[\s*['\"]{re.escape(key_text)}['\"]\s*\])"
+    )
+    return re.search(
+        rf"--shard(?:=|\s+)[\"']?[^\s\"']*"
+        rf"\$\{{\{{\s*{matrix_ref}\s*\}}\}}"
+        rf"[^\s\"']*[\"']?",
+        _job_run_blob(job),
+        re.IGNORECASE,
+    ) is not None
+
+
 def _matrix_shard_leg_count(job: dict) -> int | None:
     """Count distinct effective shard configurations, ignoring diagnostics.
 
@@ -3763,15 +3783,18 @@ def _matrix_shard_leg_count(job: dict) -> int | None:
     matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
     if not isinstance(matrix, dict):
         return None
-    shard_keys = {
-        str(key) for key in matrix
-        if key not in {"include", "exclude"} and _SHARD_AXIS_RE.search(str(key))
-    }
+    shard_keys = set()
+    for key in matrix:
+        key_text = str(key)
+        if key_text in {"include", "exclude"}:
+            continue
+        if _matrix_axis_feeds_shard(job, key_text):
+            shard_keys.add(key_text)
     include = matrix.get("include")
     if isinstance(include, list):
         shard_keys.update(
             str(key) for row in include if isinstance(row, dict) for key in row
-            if _SHARD_AXIS_RE.search(str(key)))
+            if _matrix_axis_feeds_shard(job, key))
     if not shard_keys:
         return None
     legs = _opt102_matrix_legs(job)
@@ -3785,34 +3808,114 @@ def _matrix_shard_leg_count(job: dict) -> int | None:
     return len(projected) if projected else None
 
 
+def _artifact_selector(step: dict, *, upload: bool) -> tuple[str, str]:
+    """Return a literal artifact name or download pattern for one action."""
+    values = step.get("with") if isinstance(step.get("with"), dict) else {}
+    name = str(values.get("name") or ("artifact" if upload else "")).strip()
+    pattern = str(values.get("pattern") or "").strip() if not upload else ""
+    return name, pattern
+
+
+def _artifact_selector_matches(
+        upload_name: str, download_name: str, download_pattern: str) -> bool:
+    """Whether a download clearly selects an artifact another job uploads."""
+    if download_name:
+        return download_name == upload_name
+    if not download_pattern:
+        return True  # actions/download-artifact without a selector downloads all
+    pattern_re = re.escape(download_pattern).replace(r"\*", ".*").replace(r"\?", ".")
+    return re.fullmatch(pattern_re, upload_name) is not None
+
+
+_REPORT_ARTIFACT_RE = re.compile(
+    r"(?:^|[\s./_-])(?:allure|coverage|junit|reports?|results?|"
+    r"test[-_]?(?:reports?|results?))(?:$|[\s./_-])",
+    re.IGNORECASE,
+)
+
+
+def _is_report_artifact(step: dict) -> bool:
+    """Whether an upload names report/result data rather than build output."""
+    values = step.get("with") if isinstance(step.get("with"), dict) else {}
+    paths = [
+        line.strip() for line in str(values.get("path") or "").splitlines()
+        if line.strip()
+    ]
+    path_is_report = [bool(_REPORT_ARTIFACT_RE.search(path)) for path in paths]
+    if any(path_is_report):
+        # An artifact that bundles `dist` with `coverage` still carries build
+        # output, so a sharded consumer genuinely reuses another job's build.
+        return all(path_is_report)
+    identity = "\n".join((
+        str(step.get("name") or ""),
+        str(values.get("name") or ""),
+    ))
+    return _REPORT_ARTIFACT_RE.search(identity) is not None
+
+
+def _jobs_with_build_handoff(jobs: dict[str, Any]) -> set[str]:
+    """Jobs that consume a build artifact uploaded by a different job."""
+    producers: list[tuple[str, str]] = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict) or not _MATRIX_SETUP_BUILD_RE.search(
+                _job_run_blob(job)):
+            continue
+        for step in _steps(job):
+            if "upload-artifact" not in _uses(step):
+                continue
+            if _is_report_artifact(step):
+                continue
+            upload_name, _ = _artifact_selector(step, upload=True)
+            if upload_name:
+                producers.append((job_name, upload_name))
+
+    consumers: set[str] = set()
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        for step in _steps(job):
+            if "download-artifact" not in _uses(step):
+                continue
+            download_name, download_pattern = _artifact_selector(step, upload=False)
+            matched_producers = {
+                producer for producer, upload_name in producers
+                if producer != job_name and _artifact_selector_matches(
+                    upload_name, download_name, download_pattern)
+            }
+            if matched_producers:
+                consumers.add(job_name)
+                break
+    return consumers
+
+
 def _opt14_setup_state(
     doc: dict,
-) -> tuple[list[str], dict[str, int], dict[str, list[str]], bool]:
+) -> tuple[list[str], dict[str, int], dict[str, list[str]], set[str]]:
     """Return repeated setup jobs and matrix facts for OPT14 and the guard.
 
     Repetition can be across at least two jobs or across the effective shard
-    configurations of one matrix job. An upload-only step (for example a
-    coverage report) or a download-only step is not a setup handoff, so both
-    actions must exist before this detector treats outputs as passed between
-    jobs.
+    configurations of one matrix job. Report uploads are not setup handoffs:
+    a handoff requires a setup job to download an artifact that a different
+    job built and uploaded.
     """
     setup_jobs: list[str] = []
     matrix_setup_legs: dict[str, int] = {}
     matrix_setup_repeated: dict[str, list[str]] = {}
+    jobs = _jobs_from_doc(doc)
+    handoff_jobs = _jobs_with_build_handoff(jobs)
     has_upload = has_download = False
-    for job_name, job in _jobs_from_doc(doc).items():
+    for job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
         steps = _steps(job)
+        has_upload = has_upload or any(
+            "upload-artifact" in _uses(step) for step in steps)
+        has_download = has_download or any(
+            "download-artifact" in _uses(step) for step in steps)
         has_checkout = any(_uses(s).startswith("actions/checkout") for s in steps)
         has_install = bool(_INSTALL_RE.search(_job_run_blob(job))) or any(
             _uses(s).startswith("actions/setup-node") and (s.get("with") or {}).get("cache")
             for s in steps)
-        for s in steps:
-            if "upload-artifact" in _uses(s):
-                has_upload = True
-            if "download-artifact" in _uses(s):
-                has_download = True
         if has_checkout and has_install:
             setup_jobs.append(job_name)
             conditioned_steps = _steps_with_if(job)
@@ -3835,20 +3938,26 @@ def _opt14_setup_state(
                 if repeats_build:
                     repeated.append("build")
                 matrix_setup_repeated[job_name] = repeated
-    has_handoff = has_upload and has_download
     # Jobs that never co-run (provably exclusive `if:`) are not repeated work
     # with each other. A sharded job still repeats its own setup across legs,
     # so keep it even when it is the workflow's only setup job.
-    setup_jobs = sorted(set(_co_running(_jobs_from_doc(doc), setup_jobs))
-                        | set(matrix_setup_legs))
-    return setup_jobs, matrix_setup_legs, matrix_setup_repeated, has_handoff
+    # Keep the established workflow-wide handoff exemption for ordinary job
+    # groups. Per-job attribution is needed only for shard facts: report merge
+    # jobs must not hide a sharded job, while a shard that downloads another
+    # job's build remains exempt.
+    ordinary_setup_jobs = (
+        set() if has_upload and has_download
+        else set(_co_running(jobs, setup_jobs)))
+    setup_jobs = sorted(
+        ordinary_setup_jobs | (set(matrix_setup_legs) - handoff_jobs))
+    return setup_jobs, matrix_setup_legs, matrix_setup_repeated, handoff_jobs
 
 
 def _detect_opt14(doc: dict, raw: str) -> list[Hit]:
     """Report repeated setup across jobs, while leaving lone-shard facts unreported."""
-    setup_jobs, matrix_setup_legs, matrix_setup_repeated, has_handoff = (
+    setup_jobs, matrix_setup_legs, matrix_setup_repeated, _handoff_jobs = (
         _opt14_setup_state(doc))
-    if len(setup_jobs) >= 2 and not has_handoff:
+    if len(setup_jobs) >= 2:
         evidence = (f"{len(setup_jobs)} jobs each run checkout + dependency "
                     f"install with no `actions/upload-artifact` / "
                     f"`download-artifact` handoff: {', '.join(setup_jobs)}")
@@ -9497,12 +9606,12 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         extra["parallel_steps"] = parallel_stats
     matrix_setup_facts: dict[str, dict[str, dict[str, Any]]] = {}
     for rel, doc, _raw in parsed:
-        _jobs, leg_counts, repeated_work, has_handoff = _opt14_setup_state(doc)
+        _jobs, leg_counts, repeated_work, handoff_jobs = _opt14_setup_state(doc)
         leg_counts = {
             job: legs for job, legs in leg_counts.items()
-            if (rel, job) not in unreadable_jobs
+            if job not in handoff_jobs and (rel, job) not in unreadable_jobs
         }
-        if leg_counts and not has_handoff:
+        if leg_counts:
             matrix_setup_facts[rel] = {
                 job: {"legs": legs, "repeated": repeated_work.get(job, [])}
                 for job, legs in sorted(leg_counts.items())
