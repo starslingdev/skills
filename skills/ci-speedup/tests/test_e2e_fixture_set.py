@@ -569,6 +569,10 @@ def test_named_fixtures_exercise_their_defining_interactions(
         for row in docs["minority-tail"]["pr_critical_path"]["checks"])
     assert "Across commits, the median projection is" in reports["minority-tail"]
     assert "`ci.yml` holds its slowest job" not in reports["minority-tail"]
+    minority_contents = reports["minority-tail"].split("## 📋 Contents", 1)[1]
+    assert "Checks that hold up most PRs" in minority_contents
+    assert "P50 1m 00s" in minority_contents
+    assert "finishes last on 20/20 PRs" in minority_contents
     assert "OPT25" not in {
         row.get("pattern") for row in docs["pr-light-matrix"]["findings"]}
     unmeasured = next(
@@ -1006,7 +1010,9 @@ def test_sharded_floor_runs_through_collection_and_full_verifier(
     assert doc["data_sources"]["gh_query_count"] == 18
     sentence = "Observed on the sampled runs, not a shard-count recommendation"
     assert report.count(sentence) == 2
-    pole_section = report.split("## 🟠 Long pole 2", 1)[1].split("\n## ", 1)[0]
+    pole_section = next(
+        section for _workflow, label, section in vr._pole_header_sections(report)
+        if vr._cmp_name(label) == vr._cmp_name(str(pole["check"])))
     assert "#### 🤖 Prompt for your coding agent" in pole_section
     assert sentence in pole_section.split("#### 🤖 Prompt for your coding agent", 1)[1]
     assert sentence not in report.split("## 📋 Contents", 1)[0]

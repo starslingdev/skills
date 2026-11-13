@@ -12,21 +12,21 @@ not measured: lifecycle data was not collected
 | **PR gate sample** | 20 of 20 PRs sampled: target met |
 | **Audit** | ran 2026-07-25 · ci-speedup skill commit [`2f048be`](https://github.com/starslingdev/skills/commit/2f048be) |
 
-> **Bottom line.** A typical PR waits **41m 12s** for all checks to finish. The biggest single measured win is **~1m 06s** off the slowest fixable check, `ubuntu-22.04 (webkit - Node.js 2…` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
+> **Bottom line.** Long pole 1, `Windows (firefox)`, is the longest check in **Checks that hold up most PRs**. A typical PR waits **41m 12s** for all checks to finish. The biggest single measured win is **~13m 24s** off the slowest fixable check, `Windows (firefox)` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
 >
-> **41m 12s until all checks finish** - the slowest check a typical PR waits on is `Windows (firefox)` (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s; `ubuntu-22.04 (webkit - Node.js 20)` is the check most PRs gate on (drilled below). (`Test chrome on macos-latest` is slower (~59m 33s) but it ran on only 5/20 sampled PRs - it looks opt-in / conditional (e.g. label-gated), so a typical PR doesn't wait on it and its time is throughput/cost, not merge-wait; unless it's a *required* status check it isn't the gate here. See its long pole below.) 
+> **41m 12s until all checks finish** - `Windows (firefox)` is the slowest check a typical PR waits on (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s. 
 >
-> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~124 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
+> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~127 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
 >
-> **`.github/workflows/fix-flakes.yml` changed ~114 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/fix-flakes.yml` changed ~117 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/publish_release.yml` changed ~116 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/publish_release.yml` changed ~119 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_bidi.yml` changed ~121 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_bidi.yml` changed ~124 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_secondary.yml` changed ~128 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_secondary.yml` changed ~131 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **What gates next:** After this fix, CI is gated by `tests_mcp.yml / windows-latest - firefox` at ~2415 s.
+> **What gates next:** After this fix, CI is gated by `tests_secondary.yml / Test chrome on macos-latest` at ~3573 s.
 > This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.
 >
 > **How to check it worked**
@@ -42,11 +42,16 @@ not measured: lifecycle data was not collected
 
 **🐌 Critical path** - the checks that gate your merge, each linking to its long-pole drill-down (waterfall → biggest lever → agent prompt):
 
-1. 🔴 [ubuntu-22.04 (webkit - Node.js 2…](#pole-1) - 41m 21s · `tests_primary.yml` gates 7/20 PRs
-2. 🔴 [Windows (firefox)](#pole-2) - 72m 57s · `tests_secondary.yml` gates 5/20 PRs
-3. 🔴 [windows-latest - firefox](#pole-3) - 40m 15s · `tests_mcp.yml` gates 6/20 PRs
-4. 🔴 [Test chrome on macos-latest](#pole-4) - 59m 33s · rarely the merge pole
-5. 🔴 [Test msedge on windows-latest](#pole-5) - 46m 01s · rarely the merge pole
+**Checks that hold up most PRs** - finished last on at least 2 sampled PRs; longest first:
+
+1. 🔴 [Windows (firefox)](#pole-1) - P50 72m 57s (the gate) · finishes last on 4/20 PRs · `tests_secondary.yml` gates 5/20 PRs
+2. 🔴 [ubuntu-22.04 (webkit - Node.js 2…](#pole-2) - P50 41m 21s · finishes last on 7/20 PRs · `tests_primary.yml` gates 7/20 PRs
+3. 🔴 [windows-latest - firefox](#pole-3) - P50 40m 15s · finishes last on 6/20 PRs · `tests_mcp.yml` gates 6/20 PRs
+
+**Long but rarely the last to finish** - finished last on fewer than 2 sampled PRs; longest first, with why:
+
+4. 🔴 [Test chrome on macos-latest](#pole-4) - P50 59m 33s · finishes last on 1/20 PRs · ran on few PRs · rarely the merge pole
+5. 🔴 [Test msedge on windows-latest](#pole-5) - P50 46m 01s · finishes last on 0/20 PRs · ran on few PRs · rarely the merge pole
 
 **⏳ Pre-start wait** - 41 jobs wait in queue before starting (developer wall-clock the spine above doesn't capture): [see below](#pre-start-wait).
 
@@ -69,32 +74,115 @@ A **workflow** is one YAML file under `.github/workflows/`; a run of it executes
 ```text
 Level 1 - checks racing on a typical PR; the merge waits for the slowest - rows marked † ran on a minority of sampled PRs (path-conditional - they gate only the PRs that trigger them):
 
-   Windows (firefox) · tests_seco… †  ██████████████████████  72m 57s
-   ubuntu-22.04 (webkit - Node.js 2…  ████████████            41m 21s       ◀┐
+   Windows (firefox) · tests_seco… †  ██████████████████████  72m 57s       ◀┐
+   ubuntu-22.04 (webkit - Node.js 2…  ████████████            41m 21s        │
    windows-latest - firefox · tests…  ████████████            40m 15s        │
    ┌─────────────────────────────────────────────────────────────────────────┘
 
-   ▼ Level 2 - inside ubuntu-22.04 (webkit - Node.js 20), steps run one after another:
+   ▼ Level 2 - inside Windows (firefox), steps run one after another:
 
-   Run ./.github/actions/run-test     ██████████████████████  41m 14s  100% ◀
-   Run actions/checkout@v6            █                            2s    0%
+   Run ./.github/actions/run-test     ██████████████████████  72m 46s  100% ◀
+   Run actions/checkout@v6            █                            6s    0%
+   Post Run actions/checkout@v6       █                            2s    0%
    Set up job                         █                            1s    0%
-   Complete job                       █                            1s    0%
-   Post Run actions/checkout@v6       █                            1s    0%
-   Post Run ./.github/actions/run-t…  █                            1s    0%
 ```
 
 Each ◀ marks the blocker the next level opens. Long pole 1 below drills the marked step to its root cause and hand-off prompt.
 
 † `Windows (firefox)` ran on 4/20 sampled PRs.
 
-> Also slower on **some** of the sampled PRs (not the typical path, not in the Contents critical path): opt-in / conditional workflow check(s) that ran on a minority of sampled PRs (label-gated or path-filtered - a typical PR doesn't wait on them): `Test chrome on macos-latest` (~59m 33s), `Test msedge on windows-latest` (~46m 01s), `Test msedge-dev on windows-latest` (~44m 28s). Unless one is a *required* status check it does not gate the merge - treat it as throughput/cost (an opt-in job) or make an external check non-blocking, rather than the long pole.
-
 <a id="pole-1"></a>
 
-## 🔴 Long pole 1: `tests_primary.yml` ▸ `ubuntu-22.04 (webkit - Node.js 20)` - 41m 21s
+## 🔴 Long pole 1: `tests_secondary.yml` ▸ `Windows (firefox)` - 72m 57s
 
-**The check most PRs gate on.** A typical PR waits on this most often; the slowest concurrent check is `Windows (firefox)` (~72m 57s).
+**Frequency group:** Checks that hold up most PRs.
+
+**The slowest check a typical PR waits on.**
+
+> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to **~13m 24s** of merge wait. Per-PR split: 0 on 16 of 20 PRs where another check runs longer; up to 13m 24s on 2 of 20 PRs; up to 15m 47s on 1 of 20 PRs; up to 20m 34s on 1 of 20 PRs.
+
+```text
+Where the job's ~72m 57s goes - every step, slowest first; they run in sequence and roughly add up to the job:
+
+   Run ./.github/actions/run-test     ██████████████████████  72m 46s       ◀
+   Run actions/checkout@v6            █                            6s
+   Post Run actions/checkout@v6       █                            2s
+   Set up job                         █                            1s
+
+(no log-level detector fired, but a **structural catalog pattern** matched this pole - see the **structural root-cause** below; the dominant step is the addressable lever.)
+```
+
+**📐 Structural root-cause - OPT75 · The long pole's time is one addressable step - speed it up or move it off the PR path - `Windows (firefox)`** - risk **MEDIUM**
+
+A measured **structural** lever on the critical path (it IS this pole, so it's not repeated in the off-path appendix). It carries a risk profile - review the guardrail and rollout before shipping:
+
+- **What ci-speedup measured:** critical-path check `Windows (firefox)` (4377s): dominant step `Run ./.github/actions/run-test` (test, 100% of job `Windows (firefox)`)
+- **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
+- **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
+- **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
+- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
+
+#### 🤖 Prompt for your coding agent
+
+```text
+starslingdev/ci-speedup measured where the time goes below but does NOT prescribe the fix - a structural catalog pattern (OPT75) matched this pole (see the **structural root-cause** section above for the measured lever + its risk axis); the dominant step below is where that lever's time is spent.
+
+REPO: microsoft/playwright (audited at commit 3827650)
+
+THE GATE
+- Workflow `tests_secondary.yml`, job `Windows (firefox)`.
+- Slowest check a typical PR waits on: P50 72m 57s; its workflow `tests_secondary.yml` gates 5/20 sampled PRs.
+
+Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+
+WHERE THE TIME GOES
+- The job's time is dominated by the `Run ./.github/actions/run-test` step: ~72m 46s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
+
+STRUCTURAL CATALOG PATTERN MATCHED
+- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
+
+WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
+- this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to ~13m 24s of merge wait. Per-PR split: 0 on 16 of 20 PRs where another check runs longer; up to 13m 24s on 2 of 20 PRs; up to 15m 47s on 1 of 20 PRs; up to 20m 34s on 1 of 20 PRs.
+
+WHERE TO LOOK
+- The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
+
+DELIVER & VERIFY
+- A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
+```
+
+
+<a id="pole-2"></a>
+
+## 🔴 Long pole 2: `tests_primary.yml` ▸ `ubuntu-22.04 (webkit - Node.js 20)` - 41m 21s
+
+**Frequency group:** Checks that hold up most PRs.
+
+_Runs concurrently behind `Windows (firefox)` (72m 57s); it becomes the gate only once every slower concurrent check drops below 41m 21s._
 
 > **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~1m 06s (the next leg, `windows-latest - firefox`, is 40m 15s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `windows-latest - firefox` (40m 15s), for up to **~1m 06s** of merge wait. Per-PR split: 0 on 13 of 20 PRs where another check runs longer; up to 39s on 1 of 20 PRs; up to 48s on 1 of 20 PRs; up to 1m 06s on 5 of 20 PRs.
 
@@ -175,92 +263,11 @@ DELIVER & VERIFY
 ```
 
 
-<a id="pole-2"></a>
-
-## 🔴 Long pole 2: `tests_secondary.yml` ▸ `Windows (firefox)` - 72m 57s
-
-_Runs concurrently - becomes the gate once the slower checks above it drop below 72m 57s._
-
-> **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to **~13m 24s** of merge wait. Per-PR split: 0 on 16 of 20 PRs where another check runs longer; up to 13m 24s on 2 of 20 PRs; up to 15m 47s on 1 of 20 PRs; up to 20m 34s on 1 of 20 PRs.
-
-```text
-Where the job's ~72m 57s goes - every step, slowest first; they run in sequence and roughly add up to the job:
-
-   Run ./.github/actions/run-test     ██████████████████████  72m 46s       ◀
-   Run actions/checkout@v6            █                            6s
-   Post Run actions/checkout@v6       █                            2s
-   Set up job                         █                            1s
-
-(no log-level detector fired, but a **structural catalog pattern** matched this pole - see the **structural root-cause** below; the dominant step is the addressable lever.)
-```
-
-**📐 Structural root-cause - OPT75 · The long pole's time is one addressable step - speed it up or move it off the PR path - `Windows (firefox)`** - risk **MEDIUM**
-
-A measured **structural** lever on the critical path (it IS this pole, so it's not repeated in the off-path appendix). It carries a risk profile - review the guardrail and rollout before shipping:
-
-- **What ci-speedup measured:** critical-path check `Windows (firefox)` (4377s): dominant step `Run ./.github/actions/run-test` (test, 100% of job `Windows (firefox)`)
-- **Guardrail:** carry the guardrail of the routed lever (e.g. OPT70's full-suite fallback if the dominant step is a test being scoped); never present the decomposition as free
-- **Rollout:** the routed lever's rollout; re-measure the pole's p50 after the dominant step is attacked - the next-largest step becomes the target
-- **Failure mode:** the dominant-step remedy ranges from LOW (cache an install) to HIGH (scope a test/build, inheriting OPT70) - the candidate carries the risk of whichever specific lever its dominant category routes to
-- **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt75--long-pole-optimize-or-relocate-the-dominant-step
-
-#### 🤖 Prompt for your coding agent
-
-```text
-starslingdev/ci-speedup measured where the time goes below but does NOT prescribe the fix - a structural catalog pattern (OPT75) matched this pole (see the **structural root-cause** section above for the measured lever + its risk axis); the dominant step below is where that lever's time is spent.
-
-REPO: microsoft/playwright (audited at commit 3827650)
-
-THE GATE
-- Workflow `tests_secondary.yml`, job `Windows (firefox)`.
-- Slowest check a typical PR waits on: P50 72m 57s; its workflow `tests_secondary.yml` gates 5/20 sampled PRs.
-
-Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
-
-WHERE THE TIME GOES
-- The job's time is dominated by the `Run ./.github/actions/run-test` step: ~72m 46s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
-
-STRUCTURAL CATALOG PATTERN MATCHED
-- A structural catalog pattern (OPT75) matched this pole - see the **structural root-cause** section above for the measured lever, its risk / guardrail / rollout, and the catalog fix recipe. The step above is the load-bearing one that lever targets; open its log in a recent pull-request run of this job (no direct log link is shown here) to see exactly what inside it the lever reshapes.
-
-WHAT'S ADDRESSABLE (wall-clock ceiling - don't over-promise)
-- this job's matrix legs run in parallel, so speeding this one leg saves only ~13m 24s (the next leg, `Test chrome on macos-latest`, is 59m 33s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test chrome on macos-latest` (59m 33s), for up to ~13m 24s of merge wait. Per-PR split: 0 on 16 of 20 PRs where another check runs longer; up to 13m 24s on 2 of 20 PRs; up to 15m 47s on 1 of 20 PRs; up to 20m 34s on 1 of 20 PRs.
-
-WHERE TO LOOK
-- The `tests_secondary.yml` workflow definition for the dominant step, and the tool/config it invokes (build tool, test runner, or install) - that's where its time is spent.
-
-NEVER BUY SPEED BY CHECKING LESS
-- The commit that merges must still be verified by exactly what verifies
-  it today. Unless the finding above IS that reduction, do not: delete or
-  narrow matrix legs so fewer configurations are tested; add
-  `continue-on-error`, `|| true`, or any other exit-code suppression;
-  narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter that do
-  cover the change; or cut test counts, timeouts, or retries in a way
-  that weakens the signal rather than the cost.
-- Not running a check against a change it cannot fail on is NOT checking
-  less, and several catalog fixes work exactly that way: a `paths:` /
-  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
-  selection. Those stay in bounds as long as the commit that merges is
-  still verified by every check its own change could fail - follow the
-  guardrail on the catalog recipe where this prompt links one, because
-  that is the half it exists to protect.
-- A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to make this faster, say
-  so and stop.
-
-VERIFICATION BAR
-- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
-- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
-
-DELIVER & VERIFY
-- A change that cuts the dominant step's wall time without dropping coverage; re-measure the step on a PR run to confirm the reduction.
-```
-
-
 <a id="pole-3"></a>
 
 ## 🔴 Long pole 3: `tests_mcp.yml` ▸ `windows-latest - firefox` - 40m 15s
+
+**Frequency group:** Checks that hold up most PRs.
 
 _Runs concurrently behind `Windows (firefox)` (72m 57s); it becomes the gate only once every slower concurrent check drops below 40m 15s._
 
@@ -345,6 +352,8 @@ DELIVER & VERIFY
 
 ## 🔴 Long pole 4: `tests_secondary.yml` ▸ `Test chrome on macos-latest` - 59m 33s
 
+**Frequency group:** Long but rarely the last to finish.
+
 **Rarely the merge gate - the actual slowest check a PR waits on, on only 1/20 sampled PRs.** Present on 5/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 59m 33s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait.
 
 > **What a change here can buy (wall-clock):** this job's matrix legs run in parallel, so speeding **this one leg** saves only ~13m 32s (the next leg, `Test msedge on windows-latest`, is 46m 01s). Because the legs share one job config, a change that speeds *every* leg at once drops the whole matrix toward the next check, `Test msedge on windows-latest` (46m 01s), for up to **~13m 32s** of merge wait. Per-PR split: 0 on 19 of 20 PRs where another check runs longer; up to 13m 32s on the other 1 of 20 PRs.
@@ -428,6 +437,8 @@ DELIVER & VERIFY
 <a id="pole-5"></a>
 
 ## 🔴 Long pole 5: `tests_secondary.yml` ▸ `Test msedge on windows-latest` - 46m 01s
+
+**Frequency group:** Long but rarely the last to finish.
 
 **Rarely the merge gate - the actual slowest check a PR waits on, on only 0/20 sampled PRs.** Present on 5/20 PRs, but a slower concurrent check almost always gates ahead of it, so its 46m 01s is throughput/cost, not merge-wait. Speeding it helps only the PRs where it IS the pole - it won't move typical merge-wait.
 
@@ -1573,7 +1584,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `1052a8c`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `ebcb369`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

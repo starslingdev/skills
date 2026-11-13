@@ -12855,10 +12855,16 @@ def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
     shrinking denominator is surfaced, not silent."""
     counts: dict[str, int] = {}
     n = dropped = 0
+    unconfirmed = {
+        str(row.get("name") or row.get("check") or "")
+        for row in _as_list(cp.get("checks"))
+        if isinstance(row, dict) and row.get("required_reachable") is False
+    }
     for entry in _as_list(cp.get("populations")):
         try:
             _share, cks = entry
-            pos = [(str(nm), float(p)) for nm, p in cks if float(p) > 0]
+            pos = [(str(nm), float(p)) for nm, p in cks
+                   if float(p) > 0 and str(nm) not in unconfirmed]
         except (TypeError, ValueError):
             dropped += 1
             continue
@@ -12932,6 +12938,228 @@ def check_workflow_gate_frequency_matches(report: str, findings_path: Path | Non
     if checked == 0:
         return Check(name, True, f"no re-derivable gate-frequency claim{tail}", skipped=True)
     return Check(name, True, f"all {checked} gate-frequency claim(s) match populations{tail}")
+
+
+_POLE_GROUP_ROW_RE = re.compile(
+    r"^(\d+)\.\s+\S+\s+\[([^\]]+)\]\(#pole-(\d+)\)\s+-\s+"
+    r"P50\s+([^·\n]+?)\s+·\s+finishes last on\s+(\d+)/(\d+)\s+PRs(.*)$",
+    re.MULTILINE)
+_VR_POLE_HOLDS_UP_MIN_COUNT = 2
+_VR_POLE_LABEL_WIDTH = 33
+
+
+def _aggregation_upstream_gate_counts(data: dict) -> dict[str, int]:
+    """Effective gate frequency inherited by an aggregation verdict's slowest upstream."""
+    graph = _as_dict(data.get("workflow_job_graph"))
+    cp = _as_dict(data.get("pr_critical_path"))
+    checks = [_as_dict(row) for row in _as_list(cp.get("checks"))]
+    counts = {
+        _cmp_name(str(row.get("name") or row.get("check") or "")):
+        int(_num(row.get("pole_n")) or 0)
+        for row in checks
+    }
+    inherited: dict[str, int] = {}
+    for raw_pole in _as_list(cp.get("poles")):
+        pole = _as_dict(raw_pole)
+        if (_num(pole.get("p50_s")) or 0.0) > _VR_AGG_GATE_TRIVIAL_S:
+            continue
+        workflow = str(pole.get("workflow_file") or "")
+        jobs = _as_dict(graph.get(workflow))
+        if not jobs:
+            continue
+        sink_name = str(pole.get("check") or "")
+        sink_job = str(pole.get("job") or "")
+        if sink_job not in jobs:
+            candidates = [
+                job_id for job_id, meta in jobs.items()
+                if _vr_job_produces_check(
+                    str(_as_dict(meta).get("name") or job_id),
+                    bool(_as_dict(meta).get("matrix")), sink_name)
+            ]
+            if len(candidates) != 1:
+                continue
+            sink_job = candidates[0]
+        needs_of = {
+            job_id: [str(need) for need in _as_list(_as_dict(meta).get("needs"))]
+            for job_id, meta in jobs.items()
+        }
+        depended_on = {need for needs in needs_of.values() for need in needs}
+        if sink_job in depended_on:
+            continue
+        closure: set[str] = set()
+        frontier = list(needs_of.get(sink_job) or [])
+        while frontier:
+            job_id = frontier.pop()
+            if job_id in closure or job_id not in jobs:
+                continue
+            closure.add(job_id)
+            frontier.extend(needs_of.get(job_id) or [])
+        if len(closure) < 2 or not {job for job in jobs if job in depended_on} <= closure:
+            continue
+        if any((_num(_as_dict(step).get("p50_s")) or 0.0) > _VR_AGG_GATE_TRIVIAL_S
+               for step in _as_list(pole.get("steps"))):
+            continue
+        upstreams = [
+            row for row in checks
+            if str(row.get("workflow_file") or "") == workflow
+            and any(_vr_job_produces_check(
+                str(_as_dict(jobs.get(job_id)).get("name") or job_id),
+                bool(_as_dict(jobs.get(job_id)).get("matrix")),
+                str(row.get("name") or row.get("check") or ""))
+                    for job_id in closure)
+        ]
+        if not upstreams:
+            continue
+        slowest = max(
+            upstreams,
+            key=lambda row: max(
+                _num(row.get("p50_s")) or 0.0,
+                _num(_as_dict(row.get("bimodal")).get("high_p50_s")) or 0.0))
+        upstream_name = _cmp_name(str(slowest.get("name") or slowest.get("check") or ""))
+        sink_count = counts.get(_cmp_name(sink_name), 0)
+        inherited[upstream_name] = max(inherited.get(upstream_name, 0), sink_count)
+    return inherited
+
+
+def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) -> Check:
+    """Two duration-ordered groups and the executive summary share one pole 1."""
+    name = "pole groups are duration-ordered and Bottom line agrees with Long pole 1"
+    if not findings_path or _is_static_only(report):
+        return Check(name, True, "no findings / static-only", skipped=True)
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings unreadable", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    checks = [row for row in _as_list(cp.get("checks")) if isinstance(row, dict)]
+    if not checks or any(row.get("pole_n") is None for row in checks):
+        return Check(name, True, "legacy findings lack complete pole counts", skipped=True)
+
+    contents = _section(report, "📋 Contents")
+    frequent_heading = "Checks that hold up most PRs"
+    rare_heading = "Long but rarely the last to finish"
+    unconfirmed_heading = "Could not confirm these checks block merging"
+    threshold_match = re.search(
+        r"(?:Checks that hold up most PRs.*?at least|"
+        r"Long but rarely the last to finish.*?fewer than)\s+(\d+)\s+sampled PRs",
+        contents)
+    rows = list(_POLE_GROUP_ROW_RE.finditer(contents))
+    pole_sections = _pole_header_sections(report)
+    if not threshold_match or len(rows) != len(pole_sections):
+        return Check(name, False,
+                     "every modern pole must appear under one of the two labelled groups with "
+                     "its P50 and finishes-last count")
+
+    threshold = int(threshold_match.group(1))
+    if threshold != _VR_POLE_HOLDS_UP_MIN_COUNT:
+        return Check(name, False,
+                     f"rendered group threshold {threshold} differs from the verifier contract "
+                     f"{_VR_POLE_HOLDS_UP_MIN_COUNT}")
+    rare_at = contents.find(rare_heading)
+    unconfirmed_at = contents.find(unconfirmed_heading)
+    failures: list[str] = []
+    groups: dict[str, list[float]] = {
+        "holds-up": [], "rare-last": [], "unconfirmed": []}
+    drill_group_labels = {
+        "holds-up": "Checks that hold up most PRs",
+        "rare-last": "Long but rarely the last to finish",
+        "unconfirmed": "Could not confirm this check blocks merging",
+    }
+    by_name = {_cmp_name(str(row.get("name") or row.get("check") or "")): row
+               for row in checks}
+    inherited_counts = _aggregation_upstream_gate_counts(data)
+    _population_counts, population_n, _dropped = _populations_pole_counts(cp)
+    expected_denominator = population_n or int(_num(cp.get("check_present_n_pr")) or 0)
+    first_name = ""
+    first_full_name = ""
+    for index, match in enumerate(rows, 1):
+        number, label, anchor, p50_text, count_text, total_text, tail = match.groups()
+        if int(number) != index or int(anchor) != index:
+            failures.append(f"row {index} has numbering {number}/anchor {anchor}")
+        if index == 1:
+            first_name = label
+            first_full_name = pole_sections[0][1]
+        count, total = int(count_text), int(total_text)
+        group = ("unconfirmed" if unconfirmed_at >= 0 and match.start() > unconfirmed_at
+                 else "rare-last" if rare_at >= 0 and match.start() > rare_at
+                 else "holds-up")
+        drill_body = pole_sections[index - 1][2]
+        rendered_drill_groups = re.findall(
+            r"^\*\*Frequency group:\*\* (.+)\.$", drill_body, re.MULTILINE)
+        expected_drill_group = drill_group_labels[group]
+        if rendered_drill_groups != [expected_drill_group]:
+            failures.append(
+                f"`{label}` drill frequency group {rendered_drill_groups!r} differs from "
+                f"Contents group `{expected_drill_group}`")
+        seconds = _parse_clock_to_s(p50_text)
+        if seconds is None:
+            failures.append(f"`{label}` has an unreadable P50 {p50_text!r}")
+        else:
+            groups[group].append(seconds)
+        if group == "rare-last" and not (
+                "ran on few PRs" in tail
+                or "a slower check usually ran alongside" in tail
+                or "feeds the terminal `needs:` gate" in tail):
+            failures.append(f"`{label}` has no reason in the rare-last group")
+        # Contents labels are deliberately width-limited for readability.  Join
+        # through the corresponding full drill heading before looking up the
+        # stamped check, so an ellipsis cannot make real evidence unjoinable.
+        full_label = pole_sections[index - 1][1]
+        inherited_upstream = _cmp_name(full_label) in inherited_counts
+        claims_terminal_gate = "feeds the terminal `needs:` gate" in tail
+        if group == "rare-last" and claims_terminal_gate != inherited_upstream:
+            failures.append(
+                f"`{label}` terminal-needs reason does not match aggregation-gate topology")
+        expected_label = (full_label if len(full_label) <= _VR_POLE_LABEL_WIDTH
+                          else full_label[:_VR_POLE_LABEL_WIDTH - 1] + "…")
+        if label != expected_label:
+            failures.append(
+                f"Contents label `{label}` does not match drill `{full_label}`")
+        stamped = by_name.get(_cmp_name(full_label))
+        if stamped is None:
+            failures.append(f"`{label}` has no matching stamped check")
+        else:
+            stamped_count = max(
+                int(_num(stamped.get("pole_n")) or 0),
+                inherited_counts.get(_cmp_name(full_label), 0))
+            stamped_p50 = _num(stamped.get("p50_s"))
+            expected_group = (
+                "unconfirmed" if stamped.get("required_reachable") is False else
+                "holds-up" if (count >= threshold or (total > 0 and count == total)) else
+                "rare-last")
+            if group != expected_group:
+                failures.append(
+                    f"`{label}` is in {group} with {count} finishes; expected {expected_group}")
+            if stamped_count != count:
+                failures.append(
+                    f"`{label}` renders {count} finishes, stamped {stamped_count}")
+            if seconds is not None and stamped_p50 is not None and abs(seconds - stamped_p50) > 1.0:
+                failures.append(
+                    f"`{label}` renders P50 {_fmt_clock(seconds)}, stamped {_fmt_clock(stamped_p50)}")
+        if expected_denominator and total != expected_denominator:
+            failures.append(f"`{label}` renders denominator {total}, not the sampled population")
+
+    for group, values in groups.items():
+        if any(values[i] < values[i + 1] for i in range(len(values) - 1)):
+            failures.append(f"{group} P50 values are not non-increasing: {values}")
+    if groups["holds-up"] and frequent_heading not in contents:
+        failures.append("holds-up rows have no labelled group heading")
+    if groups["rare-last"] and rare_heading not in contents:
+        failures.append("rare-last rows have no labelled group heading")
+    if groups["unconfirmed"] and unconfirmed_heading not in contents:
+        failures.append("unconfirmed rows have no labelled group heading")
+
+    bottom = next((line for line in report.splitlines()
+                   if line.startswith("> **Bottom line.**")), "")
+    expected_open = f"> **Bottom line.** Long pole 1, `{first_name}`,"
+    if not first_name or not bottom.startswith(expected_open):
+        failures.append(f"Bottom line does not open with Long pole 1 `{first_name}`")
+    if not first_full_name:
+        failures.append("Contents pole 1 has no corresponding drill heading")
+
+    return Check(name, not failures,
+                 "; ".join(failures[:8]) if failures else
+                 f"{len(rows)} poles grouped and duration-ordered; Bottom line names pole 1")
 
 
 def check_spine_heavy_check_disclosed(report: str, findings_path: Path | None) -> Check:
@@ -16784,6 +17012,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_headline_wait_is_divergence_correct(report, findings_path, report_path),  # issue #115
         check_spine_heavy_check_disclosed(report, findings_path),
         check_workflow_gate_frequency_matches(report, findings_path),
+        check_pole_groups_and_bottom_agree(report, findings_path),
         check_pole_not_reframed_as_hygiene(report, findings_path),
         check_toc_also_noticed_label_honest(report),
         check_cache_claim_backed_by_distribution(report, findings_path),

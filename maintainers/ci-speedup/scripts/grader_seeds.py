@@ -56,7 +56,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 93 AUTO_SEED / 1 EXCLUDE /
+# name is in the trailing comment for cross-reference with spec §2-A. 94 AUTO_SEED / 1 EXCLUDE /
 # 3 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
@@ -121,6 +121,7 @@ TRIAGE_ALLOWLIST = {
     "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)": AUTO_SEED,  # check_era_chain_spine_bound_to_kept_era (issue #80)
     "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)": AUTO_SEED,  # check_spine_heavy_check_disclosed
     "rendered per-workflow gate frequency matches the populations re-derivation": AUTO_SEED,        # check_workflow_gate_frequency_matches
+    "pole groups are duration-ordered and Bottom line agrees with Long pole 1": AUTO_SEED,          # check_pole_groups_and_bottom_agree
     "no drilled pole's job is also framed as an 'Also noticed' minor-cleanup finding": AUTO_SEED,  # check_pole_not_reframed_as_hygiene
     "TOC 'Also noticed' pointer's on/off-path label matches the appendix": AUTO_SEED,             # check_toc_also_noticed_label_honest
     "every rendered cache claim carries a cross-run cache distribution": AUTO_SEED,               # check_cache_claim_backed_by_distribution
@@ -247,6 +248,7 @@ CHECK_CLASS = {
     "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)": "fabricated-or-unsupported-finding",  # issue #80: a dropped-era PR's timing feeds the "typical PR waits N" makespan headline under a disclosure claiming the kept era — a measurement of a config that isn't the one disclosed
     "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)": "coverage-gap-dead-end",  # an undisclosed gap
     "rendered per-workflow gate frequency matches the populations re-derivation": "fabricated-or-unsupported-finding",  # a rendered frequency not backed by the re-derivation
+    "pole groups are duration-ordered and Bottom line agrees with Long pole 1": "mis-ranked-lever",  # group order or headline disagrees with the measured pole ranking
     "no drilled pole's job is also framed as an 'Also noticed' minor-cleanup finding": "mis-ranked-lever",  # a major pole reframed as minor = a ranking error
     "TOC 'Also noticed' pointer's on/off-path label matches the appendix": "fabricated-or-unsupported-finding",  # a rendered label not backed by the appendix
     "every rendered cache claim carries a cross-run cache distribution": "estimated-not-measured",  # a claim without the backing distribution
