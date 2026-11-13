@@ -75,7 +75,6 @@ REQUIRED_VERIFIER_MIRRORS = {
 }
 
 PROVISIONAL_MODULE_LANDING_MARKERS = {
-    "pr_sample_contract.py": "(#333)",
     "gate_frequency_contract.py": "(#317)",
 }
 
@@ -84,11 +83,6 @@ PROVISIONAL_SYMBOL_LANDING_MARKERS = {
 }
 
 REQUIRED_PROVISIONAL_SOURCES = {
-    "pr_sample_contract.py:PR_SAMPLE_TARGET": 100,
-    "pr_sample_contract.py:PR_SAMPLE_MIN_DISTINCT_DAYS": 5,
-    "pr_sample_contract.py:PR_SAMPLE_CANDIDATE_PAGE_CAP": 12,
-    "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_NUMERATOR": 1,
-    "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_DENOMINATOR": 2,
     "gate_frequency_contract.py:GATE_BOOKKEEPING_CUTOFF_S": 60.0,
     "gate_frequency_contract.py:GATE_MIN_COUNT_FOR_RANKING": 5,
     "gate_frequency_contract.py:GATE_INTERVAL_Z": 1.96,
@@ -162,16 +156,19 @@ REQUIRED_CURRENT_SOURCES = {
     "collect_runs.py:_OPT98_REPROVE_RATIO": 0.8,
     "collect_runs.py:_OPT98_WINDOW_DAYS": 30,
     "collect_runs.py:_POLE_RECUR_FLOOR": 2,
-    "collect_runs.py:_PR_CANDIDATE_PAGE_CAP": 3,
     "collect_runs.py:_PUSH_LANE_RARE_PER_30D": 8,
     "collect_runs.py:_RARE_PRESENCE_FRAC": 0.5,
     "collect_runs.py:_RARE_PRESENCE_MIN_PR": 6,
-    "collect_runs.py:_REPR_PR_TARGET": 20,
     "collect_runs.py:_SHALLOW_RUNS": 10,
     "collect_runs.py:_SUCCESS_ONLY_CAVEAT_FAILURE_RATE": 0.2,
     "collect_runs.py:_SUCCESS_ONLY_CAVEAT_MIN_RUNS": 10,
     "collect_runs.py:_TRIAGE_WALLCLOCK_FLOOR_S": 90.0,
     "pr_lifecycle.py:MIN_MEASURED": 10,
+    "pr_sample_contract.py:PR_SAMPLE_CANDIDATE_PAGE_CAP": 12,
+    "pr_sample_contract.py:PR_SAMPLE_MIN_DISTINCT_DAYS": 5,
+    "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_DENOMINATOR": 2,
+    "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_NUMERATOR": 1,
+    "pr_sample_contract.py:PR_SAMPLE_TARGET": 100,
     "verify_report.py:_CEILING_MIN_GATING_PR": 5,
     "verify_report.py:_VR_AGG_GATE_TRIVIAL_S": 30.0,
     "verify_report.py:_VR_CACHE_COLD_MISS_PCT": 99.5,
@@ -354,7 +351,7 @@ def test_report_defaults_machine_contract_matches_the_engine():
         for source in row.get("symbols", []):
             path, symbol = _module(source)
             assert path.exists() and symbol in _symbols(path), f"{key}: unknown source {source}"
-        # #315/#317/#318 own these provisional modules. Pin the proposed values
+        # #317/#318 own these provisional modules. Pin the proposed values
         # now; once a module is present on this branch, the same guard checks it.
         for source, expected in row.get("planned_sources", {}).items():
             path, symbol = _module(source)
@@ -376,7 +373,7 @@ def test_report_defaults_machine_contract_matches_the_engine():
 
     collect_source = (SCRIPTS / "collect_runs.py").read_text(encoding="utf-8")
     assert "end - _dt.timedelta(days=30)" in collect_source
-    assert "**Current value:** up to 20 selected PR commits" in text
+    assert "**Current value:** up to 100 completed PR commits" in text
     assert re.search(r"does\s+not set this population", text)
     assert "**Current value:** 30 days" in text
     assert "collect_runs.py::_window_30d" in text

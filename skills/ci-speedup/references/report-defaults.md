@@ -12,26 +12,25 @@ including the values rather than only the direction of change.
 
 ### `pr-gate-sample-size`
 
-**Current value:** up to 20 selected PR commits
-(`collect_runs.py::_REPR_PR_TARGET`). They may still have queued or in-progress
-runs, as the eligibility entry below describes.
+**Current value:** up to 100 completed PR commits
+(`pr_sample_contract.PR_SAMPLE_TARGET`).
 The unrelated `--max-runs` option bounds per-workflow timing history and does
 not set this population.
 
 **Report statements:** PR-gate P50/P90 durations, gate frequency, pole order,
 and every claim that describes a check as typical or rare.
 
-**Reason:** Twenty keeps the API cost modest, but it can represent one short
-burst and is too small to support a stable ordering.
+**Reason:** One hundred keeps the API cost bounded while reducing sensitivity
+to one short traffic burst.
 
-**Proposed decision:** **Change to at least 100 completed PR commits** under
-#306 and #311. #315 centralizes the provisional value as
-`pr_sample_contract.PR_SAMPLE_TARGET`; it remains awaiting owner approval.
+**Proposed decision:** **Keep 100 completed PR commits.** #315, relanded by
+#333, centralizes the value as `pr_sample_contract.PR_SAMPLE_TARGET`; it
+remains awaiting owner approval.
 
 ### `pr-gate-eligibility`
 
-**Current value:** candidate commits can still have queued or in-progress runs;
-their wall time is excluded, but their check rows can feed gate frequency.
+**Current value:** only completed PR commits are eligible; excluded in-flight
+commits are disclosed rather than treated as zero or clean.
 
 **Report statements:** sample completeness, "finishes last," gate frequency,
 pole order, and the Bottom line.
@@ -39,13 +38,14 @@ pole order, and the Bottom line.
 **Reason:** A last-finisher cannot be known until every sampled run for the
 commit finishes. Partial commits remain useful coverage evidence.
 
-**Proposed decision:** **Change to completed PR commits only** under #306, and
-disclose excluded in-flight commits rather than treating them as zero or clean.
+**Proposed decision:** **Keep completed PR commits only** and retain the
+in-flight exclusion disclosure.
 
 **Approval status:** awaiting owner approval.
 ### `pr-gate-span`
 
-**Current value:** no minimum span; 20 observations can come from one hour.
+**Current value:** at least 5 distinct days
+(`pr_sample_contract.PR_SAMPLE_MIN_DISTINCT_DAYS`).
 
 **Report statements:** every frequency, interval, "typical PR," and pole-order
 claim derived from the gate population.
@@ -53,25 +53,25 @@ claim derived from the gate population.
 **Reason:** Multiple days reduce sensitivity to one traffic burst, weekday, or
 temporary path mix. Five days covers most of a working week.
 
-**Proposed decision:** **Change to at least 5 distinct days** under #306 and
-#311, and print the first and last sampled dates. #315 centralizes the
-provisional value in `pr_sample_contract.py`; it remains awaiting owner
-approval.
+**Proposed decision:** **Keep at least 5 distinct days** and continue printing
+the first and last sampled dates. #315, relanded by #333, centralizes the value
+in `pr_sample_contract.py`; it remains awaiting owner approval.
 
 **Approval status:** awaiting owner approval.
 ### `pr-candidate-pages`
 
-**Current value:** 3 pages per workflow (`_PR_CANDIDATE_PAGE_CAP`).
+**Current value:** 12 pages per workflow
+(`pr_sample_contract.PR_SAMPLE_CANDIDATE_PAGE_CAP`), with an early stop once
+100 eligible commits over 5 days are available.
 
 **Report statements:** sample stop reason, candidate exhaustion, sample count,
 time span, and every downstream gate-frequency claim.
 
-**Reason:** A fixed cap prevents an unbounded walk, but three pages can be
-consumed by incomplete or ineligible commits before reaching the target.
+**Reason:** A fixed cap prevents an unbounded walk, while twelve pages leave
+room for incomplete or ineligible commits before reaching the target.
 
-**Proposed decision:** **Change the cap to 12 pages** with an early stop once
-100 eligible commits over 5 days are available. #315 centralizes the
-provisional cap in `pr_sample_contract.py`. Approve the API cost ceiling
+**Proposed decision:** **Keep the cap at 12 pages.** #315, relanded by #333,
+centralizes the cap in `pr_sample_contract.py`. Approve the API cost ceiling
 together with the sample target; the value remains awaiting owner approval.
 
 ### `config-era-boundary`
@@ -489,8 +489,7 @@ one commit.
 
 ### `partial-majority-rule`
 
-**Current value:** main has no centralized majority rule for the representative
-sample. #315 provisionally uses more than one half through
+**Current value:** strictly more than one half through
 `pr_sample_contract.PR_SAMPLE_PARTIAL_MAJORITY_NUMERATOR` and
 `PR_SAMPLE_PARTIAL_MAJORITY_DENOMINATOR`.
 
@@ -500,8 +499,8 @@ whether gate frequency may be headlined.
 **Reason:** A population with more incomplete than complete commits cannot
 support a confident last-finisher ranking.
 
-**Proposed decision:** **Use strictly more than 1/2.** The #315 value remains
-awaiting owner approval.
+**Proposed decision:** **Keep strictly more than 1/2.** The #315 value,
+relanded by #333, remains awaiting owner approval.
 
 ## Finding thresholds and caps
 
@@ -821,18 +820,15 @@ implementation lands.
   },
   "partial-majority-rule": {
     "decision": "partial-majority-rule",
-    "planned_sources": {
+    "sources": {
       "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_DENOMINATOR": 2,
       "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_NUMERATOR": 1
     }
   },
   "pr-candidate-pages": {
     "decision": "pr-candidate-pages",
-    "planned_sources": {
-      "pr_sample_contract.py:PR_SAMPLE_CANDIDATE_PAGE_CAP": 12
-    },
     "sources": {
-      "collect_runs.py:_PR_CANDIDATE_PAGE_CAP": 3
+      "pr_sample_contract.py:PR_SAMPLE_CANDIDATE_PAGE_CAP": 12
     }
   },
   "pr-sample-eligibility": {
@@ -843,17 +839,14 @@ implementation lands.
   },
   "pr-sample-span": {
     "decision": "pr-gate-span",
-    "planned_sources": {
+    "sources": {
       "pr_sample_contract.py:PR_SAMPLE_MIN_DISTINCT_DAYS": 5
     }
   },
   "pr-sample-target": {
     "decision": "pr-gate-sample-size",
-    "planned_sources": {
-      "pr_sample_contract.py:PR_SAMPLE_TARGET": 100
-    },
     "sources": {
-      "collect_runs.py:_REPR_PR_TARGET": 20
+      "pr_sample_contract.py:PR_SAMPLE_TARGET": 100
     }
   },
   "push-cohort": {
