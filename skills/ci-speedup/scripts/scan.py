@@ -4977,11 +4977,32 @@ def _detect_opt61(
         assignment_re = re.compile(
             r"\b(CCACHE_DIR|SCCACHE_DIR|STATICCHECK_CACHE|GOLANGCI_LINT_CACHE)"
             r"\s*=\s*([^\s;&]+)", re.IGNORECASE)
-        build_command_re = re.compile(
-            r"\b(?:cmake\s+--build|make|ninja|meson\s+compile|cargo\s+(?:build|test)|"
-            r"go\s+(?:build|test))\b", re.IGNORECASE)
         direct_compiler_re = re.compile(
             r"(?:^|[\s;&|])(ccache|sccache)(?=\s|$)", re.IGNORECASE)
+        compiler_cache_consumer_re = re.compile(
+            r"(?:^|[\s;&|`$(])(?:"
+            r"cargo\s+(?:\+\S+\s+)?(?:build|test|check|bench|doc|hack|"
+            r"llvm-cov|run|xtask)\b|"
+            r"cargo\s+(?:\+\S+\s+)?nextest\s+run\b|"
+            r"cargo\s+(?:\+\S+\s+)?clippy\b"
+            r"(?![^;&|]*(?:--version|-V)(?:\s|$))|"
+            r"cross\s+(?:build|test|check|bench)\b|"
+            r"cmake\s+--build\b|meson\s+compile\b|make\b|ninja\b|"
+            r"bazel(?:isk)?\s+(?:build|test)\b|"
+            r"(?:just|task)[ \t]++(?!-)\S+|"
+            r"npm\s+(?:run|exec|test|start)\b|"
+            r"(?:pnpm|yarn|bun)[ \t]++(?!-)"
+            r"(?!(?:version|help|info|list|config|cache)\b)\S+|"
+            r"rustc[ \t]++(?!(?:--version|-Vv?|--print|--explain)"
+            r"(?:[ \t]|$))|"
+            r"(?:python(?:3(?:\.\d+)?)?|bash|sh)[ \t]+"
+            r"(?:-[A-Za-z]+[ \t]+)*[^\s;&|]+\.(?:py|sh|js|ts)\b|"
+            r"(?:\./|\$GITHUB_WORKSPACE/|"
+            r"\$\{\{\s*github\.workspace\s*\}\}/|"
+            r"(?:scripts?|ci|tools?)/)\S+"
+            r")",
+            re.IGNORECASE,
+        )
         analysis_command_re = re.compile(
             r"(?:^|[\s;&|])(?:staticcheck|golangci-lint)(?=\s|$)", re.IGNORECASE)
 
@@ -4994,7 +5015,13 @@ def _detect_opt61(
                 if direct:
                     return family == direct.group(1).casefold()
                 env_text = "\n".join(f"{key}={value}" for key, value in env.items())
-                return family in env_text.casefold() and bool(build_command_re.search(command))
+                if family not in env_text.casefold():
+                    return False
+                # Only build drivers, task runners, and first-party scripts can
+                # consume the configured compiler wrapper. File inspection,
+                # packaging, toolchain setup, and metadata probes do not make
+                # an inherited cache directory active merely by sharing a job.
+                return compiler_cache_consumer_re.search(command) is not None
             family = "staticcheck" if name == "staticcheck_cache" else "golangci"
             match = analysis_command_re.search(command)
             return bool(match and family in match.group(0).casefold())

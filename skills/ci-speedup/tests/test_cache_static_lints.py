@@ -272,6 +272,297 @@ def test_opt61_accepts_a_persisted_sccache_directory(tmp_path) -> None:
     assert "OPT61" not in _patterns(rows)
 
 
+def test_opt61_checks_declared_sccache_directory_for_all_compiler_consumers(
+        tmp_path) -> None:
+    for index, command in enumerate((
+            "cargo clippy --all-targets",
+            "cargo nextest run",
+            "cargo +nightly clippy --all-targets",
+            "cargo +stable nextest run",
+    )):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: {command}
+""")
+
+        assert "OPT61" in _patterns(rows), command
+
+        matching = _scan_workflow(tmp_path / f"matching-{index}", f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /var/cache/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: {command}
+""")
+
+        assert "OPT61" not in _patterns(matching), command
+
+
+def test_opt61_ignores_nextest_version_before_a_correctly_persisted_run(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo nextest --version
+      - run: cargo nextest run
+        env:
+          SCCACHE_DIR: /build/sccache
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_ignores_an_unused_job_sccache_dir_when_builds_override_it(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: cargo test
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: git diff --exit-code
+      - run: ls -la target
+      - run: cat Cargo.lock
+      - run: rustup component add clippy
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_checks_job_sccache_dir_used_by_cargo_doc_after_an_override(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  mismatched-sccache-doc:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: cargo doc --no-deps
+""")
+
+    findings = [row for row in rows if row.get("pattern") == "OPT61"]
+    assert findings
+    assert "mismatched-sccache-doc" in findings[0]["affected_jobs"]
+
+
+def test_opt61_checks_inherited_sccache_dir_after_a_saved_build_override(
+        tmp_path) -> None:
+    commands = (
+        "cargo check --all-targets",
+        "cargo bench --no-run",
+        "cargo hack check",
+        "cargo llvm-cov nextest",
+        "cross build --target aarch64-unknown-linux-gnu",
+        "just build",
+        "./scripts/build.sh",
+        "python scripts/build.py",
+        "bash ci/compile.sh",
+        "task build",
+        "echo $(./scripts/build.sh)",
+    )
+    undetected: list[str] = []
+    for index, command in enumerate(commands):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: {command}
+""")
+
+        if "OPT61" not in _patterns(rows):
+            undetected.append(command)
+
+    assert undetected == []
+
+
+def test_opt61_ignores_non_build_steps_after_a_saved_build_override(
+        tmp_path) -> None:
+    commands = (
+        "mkdir -p dist",
+        "cp Cargo.lock dist/",
+        "tar -cf dist.tar dist",
+        "du -sh target",
+        "find target -maxdepth 1 -type f",
+        "grep -R TODO src",
+        "head -n 5 Cargo.lock",
+        "rustc --version",
+        "cargo --version",
+        "cargo fmt --check",
+        "rustup show",
+        "df -h",
+        "test -f Cargo.lock",
+        "ls -la $HOME",
+        "echo ok | tee log.txt",
+        "git diff --exit-code",
+        "cat Cargo.lock",
+        "npm --version",
+        "pnpm --version",
+        "yarn --version",
+        "bun --version",
+        "just --list",
+        "task --version",
+        "task --list",
+        "cargo clippy --version",
+        "cargo +nightly clippy --version",
+        "rustc   --version",
+        "rustc -Vv",
+        "rustc --print target-list",
+    )
+    false_positives: list[str] = []
+    for index, command in enumerate(commands):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: {command}
+""")
+
+        if "OPT61" in _patterns(rows):
+            false_positives.append(command)
+
+    assert false_positives == []
+
+
+def test_opt61_checks_declared_sccache_directory_for_unlisted_consumers(
+        tmp_path) -> None:
+    commands = (
+        "cargo doc --no-deps",
+        "cargo bench --no-run",
+        "cargo check --all-targets",
+        "cargo hack check",
+        "cargo llvm-cov nextest",
+        "cross build --target aarch64-unknown-linux-gnu",
+        "just build",
+        "./scripts/build.sh",
+        "python scripts/build.py",
+        "bash ci/compile.sh",
+        "python build.py",
+        "python3.12 -I build.py",
+        "bash build.sh",
+        "sh compile.sh",
+        "cargo xtask build",
+        "cargo run --bin xtask -- build",
+        "$GITHUB_WORKSPACE/scripts/build.sh",
+        "task build",
+    )
+    undetected: list[str] = []
+    for index, command in enumerate(commands):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: {command}
+""")
+
+        if "OPT61" not in _patterns(rows):
+            undetected.append(command)
+
+    assert undetected == []
+
+    matching = _scan_workflow(tmp_path / "matching", """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /var/cache/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo doc --no-deps
+""")
+
+    assert "OPT61" not in _patterns(matching)
+
+
 def test_opt61_accepts_a_persisted_temporary_analysis_cache(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:

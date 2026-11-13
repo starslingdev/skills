@@ -579,6 +579,18 @@ def test_named_fixtures_exercise_their_defining_interactions(
         and "env-ccache" in (row.get("affected_jobs") or [])
         for row in cache_rows)
     assert any(
+        row.get("pattern") == "OPT61"
+        and "mismatched-sccache-clippy" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
+    assert any(
+        row.get("pattern") == "OPT61"
+        and "mismatched-sccache-doc" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
+    assert not any(
+        row.get("pattern") == "OPT61"
+        and "matching-sccache-nextest" in (row.get("affected_jobs") or [])
+        for row in cache_rows)
+    assert any(
         row.get("pattern") == "OPT4"
         and "export-only" in (row.get("affected_jobs") or [])
         for row in cache_rows)
