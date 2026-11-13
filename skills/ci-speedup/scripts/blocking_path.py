@@ -41,6 +41,7 @@ import pr_lifecycle
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
+from pr_sample_contract import pr_sample_is_mostly_partial
 from shell_prefix import SHELL_PREFIX_SRC  # same-skill module; one source for three detectors
 from workflow_steps import (  # same-skill module; step walker
     parallel_steps_disclosure, parallel_steps_used, parallel_steps_used_for)
@@ -6736,6 +6737,17 @@ def _capture_relation(captured_at: str, scanned_at: str) -> str:
     return "newer than" if c > s else "older than"
 
 
+def _pr_sample_job_list_budget_line(doc: dict[str, Any]) -> str:
+    """Return the bounded PR-sample job-list read disclosure, when stamped."""
+    cp = doc.get("pr_critical_path") or {}
+    reads = cp.get("sample_job_list_reads")
+    cap = cp.get("sample_job_list_read_cap")
+    if not isinstance(reads, int) or not isinstance(cap, int):
+        return ""
+    cap_note = "; cap reached" if cp.get("sample_job_list_cap_hit") else ""
+    return f"> - **PR-sample job-list reads:** {reads} of at most {cap}{cap_note}."
+
+
 def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[str]:
     """Spell out WHERE the numbers come from: levels 1–2 are P50 from the committed
     ci-speedup audit (its own sample size + window + gate-sample completeness);
@@ -6862,15 +6874,44 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "figures are run-list-only, not job-level.")
     stop_reason = str(cp.get("sample_stop_reason") or (
         "target_met" if complete else "candidates_exhausted")).replace("_", " ")
-    gate = (f"> - **Which checks gate (the critical-path ordering):** measured from "
-            f"**{spr}/{tgt} sampled PRs** — **{spr} of {tgt} PRs sampled: "
-            f"{stop_reason}**")
+    partial_commits = cp.get("sample_partial_count")
+    distinct_days = cp.get("sample_distinct_days")
+    min_distinct_days = cp.get("sample_min_distinct_days")
+    unreliable = (
+        (isinstance(partial_commits, int) and isinstance(spr, int)
+         and pr_sample_is_mostly_partial(partial_commits, spr))
+        or (isinstance(distinct_days, int)
+            and isinstance(min_distinct_days, int)
+            and distinct_days < min_distinct_days))
+    heading = ("PR gate sample (ordering withheld)" if unreliable
+               else "Which checks gate (the critical-path ordering)")
+    overshoot = isinstance(spr, int) and isinstance(tgt, int) and spr > tgt
+    sample_population = (f"{spr} PRs sampled (minimum target {tgt})" if overshoot
+                         else f"{spr}/{tgt} sampled PRs")
+    sample_status = (f"{spr} PRs sampled (minimum target {tgt})" if overshoot
+                     else f"{spr} of {tgt} PRs sampled")
+    gate = (f"> - **{heading}:** measured from **{sample_population}** — "
+            f"**{sample_status}: {stop_reason}**")
+    if unreliable:
+        reasons = []
+        if (isinstance(partial_commits, int) and isinstance(spr, int)
+                and pr_sample_is_mostly_partial(partial_commits, spr)):
+            reasons.append(f"{partial_commits}/{spr} sampled commits are partial")
+        if (isinstance(distinct_days, int)
+                and isinstance(min_distinct_days, int)
+                and distinct_days < min_distinct_days):
+            reasons.append(f"the sample spans only {distinct_days} distinct day(s)")
+        gate += (" — ⚠️ **gate frequency and pole order are unreliable** because "
+                 + " and ".join(reasons))
     if not complete:
         short_reasons = {
             "fetch failures": "some candidate or check-run history was unreadable",
             "page cap": "the bounded candidate-page walk stopped before reaching the target",
+            "job list cap": "the bounded job-list read budget stopped before reaching the target",
             "era door": "older PRs from a different workflow configuration were excluded",
             "candidates exhausted": "the visible candidate history contained too few qualifying PRs",
+            "required suite empty": "no commit ran every observable required check",
+            "required checks unobservable": "the required checks were not present in Actions job lists",
         }
         gate += (f" — ⚠️ **short sample** ({short_reasons.get(stop_reason, 'the sample target was not reached')}), "
                  "so the gate ordering here is a floor, not the full picture")
@@ -6914,19 +6955,42 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
     # (the PR-floor fallback), vs. it couldn't be read at all (no admin / 404). Branch
     # on `required_suite_unsatisfiable` so an external-but-readable gate isn't reported
     # as a permissions failure.
-    if cp.get("required_suite_unsatisfiable"):
+    if cp.get("sample_stop_reason") == "required_suite_empty":
+        out.append("> - ⚠️ **No complete observable required suite** — completed PR "
+                   "commits were present, but no commit ran every observable required "
+                   "check. The sample stays empty rather than falling back to unrelated "
+                   "jobs while claiming required-suite scope.")
+    elif cp.get("required_suite_unsatisfiable"):
         out.append("> - ⚠️ **No file-backed required gate** — the required checks were "
-                   "read, but they're external/managed (a CLA bot, enterprise CI, "
-                   "label-gated e2e, a mergeability gate) and ran on **none** of the "
-                   "sampled PRs, so there's no required-check critical path. The spine "
+                   "read, but they were not observable in the sampled Actions job lists "
+                   "(a CLA bot, enterprise CI, label-gated e2e, or mergeability gate), "
+                   "so their per-commit presence and timing could not be established. The spine "
                    "is the measured **PR-floor** — the file-backed work a normal PR "
                    "runs — not the branch-protection gate.")
+    elif cp.get("sample_job_list_scoped"):
+        if cp.get("sample_partial_count"):
+            out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "
+                       "population excludes commits known to have skipped an observable "
+                       "required check. Commits with failed job-list reads remain partial "
+                       "and unverified rather than being called clean; the reliability "
+                       "label above reflects their share. Required checks absent from all "
+                       "job lists are named separately.")
+        else:
+            out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "
+                       "representative population avoids one check-run request per commit, "
+                       "and includes only completed PR commits where every observable "
+                       "required check ran. Required checks absent from the job lists are "
+                       "named separately and excluded from that suite test; gate frequency "
+                       "is observed from the resulting scoped population.")
     elif cp.get("required_suite_scoped") is False:
         out.append("> - ⚠️ **Required checks were unreadable** (no admin / branch "
                    "protection 404), so 'gate' here means the **slowest check on a "
                    "typical PR** (observed), not a *confirmed required* check. Slow "
                    "checks that run on only a minority of PRs are shown as a footnote, "
                    "not the headline.")
+    job_list_budget = _pr_sample_job_list_budget_line(doc)
+    if job_list_budget:
+        out.append(job_list_budget)
     dropped = cp.get("dropped_non_pr_checks") or []
     if dropped:
         shown = ", ".join(f"`{_clean_label(n)}`" for n in dropped[:4])
@@ -6957,8 +7021,9 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
         shown = ", ".join(f"`{_clean_label(n)}`" for n in unobs[:4])
         more = f" +{len(unobs) - 4} more" if len(unobs) > 4 else ""
         out.append(f"> - ⚠️ **Status-only required check(s) excluded from the suite test:** "
-                   f"{shown}{more} — never posted as a check-run in the sampled window (a "
-                   "GitHub-App commit status / external gate), so they can't be timed. The "
+                   f"{shown}{more} — absent from the sampled Actions job lists (for example "
+                   "a GitHub-App commit status or external gate), so this bounded job-list "
+                   "sample cannot establish their per-commit presence or timing. The "
                    "gate was measured on the **observable** required subset; these aren't on "
                    "the critical path and aren't confirmed satisfied here, just unmeasurable.")
     # Issue #119: a required status a workflow in THIS repo posts itself (an aggregate that
@@ -8810,7 +8875,18 @@ def _metadata_table(doc: dict[str, Any], repo: str) -> list[str]:
         reason = str(cp.get("sample_stop_reason") or (
             "target_met" if cp.get("sample_complete", True)
             else "candidates_exhausted")).replace("_", " ")
-        rows.append(("PR gate sample", f"{spr} of {tgt} PRs sampled: {reason}"))
+        span_first = str(cp.get("sample_span_first") or "")[:10]
+        span_last = str(cp.get("sample_span_last") or "")[:10]
+        span = (f"; {span_first} to {span_last}"
+                if span_first and span_last else "")
+        sample_size = (f"{spr} PRs sampled (minimum target {tgt})"
+                       if spr > tgt else f"{spr} of {tgt} PRs sampled")
+        budget = ""
+        reads = cp.get("sample_job_list_reads")
+        cap = cp.get("sample_job_list_read_cap")
+        if isinstance(reads, int) and isinstance(cap, int):
+            budget = f"; {reads}/{cap} job-list reads"
+        rows.append(("PR gate sample", f"{sample_size}: {reason}{span}{budget}"))
     if skill.startswith("installed:"):
         # Content-hash provenance for an installed skill copy (issue #2): not a
         # commit, so a plain identity string with NO commit permalink to fabricate.
@@ -11075,6 +11151,74 @@ def _commit_wait_bottom_line(commit_clock: dict[str, Any],
             f"of work, reducing the full wait to **~{_clock(projected)} "
             f"({wall / projected:.2f}x)**; it does not claim the queue seconds.")
     return bottom
+
+
+def _commit_wall_disclosure_lines(commit_clock: dict[str, Any]) -> list[str]:
+    """Render the verifier-pinned per-commit wait even when no pole resolves."""
+    p50 = _num(commit_clock.get("p50_s"))
+    p90 = _num(commit_clock.get("p90_s"))
+    facts = [f for f in (commit_clock.get("facts") or []) if isinstance(f, dict)]
+
+    def duration(seconds: float) -> str:
+        whole = max(0, round(seconds))
+        hours, rem = divmod(whole, 3600)
+        minutes, secs = divmod(rem, 60)
+        return (f"{hours}h {minutes:02d}m {secs:02d}s" if hours
+                else f"{minutes}m {secs:02d}s")
+
+    lines: list[str] = []
+    if p50 is not None and p90 is not None:
+        complete = [f for f in facts if _num(f.get("wall_s")) is not None]
+        basis = (min(complete, key=lambda f: abs(
+            (_num(f.get("wall_s")) or 0.0) - p50)) if complete else None)
+        p4 = basis.get("projection_4x") if isinstance(basis, dict) else None
+        clause = ""
+        if isinstance(p4, dict):
+            projected = _num(p4.get("projected_s"))
+            multiple = _num(p4.get("multiple"))
+            if projected is not None and multiple is not None:
+                clause = (
+                    " At the sampled p50 commit, a 4x speedup to its slowest job "
+                    f"projects to **{duration(projected)}** (**{multiple:.2f}x**).")
+                median = _num(commit_clock.get("median_projection_multiple"))
+                worst = commit_clock.get("worst_commit") or {}
+                worst_wall = _num(worst.get("wall_s")) if isinstance(worst, dict) else None
+                worst_sha = (str(worst.get("sha") or "")[:7]
+                             if isinstance(worst, dict) else "")
+                worst_wf = (str(worst.get("workflow_file") or "")
+                            if isinstance(worst, dict) else "")
+                if median is not None:
+                    clause += f" Across commits, the median projection is **{median:.2f}x**."
+                if worst_wall is not None and worst_sha:
+                    held = (f"; `{_wf_base(worst_wf)}` holds its slowest job"
+                            if median is not None and median < multiple / 2.0 and worst_wf
+                            else "")
+                    clause += (
+                        f" The worst sampled commit is `{worst_sha}` at "
+                        f"**{duration(worst_wall)}**{held}.")
+        lines.append(
+            "> **Per-commit PR wait:** p50 "
+            f"**{duration(p50)}**, p90 **{duration(p90)}**, from the earliest "
+            "workflow run created to the last job completed across every workflow "
+            "on that commit." + clause)
+    partial = [f for f in facts if f.get("partial") is True]
+    if partial:
+        missing = sorted({str(wf) for f in partial
+                          for wf in (f.get("missing_workflows") or []) if wf})
+        reruns = sorted({str(wf) for f in partial
+                         for wf in (f.get("rerun_workflows") or []) if wf})
+        reasons = []
+        if missing:
+            reasons.append("missing " + ", ".join(
+                f"`{_clean_label(wf)}`" for wf in missing))
+        if reruns:
+            reasons.append("re-run " + ", ".join(
+                f"`{_clean_label(wf)}`" for wf in reruns))
+        lines.append(
+            f"> {len(partial)} sampled commit(s) were partial"
+            + (f" ({'; '.join(reasons)})" if reasons else "")
+            + "; their observed spans were excluded from these percentiles.")
+    return lines
 
 
 _WORKFLOW_LANE_EVENTS = frozenset({
@@ -13539,6 +13683,23 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     out: list[str] = [_STATIC_ONLY_MARKER, "",
                       f"# {repo} — why is the merge slow?", ""]
     out += _metadata_table(doc, repo)
+    _static_stop = str(cp.get("sample_stop_reason") or "")
+    if _static_stop == "required_suite_empty" and not broken:
+        out += ["> [!IMPORTANT]",
+                "> **No complete observable required suite.** Completed PR commits "
+                "were present, but no commit ran every observable required check. "
+                "The report keeps the scoped population empty rather than ranking "
+                "unrelated jobs.", ""]
+    _static_unobservable = cp.get("required_checks_unobservable") or []
+    if _static_unobservable:
+        _shown = ", ".join(
+            f"`{_clean_label(str(name))}`" for name in _static_unobservable[:4])
+        _more = (f" +{len(_static_unobservable) - 4} more"
+                 if len(_static_unobservable) > 4 else "")
+        out += ["> [!IMPORTANT]",
+                "> **Required checks are unobservable in Actions job lists:** "
+                f"{_shown}{_more}. They remain required-check coverage gaps; the "
+                "report does not silently drop them or claim they were timed.", ""]
     # An unscanned file must never read as clean — keep the coverage warning on top.
     out += _coverage_gap_banner(doc.get("scan_incomplete"))
     out += _unresolved_gate_lines(doc.get("pr_critical_path") or {})
@@ -13579,6 +13740,11 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                 "**cloud bill** (runner-minutes), not measured developer wall-clock. "
                 "Re-run when the GitHub API is reachable again (e.g. once a rate limit "
                 "has reset) to get the measured wall-clock critical path.", ""]
+    elif _static_stop == "required_suite_empty":
+        # The specific banner above already explains why completed PR history produced
+        # no scoped population. Do not follow it with the generic no-run-history banner,
+        # which would falsely say that no PR-gating timing exists.
+        pass
     elif _static_commit_wall > 0:
         out += ["> [!IMPORTANT]",
                 "> **Commit-level developer wait was measured, but no per-check spine "
@@ -13652,6 +13818,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                   "pass failed), so this report can't rank what a PR waits on before "
                   "the merge — and that silence is a hole in the data, not a verdict "
                   "on your CI."]
+    elif _static_stop == "required_suite_empty":
+        bottom = ["> **Bottom line.** Completed PR timing was available, but no commit "
+                  "ran the whole observable required suite, so this report does not "
+                  "rank unrelated jobs as the merge gate."]
     elif no_pr_gating:
         bottom = ["> **Bottom line.** This repo's current workflows never run on PRs, "
                   "so there is no merge wait to rank — the findings below are about "
@@ -13691,6 +13861,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *queue_lines]
     if tier2_lines:
         out += ["---", "", *tier2_lines]
+    _commit_lines = _commit_wall_disclosure_lines(
+        cp.get("commit_wall_clock") or {})
+    if _commit_lines:
+        out += ["---", "", *_commit_lines]
     # No pole is drilled here, so every OPT80 tail line renders in the off-pole
     # section, after the runner-minute cards and before Also noticed. This is
     # the static-only path (no measured poles); the block is empty unless some
@@ -13730,7 +13904,8 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     _era_lines = _config_era_disclosure_lines(cp, captured_at)
     if _era_lines:
         out += ["---", "", *_era_lines]
-    out += _data_sources_footer(doc, repo)
+    _budget_line = _pr_sample_job_list_budget_line(doc)
+    out += _data_sources_footer(doc, repo, lead=[_budget_line] if _budget_line else None)
     out += _starsling_footer()
     return _strip_emdashes("\n".join(out))
 
@@ -14995,14 +15170,21 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         }
     # Stamp `_demoted_gate_framing` = "the header framed this pole 'Rarely the merge gate' /
     # 'Opt-in / rare' / 'Required · path-conditional'" — EXACTLY the per-pole header's demotion
-    # branch (npop present, NOT typical, NOT the blocker, NOT a chain member). The TOC row and the
+    # branch (npop present, NOT typical, NOT a chain member). A workflow-frequency blocker can
+    # still be a rarely-slowest check; blocker identity must not let its hand-off reclaim the
+    # typical-gate wording that its per-PR pole frequency disowns. The TOC row and the
     # agent-prompt gate line read this stamp so a demoted pole isn't handed the typical-gate framing
     # its own header disowns (caddy goreleaser-check). Stamped HERE, after `blocker`/`chain` exist
     # and before both the TOC and the per-pole loop, so all three render sites agree.
     _chain_set = set(_chain_modal) if chain_active else set()
     for p in pole_wfs:
+        _demoted_by_schema = (
+            not _typical_check(str(p.get("check", "")))
+            if _have_pole_n
+            else (not _pole_typical(p) and p is not blocker)
+        )
         p["_demoted_gate_framing"] = bool(
-            npop and not _pole_typical(p) and p is not blocker
+            npop and _demoted_by_schema
             and str(p.get("check", "")) not in _chain_set)
     # `top_is_gate` carries the removed Level-1 chart's ◀-is-the-gate condition to the
     # Contents' first row: the frequency gate is the slowest single check AND the gate is

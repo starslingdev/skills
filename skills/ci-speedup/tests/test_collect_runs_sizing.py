@@ -1141,7 +1141,8 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
     # sample_fetched to the wrong diag key, say) would silently zero a coverage
     # caveat — and nothing else fails, since collect() makes live gh calls and is
     # never exercised in the suite. Lock the mapping on the pure helper.
-    from collect_runs import (_PR_CANDIDATE_PAGE_CAP,
+    from collect_runs import (_PR_CANDIDATE_PAGE_CAP, _PR_SAMPLE_MIN_DISTINCT_DAYS,
+                              _PR_SAMPLE_JOB_LIST_READ_CAP,
                               _sampling_provenance_fields, _select_repr_shas)
     diag = {"target": 20, "kept": 16, "fetched": 160, "fetch_failures": 3,
             "complete": False, "required_suite_scoped": True,
@@ -1155,10 +1156,19 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
         "sample_stop_reason": "candidates_exhausted",
         "sample_candidate_pages_fetched": 1,
         "sample_candidate_page_cap": _PR_CANDIDATE_PAGE_CAP,
+        "sample_job_list_reads": 0,
+        "sample_job_list_read_cap": _PR_SAMPLE_JOB_LIST_READ_CAP,
+        "sample_job_list_cap_hit": False,
         "sample_candidate_pages_exhausted": True,
         "sample_candidate_page_fetch_failures": 0,
         "sample_candidate_era_door": False,
         "sample_candidate_selection_limited": False,
+        "sample_distinct_days": 0,
+        "sample_min_distinct_days": _PR_SAMPLE_MIN_DISTINCT_DAYS,
+        "sample_span_first": "",
+        "sample_span_last": "",
+        "sample_partial_count": 0,
+        "sample_job_list_scoped": False,
         "required_suite_scoped": True,
         "required_suite_unsatisfiable": False,
         "required_checks_unobservable": ["Devin Review"],
@@ -1175,10 +1185,16 @@ def test_sampling_provenance_fields_locks_diag_to_doc_key_mapping():
                            "sample_stop_reason",
                            "sample_candidate_pages_fetched",
                            "sample_candidate_page_cap",
+                           "sample_job_list_reads", "sample_job_list_read_cap",
+                           "sample_job_list_cap_hit",
                            "sample_candidate_pages_exhausted",
                            "sample_candidate_page_fetch_failures",
                            "sample_candidate_era_door",
                            "sample_candidate_selection_limited",
+                           "sample_job_list_scoped",
+                           "sample_distinct_days", "sample_min_distinct_days",
+                           "sample_span_first",
+                           "sample_span_last", "sample_partial_count",
                            "required_suite_scoped", "required_suite_unsatisfiable",
                            "required_checks_unobservable"}
     assert mapped["sample_fetched"] == real_diag["fetched"]
