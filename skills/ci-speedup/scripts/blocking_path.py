@@ -14132,13 +14132,42 @@ def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _record_analysis_disposition(doc: dict[str, Any], key: str, check: str,
+                                 status: str, reason: str) -> None:
+    """Record and report exactly one outcome for a supplied ``--analysis`` key."""
+    rows = doc.setdefault("analysis_dispositions", [])
+    if any(str(row.get("key") or "") == key for row in rows if isinstance(row, dict)):
+        return
+    rows.append({"key": key, "check": check, "status": status, "reason": reason})
+    print(f"ci-speedup: --analysis {key or '<unbound>'} {status}"
+          + (f" for {check}" if check else "") + f": {reason}", file=sys.stderr)
+
+
+def _report_unmatched_analysis_dispositions(doc: dict[str, Any],
+                                            analyses: dict[str, Any]) -> None:
+    """Make unbound and below-the-render-cap analysis keys loud after rendering."""
+    seen = {str(row.get("key") or "") for row in doc.get("analysis_dispositions", [])
+            if isinstance(row, dict)}
+    for key in analyses:
+        if key not in seen:
+            payload = analyses[key]
+            if not isinstance(payload, dict):
+                reason = "the analysis JSON is not an object"
+            elif payload.get("__analysis_parse_error__"):
+                reason = str(payload["__analysis_parse_error__"])
+            else:
+                reason = "no rendered pole matched this analysis key"
+            _record_analysis_disposition(
+                doc, key, "", "declined", reason)
+
+
 def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
            samples: dict[str, dict[str, Any]] | None = None,
            log_runs: dict[str, str] | None = None,
            captured_at: str = "",
            steps: dict[str, dict[str, Any]] | None = None,
            mags: dict[str, dict[str, Any]] | None = None,
-           analyses: dict[str, dict[str, Any]] | None = None) -> str:
+           analyses: dict[str, Any] | None = None) -> str:
     global _LAST_CLAIMS
     logs = logs or {}
     samples = samples or {}
@@ -14146,6 +14175,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     steps = steps or {}
     mags = mags or {}
     analyses = analyses or {}
+    if analyses:
+        # This is part of the findings object the renderer was handed, so callers that
+        # persist the enriched findings retain every explicit decision not to use a
+        # supplied analysis. Reset per render: a prior attempt must not leak into this one.
+        doc["analysis_dispositions"] = []
     cs = claims.ClaimSet()
     _LAST_CLAIMS = cs
     cp = doc.get("pr_critical_path") or {}
@@ -15853,20 +15887,47 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # not pull an LLM gap-fill analysis (that path is for poles no detector recognized).
         _catalog_covered = bool(structural_specific or data_driven
                                 or _opt79_pole_covers(opt79_pole) or opt82_pole)
-        analysis = (_match(analyses)
-                    if (leaf is None and _catalog_leaf(offcat_leaf) is None
-                        and not _catalog_covered) else None)
-        if analysis and (
-                not isinstance(analysis, dict)
-                or not isinstance(analysis.get("cause"), str)
-                or not analysis["cause"].strip()
-                or not isinstance(analysis.get("prompt"), str)
-                or not analysis["prompt"].strip()
-                or not isinstance(analysis.get("evidence"), list)
-                or not analysis["evidence"]
-                or not all(isinstance(line, str) and line.strip()
-                           for line in analysis["evidence"])):
-            analysis = None
+        analysis_was_supplied = owner_key is not None and owner_key in analyses
+        offered_analysis = analyses.get(owner_key) if analysis_was_supplied else None
+        analysis = None
+        decline_reason = ""
+        if analysis_was_supplied:
+            if _agg:
+                decline_reason = "the pole is an aggregation gate with no analysis block"
+            elif leaf is not None:
+                decline_reason = "a log detector already names the root cause"
+            elif structural_specific:
+                decline_reason = (
+                    "a specific structural catalog pattern already names the root cause")
+            elif not generic_structural and _catalog_leaf(offcat_leaf) is not None:
+                decline_reason = "a log detector matched a secondary off-category cause"
+            elif not generic_structural and (
+                    _opt79_pole_covers(opt79_pole) or opt82_pole or data_driven):
+                decline_reason = "a specific catalog finding already names the root cause"
+            elif not isinstance(offered_analysis, dict):
+                decline_reason = "the analysis JSON is not an object"
+            elif offered_analysis.get("__analysis_parse_error__"):
+                decline_reason = str(offered_analysis["__analysis_parse_error__"])
+            elif not isinstance(offered_analysis.get("cause"), str) \
+                    or not offered_analysis["cause"].strip():
+                decline_reason = "the analysis has no non-empty cause"
+            elif not isinstance(offered_analysis.get("prompt"), str) \
+                    or not offered_analysis["prompt"].strip():
+                decline_reason = "the analysis has no non-empty prompt"
+            elif (not isinstance(offered_analysis.get("evidence"), list)
+                  or not offered_analysis["evidence"]
+                  or not all(isinstance(line, str) and line.strip()
+                             for line in offered_analysis["evidence"])):
+                decline_reason = "the analysis has no non-empty evidence lines"
+            else:
+                # Generic structural cards are the pole's primary match and name no cause
+                # inside the job. A secondary appendix finding must not make that supplied
+                # gap-fill disappear: the report still needs the captured-log explanation.
+                analysis = offered_analysis
+        if analysis_was_supplied and analysis is None:
+            _record_analysis_disposition(
+                doc, str(owner_key or ""), str(p.get("check") or ""), "declined",
+                decline_reason or "the pole is not eligible for gap-fill analysis")
         out.append(f'<a id="pole-{i}"></a>')
         out.append("")
         # `wf_base` (a workflow FILENAME) and `check` are BOTH arbitrary repo text dropped
@@ -16091,6 +16152,9 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # captured log stands in for the measured cause (clearly labelled).
             out += _llm_analysis_block(analysis, cross_run_rendered=cross_run_rendered,
                                        generic_patterns=generic_structural)
+            _record_analysis_disposition(
+                doc, str(owner_key or ""), str(p.get("check") or ""), "rendered",
+                "the analysis block was added to this pole")
         # The structural-track finding(s) routed to this pole render LOUD here — the
         # pole IS the structural lever, and they're excluded from the hygiene appendix,
         # so this is the only place their risk/guardrail/rollout appears.
@@ -16867,7 +16931,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, json.JSONDecodeError) as e:
             print(f"--mag: cannot read/parse {kv[1]}: {e}", file=sys.stderr)
             return 1
-    analyses: dict[str, dict[str, Any]] = {}
+    analyses: dict[str, Any] = {}
     for spec in args.analyses:
         kv = _split(spec, "--analysis")
         if kv is None:
@@ -16875,10 +16939,14 @@ def main(argv: list[str] | None = None) -> int:
         try:
             analyses[kv[0]] = json.loads(Path(kv[1]).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
-            print(f"--analysis: cannot read/parse {kv[1]}: {e}", file=sys.stderr)
-            return 1
+            # Keep rendering, but retain this key so the disposition sweep below can
+            # account for it instead of letting a malformed explicit input disappear.
+            analyses[kv[0]] = {
+                "__analysis_parse_error__": f"the analysis JSON could not be read or parsed: {e}"
+            }
     md = render(doc, logs, samples, log_runs, args.captured_at, steps, mags,
                 analyses=analyses)
+    _report_unmatched_analysis_dispositions(doc, analyses)
     if args.out_path:
         args.out_path.write_text(md + "\n", encoding="utf-8")
         # Claims layer manifest, written alongside the report (never in place of it - the
@@ -16899,7 +16967,12 @@ def main(argv: list[str] | None = None) -> int:
     # Strictly best-effort: the report is already written above, so a signal/capture
     # failure degrades to a warning rather than failing the render (its contract).
     try:
-        _emit_gap_signal(doc, logs, analyses)
+        rendered_keys = {
+            str(row.get("key") or "") for row in doc.get("analysis_dispositions", [])
+            if isinstance(row, dict) and row.get("status") == "rendered"
+        }
+        _emit_gap_signal(doc, logs, {key: value for key, value in analyses.items()
+                                     if key in rendered_keys})
     except Exception as e:  # noqa: BLE001 — never let the gap signal fail a written report
         print(f"ci-speedup: gap signal failed (report already written): {e}",
               file=sys.stderr)

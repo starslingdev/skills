@@ -189,7 +189,7 @@ def run_fixture(path: Path, monkeypatch, tmp_path: Path, *,
     repo_root = tmp_path / f"{path.name}-repo"
     repo_root.mkdir()
     for entry in path.iterdir():
-        if entry.name in {"expected.json", "responses.json", "workflows"}:
+        if entry.name in {"analyses.json", "expected.json", "responses.json", "workflows"}:
             continue
         if entry.is_dir():
             shutil.copytree(entry, repo_root / entry.name)
@@ -230,9 +230,12 @@ def run_fixture(path: Path, monkeypatch, tmp_path: Path, *,
             mags[key] = json.loads((logs_dir / entry["mag_file"]).read_text())
         if entry.get("html_url"):
             log_runs[key] = entry["html_url"]
+    analyses_path = path / "analyses.json"
+    analyses = (json.loads(analyses_path.read_text(encoding="utf-8"))
+                if analyses_path.exists() else None)
     report = bp.render(
         doc, logs, steps=steps, mags=mags, log_runs=log_runs,
-        captured_at=recorded["captured_at"])
+        captured_at=recorded["captured_at"], analyses=analyses)
     out = tmp_path / path.name
     out.mkdir()
     findings_path = out / "findings.json"

@@ -1,0 +1,17 @@
+{
+  "ci": {
+    "cause": "The captured gate log shows one pytest-xdist run over the full suite on four workers; the separate ESLint match is only a secondary observation.",
+    "breakdown": [
+      [
+        "test execution",
+        "9538 items run on four workers"
+      ]
+    ],
+    "evidence": [
+      "pytest -v -n 4 --dist worksteal",
+      "4 workers [9538 items]",
+      "9504 passed in 98.43s"
+    ],
+    "prompt": "Inspect the gate job's history and determine why the full pytest suite runs on four workers before proposing any change. Preserve the full test gate and compare representative runs after the change."
+  }
+}
