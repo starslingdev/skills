@@ -11,6 +11,7 @@ before printing the summary.
 - [Where each line comes from](#where-each-line-comes-from)
 - [The push-credential rows](#the-push-credential-rows)
 - [The vector-map receipt format](#the-vector-map-receipt-format)
+- [The per-finding verdict lines](#the-per-finding-verdict-lines)
 
 ---
 
@@ -105,3 +106,32 @@ and is never promoted to ✅.
 Plain text only, in the receipt and in the question text that carries it — no
 `**bold**`, no headings, no code fences. The question UI supplies its own
 emphasis, and bolding the whole block made a close unreadable.
+
+## The per-finding verdict lines
+
+After the vector map, print one verdict line per finding, so the user sees
+how worried to be about each one without opening the report. Take them from
+the render plan, which carries the report's own order and each group's
+`verdict` (the agent's Phase 2.5 judgment, flattened to one line):
+
+```bash
+SLUG="$(printf '%s' "$(git rev-parse --show-toplevel)" | shasum | cut -c1-12)"; FINDINGS="${TMPDIR:-/tmp}/ci-secure-findings-${SLUG}.json"
+<ci-secure>/scripts/report.py --render-plan --in "$FINDINGS"
+# [{"pattern": "P14.18", "dormant": false, "verdict": "Real in principle but low in practice. ..."}, ...]
+```
+
+List position is the finding number (index 0 is `Finding 1`). Print the
+verdict's first sentence, and add `(dormant)` for a dormant group:
+
+```
+Verdicts:
+  Finding 1 (P14.18): Real in principle but low in practice.
+  Finding 2 (P14.10): High: anyone who opens a pull request reaches it today.
+```
+
+An empty `verdict` means Phase 2.5 did not write one for that group: say
+`Finding N (P14.x): no verdict written`, never invent one here. The verdict
+is the agent's judgment of THIS workflow and may be lower than the catalog
+severity printed in the vector map; say it as written, without softening or
+raising it. Plain text only, and inside the question text whenever the next
+act is a structured question (SKILL.md Phase 3's delivery caveat).

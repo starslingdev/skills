@@ -259,10 +259,16 @@ def test_pipeline_scan_render_verify_passes(tmp_path: Path) -> None:
     # half of it two scripts reach on their own.
     data = json.loads(findings.read_text(encoding="utf-8"))
     for f in data["findings"]:
-        f["attacker_scenario"] = (
-            "An attacker who opens a pull request against this fixture repo "
-            "reaches the privileged job and reads its secrets."
-        )
+        f["attacker_scenario"] = {
+            "what_it_does": "Runs this fixture repo's checks on pull requests.",
+            "why_flagged": "Outsiders can start it, and it holds a privileged pass.",
+            "what_must_go_wrong": "Someone opens a pull request; nothing else.",
+            "verdict": "High: any stranger can reach it.",
+            "how_to_close": "1. Follow the catalog recipe for this pattern.",
+            "attacker_could": (
+                "An attacker who opens a pull request against this fixture repo "
+                "reaches the privileged job and reads its secrets."),
+        }
     findings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     subprocess.run(
         [sys.executable, str(report_py), "--in", str(findings), "--out", str(report_md)],
@@ -377,10 +383,19 @@ def test_trimmed_group_is_red_even_when_named_in_the_header(tmp_path: Path) -> N
     assert "P14.11" in result.detail
 
 
-def test_scenarios_required_on_rendered_findings() -> None:
-    with_scenario = (
-        "## Finding 1: t\n- **What an attacker could do:** bad things\n"
+def _plain_sections(attacker: str = "bad things") -> str:
+    return (
+        "#### What this workflow does\n\nPosts a comment.\n\n"
+        "#### Why ci-secure flagged it\n\nOutsiders start it.\n\n"
+        "#### What would have to go wrong first\n\nNothing.\n\n"
+        f"#### What an attacker could do then\n\n{attacker}\n\n"
+        "#### Verdict\n\nHigh.\n\n"
+        "#### How to close it\n\n1. Split it.\n\n"
     )
+
+
+def test_scenarios_required_on_rendered_findings() -> None:
+    with_scenario = "## Finding 1: t\n\n" + _plain_sections()
     assert vr.check_scenarios_on_rendered_findings(with_scenario).ok
     without = "## Finding 1: t\nno scenario row here\n"
     assert not vr.check_scenarios_on_rendered_findings(without).ok
@@ -388,20 +403,24 @@ def test_scenarios_required_on_rendered_findings() -> None:
 
 
 def test_scenario_check_fails_when_no_row_matches_the_real_shape() -> None:
-    """The bare phrase is not a scenario row.
+    """The bare phrase is not a scenario.
 
-    The check used to fall back to counting occurrences of the bare phrase
-    whenever nothing matched the real `**What an attacker could do:**` shape —
-    so a report that lost the row entirely, but still said the words anywhere
-    (a heading, the methodology, an appendix), counted them and passed. Zero
-    strict matches with a finding on the page is red.
+    The check once fell back to counting occurrences of the bare phrase
+    whenever nothing matched the real shape — so a report that lost the
+    section entirely, but still said the words anywhere (a different heading
+    level, the methodology, an appendix), counted them and passed. Zero strict
+    matches with a finding on the page is red.
     """
     prose_only = (
         "## Finding 1: t\n"
-        "### What an attacker could do\n"
+        "### What an attacker could do then\n"
         "This appendix explains the idea in general terms.\n"
     )
     assert not vr.check_scenarios_on_rendered_findings(prose_only).ok
+    # One finding with the section and one without is red too: the second
+    # has no comprehension mechanism at all.
+    half = "## Finding 1: t\n\n" + _plain_sections() + "## Finding 2: u\nnothing\n"
+    assert not vr.check_scenarios_on_rendered_findings(half).ok
 
 
 def test_scenario_check_fails_when_every_row_is_the_catalog_fallback() -> None:
@@ -413,22 +432,23 @@ def test_scenario_check_fails_when_every_row_is_the_catalog_fallback() -> None:
     it had.
     """
     all_fallback = (
-        "## Finding 1: t\n- **What an attacker could do:** generic line "
+        "## Finding 1: t\n\n#### What an attacker could do then\n\ngeneric line "
         "_(catalog description — run the full skill for a repo-specific "
-        "scenario)_\n"
-        "## Finding 2: u\n- **What an attacker could do:** other generic line "
-        "_(catalog description — run the full skill for a repo-specific "
-        "scenario)_\n"
+        "scenario)_\n\n"
+        "## Finding 2: u\n\n#### What an attacker could do then\n\nother "
+        "generic line _(catalog description — run the full skill for a "
+        "repo-specific scenario)_\n\n"
     )
     res = vr.check_scenarios_on_rendered_findings(all_fallback)
     assert not res.ok
     assert "catalog's generic description" in res.detail
     # One real scenario alongside the fallbacks is a reported split, not a fail.
-    mixed = all_fallback + (
-        "## Finding 3: v\n- **What an attacker could do:** an attacker who "
-        "comments on an issue in this repo runs code as the release job\n"
-    )
-    assert vr.check_scenarios_on_rendered_findings(mixed).ok
+    mixed = all_fallback + "## Finding 3: v\n\n" + _plain_sections(
+        "an attacker who comments on an issue in this repo runs code as the "
+        "release job")
+    res = vr.check_scenarios_on_rendered_findings(mixed)
+    assert res.ok
+    assert "2 lack the repo-specific sections" in res.detail
 
 
 def test_findings_total_check_skips_a_clean_report() -> None:

@@ -283,7 +283,7 @@ def test_reusable_workflow_survives_from_the_gh_call_to_the_all_selection(
                "scanned_workflows": 1}
 
     plan = report.render_plan_keys(dict(payload))
-    assert plan == [{"pattern": "P14.10", "dormant": False}]
+    assert plan == [{"pattern": "P14.10", "dormant": False, "verdict": ""}]
 
     md = report.render(dict(payload))
     assert "every affected workflow is dormant" not in md.lower()

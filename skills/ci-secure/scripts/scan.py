@@ -98,9 +98,17 @@ class FindingExtra(Finding, total=False):
     """``Finding`` plus the keys some producers add. All optional."""
     # Merged onto every member of a group by the orchestrator at runtime
     # (SKILL.md Phase 2.5): the repo-grounded exploitation scenario the
-    # report renders as its "What an attacker could do" row. Absent → the
-    # report falls back to the catalog's static capability line.
-    attacker_scenario: str
+    # report renders at the top of each finding. Either an object with one
+    # plain-English field per report section (`what_it_does`, `why_flagged`,
+    # `what_must_go_wrong`, `attacker_could`, `verdict`, `how_to_close`), or —
+    # from an older run — one paragraph, which renders under "What an
+    # attacker could do then". Absent → the report falls back to the
+    # catalog's static capability line.
+    attacker_scenario: str | dict[str, Any]
+    # P14.18 only: GitHub's "Allow GitHub Actions to create and approve pull
+    # requests" repository setting, read over the API. `state` is "true",
+    # "false" or "unread" (the reason in `detail`) — never guessed.
+    actions_can_approve_prs: dict[str, str]
     audit_id: str
     audit_url: str
     # "source" (evidence quotes the workflow verbatim) or "derived" (evidence
@@ -6829,6 +6837,16 @@ def _scan_once(
     # Recorded only when the scan reached a tag-pinned GitHub CLI extension
     # that its job runs: every other repository's output is unchanged.
     # `scan()` switches the lookup back off once this returns or raises.
+    #
+    # P14.18's payoff turns on one repository setting: whether a workflow's
+    # token may approve pull requests. Read it once, only when a P14.18
+    # finding exists, and put the answer on each such finding.
+    if any(f.get("pattern") == "P14.18" for f in findings):
+        approval = _pr_approval_setting(repo)
+        for f in findings:
+            if f.get("pattern") == "P14.18":
+                f["actions_can_approve_prs"] = dict(approval)  # type: ignore[typeddict-unknown-key]
+
     lookup_status, lookup_unverified = _release_lookup_status()
     if lookup_status is not None:
         gh_checks["P14.24"] = lookup_status
@@ -6970,6 +6988,53 @@ def _scan_once(
         "security_score": _compute_security_score(root, workflow_files,
                                                   scan_incomplete, repo),
     }
+
+
+def _fetch_workflow_permissions(repo: str) -> dict[str, Any]:
+    """The repository's default workflow-token settings, from the API.
+
+    `GET repos/{owner}/{repo}/actions/permissions/workflow` returns
+    `default_workflow_permissions` and `can_approve_pull_request_reviews`.
+    Raises on any failure; `_pr_approval_setting` turns that into "unread".
+    """
+    from gh_utils import check_prereqs, run_gh_api  # noqa: E402
+    if not check_prereqs():
+        raise RuntimeError("gh is unavailable or not signed in (run gh auth login)")
+    body = json.loads(run_gh_api(
+        f"repos/{repo}/actions/permissions/workflow",
+        quiet_not_found=True, quiet_forbidden=True))
+    if not isinstance(body, dict):
+        raise RuntimeError("the API returned something other than an object")
+    return body
+
+
+def _pr_approval_setting(repo: str | None) -> dict[str, str]:
+    """{"state": "true"|"false"|"unread", "detail": ...} for P14.18.
+
+    Network-gated like the API-read config facts: it needs `owner/repo` and a
+    signed-in gh. Anything short of a boolean from the API is "unread" with
+    the reason, never a default — a guessed "false" would tell a reader a
+    hijacked job cannot approve pull requests when nobody looked.
+    """
+    if not repo:
+        return {"state": "unread", "detail": (
+            "this scan had no repository to read the setting from (it needs "
+            "gh signed in and a GitHub remote)")}
+    try:
+        body = _fetch_workflow_permissions(repo)
+    except Exception as exc:                                  # noqa: BLE001
+        reason = " ".join(str(exc).split())[:200]
+        return {"state": "unread",
+                "detail": f"the setting could not be read ({reason})"}
+    value = body.get("can_approve_pull_request_reviews")
+    if value is True:
+        return {"state": "true",
+                "detail": "read from the repository's Actions settings"}
+    if value is False:
+        return {"state": "false",
+                "detail": "read from the repository's Actions settings"}
+    return {"state": "unread", "detail": (
+        "the API answered without a `can_approve_pull_request_reviews` value")}
 
 
 def _compute_security_score(
