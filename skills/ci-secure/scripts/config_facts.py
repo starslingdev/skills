@@ -4480,7 +4480,35 @@ def _review_verdict(src: Any) -> tuple[str, str]:
                "most recent reviewable push\" is on, so a push credential "
                "pushes new code onto an approved pull request and merges it "
                "on the old approval")
-    return "fail", f"{why}. {_REVIEW_FIX}"
+    # Name the bypassers too, and any bypass list that was not read, so one
+    # report lists every fix: fixing the rule in a source that lists them
+    # would only turn this into a bypass fail (or an unmeasured one) next.
+    labels: dict = {}
+    not_read: list[str] = []
+    for g in found:
+        if g.bypass is None:
+            if g.unread:
+                not_read.append(g.unread)
+        else:
+            labels.update(g.bypass)
+    also = ""
+    if labels:
+        one = len(labels) == 1
+        them = "it" if one else "them"
+        also += (". Also, " + _capped(list(labels.values()), 6, ", ")
+                 + " can skip this rule from a bypass list, so if the rule is "
+                 f"fixed in a source that lists {them}, a leaked credential "
+                 f"of {'this actor' if one else 'any of these'} could still "
+                 f"land code with no review; then remove {them} from that "
+                 "bypass list too (the ruleset's, or classic branch "
+                 "protection's \"Allow specified actors to bypass required "
+                 "pull requests\"; \"For pull requests only\" bypass is not "
+                 "enough), leaving only admins")
+    if not_read:
+        also += (". Who may skip it could not be fully read: "
+                 + "; ".join(dict.fromkeys(not_read))
+                 + " — a repository admin should check that list as well")
+    return "fail", f"{why}. {_REVIEW_FIX}{also}"
 
 
 def _default_branch_review(repo: str | None, fetcher) -> tuple[str, str]:
