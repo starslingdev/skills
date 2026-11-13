@@ -34,7 +34,7 @@ line).
 | `why_flagged` | Why ci-secure flagged it | The combination the scanner matched, in plain words, then that it is one of the ten setups ci-secure looks for. | 2–3 sentences |
 | `what_must_go_wrong` | What would have to go wrong first | The access an attacker needs before anything bad happens, and the reasons that is hard or easy HERE, as a short bulleted list. End with the realistic path. | 1 lead line, 2–4 bullets, 1 closing line |
 | `attacker_could` | What an attacker could do then | What they get once in, in ordinary words ("approve a pull request", "read your secrets", "publish a release as you"). | 1–3 sentences |
-| `verdict` | Verdict | How worried to be about THIS workflow, plus the bigger problem in the repo if there is one. The first sentence is the terminal summary's one-line verdict. | 1–2 sentences |
+| `verdict` | Verdict | How worried to be about the workflows in THIS group, judged by its most exposed member, plus the bigger problem in the repo if there is one. The first sentence is the terminal summary's one-line verdict. | 1–2 sentences |
 | `how_to_close` | How to close it | Numbered cheap options, cheapest first, each with what it removes and what it could break. Combine the catalog's fix recipe with what you know about this repo. | 1–3 items |
 
 ## Rules for every field
@@ -52,7 +52,11 @@ line).
   to take over a maintainer's account" are very different findings; the
   reader must tell them apart at a glance.
 - **The verdict is honest, and low is allowed.** `severity` rates the KIND of
-  setup and stays catalog-authored; the verdict rates THIS workflow. When the
+  setup and stays catalog-authored; the verdict rates THIS group's workflows.
+  One group can hold several workflows (a tightly guarded Dependabot workflow
+  next to one that runs outsiders' code): assess every member, name the
+  differences that matter, and base the opening sentence on the most exposed
+  one, so a guarded member never lowers the verdict for the rest. When the
   barrier is high, say the risk is real in principle but low in practice. Do
   not inflate a low one, and never call any of the ten "no risk": the scanner
   matched a real outsider-to-compromise shape, and the conditions you listed
