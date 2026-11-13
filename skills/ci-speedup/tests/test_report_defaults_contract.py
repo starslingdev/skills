@@ -162,9 +162,11 @@ REQUIRED_CURRENT_SOURCES = {
     "collect_runs.py:_SHALLOW_RUNS": 10,
     "collect_runs.py:_SUCCESS_ONLY_CAVEAT_FAILURE_RATE": 0.2,
     "collect_runs.py:_SUCCESS_ONLY_CAVEAT_MIN_RUNS": 10,
+    "collect_runs.py:_TRIAGE_RECOVER_GATE_FRAC": 0.5,
     "collect_runs.py:_TRIAGE_WALLCLOCK_FLOOR_S": 90.0,
     "pr_lifecycle.py:MIN_MEASURED": 10,
     "pr_sample_contract.py:PR_SAMPLE_CANDIDATE_PAGE_CAP": 12,
+    "pr_sample_contract.py:PR_SAMPLE_JOB_LIST_READ_CAP": 1200,
     "pr_sample_contract.py:PR_SAMPLE_MIN_DISTINCT_DAYS": 5,
     "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_DENOMINATOR": 2,
     "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_NUMERATOR": 1,
@@ -373,7 +375,8 @@ def test_report_defaults_machine_contract_matches_the_engine():
 
     collect_source = (SCRIPTS / "collect_runs.py").read_text(encoding="utf-8")
     assert "end - _dt.timedelta(days=30)" in collect_source
-    assert "**Current value:** up to 100 completed PR commits" in text
+    assert "**Current value:** a minimum target of 100 completed PR commits" in text
+    assert "when history permits" in text
     assert re.search(r"does\s+not set this population", text)
     assert "**Current value:** 30 days" in text
     assert "collect_runs.py::_window_30d" in text
@@ -391,9 +394,26 @@ def test_report_defaults_machine_contract_matches_the_engine():
     assert "when per-pole co-occurrence data is available" in text
     assert "presence fallback" in text
     assert "`max(3 × P50, P50 + 30 seconds)`" in text
+    assert "`max(15 minutes, P99 + 10 minutes, 1.5 × P99)`" in text
+    assert "`_TRIAGE_RECOVER_GATE_FRAC = 0.5`" in text
 
     for pattern in ("OPT29", "OPT35", "OPT38", "OPT44"):
         assert re.search(
             rf'"{pattern}"\s*:\s*\{{[^}}]*"hit_rate"\s*:\s*0\.1(?:0)?\b',
             collect_source, re.DOTALL), pattern
     assert "10% modeled occurrence for OPT29, OPT35, OPT38, and OPT44" in text
+
+
+def test_every_shared_pr_sample_constant_is_reviewed():
+    """A value added to the shared PR-sample contract must be reviewed here
+    too, or the owner approves a contract that silently grew (#333 added the
+    job-list read cap this way)."""
+    path = SCRIPTS / "pr_sample_contract.py"
+    shared = {f"pr_sample_contract.py:{name}" for name in _assignments(path)
+              if name.isupper()}
+    documented = {
+        source
+        for row in _contract(DOC.read_text(encoding="utf-8")).values()
+        for source in row.get("sources", {})
+    }
+    assert shared <= documented, sorted(shared - documented)

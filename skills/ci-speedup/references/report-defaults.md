@@ -8,12 +8,24 @@ reader. A value marked **change** is a proposal until the owner approves this
 document and the named public issue lands. Approval should cover every proposal,
 including the values rather than only the direction of change.
 
+## Contents
+
+- [Gate sample](#gate-sample)
+- [Lookbacks and cohorts](#lookbacks-and-cohorts)
+- [Pole selection and order](#pole-selection-and-order)
+- [Other output-shaping defaults](#other-output-shaping-defaults)
+- [Finding thresholds and caps](#finding-thresholds-and-caps)
+- [Machine-readable contract](#machine-readable-contract)
+- [Approval checklist](#approval-checklist)
+
 ## Gate sample
 
 ### `pr-gate-sample-size`
 
-**Current value:** up to 100 completed PR commits
-(`pr_sample_contract.PR_SAMPLE_TARGET`).
+**Current value:** a minimum target of 100 completed PR commits
+(`pr_sample_contract.PR_SAMPLE_TARGET`). The sample can exceed it while
+spreading across days, and the report then says "N PRs sampled (minimum target
+100)"; it stops short when the page or job-list read cap binds first.
 The unrelated `--max-runs` option bounds per-workflow timing history and does
 not set this population.
 
@@ -44,8 +56,11 @@ in-flight exclusion disclosure.
 **Approval status:** awaiting owner approval.
 ### `pr-gate-span`
 
-**Current value:** at least 5 distinct days
-(`pr_sample_contract.PR_SAMPLE_MIN_DISTINCT_DAYS`).
+**Current value:** at least 5 distinct days when history permits
+(`pr_sample_contract.PR_SAMPLE_MIN_DISTINCT_DAYS`). On the busiest repositories
+the page and job-list read caps bind first: the Home Assistant and Next.js
+golden replays stop at `job_list_cap` with 100 commits over 2 days, and the
+report states that stop reason.
 
 **Report statements:** every frequency, interval, "typical PR," and pole-order
 claim derived from the gate population.
@@ -62,7 +77,9 @@ in `pr_sample_contract.py`; it remains awaiting owner approval.
 
 **Current value:** 12 pages per workflow
 (`pr_sample_contract.PR_SAMPLE_CANDIDATE_PAGE_CAP`), with an early stop once
-100 eligible commits over 5 days are available.
+100 eligible commits over 5 days are available, and at most 1,200 job-list
+reads for the sample per audit (`pr_sample_contract.PR_SAMPLE_JOB_LIST_READ_CAP`),
+reported with the stop reason `job_list_cap` when it binds.
 
 **Report statements:** sample stop reason, candidate exhaustion, sample count,
 time span, and every downstream gate-frequency claim.
@@ -70,7 +87,7 @@ time span, and every downstream gate-frequency claim.
 **Reason:** A fixed cap prevents an unbounded walk, while twelve pages leave
 room for incomplete or ineligible commits before reaching the target.
 
-**Proposed decision:** **Keep the cap at 12 pages.** #315, relanded by #333,
+**Proposed decision:** **Keep the cap at 12 pages and 1,200 job-list reads.** #315, relanded by #333,
 centralizes the cap in `pr_sample_contract.py`. Approve the API cost ceiling
 together with the sample target; the value remains awaiting owner approval.
 
@@ -225,7 +242,11 @@ contains it.
 ### `bookkeeping-cutoff`
 
 **Current value:** several reader-facing floors already shape related output:
-triage recovery uses `_TRIAGE_WALLCLOCK_FLOOR_S = 90`; aggregate-gate handling
+fast-workflow triage skips job lists for a workflow whose sampled wall stays
+under `_TRIAGE_WALLCLOCK_FLOOR_S = 90` seconds, then recovers any triaged
+workflow whose run-list wall reaches `_TRIAGE_RECOVER_GATE_FRAC = 0.5` of the
+measured gate, so a seconds-scale gate's competing checks are still ranked;
+aggregate-gate handling
 uses `_AGG_GATE_TRIVIAL_S = 30`; wall-clock saving presentation uses
 `_WALL_CLOCK_LONG_POLE_FLOOR_S = 30`; and no-op classification uses
 `_NOOP_FLOOR_S = 30`.
@@ -417,9 +438,9 @@ remains awaiting owner approval.
 ### `timeout-recommendation-thresholds`
 
 **Current value:** OPT57 treats 95% of GitHub's 360-minute default as near the
-ceiling, needs 3 successful samples, recommends at least 15 minutes, adds a
-10-minute buffer or 1.5x the observed P99, and accepts 15 minutes of kill grace
-(`_OPT57_*`).
+ceiling, needs 3 successful samples, recommends
+`max(15 minutes, P99 + 10 minutes, 1.5 × P99)` of the observed successful runs,
+and accepts 15 minutes of kill grace (`_OPT57_*`).
 
 **Report statements:** timeout-risk findings, the recommended timeout, and
 whether a failed job is described as reaching the platform ceiling.
@@ -633,6 +654,7 @@ implementation lands.
       "blocking_path.py:_WALL_CLOCK_LONG_POLE_FLOOR_S": 30.0,
       "collect_runs.py:_AGG_GATE_TRIVIAL_S": 30.0,
       "collect_runs.py:_NOOP_FLOOR_S": 30.0,
+      "collect_runs.py:_TRIAGE_RECOVER_GATE_FRAC": 0.5,
       "collect_runs.py:_TRIAGE_WALLCLOCK_FLOOR_S": 90.0,
       "verify_report.py:_VR_AGG_GATE_TRIVIAL_S": 30.0,
       "verify_report.py:_WALL_CLOCK_LONG_POLE_FLOOR_S": 30.0
@@ -828,7 +850,8 @@ implementation lands.
   "pr-candidate-pages": {
     "decision": "pr-candidate-pages",
     "sources": {
-      "pr_sample_contract.py:PR_SAMPLE_CANDIDATE_PAGE_CAP": 12
+      "pr_sample_contract.py:PR_SAMPLE_CANDIDATE_PAGE_CAP": 12,
+      "pr_sample_contract.py:PR_SAMPLE_JOB_LIST_READ_CAP": 1200
     }
   },
   "pr-sample-eligibility": {
@@ -995,7 +1018,7 @@ implementation lands.
 
 - [ ] Approve or edit every keep/change decision above.
 - [ ] Approve 100 completed PR commits over at least 5 days.
-- [ ] Approve the 12-page cap with early stopping.
+- [ ] Approve the 12-page cap with early stopping and the 1,200 job-list read cap.
 - [ ] Approve the conditional 60-second bookkeeping rule.
 - [ ] Approve 5 last-finisher observations for supported ranking/grouping.
 - [ ] Approve two-sided 95% Wilson intervals and overlap as unsupported order.
