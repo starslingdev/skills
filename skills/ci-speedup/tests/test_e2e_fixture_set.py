@@ -1001,12 +1001,18 @@ def test_sharded_floor_runs_through_collection_and_full_verifier(
     assert stamp["divided_work_s"] == 90.0
     assert stamp["in_step_floor_s"] == 125.0
     assert stamp["n_shards"] == 4
+    assert doc["pr_critical_path"]["critical_path_check"] != "gate"
+    assert "gate" not in doc["pr_critical_path"]["bookkeeping_checks"]
     # One bounded representative-log probe is part of this qualifying path. Pin
     # the complete offline call budget so it cannot silently fan out per shard.
-    assert doc["data_sources"]["gh_query_count"] == 18
+    # The 30-second required `needs:` aggregator is excluded without being
+    # mislabeled as bookkeeping, so it consumes no pole-log read; the
+    # representative shard probe remains bounded.
+    assert doc["data_sources"]["gh_query_count"] == 17
     sentence = "Observed on the sampled runs, not a shard-count recommendation"
     assert report.count(sentence) == 2
-    pole_section = report.split("## 🟠 Long pole 2", 1)[1].split("\n## ", 1)[0]
+    # The meaningful shard is pole 1 once the 30-second aggregator is removed.
+    pole_section = report.split("## 🟠 Long pole 1", 1)[1].split("\n## ", 1)[0]
     assert "#### 🤖 Prompt for your coding agent" in pole_section
     assert sentence in pole_section.split("#### 🤖 Prompt for your coding agent", 1)[1]
     assert sentence not in report.split("## 📋 Contents", 1)[0]
@@ -2036,3 +2042,158 @@ def test_fixture_set_catches_unconfirmed_gate_credit_regression(
             AssertionError,
             match=r"unpinnable-slow-check: credited_findings\.length changed"):
         assert_fixture_facts(fixture, fixture_facts(doc, checks))
+
+
+def test_gate_frequency_confidence_discloses_bookkeeping_and_withholds_order(
+        monkeypatch, tmp_path):
+    """Whole pipeline: a 30s last job is disclosed, never ranked as developer wait."""
+    fixture = FIXTURE_ROOT / "bookkeeping-last-job"
+    run_root = tmp_path / "run"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+    cp = doc["pr_critical_path"]
+
+    assert cp["bookkeeping_checks"] == ["cleanup"]
+    assert cp["critical_path_check"] != "cleanup"
+    assert all(row.get("name") != "cleanup" for row in cp["checks"])
+    assert "cleanup" in report and "under 60s" in report
+    assert "rough 95% interval" in report
+    assert "2026-01-24 to 2026-01-28" in report
+    confidence_claims = [
+        claim for claim in bp._LAST_CLAIMS.to_json()["claims"]
+        if claim["kind"] == "pole_gate_prompt"
+        and "gate_interval_lo" in claim["fields"]]
+    assert confidence_claims
+    assert all(
+        {"gate_interval_lo", "gate_interval_hi", "sample_span_first", "sample_span_last",
+         "gate_order_supported"}
+        <= claim["fields"].keys()
+        for claim in confidence_claims)
+    assert all(claim["fields"]["gate_order_supported"] is False
+               for claim in confidence_claims)
+    # Both visible poles carry the same workflow estimate, so their displayed
+    # rows are tied and must not be presented as a supported order.
+    assert "pole order is not supported" in report
+    assert not [check for check in checks if not check.skipped and not check.ok]
+
+    legacy = json.loads(json.dumps(doc))
+    legacy["pr_critical_path"].pop("gate_interval_z")
+    legacy_path = run_root / fixture.name / "legacy-findings.json"
+    legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+    legacy_check = vr.check_gate_frequency_confidence(report, legacy_path)
+    assert legacy_check.ok and legacy_check.skipped
+    assert "recorded interval constant" in legacy_check.detail
+
+    two_workflow_doc = json.loads(json.dumps(doc))
+    for row in two_workflow_doc["pr_critical_path"]["checks"]:
+        if row.get("name") == "build":
+            row["workflow_file"] = ".github/workflows/build.yml"
+    for pole in two_workflow_doc["pr_critical_path"]["poles"]:
+        if pole.get("check") == "build":
+            pole["workflow_file"] = ".github/workflows/build.yml"
+    two_workflow_report = bp.render(two_workflow_doc, captured_at="2026-01-31T00:00:00Z")
+    assert "`ci.yml` gates 10/20" in two_workflow_report
+    assert "`build.yml` gates 10/20" in two_workflow_report
+    assert "pole order is not supported" in two_workflow_report
+
+    mutant = json.loads(json.dumps(doc))
+    mutant_cp = mutant["pr_critical_path"]
+    mutant_cp["sample_distinct_days"] = 1
+    mutant_cp["sample_span_first"] = mutant_cp["sample_span_last"]
+    positive = [row for row in mutant_cp["checks"] if row.get("pole_n")]
+    assert len(positive) >= 2
+    positive[0]["pole_n"], positive[1]["pole_n"] = 3, 2
+    ranked_report = re.sub(
+        r" \*\*Gate-frequency confidence:\*\*.*?(?= \*\*Short bookkeeping jobs)",
+        "", report)
+    out = run_root / fixture.name
+    findings_path = out / "findings.json"
+    report_path = out / "report.md"
+    findings_path.write_text(json.dumps(mutant), encoding="utf-8")
+    report_path.write_text(ranked_report, encoding="utf-8")
+    mutant_checks = vr.run_checks(
+        ranked_report, report_path, findings_path, skill_repo=None)
+    assert any(
+        check.name == (
+            "gate-frequency ordering has enough events, span, and "
+            "non-overlapping intervals") and not check.ok
+        for check in mutant_checks)
+
+
+    for bad_report in (
+            re.sub(r"rough 95% interval \d+-\d+%", "rough 95% interval 99-100%", report),
+            re.sub(r"; 2026-01-24 to 2026-01-28(?=\))", "", report)):
+        report_path.write_text(bad_report, encoding="utf-8")
+        bad_checks = vr.run_checks(bad_report, report_path, out / "findings.json", skill_repo=None)
+        assert any(
+            check.name == (
+                "gate-frequency ordering has enough events, span, and "
+                "non-overlapping intervals") and not check.ok
+            for check in bad_checks)
+
+
+def test_all_short_file_backed_gates_do_not_become_external_floor_fallback(
+        monkeypatch, tmp_path):
+    """Whole pipeline: an all-bookkeeping sample stays honest about its source."""
+    fixture = tmp_path / "fixtures" / "all-short-required-gate"
+    fixture.parent.mkdir()
+    shutil.copytree(FIXTURE_ROOT / "bookkeeping-last-job", fixture)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["required_checks"] = ["gate"]
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    workflow_path = fixture / "workflows" / "ci.yml"
+    workflow_path.write_text(
+        workflow_path.read_text(encoding="utf-8").replace("    needs: build\n", ""),
+        encoding="utf-8")
+    monkeypatch.setattr(cr, "_GATE_BOOKKEEPING_CUTOFF_S", 1_000.0)
+    doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    cp = doc["pr_critical_path"]
+
+    assert cp.get("gate_kind") != "pr_floor_fallback"
+    assert [row["check"] for row in cp["poles"]] == ["gate"]
+    assert [row["name"] for row in cp["checks"]] == ["gate"]
+    assert cp["bookkeeping_checks"] == []
+    assert "external/managed" not in report
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_all_short_unscoped_sample_keeps_its_most_frequent_last_finisher(
+        monkeypatch, tmp_path):
+    """Whole pipeline: an unreadable required set does not crown a zero-frequency check."""
+    fixture = tmp_path / "fixtures" / "all-short-unscoped-gate"
+    fixture.parent.mkdir()
+    shutil.copytree(FIXTURE_ROOT / "bookkeeping-last-job", fixture)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["required_checks"] = []
+    durations = {"build": 45, "cleanup": 30, "gate": 51}
+
+    def shorten(rows):
+        for row in rows:
+            seconds = durations[row["name"]]
+            day = str(row["completed_at"])[:10]
+            row["started_at"] = f"{day}T00:00:00Z"
+            row["completed_at"] = f"{day}T00:00:{seconds:02d}Z"
+            for step in row.get("steps") or []:
+                step["started_at"] = row["started_at"]
+                step["completed_at"] = row["completed_at"]
+
+    for rows in recorded["jobs"].values():
+        shorten(rows)
+    for rows in recorded["checks"].values():
+        shorten(rows)
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+
+    doc, report, checks = run_fixture(fixture, monkeypatch, tmp_path)
+    cp = doc["pr_critical_path"]
+    assert cp["critical_path_check"] == "gate"
+    assert cp["checks"][0]["name"] == "gate"
+    assert cp["checks"][0]["pole_n"] > 0
+    assert cp["checks"][0]["pole_n"] == max(
+        row["pole_n"] for row in cp["checks"])
+    assert "gate" not in cp["bookkeeping_checks"]
+    assert "`gate`" in report
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]

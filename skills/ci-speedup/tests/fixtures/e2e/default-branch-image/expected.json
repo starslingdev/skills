@@ -77,7 +77,6 @@
       "presence-causal headline only when the slowest check is minority-present",
       "recoverable ceiling above the typical wait carries a worst-case reconciliation",
       "rendered chain total is never below the largest member it sums",
-      "rendered per-workflow gate frequency matches the populations re-derivation",
       "scanned date matches the date in the filename",
       "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)",
       "static-only banner matches CI shape",

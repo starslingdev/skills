@@ -91,6 +91,14 @@ def test_close_is_one_question_one_page_never_tabs():
     assert "ONE question, ONE page, never multiple questions" in close
     assert "tabs" in close
     assert "Q1" not in close and "Q2" not in close, "the two-question overflow split resurfaced"
+
+
+def test_unsupported_gate_order_has_an_unambiguous_alphabetical_menu():
+    close = re.sub(r"\s+", " ", _phase6())
+    assert "pole_gate_prompt" in close and "gate_order_supported: false" in close
+    assert "per-pole fix options" in close and "alphabetically by check name" in close
+    assert "when it is unsupported, the alphabetically first check" in close
+    assert "the always-last save rule still applies" in close
     assert "SAME AskUserQuestion call" not in close, "the two-question overflow rule resurfaced"
 
 

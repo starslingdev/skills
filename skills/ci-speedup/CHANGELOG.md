@@ -30,6 +30,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-11** — Show Wilson intervals and sample spans beside gate frequencies, withhold unsupported pole order from the chat close, and disclose while excluding sub-60-second bookkeeping jobs from developer-wait poles (#317).
 - **2026-11-11** — Exclude matrix legs whose dominant test step was skipped when their only remaining steps ran on every leg, while preserving platform-specific legs as real work.
 
 ### Added

@@ -16,9 +16,9 @@ not measured: lifecycle data was not collected
 >
 > **34s until all checks finish** - `Windows` is the slowest check a typical PR waits on. 
 >
-> **`.github/workflows/tests.yaml` changed ~217 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests.yaml` changed ~219 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/zizmor.yaml` changed ~219 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/zizmor.yaml` changed ~221 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **What gates next:** After this fix, CI is gated by `tests.yaml / PyPy` at ~26 s.
 > This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.
@@ -36,8 +36,8 @@ not measured: lifecycle data was not collected
 
 **🐌 Critical path** - the checks that gate your merge, each linking to its long-pole drill-down (waterfall → biggest lever → agent prompt):
 
-1. 🟡 [Windows](#pole-1) - 34s (the gate)
-2. 🟡 [main](#pole-2) - 19s
+1. 🟡 [Windows](#pole-1) - 34s (the gate) · `tests.yaml` gates 18/20 PRs
+2. 🟡 [main](#pole-2) - 19s · `pre-commit.yaml` gates 2/20 PRs
 3. 🟡 [PyPy](#pole-3) - 26s · rarely the merge pole
 4. 🟡 [3.14t](#pole-4) - 25s · rarely the merge pole
 5. 🟡 [3.9](#pole-5) - 24s · rarely the merge pole
@@ -114,7 +114,7 @@ REPO: pallets/flask (audited at commit 36e4a82)
 
 THE GATE
 - Workflow `tests.yaml`, job `Windows`.
-- Slowest check a typical PR waits on: P50 34s.
+- Slowest check a typical PR waits on: P50 34s; its workflow `tests.yaml` gates 18/20 sampled PRs.
 
 Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
 
@@ -198,7 +198,7 @@ REPO: pallets/flask (audited at commit 36e4a82)
 
 THE GATE
 - Workflow `pre-commit.yaml`, job `main`.
-- Slowest check a typical PR waits on: P50 19s.
+- Slowest check a typical PR waits on: P50 19s; its workflow `pre-commit.yaml` gates 2/20 sampled PRs.
 
 Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
 
@@ -728,7 +728,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `db148d3`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `b72853c`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 47 runs / 152 jobs sampled | Critical-path + per-step P50 |
 | job logs | 1 job log(s) sampled | Step internals + cross-run magnitude (deeper levels) |
 | workflow YAML | 5 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |
