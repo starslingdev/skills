@@ -333,6 +333,56 @@ def test_neither_stale_approval_rule_fails_and_names_both(tmp_path):
     assert "most recent reviewable push" in ev, ev
 
 
+def test_a_failing_rule_also_names_its_bypassers(tmp_path):
+    """A rule that fails on its own settings still names who may skip it, so
+    one read of the report lists every fix: fixing the stale-approval
+    setting alone would only turn this into a bypass fail on the next run."""
+    f, _ = _run(tmp_path, _responses(
+        rules=[_pr_rule()],
+        rulesets=[_ruleset(bypass=[_actor("OrganizationAdmin", None),
+                                   _actor("Integration", 101),
+                                   _actor("Integration", 202)])]))
+    assert f["outcome"] == "fail", f
+    ev = f["evidence"]
+    assert "Dismiss stale pull request approvals" in ev, ev
+    assert "app 101" in ev and "app 202" in ev, ev
+    assert "bypass list" in ev, ev
+    assert "organization admins" not in ev.lower(), ev
+
+
+def test_a_failing_rule_with_no_bypassers_names_none(tmp_path):
+    f, _ = _run(tmp_path, _responses(rules=[_pr_rule()],
+                                     rulesets=[_ruleset()]))
+    assert f["outcome"] == "fail", f
+    assert "bypass list" not in f["evidence"], f
+    # With nobody to name, the evidence is exactly what it was before.
+    assert f["evidence"].endswith("most recent reviewable push\""), f
+
+
+def test_a_failing_rule_says_when_its_bypass_list_was_not_read(tmp_path):
+    """An unread bypass list is part of the fix too: without a word here the
+    next scan, after the rule is fixed, turns unmeasured on that list."""
+    f, _ = _run(tmp_path, _responses(rules=[_pr_rule()],
+                                     rulesets=[_ruleset(bypass=None)]))
+    assert f["outcome"] == "fail", f
+    ev = f["evidence"]
+    assert "`protect-main-7`'s bypass list is not readable" in ev, ev
+
+
+def test_a_failing_rules_classic_bypassers_get_classic_advice(tmp_path):
+    """Classic protection has no "For pull requests only" mode; the advice
+    names the classic setting that lists them, as the bypass fail does."""
+    f, _ = _run(tmp_path, _responses(classic=_classic(apps=["deploy-bot"])))
+    assert f["outcome"] == "fail", f
+    ev = f["evidence"]
+    assert "app `deploy-bot`" in ev, ev
+    assert ("\"Allow specified actors to bypass required pull requests\""
+            in ev), ev
+    # Fixing the rule in a source that does not list the actor holds it, so
+    # the removal advice is tied to the source that lists them.
+    assert "fixed in a source that lists" in ev, ev
+
+
 def test_a_ruleset_in_evaluate_mode_is_not_counted(tmp_path):
     """The rules endpoint documents that it leaves evaluate-mode rulesets out;
     should one appear anyway, its detail decides, and evaluate enforces
