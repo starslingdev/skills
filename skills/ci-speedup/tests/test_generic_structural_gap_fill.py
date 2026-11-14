@@ -19,6 +19,7 @@ Two halves, both pinned here:
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -124,6 +125,17 @@ def _render(doc: dict, analysis: dict | None = None) -> str:
                      analyses=({_KEY: analysis} if analysis else None))
 
 
+def _secondary_remote_cache_finding() -> dict:
+    return {
+        "id": "f-OPT3", "pattern": "OPT3", "pattern_class": "data-driven",
+        "severity": "MEDIUM", "title": "Remote cache is read-only",
+        "workflow_file": _WF, "line": 12, "affected_jobs": [_CHECK],
+        "wall_clock_p50_s": 180.0, "runner_min_saving": 0.0,
+        "pr_critical_path_check": _CHECK,
+        "evidence": "TURBO_CACHE is remote:ro on pull requests",
+    }
+
+
 def test_log_excerpt_matches_no_log_level_detector():
     # Precondition: the pole's only catalog match is the structural one.
     assert bp._catalog_leaf(bp._parse_log(_LOG)) is None
@@ -155,6 +167,197 @@ def test_generic_only_pole_takes_the_gap_fill_analysis(pattern):
     assert f"📐 Structural root-cause - {pattern}" in md  # the lever is not dropped
     # The filled pole's audit line no longer claims nothing is known about the step.
     assert "no known root-cause pattern matched" not in md
+
+
+def test_generic_primary_takes_analysis_when_a_secondary_leaf_matches_the_job():
+    doc = _doc()
+    doc["findings"].append(_secondary_remote_cache_finding())
+    assert bp._data_driven_for_pole(doc["pr_critical_path"]["poles"][0], doc["findings"])
+
+    md = _render(doc, _ANALYSIS)
+
+    assert "🤖 LLM root-cause analysis" in md
+    assert "SENTINEL-GAP-FILL-PROMPT" in md
+    assert "no drill-down available" not in md
+    vr = _load_verify_report()
+    failures = [c for c in vr.run_checks(md, None, None, None)
+                if not c.ok and not c.skipped and c.name !=
+                "report's skill commit is HEAD or an ancestor of it (provenance)"]
+    assert failures == []
+
+
+def test_generic_primary_takes_analysis_beside_an_offcategory_log_leaf():
+    doc = _doc()
+    log = _LOG + "\n$ eslint . --ext .ts,.tsx,.js\n"
+    pole = doc["pr_critical_path"]["poles"][0]
+    parsed = bp._parse_log(log)
+    assert parsed and parsed["fix_key"] == "eslint-no-cache"
+    kept, secondary = bp._demote_offcategory_leaf(parsed, pole)
+    assert kept is None and secondary is not None
+
+    md = bp.render(doc, {_KEY: log}, {}, {_KEY: _RUN_URL}, "2026-11-03",
+                   {_KEY: _TIMELINE}, analyses={_KEY: _ANALYSIS})
+
+    assert "ci-speedup:offcategory-leaf" in md
+    assert "🤖 LLM root-cause analysis" in md
+    assert "SENTINEL-GAP-FILL-PROMPT" in md
+    assert "no drill-down available" not in md
+
+
+def test_declined_analysis_is_loud_and_recorded_in_findings(capsys):
+    doc = _doc("OPT72")
+
+    _render(doc, _ANALYSIS)
+
+    assert "--analysis ci declined" in capsys.readouterr().err
+    assert doc["analysis_dispositions"] == [{
+        "key": _KEY,
+        "check": _CHECK,
+        "status": "declined",
+        "reason": "a specific structural catalog pattern already names the root cause",
+    }]
+
+
+def _run_cli(tmp_path, doc: dict, analyses: dict[str, object], *,
+             logs: dict[str, str] | None = None) -> tuple[bytes, str]:
+    findings = tmp_path / "findings.json"
+    report = tmp_path / "report.md"
+    findings.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    before = findings.read_bytes()
+    argv = ["--in", str(findings), "--out", str(report)]
+    for key, payload in analyses.items():
+        path = tmp_path / f"{key}-analysis.json"
+        path.write_text(json.dumps(payload), encoding="utf-8")
+        argv += ["--analysis", f"{key}={path}"]
+    for key, text in (logs or {}).items():
+        path = tmp_path / f"{key}-job.log"
+        path.write_text(text, encoding="utf-8")
+        argv += ["--log", f"{key}={path}"]
+
+    assert bp.main(argv) == 0
+    return before, findings.read_bytes()
+
+
+def test_cli_never_rewrites_findings_when_reporting_a_declined_analysis(tmp_path, capsys):
+    before, after = _run_cli(tmp_path, _doc("OPT72"), {_KEY: _ANALYSIS},
+                             logs={_KEY: _LOG})
+
+    assert after == before
+    err = capsys.readouterr().err
+    assert "--analysis ci declined" in err
+    assert "specific structural catalog pattern" in err
+
+
+def test_cli_reports_null_invalid_and_unbound_analysis_inputs(tmp_path, capsys):
+    null_dir = tmp_path / "null"
+    invalid_dir = tmp_path / "invalid"
+    unbound_dir = tmp_path / "unbound"
+    null_dir.mkdir()
+    invalid_dir.mkdir()
+    unbound_dir.mkdir()
+    null_before, null_after = _run_cli(
+        null_dir, _doc(), {_KEY: None}, logs={_KEY: _LOG})
+    invalid_before, invalid_after = _run_cli(
+        invalid_dir, _doc(), {_KEY: ["not", "an", "object"]}, logs={_KEY: _LOG})
+    unbound_before, unbound_after = _run_cli(
+        unbound_dir, _doc(), {"unbound": _ANALYSIS}, logs={_KEY: _LOG})
+
+    assert null_after == null_before
+    assert invalid_after == invalid_before
+    assert unbound_after == unbound_before
+    err = capsys.readouterr().err
+    assert "--analysis ci declined" in err and "not an object" in err
+    assert "--analysis unbound declined" in err and "no rendered pole matched" in err
+
+
+def test_cli_reports_analysis_for_a_pole_below_the_render_cap(tmp_path, capsys):
+    doc = _doc()
+    doc["pr_critical_path"]["poles"] = []
+    doc["findings"] = []
+    for index in range(6):
+        check = f"job-{index}"
+        workflow = f".github/workflows/w{index}.yml"
+        doc["pr_critical_path"]["poles"].append({
+            "check": check, "p50_s": float(600 - index * 10),
+            "workflow_file": workflow, "job": check,
+            "dominant_step": "work", "dominant_p50_s": float(500 - index * 10),
+            "steps": [{"step": "work", "category": "test",
+                       "p50_s": float(500 - index * 10)}],
+        })
+
+    before, after = _run_cli(tmp_path, doc, {"w5": _ANALYSIS}, logs={"w5": _LOG})
+
+    assert after == before
+    assert "--analysis w5 declined: no rendered pole matched" in capsys.readouterr().err
+
+
+def test_cli_reports_syntactically_invalid_analysis_without_touching_input(tmp_path, capsys):
+    findings = tmp_path / "findings.json"
+    analysis = tmp_path / "analysis.json"
+    report = tmp_path / "report.md"
+    findings.write_text(json.dumps(_doc(), indent=2) + "\n", encoding="utf-8")
+    before = findings.read_bytes()
+    analysis.write_text("{not-json", encoding="utf-8")
+
+    assert bp.main([
+        "--in", str(findings), "--out", str(report),
+        "--analysis", f"{_KEY}={analysis}",
+    ]) == 0
+
+    assert findings.read_bytes() == before
+    err = capsys.readouterr().err
+    assert "--analysis ci declined" in err
+    assert "could not be read or parsed" in err
+
+
+def _aggregation_gate_doc() -> dict:
+    wf = ".github/workflows/aggregate.yml"
+    return {
+        "repo": "o/r", "scanned_at": "2026-11-03T00:00:00Z", "findings": [],
+        "data_bundle": {"logs": [{"check": "gate", "workflow_file": wf}]},
+        "data_sources": {"runs_sampled": 20, "jobs_sampled": 40,
+                         "workflows_analyzed": 1},
+        "workflow_job_graph": {wf: {
+            "build": {"name": "build", "needs": []},
+            "lint": {"name": "lint", "needs": []},
+            "gate": {"name": "gate", "needs": ["build", "lint"]},
+        }},
+        "pr_critical_path": {
+            "sampled_pr_count": 20, "sample_target": 20, "sample_complete": True,
+            "check_present_n_pr": 20, "critical_path_check": "build",
+            "poles": [
+                {"check": "build", "p50_s": 120.0, "workflow_file": wf,
+                 "job": "build", "dominant_step": "compile", "dominant_p50_s": 100.0,
+                 "steps": [{"step": "compile", "category": "build", "p50_s": 100.0}]},
+                {"check": "gate", "p50_s": 3.0, "workflow_file": wf,
+                 "job": "gate", "steps": []},
+            ],
+            "checks": [
+                {"name": "build", "p50_s": 120.0, "present_on": 20,
+                 "workflow_file": wf},
+                {"name": "lint", "p50_s": 60.0, "present_on": 20,
+                 "workflow_file": wf},
+                {"name": "gate", "p50_s": 3.0, "present_on": 20,
+                 "workflow_file": wf},
+            ],
+            "populations": [],
+        },
+    }
+
+
+def test_aggregation_gate_analysis_is_declined_not_recorded_as_rendered(capsys):
+    doc = _aggregation_gate_doc()
+
+    md = bp.render(doc, {"aggregate": _LOG}, analyses={"aggregate": _ANALYSIS})
+
+    gate = md[md.index("▸ `gate`"):]
+    assert "**Aggregation gate" in gate
+    assert "🤖 LLM root-cause analysis" not in gate
+    assert doc["analysis_dispositions"][-1] == {
+        "key": "aggregate", "check": "gate", "status": "declined",
+        "reason": "the pole is an aggregation gate with no analysis block",
+    }
+    assert "--analysis aggregate declined" in capsys.readouterr().err
 
 
 def test_specific_structural_pattern_still_covers_its_pole():

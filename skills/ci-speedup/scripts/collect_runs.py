@@ -46,6 +46,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from pr_sample_contract import (
+    PR_SAMPLE_CANDIDATE_PAGE_CAP as _PR_CANDIDATE_PAGE_CAP,
+    PR_SAMPLE_JOB_LIST_READ_CAP as _PR_SAMPLE_JOB_LIST_READ_CAP,
+    PR_SAMPLE_MIN_DISTINCT_DAYS as _PR_SAMPLE_MIN_DISTINCT_DAYS,
+    PR_SAMPLE_TARGET as _PR_SAMPLE_TARGET,
+)
+
 # Module logger — inherits the entry point's logging config (WARNING by default,
 # DEBUG under STARSLING_LOG_LEVEL). Used for diagnosable-but-non-fatal gh paths
 # (e.g. an expected-absent rulesets endpoint) so a real collection failure is
@@ -4308,9 +4315,6 @@ def _all_status_runs(client: GhClient, repo: str, wf_id: int,
         f"?per_page={max_runs}{pin}")
 
 
-_PR_CANDIDATE_PAGE_CAP = 3
-
-
 def _all_status_run_page(client: GhClient, repo: str, wf_id: int,
                          page: int, created_before: str | None = None
                          ) -> list[dict[str, Any]] | None:
@@ -4554,6 +4558,17 @@ class _JobFetchMemo:
             if lock is None:
                 lock = self._key_locks[key] = threading.Lock()
             return lock
+
+    def contains(self, fetch: Callable[..., Any], repo: str, run_id: Any) -> bool:
+        """Whether this successful job payload is already owned by the memo.
+
+        Prefetch planners use this before scheduling an endpoint.  The later
+        gather would be a memo hit either way, but prefetching the same endpoint
+        first would still issue an unnecessary GitHub request.
+        """
+        key = (self._flavour(fetch), repo, run_id)
+        with self._lock:
+            return key in self._hits
 
     @staticmethod
     def _flavour(fetch: Callable[..., Any]) -> str:
@@ -5028,6 +5043,10 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
         "sample_candidate_pages_fetched": sample_diag.get("candidate_pages_fetched", 1),
         "sample_candidate_page_cap": sample_diag.get(
             "candidate_page_cap", _PR_CANDIDATE_PAGE_CAP),
+        "sample_job_list_reads": sample_diag.get("job_list_reads", 0),
+        "sample_job_list_read_cap": sample_diag.get(
+            "job_list_read_cap", _PR_SAMPLE_JOB_LIST_READ_CAP),
+        "sample_job_list_cap_hit": sample_diag.get("job_list_cap_hit", False),
         "sample_candidate_pages_exhausted": sample_diag.get(
             "candidate_pages_exhausted", True),
         "sample_candidate_page_fetch_failures": sample_diag.get(
@@ -5035,6 +5054,12 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
         "sample_candidate_era_door": sample_diag.get("candidate_era_door", False),
         "sample_candidate_selection_limited": sample_diag.get(
             "selection_limited", False),
+        "sample_distinct_days": sample_diag.get("distinct_days", 0),
+        "sample_min_distinct_days": _PR_SAMPLE_MIN_DISTINCT_DAYS,
+        "sample_span_first": sample_diag.get("span_first", ""),
+        "sample_span_last": sample_diag.get("span_last", ""),
+        "sample_partial_count": sample_diag.get("partial_count", 0),
+        "sample_job_list_scoped": sample_diag.get("job_list_scoped", False),
         "sample_fetch_failures": sample_diag["fetch_failures"],
         "sample_fetched": sample_diag["fetched"],
         "required_suite_scoped": sample_diag["required_suite_scoped"],
@@ -28706,8 +28731,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # a per-workflow wall-clock saving at the cross-workflow floor.
     events_by_wf: dict[str, set[str]] = {}
     # Candidate PR head-commits with their most-recent run timestamp, across all
-    # workflows — the pool the measured-critical-path sample is drawn from (the
-    # 20 most recent that ran the full required-check suite).
+    # workflows — the pool the representative measured-critical-path sample is
+    # drawn from.
     pr_sha_ts: dict[str, str] = {}
     # #58: per-head-sha identity metadata (event + derived PR number) so merge-queue
     # runs can be folded onto their PR before the presence denominator is formed. Fed
@@ -29099,7 +29124,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                                  min(shallow_runs, len(runs_for_spine))))
         # Candidate PR head-SHAs where THIS workflow ran (developer-facing
         # events), with their most-recent run timestamp — the pool the measured
-        # critical-path sample (20 most recent full-suite PRs) is drawn from.
+        # representative critical-path sample is drawn from.
         #
         # Draw from `runs_for_spine` (issue #66) so a NON-straddling workflow is byte-identical.
         # On a STRADDLE (issue #77), seed from the FULL sample instead: content-keying the spine
@@ -29111,7 +29136,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # enumeration — it is only made VISIBLE to the flip decision, never blended into the spine.
         _pool_runs = runs if _era_fact is not None else runs_for_spine
         for r in _pool_runs:
-            if str(r.get("event") or "") in _DEVELOPER_EVENTS and r.get("head_sha"):
+            if (str(r.get("event") or "") in _DEVELOPER_EVENTS
+                    and r.get("head_sha")
+                    and str(r.get("status") or "") == "completed"):
                 sha = str(r["head_sha"])
                 ts = str(r.get("created_at") or r.get("updated_at") or "")
                 if ts > pr_sha_ts.get(sha, ""):
@@ -29566,16 +29593,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         getattr(client, "graphql", lambda query: None), repo,
         sorted(required_checks.names) if required_checks is not None and required_checks.complete else None)
 
-    # MEASURED CRITICAL PATH — fetch the full check-run set for the 20 most recent
-    # PRs that ran the FULL CI suite (their check-runs include every required
-    # status check), so the sampled critical path reflects what a real code PR
-    # actually waits on — not a docs-only PR that self-skips the gate. check-runs
-    # include checks with NO workflow file (CodeQL default setup, app checks) that
-    # scan.py can't see, so this is the true concurrent-check floor for sizing.
-    # Falls back to the 20 most recent dev-event PRs when required checks are
-    # unreadable. Candidates are walked newest-first; we fetch each one's
-    # check-runs and keep it only if it ran the full required suite.
-    _REPR_PR_TARGET = 20
+    # MEASURED CRITICAL PATH — collect a representative stretch of completed PR
+    # commits. Run and job lists are the primary basis: unlike check-run reads they
+    # are already needed for workflow timing and let a busy repository build a
+    # useful population without one extra API request per candidate commit.
+    _REPR_PR_TARGET = _PR_SAMPLE_TARGET
     req_names = required_checks.names if required_checks is not None else frozenset()
 
     # ENG-1 PR-N1: per-sha latest-attempt check-run intervals, stashed on the
@@ -29597,6 +29619,17 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # with no merge_group runs this is the identity map: one member per group, exactly
     # the pre-#58 per-sha behaviour.
     _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+
+    def _spread_target(rep_ts: dict[str, str]) -> int:
+        """Keep walking past the count floor until five UTC dates are represented."""
+        days: set[str] = set()
+        for index, sha in enumerate(
+                sorted(rep_ts, key=lambda key: rep_ts[key], reverse=True), 1):
+            days.add(str(rep_ts[sha])[:10])
+            if index >= _REPR_PR_TARGET and len(days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS:
+                return index
+        return _REPR_PR_TARGET
+
     check_runs_complete_by_sha: dict[str, bool] = {}
     _member_check_runs: dict[str, list[dict[str, Any]]] = {}
     _member_check_runs_complete: dict[str, bool] = {}
@@ -29632,10 +29665,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         sha_check_intervals[rep_sha] = iv
         return m
 
-    repr_shas, per_sha_checks, check_durs, sample_diag = _select_repr_shas(
-        _rep_ts, _checks_for, req_names, _REPR_PR_TARGET,
-        repo_published=_repo_published_required(
-            req_names, findings_doc.get("workflow_status_publishers")))
+    # Selection is finalized after the bounded run-page walk. A representative
+    # population uses job lists directly; only a genuinely short history falls
+    # back to the older per-commit check-run selector.
+    repr_shas: list[str] = []
+    per_sha_checks: list[dict[str, float]] = []
+    check_durs: dict[str, list[float]] = {}
+    sample_diag: dict[str, Any] = {}
 
     # The timing walk above starts from the all-status page already fetched for each
     # workflow. A busy repository can fill that page while yielding only a handful of
@@ -29647,19 +29683,263 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _candidate_page = 1
     _candidate_page_failed = False
     _candidate_page_failures = 0
-    _candidate_era_door = bool(config_era_facts)
+    # This is a property of the PR-candidate walk, not of the repository. A
+    # schedule/push workflow may have a config-era fact without constraining any
+    # pull-request candidate; only a boundary crossed below may close this door.
+    _candidate_era_door = False
     _candidate_runs_by_wf: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    # The workflow timing pass intentionally visits only workflows tied to a
+    # finding. Gate-frequency sampling has a different denominator: every
+    # workflow that ran on the PR commit. Always read every workflow's first
+    # run-list page so a clean workflow cannot disappear merely because a
+    # finding-bearing sibling already filled the commit target.
+    for _wf_path in sorted(wf_by_path):
+        _wf_id = (wf_by_path.get(_wf_path) or {}).get("id")
+        if _wf_id is None:
+            continue
+        # The timing pass may already have cached this page, but its success
+        # sample is deliberately capped by ``max_runs``.  Candidate discovery
+        # needs every row on the cached page, so always fold the page here even
+        # when fetching it is free.
+        _page_rows = _all_status_page(_wf_path, _wf_id)
+        if _page_rows is None:
+            continue
+        for _row in _page_rows:
+            if (str(_row.get("event") or "") not in _DEVELOPER_EVENTS
+                    or not _row.get("head_sha")
+                    or str(_row.get("status") or "") != "completed"):
+                continue
+            _sha = str(_row["head_sha"])
+            _ts = str(_row.get("created_at") or _row.get("updated_at") or "")
+            if _ts > pr_sha_ts.get(_sha, ""):
+                pr_sha_ts[_sha] = _ts
+            _prev = sha_meta.get(_sha)
+            if _prev is None or _ts > str(_prev.get("ts") or ""):
+                sha_meta[_sha] = {
+                    "event": str(_row.get("event") or ""),
+                    "pr_num": _run_pr_number(_row), "ts": _ts,
+                }
+        _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+    _workflow_triggers = findings_doc.get("workflow_triggers") or {}
+    _pr_candidate_workflows = {
+        str(path) for path, events in _workflow_triggers.items()
+        if isinstance(events, list)
+        and set(str(event) for event in events) & set(_DEVELOPER_EVENTS)
+    }
     _candidate_active = {
         wf_path
         for wf_path, page_rows in all_status_runs_by_wf.items()
         if len(page_rows) >= _COST_RUNLIST_MAX
+        and (wf_path in _pr_candidate_workflows
+             or (not _workflow_triggers and any(
+                 str(row.get("event") or "") in _DEVELOPER_EVENTS
+                 for row in page_rows)))
         and (wf_by_path.get(wf_path) or {}).get("id") is not None
     }
-    while ((len(repr_shas) < _REPR_PR_TARGET
-            or sample_diag.get("required_suite_unsatisfiable"))
-           and not config_era_facts
-           and _candidate_active
-           and _candidate_page < _PR_CANDIDATE_PAGE_CAP):
+
+    _candidate_scoped_ts: dict[str, str] = {}
+    _candidate_scope_evaluated = False
+    _candidate_observable_required: frozenset[str] = frozenset()
+    _candidate_unobservable_required: frozenset[str] = frozenset()
+    _candidate_evaluated_count = 0
+    _candidate_job_list_reads = 0
+    _candidate_job_list_cap_hit = False
+    _candidate_repo_published_required = frozenset(_repo_published_required(
+        req_names, findings_doc.get("workflow_status_publishers")))
+
+    def _budget_candidate_job_runs(
+            runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep memo hits plus at most the remaining PR-sample job-read budget."""
+        nonlocal _candidate_job_list_reads, _candidate_job_list_cap_hit
+        allowed: list[dict[str, Any]] = []
+        seen: set[Any] = set()
+        for run in runs:
+            run_id = run.get("id")
+            if run_id in seen:
+                continue
+            seen.add(run_id)
+            if job_memo.contains(_fetch_run_jobs, repo, run_id):
+                allowed.append(run)
+                continue
+            if _candidate_job_list_reads >= _PR_SAMPLE_JOB_LIST_READ_CAP:
+                _candidate_job_list_cap_hit = True
+                continue
+            _candidate_job_list_reads += 1
+            allowed.append(run)
+        return allowed
+
+    def _candidate_snapshot() -> tuple[
+            list[dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, str]]:
+        rows = [
+            row
+            for page_rows in all_status_runs_by_wf.values() for row in page_rows
+            if str(row.get("event") or "") in _DEVELOPER_EVENTS
+            and row.get("head_sha")
+        ] + [
+            row
+            for page_rows in _candidate_runs_by_wf.values() for row in page_rows
+            if str(row.get("event") or "") in _DEVELOPER_EVENTS
+            and row.get("head_sha")
+        ]
+        by_sha: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            by_sha[str(row["head_sha"])].append(row)
+        # A full page means older workflow history remains unseen.  Do not call
+        # a candidate complete when it predates that workflow's oldest observed
+        # row: a sibling run may exist on the next page and can still change the
+        # candidate's gate membership.  Once the workflow returns a short page,
+        # it leaves ``_candidate_active`` and its observed history is exhaustive.
+        active_horizons: list[str] = []
+        for wf_path in _candidate_active:
+            workflow_rows = (
+                list(all_status_runs_by_wf.get(wf_path) or [])
+                + list(_candidate_runs_by_wf.get(wf_path) or []))
+            timestamps = [
+                str(row.get("created_at") or row.get("updated_at") or "")
+                for row in workflow_rows
+                if row.get("created_at") or row.get("updated_at")
+            ]
+            if timestamps:
+                active_horizons.append(min(timestamps))
+        incomplete_horizon = max(active_horizons, default="")
+        eligible_reps = {
+            rep for rep, members in _rep_members.items()
+            if all(by_sha.get(member) for member in members)
+            and all(str(row.get("status") or "") == "completed"
+                    for member in members for row in by_sha[member])
+            and (not incomplete_horizon
+                 or str(_rep_ts.get(rep) or "") >= incomplete_horizon)
+        }
+        return rows, by_sha, {
+            sha: ts for sha, ts in _rep_ts.items() if sha in eligible_reps
+        }
+
+    def _candidate_sample_ready() -> bool:
+        """Whether the observed run/job population already satisfies the sample.
+
+        Count only completed identities first. When a readable required suite is
+        present, use the job lists already required for timing to keep commits that
+        ran every observable required check. A failed job read remains eligible and
+        is disclosed later as partial; silently replacing it with an older commit
+        would turn an I/O gap into a clean suite decision.
+        """
+        nonlocal _candidate_scoped_ts, _candidate_observable_required
+        nonlocal _candidate_unobservable_required, _candidate_scope_evaluated
+        nonlocal _candidate_evaluated_count
+        _rows, rows_by_sha, eligible_ts = _candidate_snapshot()
+        raw_days = {str(ts or "")[:10] for ts in eligible_ts.values()}
+        if (len(eligible_ts) < _REPR_PR_TARGET
+                or len(raw_days) < _PR_SAMPLE_MIN_DISTINCT_DAYS):
+            return False
+        if not req_names:
+            _candidate_scoped_ts = eligible_ts
+            return True
+
+        ordered_reps = sorted(
+            eligible_ts, key=lambda sha: eligible_ts[sha], reverse=True)
+        # Read only the newest prefix that can satisfy both public sample goals.
+        # If path-conditional jobs remove too many commits, extend in bounded
+        # batches until the scoped population is ready or visible candidates end.
+        # This keeps a busy page with 200 eligible commits from paying 200 job-list
+        # requests when its newest 100 already span the configured date floor.
+        evaluation_count = min(len(ordered_reps), _spread_target(eligible_ts))
+        evaluated_reps: set[str] = set()
+        failed_reps: set[str] = set()
+        names_by_rep: dict[str, set[str]] = defaultdict(set)
+        observed: set[str] = set()
+        while len(evaluated_reps) < len(ordered_reps):
+            batch_reps = ordered_reps[len(evaluated_reps):evaluation_count]
+            if not batch_reps:
+                break
+            run_rep: dict[Any, str] = {}
+            selected_runs: list[dict[str, Any]] = []
+            run_ids_by_rep: dict[str, set[Any]] = defaultdict(set)
+            for rep in batch_reps:
+                for member in _rep_members.get(rep, [rep]):
+                    for row in rows_by_sha.get(member, []):
+                        rid = row.get("id")
+                        if rid in run_rep:
+                            continue
+                        run_rep[rid] = rep
+                        run_ids_by_rep[rep].add(rid)
+                        selected_runs.append(row)
+            selected_runs = _budget_candidate_job_runs(selected_runs)
+            selected_ids = {run.get("id") for run in selected_runs}
+            completed_reps = {
+                rep for rep, run_ids in run_ids_by_rep.items()
+                if run_ids <= selected_ids
+            }
+            evaluated_reps.update(completed_reps)
+            run_rep = {
+                run_id: rep for run_id, rep in run_rep.items()
+                if rep in completed_reps
+            }
+            selected_runs = [
+                run for run in selected_runs
+                if run_rep.get(run.get("id")) in completed_reps
+            ]
+            kept_jobs, _failures = _gather_run_jobs(
+                client, repo, selected_runs, keep_empty=True, memo=job_memo)
+            fetched_ids = {run.get("id") for run, _jobs in kept_jobs}
+            failed_reps.update(
+                run_rep.get(run.get("id"), "") for run in selected_runs
+                if run.get("id") not in fetched_ids)
+            for run, jobs in kept_jobs:
+                rep = run_rep.get(run.get("id"), "")
+                for job in jobs:
+                    name = str(job.get("name") or "")
+                    if name and str(job.get("conclusion") or "") != "skipped":
+                        names_by_rep[rep].add(name)
+                        observed.add(name)
+
+            observable = frozenset(set(req_names) & observed)
+            _candidate_scope_evaluated = True
+            _candidate_observable_required = observable
+            _candidate_unobservable_required = frozenset(
+                set(req_names) - observed)
+            evaluated_ts = {
+                rep: eligible_ts[rep] for rep in ordered_reps
+                if rep in evaluated_reps}
+            _candidate_evaluated_count = max(
+                _candidate_evaluated_count, len(evaluated_ts))
+            if not observable:
+                # No Actions job in the newest sufficient population implements
+                # the readable required names.  A full workflow page can still
+                # hide older commits that do implement them, so exhaust the
+                # active history horizon before declaring the suite external.
+                if evaluation_count < len(ordered_reps):
+                    evaluation_count = min(
+                        len(ordered_reps), evaluation_count + 25)
+                    continue
+                if _candidate_active:
+                    return False
+                _candidate_scoped_ts = evaluated_ts
+                return True
+            _candidate_scoped_ts = {
+                rep: ts for rep, ts in evaluated_ts.items()
+                if (rep in failed_reps
+                    or observable <= names_by_rep.get(rep, set()))
+            }
+            scoped_days = {str(ts or "")[:10]
+                           for ts in _candidate_scoped_ts.values()}
+            if (len(_candidate_scoped_ts) >= _REPR_PR_TARGET
+                    and len(scoped_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS):
+                return True
+            if _candidate_job_list_cap_hit:
+                return False
+            if evaluation_count >= len(ordered_reps):
+                break
+            evaluation_count = min(len(ordered_reps), evaluation_count + 25)
+        return False
+
+    # Apply the completed-only eligibility after every bounded workflow walk.
+    # Stopping on the aggregate count first can strand clean commits on older
+    # pages when the apparent target is later removed by an in-flight sibling.
+    while (_candidate_active
+           and _candidate_page < _PR_CANDIDATE_PAGE_CAP
+           and not _candidate_job_list_cap_hit
+           and not _candidate_sample_ready()):
         _candidate_page += 1
         _next_active: set[str] = set()
         for wf_path in sorted(_candidate_active):
@@ -29695,7 +29975,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _next_active.add(wf_path)
             for r in page_rows:
                 if (str(r.get("event") or "") not in _DEVELOPER_EVENTS
-                        or not r.get("head_sha")):
+                        or not r.get("head_sha")
+                        or str(r.get("status") or "") != "completed"):
                     continue
                 sha = str(r["head_sha"])
                 ts = str(r.get("created_at") or r.get("updated_at") or "")
@@ -29709,21 +29990,157 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     }
         _candidate_active = _next_active
         _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+
+    # Re-read the selected population from run/job lists. Besides avoiding a
+    # check-runs-only view of a busy repository, this excludes an in-flight burst:
+    # a commit is eligible only when every developer-event run we observed for its
+    # identity has completed. The memo makes jobs already used by the workflow drill
+    # free here; deeper candidate pages pay one jobs read per selected run.
+    _candidate_rows, _rows_by_sha, _eligible_ts = _candidate_snapshot()
+    _candidate_sample_ready()
+    _raw_eligible_days = {str(ts or "")[:10] for ts in _eligible_ts.values()}
+    _job_population_read = (
+        len(_eligible_ts) >= _REPR_PR_TARGET
+        and len(_raw_eligible_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
+        and (not req_names or _candidate_scope_evaluated))
+    if _candidate_scope_evaluated and _candidate_observable_required:
+        _eligible_ts = _candidate_scoped_ts
+    _selection_target = _spread_target(_eligible_ts)
+    _eligible_days = {str(ts or "")[:10] for ts in _eligible_ts.values()}
+    if _job_population_read:
+        repr_shas = sorted(
+            _eligible_ts, key=lambda sha: _eligible_ts[sha], reverse=True
+        )[:_selection_target]
+        per_sha_checks = [{} for _sha in repr_shas]
+        check_durs = {}
+        _required_suite_unsatisfiable = bool(
+            req_names and (
+                (not _candidate_observable_required
+                 and not _candidate_repo_published_required)
+                or (_candidate_observable_required
+                    and not _candidate_scoped_ts)))
+        sample_diag = {
+            "target": _REPR_PR_TARGET, "kept": len(repr_shas),
+            "fetched": _candidate_evaluated_count, "fetch_failures": 0,
+            "complete": (
+                len(repr_shas) >= _REPR_PR_TARGET
+                and len(_eligible_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
+                and not _required_suite_unsatisfiable),
+            "required_suite_scoped": bool(
+                req_names and _candidate_observable_required
+                and not _candidate_repo_published_required),
+            "required_suite_unsatisfiable": _required_suite_unsatisfiable,
+            "required_checks_unobservable": sorted(
+                _candidate_unobservable_required),
+            "selection_limited": False,
+            "job_list_scoped": True,
+        }
+        _rep_ts = _eligible_ts
+    else:
         repr_shas, per_sha_checks, check_durs, sample_diag = _select_repr_shas(
-            _rep_ts, _checks_for, req_names, _REPR_PR_TARGET,
+            _eligible_ts, _checks_for, req_names, _selection_target,
             repo_published=_repo_published_required(
                 req_names, findings_doc.get("workflow_status_publishers")),
-            # Every candidate already paid for by the bounded run-page walk is
-            # eligible. The ordinary selector keeps its 160-fetch runaway cap;
-            # this path's three-page cap is the bound instead.
-            max_fetch_override=len(_rep_ts))
+            max_fetch_override=len(_eligible_ts))
+        _rep_ts = _eligible_ts
 
-    if (len(repr_shas) >= _REPR_PR_TARGET
+    _selected_runs: list[dict[str, Any]] = []
+    _run_rep: dict[Any, str] = {}
+    for _rep in repr_shas:
+        for _member in _rep_members.get(_rep, [_rep]):
+            for _row in _rows_by_sha.get(_member, []):
+                _rid = _row.get("id")
+                if _rid in _run_rep:
+                    continue
+                _run_rep[_rid] = _rep
+                _selected_runs.append(_row)
+    if len(repr_shas) < _REPR_PR_TARGET and not _job_population_read:
+        # A short history keeps the established check-run population. Its ordinary
+        # workflow job sample has already been read; do not retry failed job pages
+        # merely to decorate a sample that cannot meet the representative contract.
+        _selected_runs = []
+    _selected_runs = _budget_candidate_job_runs(_selected_runs)
+    _sample_kept_jobs, _sample_job_failures = _gather_run_jobs(
+        client, repo, _selected_runs, keep_empty=True, memo=job_memo)
+    jobs_fetch_failures += _sample_job_failures
+    _sample_fetched_run_ids = {
+        run.get("id") for run, _jobs in _sample_kept_jobs}
+    _sample_failed_reps = {
+        _run_rep.get(run.get("id"), "") for run in _selected_runs
+        if run.get("id") not in _sample_fetched_run_ids
+    }
+    _jobs_by_rep: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for _run, _jobs in _sample_kept_jobs:
+        _jobs_by_rep[_run_rep.get(_run.get("id"), "")].extend(_jobs)
+    _job_maps: list[dict[str, float]] = []
+    _job_durs: dict[str, list[float]] = defaultdict(list)
+    _partial_reps = 0
+    _partial_sample_shas: set[str] = set()
+    for _rep in repr_shas:
+        _m: dict[str, float] = {}
+        _iv: dict[str, tuple[str, str]] = {}
+        for _job in _jobs_by_rep.get(_rep, []):
+            _name = str(_job.get("name") or "")
+            _duration = _job_duration_s(_job)
+            if not _name or _duration is None:
+                continue
+            if _duration >= _m.get(_name, -1.0):
+                _m[_name] = _duration
+            _started = str(_job.get("started_at") or "")
+            _completed = str(_job.get("completed_at") or "")
+            if _started and _completed:
+                _iv[_name] = (_started, _completed)
+        if ((not _m or _rep in _sample_failed_reps)
+                and _job_population_read):
+            _partial_reps += 1
+            _partial_sample_shas.add(_rep)
+        for _name, _duration in _m.items():
+            _job_durs[_name].append(_duration)
+        _job_maps.append(_m)
+        if _job_population_read:
+            sha_check_intervals[_rep] = _iv
+            check_runs_complete_by_sha[_rep] = bool(_m) and _rep not in _sample_failed_reps
+    if _job_population_read and _job_maps and any(_job_maps):
+        per_sha_checks = _job_maps
+        check_durs = dict(_job_durs)
+        _observed_job_names = set(_job_durs)
+        _missing_required = set(req_names) - _observed_job_names
+        _repo_published = set(_repo_published_required(
+            req_names, findings_doc.get("workflow_status_publishers")))
+        sample_diag["required_checks_unobservable"] = sorted(
+            _missing_required - _repo_published)
+        if _missing_required & _repo_published:
+            sample_diag["required_checks_repo_published"] = sorted(
+                _missing_required & _repo_published)
+        if req_names and not (set(req_names) & _observed_job_names):
+            sample_diag["required_suite_unsatisfiable"] = not bool(
+                _missing_required and _missing_required <= _repo_published)
+            sample_diag["required_suite_scoped"] = False
+
+    _sample_dates = sorted({str(_rep_ts.get(sha) or "")[:10] for sha in repr_shas
+                            if _rep_ts.get(sha)})
+    sample_diag.update({
+        "distinct_days": len(_sample_dates),
+        "span_first": min((_rep_ts.get(sha) or "" for sha in repr_shas), default=""),
+        "span_last": max((_rep_ts.get(sha) or "" for sha in repr_shas), default=""),
+        "partial_count": _partial_reps,
+    })
+
+    if (_candidate_job_list_cap_hit):
+        sample_diag["stop_reason"] = "job_list_cap"
+    elif (len(repr_shas) >= _REPR_PR_TARGET
+            and len(_sample_dates) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
             and not sample_diag.get("required_suite_unsatisfiable")):
         sample_diag["stop_reason"] = "target_met"
     elif (sample_diag.get("fetch_failures") or _candidate_page_failed
           or all_status_failed):
         sample_diag["stop_reason"] = "fetch_failures"
+    elif sample_diag.get("required_suite_unsatisfiable"):
+        sample_diag["stop_reason"] = (
+            "required_checks_unobservable"
+            if sample_diag.get("required_checks_unobservable")
+            and not sample_diag.get("required_suite_scoped")
+            else "required_suite_empty")
     elif _candidate_era_door:
         sample_diag["stop_reason"] = "era_door"
     elif (sample_diag.get("selection_limited")
@@ -29742,6 +30159,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "candidate_page_fetch_failures": (
             _candidate_page_failures + len(all_status_failed)),
         "candidate_era_door": _candidate_era_door,
+        "job_list_reads": _candidate_job_list_reads,
+        "job_list_read_cap": _PR_SAMPLE_JOB_LIST_READ_CAP,
+        "job_list_cap_hit": _candidate_job_list_cap_hit,
     })
     # Config-era thin-flip (issue #74, direction (a): the timing spine flips WITH the rule). Now that
     # the PR gate sample (`per_sha_checks`) is in hand we can tell whether a `disclosed_pre` straddle's
@@ -29774,7 +30194,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # so every downstream consumer (pr_check_p50, poles, the detector loop) sees the post era.
         nonlocal jobs_fetch_failures, runs_sampled, jobs_sampled
         post_slice = post_runs[:max_runs]
-        _prefetch_json(client, [_run_jobs_endpoint(repo, r.get("id")) for r in post_slice])
+        _prefetch_json(client, [
+            _run_jobs_endpoint(repo, r.get("id")) for r in post_slice
+            if not job_memo.contains(_fetch_run_jobs, repo, r.get("id"))])
         kept_jobs, wf_failures = _gather_run_jobs(client, repo, post_slice, memo=job_memo)
         # Surface a post re-drill fetch failure through the SAME coverage machinery as every other
         # job-fetch path (issue #74 review): never swallow it into unmeasured-silence.
@@ -30071,15 +30493,30 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _era_repr_shas, _era_per_sha_checks, _era_sha_intervals, _era_dropped_pr_count = (
         _era_scope_pr_spine_sample(
             repr_shas, per_sha_checks, sha_check_intervals, _rep_ts,
-            set(pr_check_p50), config_era_facts, _era_check_wf_of))
+            set(pr_check_p50), [
+                fact for fact in config_era_facts
+                if events_by_wf.get(str(fact.get("workflow_file") or ""), set())
+                & set(_DEVELOPER_EVENTS)
+            ], _era_check_wf_of))
     # The public sample count is the post-era-door population, so completeness
     # and its reason must be post-door too. Keeping the pre-door `complete=True`
     # would render a short 12/20 population as complete.
     sample_diag["kept"] = len(_era_repr_shas)
+    _era_sample_ts = [str(_rep_ts.get(sha) or "") for sha in _era_repr_shas
+                      if _rep_ts.get(sha)]
+    sample_diag["distinct_days"] = len({ts[:10] for ts in _era_sample_ts})
+    sample_diag["span_first"] = min(_era_sample_ts, default="")
+    sample_diag["span_last"] = max(_era_sample_ts, default="")
+    sample_diag["partial_count"] = sum(
+        sha in _partial_sample_shas for sha in _era_repr_shas)
     sample_diag["complete"] = (
         len(_era_repr_shas) >= _REPR_PR_TARGET
+        and int(sample_diag.get("distinct_days") or 0) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
         and not sample_diag.get("required_suite_unsatisfiable"))
-    if _era_dropped_pr_count and len(_era_repr_shas) < _REPR_PR_TARGET:
+    if (_era_dropped_pr_count and not sample_diag["complete"]
+            and sample_diag.get("stop_reason") not in {
+                "fetch_failures", "required_checks_unobservable",
+                "required_suite_empty"}):
         sample_diag["stop_reason"] = "era_door"
         sample_diag["candidate_era_door"] = True
     _era_check_runs_complete = [
@@ -31037,7 +31474,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     }
     _prefetch_json(client, [
         _run_jobs_endpoint(repo, run.get("id"))
-        for runs in _opt21_outcome_runs.values() for run in runs])
+        for runs in _opt21_outcome_runs.values() for run in runs
+        if not job_memo.contains(_fetch_run_jobs, repo, run.get("id"))])
     _opt21_outcome_jobs: dict[str, list[list[dict[str, Any]]]] = {}
     for _wf in sorted(_opt21_workflows):
         _outcome_kept, _outcome_fetches = _gather_run_jobs(
@@ -31913,6 +32351,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _prefetch_json(client, [
                     _run_jobs_endpoint(repo, run.get("id"))
                     for run in _cancelled_runs
+                    if not job_memo.contains(
+                        _fetch_run_jobs, repo, run.get("id"))
                 ])
                 _cancelled_kept, _cancelled_failures = _gather_run_jobs(
                     client, repo, _cancelled_runs, memo=job_memo)
@@ -32429,8 +32869,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # pre-start/queue-axis finding (OPT43) shortens time-to-start, not the
     # dominant step, so it must not stand in for the OPT75/etc lever on the pole.
     covered_job_savings = _build_covered_job_savings(findings)
-    # (required_checks + the measured-critical-path sample were fetched above,
-    # scoped to the 20 most recent full-suite PRs.)
+    # (required_checks + the representative measured-critical-path sample were
+    # fetched above.)
     struct_start = max(
         (int(f["id"][1:]) for f in findings
          if f.get("id", "").startswith("f") and f["id"][1:].isdigit()),
