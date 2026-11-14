@@ -428,13 +428,14 @@ class RawHit:
     derived_note: str | None = None
 
 
-_CONTEXT_BRACKET_CHAIN_RE = re.compile(
-    r"\b(?P<base>(?:inputs|client_payload|repository_dispatch\.client_payload|"
-    r"github\.event(?:\.[A-Za-z_][A-Za-z0-9_-]*)*))"
-    r"(?P<brackets>(?:\s*\[\s*(?:'[^']+'|\"[^\"]+\")\s*\])+)",
+_TEMPLATE_EXPRESSION_RE = re.compile(r"\$\{\{(?:(?!\}\}).)*\}\}", re.DOTALL)
+_CONTEXT_PATH_RE = re.compile(
+    r"\b(?P<path>(?:inputs|client_payload|repository_dispatch\.client_payload|"
+    r"github\.event)(?:(?:\.[A-Za-z_][A-Za-z0-9_-]*)|"
+    r"(?:\s*\[\s*(?:'[^']+'|\"[^\"]+\")\s*\]))+)",
 )
 _CONTEXT_BRACKET_KEY_RE = re.compile(
-    r"\[\s*(?:'(?P<single>[^']+)'|\"(?P<double>[^\"]+)\")\s*\]",
+    r"\s*\[\s*(?:'(?P<single>[^']+)'|\"(?P<double>[^\"]+)\")\s*\]",
 )
 
 
@@ -448,20 +449,27 @@ def _normalize_context_brackets(text: str) -> str:
     shorter dotted spelling to the original length, preserving source offsets
     and line attribution for the raw workflow text.
     """
-    def _replace(match: re.Match[str]) -> str:
-        keys = []
-        for key_match in _CONTEXT_BRACKET_KEY_RE.finditer(
-                match.group("brackets")):
-            key = key_match.group("single") or key_match.group("double") or ""
-            keys.append(re.sub(r"[^A-Za-z0-9_]", "_", key))
-        dotted = match.group("base") + "".join(f".{key}" for key in keys)
-        # Pad before the replacement so a following dotted suffix remains
-        # attached (``github.event['pull_request'].title``).  The total length
-        # is unchanged, so offsets after the normalized chain still line up
-        # with the original workflow text.
-        return " " * (len(match.group(0)) - len(dotted)) + dotted
+    def _replace_path(match: re.Match[str]) -> str:
+        path = match.group("path")
 
-    return _CONTEXT_BRACKET_CHAIN_RE.sub(_replace, text)
+        def _replace_key(key_match: re.Match[str]) -> str:
+            key = key_match.group("single") or key_match.group("double") or ""
+            return "." + re.sub(r"[^A-Za-z0-9_]", "_", key)
+
+        dotted = _CONTEXT_BRACKET_KEY_RE.sub(_replace_key, path)
+        # Pad before the replacement so every dotted and bracket segment stays
+        # attached. The total length is unchanged, so later source offsets
+        # still line up with the original workflow text.
+        return " " * (len(path) - len(dotted)) + dotted
+
+    def _replace_expression(match: re.Match[str]) -> str:
+        return _CONTEXT_PATH_RE.sub(_replace_path, match.group(0))
+
+    # Shell text may contain bracket-looking strings whose quoted key embeds a
+    # template expression. Rewriting the whole shell scalar would consume that
+    # expression and hide the injection, so only expression bodies are
+    # normalized.
+    return _TEMPLATE_EXPRESSION_RE.sub(_replace_expression, text)
 
 
 def detect_regex(file_path: Path, pattern: str, *,
@@ -476,7 +484,7 @@ def detect_regex(file_path: Path, pattern: str, *,
     lines = content.splitlines()
     compiled = re.compile(pattern, re.MULTILINE)
     for m in compiled.finditer(match_content):
-        line_no = match_content.count("\n", 0, m.start()) + 1
+        line_no = content.count("\n", 0, m.start()) + 1
         idx = line_no - 1
         start = max(0, idx - 1)
         stop = min(len(lines), idx + 2)

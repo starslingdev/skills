@@ -434,6 +434,8 @@ def test_p1410_modern_bare_inputs_context_is_caller_filled(
     'github.event["client_payload"]["command"]',
     "github.event['pull_request']['title']",
     "github.event['pull_request'].title",
+    "github.event['pull_request'].head['ref']",
+    "github.event['client_payload'].data['command']",
     "inputs.max_items",
     "github.event.inputs.max_items",
 ])
@@ -506,6 +508,48 @@ def test_bracket_indexed_github_generated_shape_stays_safe(tmp_path: Path) -> No
         "      - run: echo \"${{ github.event.pull_request['number'] }}\"\n"
     ))
     assert "P14.10" not in _patterns_for_file(_scan_dir(tmp_path), "safe.yml")
+
+
+def test_bracket_normalization_does_not_consume_an_embedded_expression(
+    tmp_path: Path,
+) -> None:
+    expression = "${{ github.event.pull_request.title }}"
+    _write_workflow(tmp_path, "sink.yml", (
+        "on: pull_request\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f'      - run: echo "inputs[\'{expression}\']"\n'
+        f'      - run: echo "VALUE=inputs[\'{expression}\']" >> "$GITHUB_ENV"\n'
+    ))
+    patterns = _patterns_for_file(_scan_dir(tmp_path), "sink.yml")
+    assert "P14.10" in patterns
+    assert "P14.15" in patterns
+
+
+def test_multiline_bracket_lookup_does_not_shift_a_later_finding(
+    tmp_path: Path,
+) -> None:
+    _write_workflow(tmp_path, "sink.yml", (
+        "on: workflow_dispatch\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - run: |\n"
+        "          echo \"${{ inputs[\n"
+        "            'first'\n"
+        "          ] }}\"\n"
+        "      - run: echo \"VALUE=${{ inputs.name }}\" >> \"$GITHUB_ENV\"\n"
+    ))
+    hits = [
+        finding for finding in _scan_dir(tmp_path)["findings"]
+        if finding["pattern"] == "P14.15"
+    ]
+    assert len(hits) == 1, hits
+    assert hits[0]["line"] == 10
+    assert "inputs.name" in hits[0]["evidence"]
 
 
 def test_shape_safe_allowlist_only_ever_touches_template_expressions() -> None:

@@ -347,8 +347,9 @@ entries are dated (UTC). Format loosely follows
 
 - **2026-11-12** (#324) — P14.10 and P14.15 now treat quoted bracket-indexed
   attacker inputs like their dotted equivalents, including hyphenated input
-  names and chained `github.event` / `client_payload` lookups. Bracket access
-  on non-source contexts remains silent.
+  names and mixed dotted/bracket `github.event` / `client_payload` lookups.
+  Normalization stays inside template expressions and preserves multiline
+  source attribution; bracket access on non-source contexts remains silent.
 
 - **2026-11-12** (#345) — ci-secure: the default-branch review check, when it
   fails on the rule's own settings, now also names anyone short of an admin
