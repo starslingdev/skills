@@ -2658,11 +2658,12 @@ def test_provenance_omits_deep_scan_note_for_a_shallow_walk():
     block = "\n".join(bp._provenance_block(
         _prov_doc(sampled_pr_count=20, sample_fetched=50), "o/r", "2026-06-08"))
     assert "recent PRs**" not in block
-    assert "20/20 sampled PRs" in block          # the plain honest baseline
+    assert "20 of 20 PRs sampled" in block       # the plain honest baseline
 
 
 def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():
-    # P2 regression: an external required suite that was READ but ran on no sampled PR
+    # P2 regression: an external required suite that was READ but was not observable
+    # in the sampled Actions job lists
     # sets required_suite_scoped=False AND required_suite_unsatisfiable=True. The
     # provenance must report the PR-floor cause, NOT the "unreadable (no admin / 404)"
     # cause — the two share the scoped=False flag but are different failures.
@@ -2670,7 +2671,8 @@ def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():
         _prov_doc(required_suite_scoped=False, required_suite_unsatisfiable=True),
         "o/r", "2026-06-08"))
     assert "No file-backed required gate" in block
-    assert "ran on **none** of the sampled PRs" in block
+    assert "per-commit presence and timing could not be established" in block
+    assert "ran on **none** of the sampled PRs" not in block
     assert "Required checks were unreadable" not in block      # the wrong cause
 
 
@@ -2882,6 +2884,23 @@ def test_demoted_frequency_pole_prompt_and_toc_drop_typical_gate_framing():
     # The demoted row must not carry a "gates N/NN PRs" tail (the sibling `test`'s frequency).
     gore_row = next(l for l in toc.splitlines() if "goreleaser-check](#pole-2)" in l)
     assert "gates" not in gore_row
+
+
+def test_rarely_slowest_first_pole_is_not_framed_as_the_typical_gate():
+    # The first ordered pole is the frequency `blocker`, but under the `pole_n` schema that
+    # identity must not reclaim the typical-gate wording: `test` is the slowest check on only
+    # 1/20 sampled PRs (below the recurring floor), so its drill says "Rarely the merge pole",
+    # matching the verifier's spine-demoted rule (Next.js `Wait for preview tarball` shape).
+    doc = _doc_demoted_frequency_pole()
+    cp = doc["pr_critical_path"]
+    cp["checks"][0]["pole_n"] = 1
+    cp["checks"][1]["pole_n"] = 0
+    md = bp.render(doc, {"ci": _IMPORT_BOUND_LOG}, {},
+                   {"ci": "https://example.invalid/actions/runs/1"}, "2026-06-08")
+    start = md.index("Long pole 1:")
+    first = md[start:md.index("Long pole 2:", start)]
+    assert "Slowest check a typical PR waits on" not in first
+    assert "Rarely the merge pole" in first
 
 
 def test_bimodal_note_surfaces_a_fast_median_check_but_not_a_slow_median_one():

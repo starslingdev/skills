@@ -126,6 +126,23 @@ def _load_untrusted_wrap():
 uw = _load_untrusted_wrap()
 
 
+def _load_pr_sample_contract():
+    """Load the shipped pure PR-sample defaults without importing the renderer."""
+    path = Path(__file__).resolve().parents[1] / "scripts" / "pr_sample_contract.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "ci_speedup_pr_sample_contract_for_verify", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("PR-sample contract module is unavailable")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_PR_SAMPLE_CONTRACT = _load_pr_sample_contract()
+
+
 @dataclass(frozen=True)
 class Check:
     name: str
@@ -2184,10 +2201,17 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     cp = _as_dict(data.get("pr_critical_path"))
     if "sample_stop_reason" not in cp:
         return Check(name, True, "artifact predates the stop-reason contract", skipped=True)
+    if _PR_SAMPLE_CONTRACT is None:
+        return Check(name, False, "PR-sample contract module is unavailable")
     required = (
         "sample_candidate_pages_fetched", "sample_candidate_page_cap",
+        "sample_job_list_reads", "sample_job_list_read_cap",
+        "sample_job_list_cap_hit",
         "sample_candidate_pages_exhausted", "sample_candidate_page_fetch_failures",
         "sample_candidate_era_door", "sample_candidate_selection_limited",
+        "sample_distinct_days", "sample_min_distinct_days",
+        "sample_span_first", "sample_span_last",
+        "sample_partial_count",
     )
     missing = [key for key in required if key not in cp]
     if missing:
@@ -2203,26 +2227,60 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     page_failures = cp.get("sample_candidate_page_fetch_failures")
     pages = cp.get("sample_candidate_pages_fetched")
     cap = cp.get("sample_candidate_page_cap")
+    job_reads = cp.get("sample_job_list_reads")
+    job_cap = cp.get("sample_job_list_read_cap")
+    job_cap_hit = cp.get("sample_job_list_cap_hit")
     exhausted = cp.get("sample_candidate_pages_exhausted")
     era_door = cp.get("sample_candidate_era_door")
     selection_limited = cp.get("sample_candidate_selection_limited")
+    distinct_days = cp.get("sample_distinct_days")
+    min_distinct_days = cp.get("sample_min_distinct_days")
+    span_first = cp.get("sample_span_first")
+    span_last = cp.get("sample_span_last")
+    partial_count = cp.get("sample_partial_count")
     if (not isinstance(failures, int) or failures < 0
             or not isinstance(page_failures, int) or page_failures < 0
             or not isinstance(pages, int) or pages < 1
             or not isinstance(cap, int) or cap < 1
+            or not isinstance(job_reads, int) or job_reads < 0
+            or not isinstance(job_cap, int) or job_cap < 1
+            or not isinstance(job_cap_hit, bool)
             or not isinstance(exhausted, bool) or not isinstance(era_door, bool)
-            or not isinstance(selection_limited, bool)):
+            or not isinstance(selection_limited, bool)
+            or not isinstance(distinct_days, int) or distinct_days < 0
+            or not isinstance(min_distinct_days, int)
+            or min_distinct_days != _PR_SAMPLE_CONTRACT.PR_SAMPLE_MIN_DISTINCT_DAYS
+            or not isinstance(span_first, str) or not isinstance(span_last, str)
+            or not isinstance(partial_count, int) or partial_count < 0
+            or partial_count > sampled):
         return Check(name, False, "candidate-page stop facts are malformed")
+    if (target != _PR_SAMPLE_CONTRACT.PR_SAMPLE_TARGET
+            or cap != _PR_SAMPLE_CONTRACT.PR_SAMPLE_CANDIDATE_PAGE_CAP
+            or job_cap != _PR_SAMPLE_CONTRACT.PR_SAMPLE_JOB_LIST_READ_CAP):
+        return Check(name, False, "sample contract target, page cap, or job-read cap drifted")
+    if pages > cap:
+        return Check(name, False, "candidate pages exceed the page cap")
+    if job_reads > job_cap or (job_cap_hit and job_reads != job_cap):
+        return Check(name, False, "PR-sample job-list reads disagree with their cap")
     strict_complete = (
-        sampled >= target and not cp.get("required_suite_unsatisfiable"))
+        sampled >= target and distinct_days >= min_distinct_days
+        and not cp.get("required_suite_unsatisfiable") and not job_cap_hit)
     if complete != strict_complete:
         return Check(
             name, False,
             "sample_complete does not match the strict required-suite target")
-    if strict_complete:
+    if job_cap_hit:
+        expected = "job_list_cap"
+    elif strict_complete:
         expected = "target_met"
     elif failures or page_failures:
         expected = "fetch_failures"
+    elif cp.get("required_suite_unsatisfiable"):
+        expected = (
+            "required_checks_unobservable"
+            if cp.get("required_checks_unobservable")
+            and cp.get("required_suite_scoped") is False
+            else "required_suite_empty")
     elif era_door:
         expected = "era_door"
     elif selection_limited or (not exhausted and pages >= cap):
@@ -2233,9 +2291,38 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     problems: list[str] = []
     if actual != expected:
         problems.append(f"sample_stop_reason={actual!r}, expected {expected!r}")
-    rendered = f"{sampled} of {target} PRs sampled: {expected.replace('_', ' ')}"
+    sample_size = (f"{sampled} PRs sampled (minimum target {target})"
+                   if sampled > target else f"{sampled} of {target} PRs sampled")
+    rendered = f"{sample_size}: {expected.replace('_', ' ')}"
     if rendered not in report:
         problems.append("rendered report omits or changes the re-derived sample statement")
+    budget = f"{job_reads} of at most {job_cap}"
+    if budget not in report:
+        problems.append("rendered report omits the PR-sample job-list read cap")
+    if sampled and (not span_first or not span_last):
+        problems.append("nonempty sample omits its first-to-last commit span")
+    elif span_first and span_last:
+        try:
+            from datetime import datetime as _sample_datetime
+            first_dt = _sample_datetime.fromisoformat(span_first.replace("Z", "+00:00"))
+            last_dt = _sample_datetime.fromisoformat(span_last.replace("Z", "+00:00"))
+            if first_dt > last_dt:
+                problems.append("sample commit span is reversed")
+        except ValueError:
+            problems.append("sample commit span is not ISO-8601")
+        rendered_span = f"{span_first[:10]} to {span_last[:10]}"
+        if rendered_span not in report:
+            problems.append("rendered report omits the sampled commit span")
+    unreliable = sampled and (
+        _PR_SAMPLE_CONTRACT.pr_sample_is_mostly_partial(partial_count, sampled)
+        or distinct_days < min_distinct_days)
+    if unreliable:
+        if "gate frequency and pole order are unreliable" not in report:
+            problems.append("thin sample omits the gate-frequency reliability warning")
+        if "Which checks gate (the critical-path ordering)" in report:
+            problems.append("thin sample still headlines gate frequency and pole order")
+        if "PR gate sample (ordering withheld)" not in report:
+            problems.append("thin sample omits the neutral gate-sample heading")
     return Check(name, not problems, "; ".join(problems) if problems else rendered)
 
 
