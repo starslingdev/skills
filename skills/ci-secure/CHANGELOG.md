@@ -357,6 +357,13 @@ entries are dated (UTC). Format loosely follows
   protection was unread, and still fails closed on rate limits, timeouts and
   server errors.
 
+- **2026-11-12** (#332) — P14.11 now sends every repository, commit and tag
+  lookup to github.com explicitly. Workflow action references resolve there,
+  so a caller whose `GH_HOST` points at GitHub Enterprise Server can no longer
+  verify a same-named repository on the wrong server. The config-fact verdict
+  action resolver uses the same host pin, while audited-repository API calls
+  continue to follow the repository's selected host.
+
 - **2026-11-11** (#331) — A GitHub CLI extension pinned to a tag on a
   release GitHub has locked as immutable is no longer reported (P14.24). That
   tag and its assets cannot move, but the offline scan could not see the

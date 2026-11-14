@@ -242,6 +242,7 @@ def run_gh_api(
     timeout: int = SUBPROCESS_TIMEOUT,
     quiet_not_found: bool = False,
     quiet_forbidden: bool = False,
+    hostname: str | None = None,
 ) -> str:
     """Run a gh api command with proper error handling.
 
@@ -257,6 +258,9 @@ def run_gh_api(
         quiet_forbidden: If True, a 403 is logged at INFO instead of ERROR,
             with the endpoint only. For reads a caller expects to be refused
             to readers without access (secret lists); the caller reports it.
+        hostname: Optional GitHub host for this endpoint. Leave unset for
+            audited-repository calls so gh follows the selected repository
+            host; pin github.com for identities that live there globally.
 
     Returns:
         The stdout content on success.
@@ -268,6 +272,9 @@ def run_gh_api(
         GitHubAPIError: For other API errors.
     """
     cmd = ["gh", "api", endpoint]
+
+    if hostname:
+        cmd.extend(["--hostname", hostname])
 
     if method != "GET":
         cmd.extend(["-X", method])
