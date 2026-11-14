@@ -355,6 +355,10 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-12** (#332) — Optional GitHub checks now distinguish a missing
+  `gh` executable from an installed CLI that is not authenticated, so the
+  skip guidance tells users whether to install or log in. The README count is
+  updated to the two network lookups plus seven API-gated config facts.
 - **2026-11-12** (#345) — ci-secure: the default-branch review check, when it
   fails on the rule's own settings, now also names anyone short of an admin
   on a bypass list (with the classic or ruleset setting to change) and any
