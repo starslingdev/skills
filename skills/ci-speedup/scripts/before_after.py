@@ -202,6 +202,15 @@ def advance_verification(
                  f"{receipt['verification_log_api_budget']}"
                  f"{' (resumed)' if reused_baseline else ''}.")
         return {**payload, **receipt}
+
+    def write_context(payload: dict[str, Any]) -> None:
+        context_file.parent.mkdir(parents=True, exist_ok=True)
+        temporary = context_file.with_name(context_file.name + ".partial")
+        temporary.write_text(
+            json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8")
+        temporary.replace(context_file)
+
     resolved_head = client.remote_head(repo, branch)
     head = resolved_head
     if tracking_default and static_matches and saved_binding.get("head_sha"):
@@ -212,13 +221,25 @@ def advance_verification(
         # The topic branch may be deleted after merge while its persisted head
         # remains the anchor for the three default-branch pushes.
         head = str(saved_binding.get("head_sha") or "")
-    if not head:
-        return finish({"status": "ineligible", "verdict": None})
     binding = {
         **static_binding,
-        "head_sha": head,
+        "head_sha": head or "",
         "tracks_moving_default_branch": tracking_default,
     }
+    if not head:
+        write_context({
+            **binding,
+            "binding": binding,
+            "initial": None,
+            "workflow_identities": [],
+            "samples": [],
+            "run_attempt_ids": [],
+            "pending_rerun": None,
+            "baseline": before if isinstance(before, list) else [],
+            **log_budget_receipt(),
+            "verdict": None,
+        })
+        return finish({"status": "ineligible", "verdict": None})
     moved = bool(saved.get("head_sha") and saved.get("head_sha") != head)
     same_binding = saved.get("binding") == binding
     if same_binding and saved.get("verdict") is not None:
@@ -252,12 +273,7 @@ def advance_verification(
 
     def persist() -> None:
         context.update(log_budget_receipt())
-        context_file.parent.mkdir(parents=True, exist_ok=True)
-        temporary = context_file.with_name(context_file.name + ".partial")
-        temporary.write_text(
-            json.dumps(context, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8")
-        temporary.replace(context_file)
+        write_context(context)
 
     if initial is None:
         persist()

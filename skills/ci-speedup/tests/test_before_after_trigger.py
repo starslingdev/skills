@@ -848,6 +848,50 @@ def test_verification_has_one_persisted_baseline_log_budget(tmp_path):
     }) == ("unknown", "5 job logs omitted by cap")
 
 
+def test_verification_persists_log_budget_when_remote_head_is_unavailable(tmp_path):
+    class MissingHeadClient(FakeClient):
+        def __init__(self):
+            super().__init__(head=None)
+            self.log_gets = []
+
+        def _text(self, endpoint):
+            self.log_gets.append(endpoint)
+            return "Cache restored from key: node-v1"
+
+        _job_logs = GhVerificationClient._job_logs
+
+    client = MissingHeadClient()
+    baseline = tmp_path / "base.json"
+    baseline.write_text(json.dumps({
+        "per_workflow_monthly_volume": {"ci.yml": 40},
+        "pr_critical_path": {"commit_wall_clock": {"facts": [{
+            "sha": "base",
+            "event": "pull_request",
+            "jobs": [{
+                **_job("base", 1),
+                "id": job_id,
+                "workflow_file": "ci.yml",
+            } for job_id in range(1, 26)],
+        }]}},
+    }))
+    context_path = tmp_path / "verify.json"
+
+    first = advance_verification(
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        context_path=context_path, changed_files=[".github/workflows/ci.yml"],
+        environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
+    calls_after_first = len(client.log_gets)
+    second = advance_verification(
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        context_path=context_path, changed_files=[".github/workflows/ci.yml"],
+        environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
+
+    assert first["status"] == second["status"] == "ineligible"
+    assert calls_after_first == 20
+    assert len(client.log_gets) == calls_after_first
+    assert second["verification_log_api_calls"] == calls_after_first
+
+
 def test_default_branch_sampling_maps_squash_merge_and_stops_at_a_gap():
     commits = [{"sha": "newer"}, {"sha": "merge"}, {"sha": "older"}]
     merge_run = _api_run(30, 3, "push", "merge")
