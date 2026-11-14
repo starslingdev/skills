@@ -395,6 +395,46 @@ def test_release_only_static_hit_is_tagged_and_never_gets_wall_clock_credit(
     assert not vr.check_default_branch_push_lane_isolated(mutant, findings_path).ok
 
 
+def test_scheduled_static_hit_on_a_pr_pole_keeps_its_lane_disclosure(
+        monkeypatch, tmp_path: Path):
+    client = _PushLaneClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    source = _doc()
+    source["findings"] = [{
+        "id": "f1",
+        "pattern": "OPT102",
+        "pattern_class": "static",
+        "severity": "MEDIUM",
+        "title": "Scheduled compilation still uses emulation",
+        "workflow_file": _GATE,
+        "line": 8,
+        "affected_jobs": ["merge-gate"],
+        "workflow_activity": {},
+        "workflow_lanes": ["schedule"],
+        "evidence": "a scheduled multi-platform image compiles in the gate job",
+        "fix_strategy": "compile for each target without emulation",
+        "fix_recipe_anchor": "opt102",
+        "wall_clock_p50_s": 600.0,
+        "sizing_basis": "measured",
+        "realization": "direct",
+        "tier": 1,
+    }]
+
+    doc = cr.collect(
+        source, "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+    finding = doc["findings"][0]
+    assert finding["non_pr_lane"] is True
+    assert finding["wall_clock_p50_s"] == 0.0
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    assert "Scheduled compilation still uses emulation" in report
+    assert "schedule lane only; no merge-gate wall-clock credit" in report
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
 def test_unscoped_push_static_hit_is_not_assumed_to_be_non_pr(
         monkeypatch, tmp_path: Path):
     client = _PushLaneClient()

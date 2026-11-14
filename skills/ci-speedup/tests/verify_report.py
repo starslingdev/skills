@@ -12860,6 +12860,12 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         pat = str(f.get("pattern", ""))
         if pat not in block_keys:
             continue   # this pattern isn't rendered in the appendix
+        if f.get("non_pr_lane") is True:
+            # The pole is measured on the pull-request lane. A finding stamped
+            # as non-PR-only is a separate lane disclosure even when its static
+            # job name matches, and the lane-isolation check independently
+            # requires zero merge-gate wall-clock credit and a rendered tag.
+            continue
         if pat == "OPT82":
             # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
             # keeps an OPT82 card on a drilled-pole lint job (its card is the only
