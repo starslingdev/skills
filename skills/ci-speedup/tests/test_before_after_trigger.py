@@ -892,6 +892,41 @@ def test_verification_persists_log_budget_when_remote_head_is_unavailable(tmp_pa
     assert second["verification_log_api_calls"] == calls_after_first
 
 
+def test_temporary_missing_remote_head_preserves_inflight_verification(tmp_path):
+    class DelayedRerunClient(FakeClient):
+        def rerun_cohort(self, repo, cohort, *, trigger=True):
+            self.events.append("rerun-trigger" if trigger else "rerun-poll")
+            if trigger:
+                self.reruns += 1
+            elif getattr(self, "rerun_finished", False):
+                return _cohort("fix", "fix-rerun-1", attempt=2)
+            return None
+
+    client = DelayedRerunClient()
+    first = _invoke(tmp_path, client)
+    before_failure = json.loads((tmp_path / "verify.json").read_text())
+    assert first["status"] == "waiting-for-rerun"
+    assert before_failure["initial"]["head_sha"] == "fix"
+    assert before_failure["samples"][0]["head_sha"] == "fix"
+    assert before_failure["pending_rerun"] is not None
+
+    client.head = None
+    second = _invoke(tmp_path, client)
+    after_failure = json.loads((tmp_path / "verify.json").read_text())
+
+    assert second["status"] == "ineligible"
+    assert after_failure["initial"] == before_failure["initial"]
+    assert after_failure["samples"] == before_failure["samples"]
+    assert after_failure["pending_rerun"] == before_failure["pending_rerun"]
+    assert after_failure["binding"] == before_failure["binding"]
+
+    client.head = "fix"
+    client.rerun_finished = True
+    recovered = _invoke(tmp_path, client)
+    assert recovered["status"] == "complete"
+    assert recovered["sample_count"] == 2
+
+
 def test_default_branch_sampling_maps_squash_merge_and_stops_at_a_gap():
     commits = [{"sha": "newer"}, {"sha": "merge"}, {"sha": "older"}]
     merge_run = _api_run(30, 3, "push", "merge")

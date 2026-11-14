@@ -227,17 +227,27 @@ def advance_verification(
         "tracks_moving_default_branch": tracking_default,
     }
     if not head:
+        preserve_session = bool(
+            static_matches and saved_binding.get("head_sha"))
+        context_binding = (dict(saved_binding)
+                           if preserve_session else binding)
         write_context({
-            **binding,
-            "binding": binding,
-            "initial": None,
-            "workflow_identities": [],
-            "samples": [],
-            "run_attempt_ids": [],
-            "pending_rerun": None,
+            **(saved if preserve_session else {}),
+            **context_binding,
+            "binding": context_binding,
+            "initial": (saved.get("initial") if preserve_session else None),
+            "workflow_identities": (list(
+                saved.get("workflow_identities") or [])
+                if preserve_session else []),
+            "samples": (list(saved.get("samples") or [])
+                        if preserve_session else []),
+            "run_attempt_ids": (list(saved.get("run_attempt_ids") or [])
+                                if preserve_session else []),
+            "pending_rerun": (saved.get("pending_rerun")
+                              if preserve_session else None),
             "baseline": before if isinstance(before, list) else [],
             **log_budget_receipt(),
-            "verdict": None,
+            "verdict": (saved.get("verdict") if preserve_session else None),
         })
         return finish({"status": "ineligible", "verdict": None})
     moved = bool(saved.get("head_sha") and saved.get("head_sha") != head)
