@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 from pathlib import Path
+import subprocess
 import time
 
 import pytest
@@ -112,15 +113,42 @@ def test_network_resolver_fetches_only_modeled_action_tag(monkeypatch):
     cf = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(cf)
     calls = []
-    def api(path):
-        calls.append(path)
+    def api(path, **kwargs):
+        calls.append((path, kwargs))
         return json.dumps({'sha': va.ALLS_GREEN.split('@')[1]})
     monkeypatch.setattr(cf, '_gh_utils', lambda: SimpleNamespace(check_prereqs=lambda: True, run_gh_api=api))
     prefix = va.ALLS_GREEN.split('@')[0]
     assert cf._verdict_action_via_gh(prefix + '@release/v1') == va.ALLS_GREEN.split('@')[1]
-    assert calls == ['repos/' + prefix + '/commits/release%2Fv1']
+    assert calls == [(
+        'repos/' + prefix + '/commits/release%2Fv1',
+        {'hostname': 'github.com'},
+    )]
     assert cf._verdict_action_via_gh('sample/other-action@v1') is None
     assert len(calls) == 1
+
+
+def test_gh_api_hostname_is_explicit_only_for_action_repository_calls(monkeypatch):
+    """Action identities live on github.com; audited-repo facts follow gh's host."""
+    spec = importlib.util.spec_from_file_location(
+        'precision_gh_utils', ROOT / 'scripts/gh_utils.py'
+    )
+    gh = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gh)
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(list(argv))
+        return subprocess.CompletedProcess(argv, 0, stdout='{}', stderr='')
+
+    monkeypatch.setattr(gh.subprocess, 'run', run)
+    gh.run_gh_api(
+        'repos/actions/checkout/commits/' + 'a' * 40,
+        hostname='github.com',
+    )
+    gh.run_gh_api('repos/audited/project')
+
+    assert calls[0][-2:] == ['--hostname', 'github.com']
+    assert '--hostname' not in calls[1]
 
 
 def test_jq_does_not_certify_a_suite_with_a_skipped_test_step():

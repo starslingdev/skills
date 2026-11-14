@@ -345,11 +345,24 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-12** (#345) — ci-secure: the default-branch review check, when it
+  fails on the rule's own settings, now also names anyone short of an admin
+  on a bypass list (with the classic or ruleset setting to change) and any
+  bypass list it could not read, so one report lists every fix instead of a
+  second fail or unmeasured after the first fix.
+
 - **2026-11-12** (#341, closes #327) — Required-check auditing now keeps a readable ruleset
   answer when GitHub hides classic branch protection from a non-admin reader
   behind a plain `404 Not Found`. The fact remains measured, names that classic
   protection was unread, and still fails closed on rate limits, timeouts and
   server errors.
+
+- **2026-11-12** (#332) — P14.11 now sends every repository, commit and tag
+  lookup to github.com explicitly. Workflow action references resolve there,
+  so a caller whose `GH_HOST` points at GitHub Enterprise Server can no longer
+  verify a same-named repository on the wrong server. The config-fact verdict
+  action resolver uses the same host pin, while audited-repository API calls
+  continue to follow the repository's selected host.
 
 - **2026-11-11** (#331) — A GitHub CLI extension pinned to a tag on a
   release GitHub has locked as immutable is no longer reported (P14.24). That

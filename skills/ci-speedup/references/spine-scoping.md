@@ -70,14 +70,14 @@ The headline must be a check that ACTUALLY gates the merge, so the spine is rank
 by **pole frequency** — how often a check is the slowest job a PR waits on — in two
 tiers: checks that are the actual pole on ≥ 2 sampled PRs first (by p50), then
 one-path outliers (the actual pole on fewer, a label-gated benchmark or a single
-path-conditional run). A slow check that ran on 1/20 PRs never headlines just
+path-conditional run). A slow check that ran on 1/100 sampled PRs never headlines just
 because it's the slowest job when it runs; and — crucially — a lightweight check
 that runs on *every* PR but is **never** the slowest (a heavier sibling always
 co-runs) is not the gate either and is demoted, even though it's ever-present. That
 second case is the bug this replaced a "present on a majority" rule to fix: on a
 path-partitioned monorepo every heavy suite runs on a minority of PRs, so a majority
 cutoff buried them all and crowned an always-present check that was the actual
-bottleneck on 0 of 20 PRs. Demoted poles are still surfaced, labelled by why they
+bottleneck on 0 of 100 sampled PRs. Demoted poles are still surfaced, labelled by why they
 were demoted: *rarely the merge gate — the actual slowest check a PR waits on, on
 only N/npop sampled PRs* (pre-`pole_n` findings fall back to the legacy presence
 wording, *opt-in / rare — ran on only N/M sampled PRs*). A required check is exempt.
