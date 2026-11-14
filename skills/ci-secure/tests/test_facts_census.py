@@ -58,6 +58,7 @@ _EXPECTED_FACTS = frozenset({
     "sec.environments.branch-restricted",
     "sec.environments.approval-holds",
     "sec.secrets.environment-scoped",
+    "sec.default-branch.review-required",
 })
 
 

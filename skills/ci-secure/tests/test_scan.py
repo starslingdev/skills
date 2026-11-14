@@ -433,6 +433,7 @@ def test_p1410_modern_bare_inputs_context_is_caller_filled(
     "github.event['inputs']['max-items']",
     'github.event["client_payload"]["command"]',
     "github.event['pull_request']['title']",
+    "github.event['pull_request'].title",
     "inputs.max_items",
     "github.event.inputs.max_items",
 ])
@@ -1340,7 +1341,8 @@ def test_a_dropped_match_does_not_unmeasure_the_config_facts(
     api_gated = {"sec.required-checks.skippable", "sec.fork-approval.effective",
                  "sec.codeowners.workflows", "sec.environments.branch-restricted",
                  "sec.environments.approval-holds",
-                 "sec.secrets.environment-scoped"}
+                 "sec.secrets.environment-scoped",
+                 "sec.default-branch.review-required"}
     assert {fid for fid, out in outcomes.items()
             if out == "unmeasured"} <= api_gated, (
         f"a dropped match unmeasured the config facts: {outcomes}"

@@ -410,6 +410,29 @@ def _tag_body(target_sha, target_type="commit"):
     return {"object": {"type": target_type, "sha": target_sha}}
 
 
+def test_p1411_asks_github_com_whatever_gh_host_says(monkeypatch):
+    """Workflow action references resolve on github.com, so every question
+    used to verify their pins must go to that host even when the caller uses
+    a GitHub Enterprise Server for other ``gh`` commands."""
+    monkeypatch.setenv("GH_HOST", "ghes.example.internal")
+    scan._gh_repo_visible.cache_clear()
+    argvs: list[list[str]] = []
+    stub = _gh_api_stub(commit=False, tag=None)
+
+    def _spy(argv, **kw):
+        argvs.append(list(argv))
+        return stub(argv, **kw)
+
+    with mock.patch.object(scan.subprocess, "run", side_effect=_spy):
+        assert scan._gh_commit_in_repo("actions/checkout", "a" * 40) is False
+
+    assert len(argvs) == 3, argvs
+    for argv in argvs:
+        assert "--hostname" in argv, argv
+        assert argv[argv.index("--hostname") + 1] == "github.com", argv
+    scan._gh_repo_visible.cache_clear()
+
+
 def test_pin_to_an_annotated_tag_object_is_not_an_impostor():
     """setup-uv/pnpm-action-setup style: `uses: owner/action@<sha>` where the
     sha is the ANNOTATED TAG object of a release, not a commit. The commits
@@ -2748,10 +2771,23 @@ def test_scan_passes_the_repo_through_to_the_api_gated_facts(tmp_path):
 
     class _EnvGh:
         """One environment that requires a reviewer and blocks self-review;
-        no readable secret."""
+        no readable secret; a default branch whose ruleset needs one approval
+        that a new push dismisses."""
 
         @staticmethod
         def run_gh_api(path, **kw):
+            if path == "repos/owner/name":
+                return json.dumps({"default_branch": "main"})
+            if path.endswith("/rules/branches/main?per_page=100"):
+                return json.dumps([{
+                    "type": "pull_request", "ruleset_id": 1,
+                    "parameters": {"required_approving_review_count": 1,
+                                   "dismiss_stale_reviews_on_push": True,
+                                   "require_last_push_approval": False}}])
+            if path.endswith("/rulesets/1?includes_parents=true"):
+                return json.dumps({"id": 1, "name": "main",
+                                   "enforcement": "active",
+                                   "bypass_actors": []})
             if path.endswith("/environments?per_page=100"):
                 return json.dumps({"environments": [{
                     "name": "prod", "deployment_branch_policy": None,
@@ -2782,6 +2818,7 @@ def test_scan_passes_the_repo_through_to_the_api_gated_facts(tmp_path):
     assert facts["sec.environments.branch-restricted"]["outcome"] == "pass"
     assert facts["sec.environments.approval-holds"]["outcome"] == "pass"
     assert facts["sec.secrets.environment-scoped"]["outcome"] == "pass"
+    assert facts["sec.default-branch.review-required"]["outcome"] == "pass"
     assert result["security_score"]["unmeasured"] == []
 
 
@@ -2807,8 +2844,9 @@ def test_scan_without_a_repo_leaves_both_api_facts_unmeasured(tmp_path):
         "sec.required-checks.skippable", "sec.fork-approval.effective",
         "sec.environments.branch-restricted",
         "sec.environments.approval-holds",
-        "sec.secrets.environment-scoped"}
-    assert score["scored_count"] == score["applicable_count"] - 5
+        "sec.secrets.environment-scoped",
+        "sec.default-branch.review-required"}
+    assert score["scored_count"] == score["applicable_count"] - 6
 
 
 # ---------------------------------------------------------------------------

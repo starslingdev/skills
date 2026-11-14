@@ -1288,6 +1288,10 @@ def test_job_fetch_memo_collapses_a_duplicate_run_id_fetch():
     # not mutate the other's jobs.
     assert second[0][1][0] is not first[0][1][0]
 
+    assert memo.contains(_fetch, "demo/repo", 7001)
+    assert memo.contains(_fetch, "demo/repo", 7002)
+    assert not memo.contains(_fetch, "demo/repo", 7999)
+
     # A failed fetch is NOT memoized — the next caller re-tries it rather than
     # inheriting a transient gh error.
     fails: list[int] = []

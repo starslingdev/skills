@@ -591,6 +591,17 @@ def test_fix_recipe_summary_strips_dangling_colon_lead_in() -> None:
     assert report._extract_fix_recipe_summary(section2) == "Replace the token with OIDC."
 
 
+def test_p1411_fix_recipe_asks_the_same_github_host_as_the_detector() -> None:
+    section = _CATALOG_TEXT.split("### P14.11", 1)[1].split("### P14.14", 1)[0]
+    commands = [
+        line.strip() for line in section.splitlines()
+        if line.strip().startswith("gh api ")
+    ]
+    assert len(commands) == 3, commands
+    for command in commands:
+        assert "--hostname github.com" in command, command
+
+
 # The 8 HIGH + 2 MEDIUM real catalog patterns. Group count is bounded by the
 # catalog (one group per pattern), and an off-catalog pattern is now dropped as
 # off-contract (S5), so the no-trim contract is exercised with the REAL set.

@@ -35,7 +35,9 @@
     "p50_s": 330.0,
     "sampled_pushes": 1
   },
-  "leaves": [],
+  "leaves": [
+    "eslint-no-cache"
+  ],
   "minority_tails": [],
   "provenance": "required_scoped",
   "representative_jobs": {
@@ -65,9 +67,7 @@
       "check enumeration is bound to the kept config era (no other-config check leaks in)",
       "cluster-floor lever's ceiling floors at a NON-sibling check (not its own matrix leg)",
       "crowned detector leaf agrees with the pole's dominant measured category (no off-category ceiling)",
-      "declared drilled-run timelines are readable",
       "each finding's runner-minute saving is within its jobs' measured compute",
-      "each rendered pole's drill belongs to its own job (no cross-job log leak)",
       "every credited runner-minute saving carries a measured-basis stamp (sizing door)",
       "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)",
       "every rendered cache claim carries a cross-run cache distribution",

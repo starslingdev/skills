@@ -228,12 +228,13 @@ rules applies to an install PR as much as to a fix PR.
    the gate gone entirely, the order matters: delete the workflow FIRST,
    then `ci-secure/`. The other way round reds every run in between, on
    the drift check, before the gate is even reached.
-5. **Up to six facts stay UNMEASURED** in the gate: whether required
+5. **Up to seven facts stay UNMEASURED** in the gate: whether required
    checks are skippable, the fork-PR approval policy — once a CODEOWNERS
    rule covers workflows — whether the branch enforces it (requires review
    from Code Owners), the two environment checks (branches restricted,
-   self-approval blocked) and whether every secret lives in an
-   environment. All six are API reads the gate does not make;
+   self-approval blocked), whether every secret lives in an
+   environment, and whether the default branch requires a reviewed pull
+   request. All seven are API reads the gate does not make;
    it runs the engine with no repository. They are disclosed and never
    counted as passes; a MISSING CODEOWNERS entry still fails. The three
    push-credential checks would not be fully measurable on a CI token anyway

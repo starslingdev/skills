@@ -63,12 +63,24 @@ sub-heading holding three hygiene rows (`sec.environments.branch-restricted`,
 are hygiene checks like the rest: name a failed one in the hygiene clause, in
 one short clause each (`3 environments accept a branch any push credential
 can make`, `3 environments let the requester approve their own run`,
-`11 repo/org secrets sit outside every environment`), and an unmeasured one
+`any workflow pushed to any branch can read 11 secrets`), and an unmeasured one
 as unmeasured with its reason — never `0 secrets` over a list that could not
 be read. Say what must be done in plain words, as the row does; there is no
 prompt to hand to another agent. Never claim these rows would have stopped
 an attack by an admin or org owner; they do not, and the report does not say
 so either.
+
+**When `sec.secrets.environment-scoped` fails, it leads the hygiene clause.**
+The report then carries a `> [!CAUTION]` **Secrets reachable from any
+branch** callout right under the headline; take the count from it and say
+the consequence, not the bookkeeping: `Hygiene: any workflow pushed to any
+branch can read 11 secrets, so one leaked push credential exposes them all
+with no review and no merge; move them into an environment only protected
+branches can use (one that passes the branch-restriction check).` When the
+callout says "at least", say "at least 11" too. Name secrets only as the report names them (names, never values),
+and never call this an attack-vector hit: the vector count is unchanged. No
+callout means the row did not fail; an unmeasured row is still said as
+unmeasured, never as this sentence.
 
 ## The vector-map receipt format
 

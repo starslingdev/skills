@@ -455,7 +455,11 @@ def _normalize_context_brackets(text: str) -> str:
             key = key_match.group("single") or key_match.group("double") or ""
             keys.append(re.sub(r"[^A-Za-z0-9_]", "_", key))
         dotted = match.group("base") + "".join(f".{key}" for key in keys)
-        return dotted + " " * (len(match.group(0)) - len(dotted))
+        # Pad before the replacement so a following dotted suffix remains
+        # attached (``github.event['pull_request'].title``).  The total length
+        # is unchanged, so offsets after the normalized chain still line up
+        # with the original workflow text.
+        return " " * (len(match.group(0)) - len(dotted)) + dotted
 
     return _CONTEXT_BRACKET_CHAIN_RE.sub(_replace, text)
 
@@ -6221,7 +6225,8 @@ def _gh_repo_visible(repo: str) -> bool:
     a CRITICAL impostor finding."""
     try:
         result = subprocess.run(
-            ["gh", "api", f"repos/{repo}", "--silent"],
+            ["gh", "api", f"repos/{repo}", "--silent",
+             "--hostname", "github.com"],
             capture_output=True, text=True, timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -6242,7 +6247,8 @@ def _gh_commit_probe(repo: str, sha: str) -> bool | None:
     """
     try:
         result = subprocess.run(
-            ["gh", "api", f"repos/{repo}/commits/{sha}", "--silent"],
+            ["gh", "api", f"repos/{repo}/commits/{sha}", "--silent",
+             "--hostname", "github.com"],
             capture_output=True, text=True, timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -6300,7 +6306,8 @@ def _gh_peel_tag_object(repo: str, sha: str) -> tuple[str | None, bool]:
         seen.add(current)
         try:
             result = subprocess.run(
-                ["gh", "api", f"repos/{repo}/git/tags/{current}"],
+                ["gh", "api", f"repos/{repo}/git/tags/{current}",
+                 "--hostname", "github.com"],
                 capture_output=True, text=True, timeout=30,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):

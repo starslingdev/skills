@@ -225,12 +225,13 @@ jobs:
 # advisory mode too. Advisory is a ramp for findings, never a mute button for a
 # broken scan.
 #
-# Up to six facts will stay UNMEASURED whatever you do: whether your required
+# Up to seven facts will stay UNMEASURED whatever you do: whether your required
 # checks can be skipped, your fork-PR approval policy — when a CODEOWNERS
 # entry covers your workflows — whether the branch requires review from Code
 # Owners, the two deployment-environment checks (branches restricted,
-# self-approval blocked) and whether every secret lives in an environment. All
-# six are repository settings read through the GitHub API, which this gate
+# self-approval blocked), whether every secret lives in an environment, and
+# whether the default branch requires a reviewed pull request. All
+# seven are repository settings read through the GitHub API, which this gate
 # does not call (several are admin-scoped besides).
 # They are reported as unmeasured and are excluded from the score rather than
 # counted as passes — a coverage gap stated out loud, not a clean result.
