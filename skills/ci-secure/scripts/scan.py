@@ -438,13 +438,62 @@ class RawHit:
     fix_guidance: str | None = None
 
 
-def detect_regex(file_path: Path, pattern: str) -> Iterator[RawHit]:
+_TEMPLATE_EXPRESSION_RE = re.compile(r"\$\{\{(?:(?!\}\}).)*\}\}", re.DOTALL)
+_CONTEXT_PATH_RE = re.compile(
+    r"\b(?P<path>(?:inputs|client_payload|repository_dispatch\.client_payload|"
+    r"github\.event)(?:(?:\.[A-Za-z_][A-Za-z0-9_-]*)|"
+    r"(?:\s*\[\s*(?:'[^']+'|\"[^\"]+\")\s*\]))+)",
+)
+_CONTEXT_BRACKET_KEY_RE = re.compile(
+    r"\s*\[\s*(?:'(?P<single>[^']+)'|\"(?P<double>[^\"]+)\")\s*\]",
+)
+
+
+def _normalize_context_brackets(text: str) -> str:
+    """Turn quoted context indexes into dotted paths without moving offsets.
+
+    The detector patterns describe context paths in dotted form. GitHub also
+    accepts bracket indexing, which is required for names containing a hyphen.
+    Each complete bracket chain is rewritten at once so a chain such as
+    ``github.event['inputs']['max-items']`` remains one path. Spaces pad the
+    shorter dotted spelling to the original length, preserving source offsets
+    and line attribution for the raw workflow text.
+    """
+    def _replace_path(match: re.Match[str]) -> str:
+        path = match.group("path")
+
+        def _replace_key(key_match: re.Match[str]) -> str:
+            key = key_match.group("single") or key_match.group("double") or ""
+            return "." + re.sub(r"[^A-Za-z0-9_]", "_", key)
+
+        dotted = _CONTEXT_BRACKET_KEY_RE.sub(_replace_key, path)
+        # Pad before the replacement so every dotted and bracket segment stays
+        # attached. The total length is unchanged, so later source offsets
+        # still line up with the original workflow text.
+        return " " * (len(path) - len(dotted)) + dotted
+
+    def _replace_expression(match: re.Match[str]) -> str:
+        return _CONTEXT_PATH_RE.sub(_replace_path, match.group(0))
+
+    # Shell text may contain bracket-looking strings whose quoted key embeds a
+    # template expression. Rewriting the whole shell scalar would consume that
+    # expression and hide the injection, so only expression bodies are
+    # normalized.
+    return _TEMPLATE_EXPRESSION_RE.sub(_replace_expression, text)
+
+
+def detect_regex(file_path: Path, pattern: str, *,
+                 normalize_context_brackets: bool = False) -> Iterator[RawHit]:
     content = _read_text_safe(file_path)
     if not content:
         return
+    match_content = (
+        _normalize_context_brackets(content)
+        if normalize_context_brackets else content
+    )
     lines = content.splitlines()
     compiled = re.compile(pattern, re.MULTILINE)
-    for m in compiled.finditer(content):
+    for m in compiled.finditer(match_content):
         line_no = content.count("\n", 0, m.start()) + 1
         idx = line_no - 1
         start = max(0, idx - 1)
@@ -893,7 +942,7 @@ def _is_shape_safe_operand(expr: str) -> bool:
 
 
 def detect_yaml_run_injection(
-    file_path: Path, pattern: str
+    file_path: Path, pattern: str, *, normalize_context_brackets: bool = False,
 ) -> Iterator[RawHit]:
     """Apply a regex only to the text of ``jobs.*.steps.*.run`` scalars.
 
@@ -928,6 +977,10 @@ def detect_yaml_run_injection(
     if not isinstance(jobs, dict):
         return
     compiled = re.compile(pattern)
+    match_text = (
+        _normalize_context_brackets(text)
+        if normalize_context_brackets else text
+    )
     lines = text.splitlines()
     triggers = _on_trigger_names(_get_on_node(doc))
     job_nodes = _job_nodes(text)
@@ -983,7 +1036,11 @@ def detect_yaml_run_injection(
             # step.
             search_cursor = run_node.start_mark.index
             run_end = run_node.end_mark.index
-            for m in compiled.finditer(run_text):
+            match_run_text = (
+                _normalize_context_brackets(run_text)
+                if normalize_context_brackets else run_text
+            )
+            for m in compiled.finditer(match_run_text):
                 snippet = m.group(0)
                 if _is_shape_safe_expression(snippet):
                     logger.debug(
@@ -992,7 +1049,7 @@ def detect_yaml_run_injection(
                         snippet, file_path,
                     )
                     continue
-                idx = text.find(snippet, search_cursor, run_end)
+                idx = match_text.find(snippet, search_cursor, run_end)
                 if idx < 0:
                     # The match exists in the parsed scalar but not
                     # verbatim in the raw file. This happens with YAML
@@ -6858,7 +6915,10 @@ def _scan_once(
 
             if entry.detector == "regex":
                 assert entry.match is not None  # validated in __post_init__
-                hits = list(detect_regex(wf, entry.match))
+                hits = list(detect_regex(
+                    wf, entry.match,
+                    normalize_context_brackets=entry.pattern == "P14.15",
+                ))
             elif entry.detector == "yaml-path":
                 assert entry.yaml_path is not None
                 hits = list(
@@ -6872,7 +6932,10 @@ def _scan_once(
                 hits = list(detect_yaml_on_trigger(wf, entry.trigger_keys))
             elif entry.detector == "yaml-run-injection":
                 assert entry.match is not None
-                hits = list(detect_yaml_run_injection(wf, entry.match))
+                hits = list(detect_yaml_run_injection(
+                    wf, entry.match,
+                    normalize_context_brackets=entry.pattern == "P14.10",
+                ))
             elif entry.detector == "yaml-job-correlated":
                 assert entry.correlation, "validated in __post_init__"
                 corr_fn = _JOB_CORRELATIONS.get(entry.correlation)
