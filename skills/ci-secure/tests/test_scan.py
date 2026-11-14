@@ -20,6 +20,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -478,7 +479,10 @@ def test_bracket_indexed_attacker_inputs_reach_both_shell_sinks(
 
 
 @pytest.mark.parametrize("expression", [
+    "secrets['TOKEN']",
+    "env['TARGET']",
     "matrix['os']",
+    "needs['build'].outputs.value",
     'steps["prepare"].outputs.value',
 ])
 def test_bracket_indexing_does_not_promote_non_source_contexts(
@@ -496,6 +500,38 @@ def test_bracket_indexing_does_not_promote_non_source_contexts(
     patterns = _patterns_for_file(_scan_dir(tmp_path), "safe.yml")
     assert "P14.10" not in patterns
     assert "P14.15" not in patterns
+
+
+def test_dynamic_bracket_index_is_silent_and_does_not_crash(tmp_path: Path) -> None:
+    expression = "inputs[matrix.k]"
+    _write_workflow(tmp_path, "safe.yml", (
+        "on: workflow_dispatch\n"
+        "jobs:\n"
+        "  build:\n"
+        "    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        f'      - run: echo "${{{{ {expression} }}}}"\n'
+        f'      - run: echo "VALUE=${{{{ {expression} }}}}" >> "$GITHUB_ENV"\n'
+    ))
+    patterns = _patterns_for_file(_scan_dir(tmp_path), "safe.yml")
+    assert "P14.10" not in patterns
+    assert "P14.15" not in patterns
+
+
+def test_bracket_normalizer_is_linear_on_a_50000_character_key() -> None:
+    def elapsed(key_length: int) -> float:
+        text = '${{ inputs["' + "x" * key_length + '"] }}'
+        started = time.perf_counter()
+        normalized = scan._normalize_context_brackets(text)
+        duration = time.perf_counter() - started
+        assert len(normalized) == len(text)
+        assert "inputs." + "x" * key_length in normalized
+        return duration
+
+    half = elapsed(25_000)
+    full = elapsed(50_000)
+    assert full < 1.0
+    assert full <= half * 4 + 0.05
 
 
 def test_bracket_indexed_github_generated_shape_stays_safe(tmp_path: Path) -> None:
