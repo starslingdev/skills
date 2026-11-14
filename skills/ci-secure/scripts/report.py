@@ -487,6 +487,21 @@ def _group_severity(members: list[dict[str, Any]]) -> str:
     )
 
 
+def _group_representative(members: list[dict[str, Any]]) -> dict[str, Any]:
+    """Member whose evidence profile governs shared group prose and fixes.
+
+    A producer may assign per-occurrence severity within one catalog pattern.
+    In that case the group headline already uses the worst severity, so its
+    scenario and remediation must come from a member at that same severity —
+    never from whichever workflow happened to sort first.
+    """
+    severity = _group_severity(members)
+    return next(
+        (member for member in members if member.get("severity", "MANUAL") == severity),
+        members[0] if members else {},
+    )
+
+
 def _occurrence_severity_breakdown(members: list[dict[str, Any]]) -> str:
     """Per-severity occurrence split, e.g. ``3 HIGH · 100 MEDIUM · 102 LOW``.
 
@@ -507,7 +522,7 @@ def _occurrence_severity_breakdown(members: list[dict[str, Any]]) -> str:
 
 
 def _group_attacker_scenario(members: list[dict[str, Any]]) -> str:
-    return members[0].get("attacker_scenario") or ""
+    return _group_representative(members).get("attacker_scenario") or ""
 
 
 def _group_is_all_dormant(members: list[dict[str, Any]]) -> bool:
@@ -526,7 +541,7 @@ def _group_short_title(
 ) -> str:
     """The h4 title for a group — a single descriptive sentence-case
     phrase, with no per-file specifics."""
-    first = members[0]
+    first = _group_representative(members)
     pattern = first.get("pattern", "")
     cat = catalog_sections.get(pattern, _ExtractedSection())
     heading = cat.heading_text or pattern
@@ -743,6 +758,8 @@ def _build_fix_prompt(
     changes in working tree).
     """
     n = len(members)
+    representative = _group_representative(members)
+    occurrence_guidance = str(representative.get("fix_guidance", "")).strip()
     occurrences_block = "\n".join(_occurrence_bullet_for_prompt(m) for m in members)
     # Full path, not `<findings.json>`: the file lives under `$TMPDIR` and a
     # dispatched subagent cannot guess the directory from a placeholder. Shell-
@@ -775,13 +792,37 @@ def _build_fix_prompt(
         "authenticated)."
         if is_impostor else ""
     )
+    is_cosmetic_pr_automation = (
+        pattern == "P14.18"
+        and representative.get("severity") == "MEDIUM"
+        and representative.get("fix_strategy") == "limit-cosmetic-pr-automation"
+    )
+    if is_cosmetic_pr_automation:
+        completion_oracle = (
+            "confirm the cosmetic boundary still holds. A P14.18 finding may "
+            "remain only when every listed occurrence is MEDIUM and its "
+            "evidence still says `no checkout`, `no PR-code execution`, and "
+            "`no review/merge API`; a HIGH occurrence or a missing boundary "
+            "marker means the fix is not complete"
+        )
+    else:
+        completion_oracle = (
+            "confirm the chain no longer fires: no finding with "
+            f"`\"pattern\": \"{pattern}\"` may remain in that JSON"
+        )
     risk = _risk_of_change(pattern, cat)
     risk_constraint = f"- Risk of the change: {risk}\n" if risk else ""
 
     tldr = (cat.tldr or "").strip()
     context_line = tldr if tldr else f"Pattern `{pattern}` from the ci-secure catalog."
     recipe_yaml = (cat.fix_recipe_yaml or "").strip()
-    if recipe_yaml:
+    if occurrence_guidance:
+        recipe_section = (
+            f"Catalog reference: {catalog_url}\n\n"
+            "Evidence-specific guidance for this finding:\n\n"
+            f"{occurrence_guidance}"
+        )
+    elif recipe_yaml:
         recipe_section = (
             f"Catalog reference: {catalog_url}\n\n"
             "Recipe (from the catalog):\n\n"
@@ -842,9 +883,8 @@ def _build_fix_prompt(
         "Verify (the oracle — you are done only when it passes): re-run "
         "the ci-secure scan over this repo — `python3 "
         f"<ci-secure>/scripts/run.py --root .{gh_flag} --out "
-        f"{recheck_ref}` — and confirm the chain no longer "
-        f"fires: no finding with `\"pattern\": \"{pattern}\"` may remain "
-        f"in that JSON.{impostor_guard} If one does, occurrences are left — "
+        f"{recheck_ref}` — and {completion_oracle}.{impostor_guard} If the "
+        "completion check fails, occurrences are left — "
         "fix them and re-run. If you also edited the rendered ci-secure "
         "report, `python3 <ci-secure>/tests/verify_report.py --report "
         "<report.md> --findings <the ci-secure findings JSON from your run "
@@ -890,7 +930,7 @@ def _finding_group_section(
     the group has been dispatched, producing
     ``## FIXED — Finding N: {short_title} — …``.
     """
-    first = members[0]
+    first = _group_representative(members)
     pattern = first.get("pattern", "")
     severity = _group_severity(members)
     cat = catalog_sections.get(pattern, _ExtractedSection())
@@ -1236,7 +1276,8 @@ def _finding_group_section(
     # Summary next, then the copy-prompt collapsible. The summary is
     # what a skimmer reads; the collapsible expands when they want to
     # dispatch the fix. Verbose recipe YAML lives behind the catalog link.
-    summary = (cat.fix_recipe_summary or "").strip()
+    occurrence_guidance = str(first.get("fix_guidance", "")).strip()
+    summary = occurrence_guidance or (cat.fix_recipe_summary or "").strip()
     catalog_ref = f"[catalog §{pattern}]({catalog_link})"
     if summary:
         # Block form (a lead-in plus its numbered options) keeps the catalog
@@ -2499,7 +2540,13 @@ _ACTION_BY_FIX_STRATEGY = {
 def _group_action_summary(members: list[dict[str, Any]]) -> str:
     """Curated one-line action verb for a group, or "" to fall back to the
     short title. Keyed off the catalog's `fix_strategy` slug."""
-    return _ACTION_BY_FIX_STRATEGY.get(members[0].get("fix_strategy", ""), "")
+    representative = _group_representative(members)
+    supplied = representative.get("fix_guidance", "")
+    if supplied:
+        # The occurrence-specific guidance is the full visible summary below;
+        # repeating it here as an imperative prints the same paragraph twice.
+        return ""
+    return _ACTION_BY_FIX_STRATEGY.get(representative.get("fix_strategy", ""), "")
 
 
 def _validate_findings(

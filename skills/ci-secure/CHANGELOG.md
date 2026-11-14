@@ -11,6 +11,16 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- P14.18 now keeps `pull_request_target` automation HIGH when it checks out
+  attacker-head code, executes PR-controlled text, or calls review/merge APIs,
+  while classifying label/comment-only jobs with none of those paths as MEDIUM
+  hygiene and recommending that their cosmetic scope stay narrow. Its
+  fail-closed script proof now rejects comments and regex literals, recognizes
+  effective `write-all` grants, and gives cosmetic jobs a completion check that
+  permits a still-required `pull-requests: write` grant.
+
 ### Added
 
 - **2026-11-12** (#341) — ci-secure: a new API-gated config hygiene check,
@@ -344,6 +354,11 @@ entries are dated (UTC). Format loosely follows
   no detector, catalog entry, pattern id or count changes.
 
 ### Fixed
+
+- **2026-11-12** (#332) — Optional GitHub checks now distinguish a missing
+  `gh` executable from an installed CLI that is not authenticated, so the
+  skip guidance tells users whether to install or log in. The README count is
+  updated to the two network lookups plus seven API-gated config facts.
 
 - **2026-11-12** (#324) — P14.10 and P14.15 now treat quoted bracket-indexed
   attacker inputs like their dotted equivalents, including hyphenated input
