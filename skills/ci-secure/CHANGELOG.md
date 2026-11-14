@@ -11,6 +11,16 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- P14.18 now keeps `pull_request_target` automation HIGH when it checks out
+  attacker-head code, executes PR-controlled text, or calls review/merge APIs,
+  while classifying label/comment-only jobs with none of those paths as MEDIUM
+  hygiene and recommending that their cosmetic scope stay narrow. Its
+  fail-closed script proof now rejects comments and regex literals, recognizes
+  effective `write-all` grants, and gives cosmetic jobs a completion check that
+  permits a still-required `pull-requests: write` grant.
+
 ### Added
 
 - **2026-11-12** (#341) — ci-secure: a new API-gated config hygiene check,

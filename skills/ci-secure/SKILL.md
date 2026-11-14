@@ -100,7 +100,7 @@ files.** A run leaves at most two files: the findings JSON (in tmp) and — only
 on the user's save pick — the report. One exception, not a scratch file: a
 Phase 5 fix subagent writes its verification re-scan to
 `${TMPDIR:-/tmp}/ci-secure-recheck-${SLUG}.json` (same per-repo slug), because
-its oracle is "re-run the scan and show the finding is gone", which cannot overwrite `$FINDINGS`.
+its oracle is "re-run the scan and satisfy the finding's completion condition", which cannot overwrite `$FINDINGS`. The P14.18 MEDIUM cosmetic exception may remain only while every listed occurrence stays MEDIUM and retains all three cosmetic-boundary evidence markers; every other finding must be gone.
 
 If `run.py` exits non-zero — OR exits zero but `$FINDINGS` is missing or
 unparseable — that is a **coverage failure, not a clean result**: surface
@@ -112,7 +112,7 @@ a findings file on failure, so there is nothing safe to render over.
 markdown report to make decisions.** One object per occurrence in
 `findings`, keyed `id`, `pattern`, `severity`, `title`, `workflow_file`,
 `line`, `affected_jobs`, `workflow_activity` (with `dormant`), `evidence`,
-`evidence_kind`, `fix_strategy`, `fix_recipe_anchor`; top-level `gh_checks`,
+`evidence_kind`, `fix_strategy`, optional evidence-specific `fix_guidance`, `fix_recipe_anchor`; top-level `gh_checks`,
 `timings`, and the THREE coverage arrays `scan_incomplete`, `dropped_matches`
 and `coverage_notes` — coverage is `complete` only when ALL THREE are empty,
 so reading one alone calls a degraded run clean. Full shape:
@@ -120,8 +120,8 @@ so reading one alone calls a degraded run clean. Full shape:
 
 ## Phase 2.5: Write the attack scenario for every group
 
-The one non-scripted field is the `attacker_scenario`: the report's "What an
-attacker could do" row. `severity` is catalog-authored, the scenario repo-grounded.
+The usually non-scripted field is the `attacker_scenario`: the report's "What an
+attacker could do" row. `severity` starts from the catalog; a detector may override it only when evidence proves a narrower profile.
 
 **Write all scenarios in ONE pass — never one subagent per group.** At most
 ten groups, 2–3 sentences each, and everything needed is at hand: per group
@@ -133,7 +133,7 @@ Write them inline, or hand all groups to a SINGLE `general-purpose` subagent
 at once, using the session model. The
 [scenario writing guide](references/scenario-authoring.md) covers who the
 attacker is, the access they need, the plain-words mechanic, and worked
-examples. Merge each scenario onto **every member** of its group in
+examples. Preserve any scanner-authored scenario; for missing members, author per `(pattern, severity, fix_strategy)` profile and merge only onto matching members in
 `$FINDINGS` — the merged object's shape is worked through in
 [references/scan-output.md](references/scan-output.md).
 
