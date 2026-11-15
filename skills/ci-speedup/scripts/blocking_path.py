@@ -1401,6 +1401,56 @@ def _pole_headline(pole: dict[str, Any]) -> tuple[float, str]:
     return p50, ""
 
 
+def _bimodal_slow_mode_story(pole: dict[str, Any]) -> str:
+    """Reader-facing mode shares and the measured slow-share ceiling.
+
+    The split itself comes from the collector's `_bimodal_split` stamp.  The
+    saving comes from the same per-PR sibling ceilings used by the ordinary
+    pole sizing, restricted to observations in the stamped slow cluster.
+    """
+    bi = pole.get("bimodal")
+    exact = pole.get("_per_pr_floor")
+    if not isinstance(bi, dict) or not isinstance(exact, dict):
+        return ""
+    low = _num(bi.get("low_p50_s"))
+    high = _num(bi.get("high_p50_s"))
+    frac = _num(bi.get("slow_frac"))
+    slow_min = _num(bi.get("slow_min_s"))
+    p50 = _num(pole.get("p50_s")) or 0.0
+    if not low or not high or not frac or not slow_min or high <= low:
+        return ""
+    # The expanded story is only honest when the ordinary P50 headline sits in
+    # the fast cluster.  This is the same predicate `_pole_headline` and the
+    # verifier use.  A slow-cluster median already tells the representative
+    # story, so keep its older bimodal caveat instead.
+    if high <= p50 * 1.15 or p50 > (low + high) / 2:
+        return ""
+    rows = [row for row in (exact.get("rows") or []) if isinstance(row, dict)]
+    ran_rows = [row for row in rows
+                if row.get("target_ran") is not False
+                and (_num(row.get("before_s")) or 0.0) > 0.0]
+    slow_rows = [row for row in ran_rows
+                 if (_num(row.get("before_s")) or 0.0) >= slow_min]
+    slow_ceilings = [float(saving) for row in slow_rows
+                     if (saving := _num(row.get("saving_s"))) is not None]
+    if not slow_ceilings:
+        return ""
+    slow_pct = round(len(slow_rows) / len(ran_rows) * 100)
+    fast_pct = 100 - slow_pct
+    slow_win = _median(slow_ceilings)
+    if slow_win <= 0:
+        return ""
+    all_sampled = len(ran_rows) == int(exact.get("total_n") or 0)
+    lead = (f"{slow_pct}% of sampled PRs wait"
+            if all_sampled else
+            f"Of sampled PRs where this check ran, {slow_pct}% wait")
+    return (
+        f"{lead} about **{_clock(high)}** on this check; "
+        f"the other {fast_pct}% wait about **{_clock(low)}**. The slow-mode win is "
+        f"about **{_clock(slow_win)}** (median of the measured per-PR ceilings)."
+    )
+
+
 def _tl_name(s: dict[str, Any]) -> str:
     """The display name of one step entry, from EITHER of the two step shapes the
     collision scan draws from — the captured representative-run TIMELINE (whose entries
@@ -7112,7 +7162,8 @@ def _iqr(xs: list[float]) -> float:
     return _median(s[(n + 1) // 2:]) - _median(s[: n // 2])
 
 
-def _bimodal_note(checks: list[dict[str, Any]], gate_p50: float | None = None) -> list[str]:
+def _bimodal_note(checks: list[dict[str, Any]], gate_p50: float | None = None,
+                  slow_ranked_names: set[str] | None = None) -> list[str]:
     """Surface checks whose duration is BIMODAL and whose median landed on the FAST
     mode — so the level-1 bar (a P50) under-states them and the P50 ranking can drop
     them below the spine even though they are a long gate on a large share of PRs.
@@ -7144,14 +7195,18 @@ def _bimodal_note(checks: list[dict[str, Any]], gate_p50: float | None = None) -
         rows.append((_clean_label(str(c.get("name", ""))), p50, lo, hi, frac))
     if not rows:
         return []
-    out = ["> **⚠️ Bimodal gates (P50 hides a frequent slow mode).** These checks rank "
-           "low by median — so the P50 spine puts them below the gate, and some aren't "
-           "in the Contents critical-path list above — but each is a long gate on a "
-           "large share of PRs:"]
+    out = ["> **⚠️ Bimodal gates (P50 hides a frequent slow mode).** Contents rows "
+           "display the slow mode when one of these checks is ranked there; checks outside "
+           "Contents can otherwise be easy to miss:"]
     for name, p50, _lo, hi, frac in rows:
-        out.append(f"> - `{name}` — P50 only **{_clock(p50)}**, but **~{_clock(hi)}** on "
-                   f"~{round(frac * 100)}% of PRs; on those it is among the slowest gates "
-                   "(median-ranked low, so easy to miss).")
+        if name in (slow_ranked_names or set()):
+            out.append(
+                f"> - `{name}` — Contents displays slow mode **~{_clock(hi)}**; P50 is "
+                f"**{_clock(p50)}**. The slow mode occurs on ~{round(frac * 100)}% of PRs.")
+        else:
+            out.append(f"> - `{name}` — P50 only **{_clock(p50)}**, but **~{_clock(hi)}** on "
+                       f"~{round(frac * 100)}% of PRs; on those it is among the slowest gates "
+                       "(median-ranked low, so easy to miss).")
     out.append("")
     return out
 
@@ -7740,12 +7795,16 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
                 p["_pole_group"] = (
                     "holds-up" if (count >= _POLE_HOLDS_UP_MIN_COUNT
                                    or (n > 0 and count == n)) else "rare-last")
+        # A fast-median bimodal check is ordered by the slow mode its drill and
+        # executive summary disclose; otherwise a 30s/6m gate sits below a
+        # unimodal 58s check while Long pole 1 says the 58s check is the larger
+        # opportunity. Non-bimodal rows keep their P50 ordering byte-for-byte.
         holds_up = sorted((p for p in matrices if p["_pole_group"] == "holds-up"),
-                          key=lambda p: -(_num(p.get("p50_s")) or 0.0))
+                          key=lambda p: -_pole_headline(p)[0])
         rare_last = sorted((p for p in matrices if p["_pole_group"] == "rare-last"),
-                           key=lambda p: -(_num(p.get("p50_s")) or 0.0))
+                           key=lambda p: -_pole_headline(p)[0])
         unconfirmed = sorted((p for p in matrices if p["_pole_group"] == "unconfirmed"),
-                             key=lambda p: -(_num(p.get("p50_s")) or 0.0))
+                             key=lambda p: -_pole_headline(p)[0])
         selected = [*holds_up, *rare_last, *unconfirmed]
         return selected[:_TOP_WORKFLOWS], file_poles
     typical_rest = sorted((p for p in matrices[1:] if typical(p)), key=lambda p: -impact(p))
@@ -7933,7 +7992,9 @@ def _toc_block(pole_wfs: list[dict[str, Any]], wf_gate: dict[str, int],
                     "ran on few PRs" if present <= npop * _RARE_PRESENCE_FRAC else
                     "a slower check usually ran alongside")
                 frequency += f" · {reason}"
-            lead = f"P50 {p50_dur}"
+            lead = (f"Slow mode {dur} (P50 {p50_dur})"
+                    if abs(head_s - (_num(p.get("p50_s")) or 0.0)) > 0.5
+                    else f"P50 {p50_dur}")
         else:
             frequency = ""
             lead = dur
@@ -15258,7 +15319,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 break
     if pole_wfs and pole_wfs[0].get("_pole_group") in {"holds-up", "rare-last"}:
         _pole_one = _lbl(_clean_label(str(pole_wfs[0].get("check", ""))))
-        _pole_one_p50 = _clock(_num(pole_wfs[0].get("p50_s")) or 0.0)
+        _pole_one_p50_s = _num(pole_wfs[0].get("p50_s")) or 0.0
+        _pole_one_p50 = _clock(_pole_one_p50_s)
+        _pole_one_head_s, _ = _pole_headline(pole_wfs[0])
+        _pole_one_bimodal = _bimodal_slow_mode_story(pole_wfs[0])
         _pole_one_group = (
             "Checks that hold up most PRs"
             if pole_wfs[0].get("_pole_group") == "holds-up"
@@ -15266,10 +15330,17 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         for _i in range(len(out) - 1, -1, -1):
             if out[_i].startswith("> **Bottom line.**"):
                 _rest = out[_i][len("> **Bottom line.**"):].lstrip()
+                _duration = (
+                    f"slow mode **{_clock(_pole_one_head_s)}** "
+                    f"(P50 **{_pole_one_p50}**)"
+                    if abs(_pole_one_head_s - _pole_one_p50_s) > 0.5
+                    else f"P50 **{_pole_one_p50}**")
                 out[_i] = (
-                    f"> **Bottom line.** Long pole 1, `{_pole_one}`, has P50 "
-                    f"**{_pole_one_p50}** and is the longest "
-                    f"check in **{_pole_one_group}**. {_rest}")
+                    f"> **Bottom line.** Long pole 1, `{_pole_one}`, has {_duration} "
+                    f"and is the longest "
+                    f"check in **{_pole_one_group}**. "
+                    + (f"{_pole_one_bimodal} " if _pole_one_bimodal else "")
+                    + _rest)
                 break
     # Owner UX edit (2026-07-19): TOP MATTER = metadata table → ONE Bottom-line blockquote
     # → Contents, nothing else. Everything that used to render as its own blockquote between
@@ -15731,7 +15802,25 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     # Scan ALL typical checks (not just the poles listed in Contents): the whole point is
     # a check whose SLOW mode would rank it as a top gate but whose median ranks it low and
     # out of the critical-path list (e.g. a turbo-cache-dependent job fast on cache hits).
-    out += _bimodal_note(src, _num(blocker.get("p50_s")))
+    # Per-PR population analysis can attach the split to a rendered pole after
+    # the broad check list was built.  Join that evidence by check name so the
+    # callout and the pole/Contents headline describe the same two durations.
+    _bimodal_poles = {
+        str(p.get("check", "")): p.get("bimodal") for p in pole_wfs
+        if isinstance(p.get("bimodal"), dict)
+    }
+    _bimodal_src: list[dict[str, Any]] = []
+    for _check in src:
+        _joined = dict(_check)
+        if not isinstance(_joined.get("bimodal"), dict):
+            _joined["bimodal"] = _bimodal_poles.get(str(_joined.get("name", "")))
+        _bimodal_src.append(_joined)
+    _slow_ranked_names = {
+        _clean_label(str(p.get("check", ""))) for p in pole_wfs
+        if abs(_pole_headline(p)[0] - (_num(p.get("p50_s")) or 0.0)) > 0.5
+    }
+    out += _bimodal_note(
+        _bimodal_src, _num(blocker.get("p50_s")), _slow_ranked_names)
 
     opt81_rendered: set[int] = set()
     opt83_rendered: set[int] = set()
@@ -16215,7 +16304,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # crowned leaf's category and asserts it agrees with the pole's dominant_category.
         if leaf is not None:
             out += [_LEAF_CROWN_MARKER.format(fk=str(leaf.get("fix_key", ""))), ""]
-        if bi_caveat:
+        _bimodal_story = _bimodal_slow_mode_story(p) if i == 1 else ""
+        if _bimodal_story:
+            out += [f"_{_bimodal_story}_", ""]
+        elif bi_caveat:
             out += [bi_caveat, ""]
         # What the sampled runs actually DID - the observed min/median/max of this pole's
         # own retained observations. Sits with the other qualifiers of the header duration,

@@ -58,6 +58,7 @@
       "a pole's step list says how many skipped or untimeable steps it leaves out",
       "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render",
       "aggregation-gate poles tell the upstream story, never an optimize-this prompt",
+      "bimodal Long pole 1 states both modes and its slow-share win",
       "cache finding's framing matches its measured hit-rate distribution",
       "cache savings pass budget, invalidation and transfer-cost guards",
       "chain headline re-derives from the stamped chain facts",
