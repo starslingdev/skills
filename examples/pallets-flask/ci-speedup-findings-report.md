@@ -38,8 +38,8 @@ not measured: lifecycle data was not collected
 
 **Checks that hold up most PRs** - finished last on at least 2 sampled PRs; longest first:
 
-1. 🟡 [Windows](#pole-1) - P50 34s (the gate) · finishes last on 18/20 PRs
-2. 🟡 [main](#pole-2) - P50 19s · finishes last on 2/20 PRs
+1. 🟡 [Windows](#pole-1) - P50 34s (the gate) · finishes last on 18/20 PRs · `tests.yaml` gates 18/20 PRs
+2. 🟡 [main](#pole-2) - P50 19s · finishes last on 2/20 PRs · `pre-commit.yaml` gates 2/20 PRs
 
 **Long but rarely the last to finish** - finished last on fewer than 2 sampled PRs; longest first, with why:
 
@@ -121,7 +121,7 @@ REPO: pallets/flask (audited at commit 36e4a82)
 
 THE GATE
 - Workflow `tests.yaml`, job `Windows`.
-- Slowest check a typical PR waits on: P50 34s.
+- Slowest check a typical PR waits on: P50 34s; its workflow `tests.yaml` gates 18/20 sampled PRs.
 
 Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
 
@@ -207,7 +207,7 @@ REPO: pallets/flask (audited at commit 36e4a82)
 
 THE GATE
 - Workflow `pre-commit.yaml`, job `main`.
-- Slowest check a typical PR waits on: P50 19s.
+- Slowest check a typical PR waits on: P50 19s; its workflow `pre-commit.yaml` gates 2/20 sampled PRs.
 
 Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
 
@@ -743,7 +743,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `ebcb369-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `b72853c-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 47 runs / 152 jobs sampled | Critical-path + per-step P50 |
 | job logs | 1 job log(s) sampled | Step internals + cross-run magnitude (deeper levels) |
 | workflow YAML | 5 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

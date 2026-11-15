@@ -1,0 +1,1521 @@
+{
+  "repo": "fixture/bookkeeping-last-job",
+  "captured_at": "2026-01-31T00:00:00Z",
+  "default_branch": "main",
+  "required_checks": [],
+  "workflows": [
+    {
+      "id": 203,
+      "path": ".github/workflows/ci.yml",
+      "name": "CI",
+      "runs_30d": 20,
+      "runs": [
+        {
+          "id": 2000,
+          "event": "pull_request",
+          "head_branch": "feature-0",
+          "head_sha": "sha-00",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-24T00:00:00Z",
+          "run_started_at": "2026-01-24T00:00:00Z",
+          "updated_at": "2026-01-24T00:03:30Z"
+        },
+        {
+          "id": 2001,
+          "event": "pull_request",
+          "head_branch": "feature-1",
+          "head_sha": "sha-01",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-25T00:00:00Z",
+          "run_started_at": "2026-01-25T00:00:00Z",
+          "updated_at": "2026-01-25T00:03:30Z"
+        },
+        {
+          "id": 2002,
+          "event": "pull_request",
+          "head_branch": "feature-2",
+          "head_sha": "sha-02",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-26T00:00:00Z",
+          "run_started_at": "2026-01-26T00:00:00Z",
+          "updated_at": "2026-01-26T00:03:30Z"
+        },
+        {
+          "id": 2003,
+          "event": "pull_request",
+          "head_branch": "feature-3",
+          "head_sha": "sha-03",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-27T00:00:00Z",
+          "run_started_at": "2026-01-27T00:00:00Z",
+          "updated_at": "2026-01-27T00:03:30Z"
+        },
+        {
+          "id": 2004,
+          "event": "pull_request",
+          "head_branch": "feature-4",
+          "head_sha": "sha-04",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-28T00:00:00Z",
+          "run_started_at": "2026-01-28T00:00:00Z",
+          "updated_at": "2026-01-28T00:03:30Z"
+        },
+        {
+          "id": 2005,
+          "event": "pull_request",
+          "head_branch": "feature-5",
+          "head_sha": "sha-05",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-24T01:00:00Z",
+          "run_started_at": "2026-01-24T01:00:00Z",
+          "updated_at": "2026-01-24T01:03:30Z"
+        },
+        {
+          "id": 2006,
+          "event": "pull_request",
+          "head_branch": "feature-6",
+          "head_sha": "sha-06",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-25T01:00:00Z",
+          "run_started_at": "2026-01-25T01:00:00Z",
+          "updated_at": "2026-01-25T01:03:30Z"
+        },
+        {
+          "id": 2007,
+          "event": "pull_request",
+          "head_branch": "feature-7",
+          "head_sha": "sha-07",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-26T01:00:00Z",
+          "run_started_at": "2026-01-26T01:00:00Z",
+          "updated_at": "2026-01-26T01:03:30Z"
+        },
+        {
+          "id": 2008,
+          "event": "pull_request",
+          "head_branch": "feature-8",
+          "head_sha": "sha-08",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-27T01:00:00Z",
+          "run_started_at": "2026-01-27T01:00:00Z",
+          "updated_at": "2026-01-27T01:03:30Z"
+        },
+        {
+          "id": 2009,
+          "event": "pull_request",
+          "head_branch": "feature-9",
+          "head_sha": "sha-09",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-28T01:00:00Z",
+          "run_started_at": "2026-01-28T01:00:00Z",
+          "updated_at": "2026-01-28T01:03:30Z"
+        },
+        {
+          "id": 2010,
+          "event": "pull_request",
+          "head_branch": "feature-10",
+          "head_sha": "sha-10",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-24T02:00:00Z",
+          "run_started_at": "2026-01-24T02:00:00Z",
+          "updated_at": "2026-01-24T02:03:30Z"
+        },
+        {
+          "id": 2011,
+          "event": "pull_request",
+          "head_branch": "feature-11",
+          "head_sha": "sha-11",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-25T02:00:00Z",
+          "run_started_at": "2026-01-25T02:00:00Z",
+          "updated_at": "2026-01-25T02:03:30Z"
+        },
+        {
+          "id": 2012,
+          "event": "pull_request",
+          "head_branch": "feature-12",
+          "head_sha": "sha-12",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-26T02:00:00Z",
+          "run_started_at": "2026-01-26T02:00:00Z",
+          "updated_at": "2026-01-26T02:03:30Z"
+        },
+        {
+          "id": 2013,
+          "event": "pull_request",
+          "head_branch": "feature-13",
+          "head_sha": "sha-13",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-27T02:00:00Z",
+          "run_started_at": "2026-01-27T02:00:00Z",
+          "updated_at": "2026-01-27T02:03:30Z"
+        },
+        {
+          "id": 2014,
+          "event": "pull_request",
+          "head_branch": "feature-14",
+          "head_sha": "sha-14",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-28T02:00:00Z",
+          "run_started_at": "2026-01-28T02:00:00Z",
+          "updated_at": "2026-01-28T02:03:30Z"
+        },
+        {
+          "id": 2015,
+          "event": "pull_request",
+          "head_branch": "feature-15",
+          "head_sha": "sha-15",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-24T03:00:00Z",
+          "run_started_at": "2026-01-24T03:00:00Z",
+          "updated_at": "2026-01-24T03:03:30Z"
+        },
+        {
+          "id": 2016,
+          "event": "pull_request",
+          "head_branch": "feature-16",
+          "head_sha": "sha-16",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-25T03:00:00Z",
+          "run_started_at": "2026-01-25T03:00:00Z",
+          "updated_at": "2026-01-25T03:03:30Z"
+        },
+        {
+          "id": 2017,
+          "event": "pull_request",
+          "head_branch": "feature-17",
+          "head_sha": "sha-17",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-26T03:00:00Z",
+          "run_started_at": "2026-01-26T03:00:00Z",
+          "updated_at": "2026-01-26T03:03:30Z"
+        },
+        {
+          "id": 2018,
+          "event": "pull_request",
+          "head_branch": "feature-18",
+          "head_sha": "sha-18",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-27T03:00:00Z",
+          "run_started_at": "2026-01-27T03:00:00Z",
+          "updated_at": "2026-01-27T03:03:30Z"
+        },
+        {
+          "id": 2019,
+          "event": "pull_request",
+          "head_branch": "feature-19",
+          "head_sha": "sha-19",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-28T03:00:00Z",
+          "run_started_at": "2026-01-28T03:00:00Z",
+          "updated_at": "2026-01-28T03:03:30Z"
+        }
+      ]
+    }
+  ],
+  "jobs": {
+    "2000": [
+      {
+        "id": 20001,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T00:00:00Z",
+        "completed_at": "2026-01-24T00:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-24T00:00:00Z",
+            "completed_at": "2026-01-24T00:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20002,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T00:00:00Z",
+        "completed_at": "2026-01-24T00:03:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-24T00:00:00Z",
+            "completed_at": "2026-01-24T00:03:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20009,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T00:03:00Z",
+        "completed_at": "2026-01-24T00:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-24T00:03:00Z",
+            "completed_at": "2026-01-24T00:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2001": [
+      {
+        "id": 20011,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T00:00:00Z",
+        "completed_at": "2026-01-25T00:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-25T00:00:00Z",
+            "completed_at": "2026-01-25T00:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20012,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T00:00:00Z",
+        "completed_at": "2026-01-25T00:03:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-25T00:00:00Z",
+            "completed_at": "2026-01-25T00:03:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20019,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T00:03:00Z",
+        "completed_at": "2026-01-25T00:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-25T00:03:00Z",
+            "completed_at": "2026-01-25T00:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2002": [
+      {
+        "id": 20021,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-26T00:00:00Z",
+            "completed_at": "2026-01-26T00:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20022,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:03:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-26T00:00:00Z",
+            "completed_at": "2026-01-26T00:03:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20029,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:03:00Z",
+        "completed_at": "2026-01-26T00:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-26T00:03:00Z",
+            "completed_at": "2026-01-26T00:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2003": [
+      {
+        "id": 20031,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-27T00:00:00Z",
+            "completed_at": "2026-01-27T00:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20032,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:03:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-27T00:00:00Z",
+            "completed_at": "2026-01-27T00:03:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20039,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:03:00Z",
+        "completed_at": "2026-01-27T00:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-27T00:03:00Z",
+            "completed_at": "2026-01-27T00:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2004": [
+      {
+        "id": 20041,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-28T00:00:00Z",
+            "completed_at": "2026-01-28T00:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20042,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:03:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-28T00:00:00Z",
+            "completed_at": "2026-01-28T00:03:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20049,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:03:00Z",
+        "completed_at": "2026-01-28T00:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-28T00:03:00Z",
+            "completed_at": "2026-01-28T00:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2005": [
+      {
+        "id": 20051,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T01:00:00Z",
+        "completed_at": "2026-01-24T01:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-24T01:00:00Z",
+            "completed_at": "2026-01-24T01:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20052,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T01:00:00Z",
+        "completed_at": "2026-01-24T01:03:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-24T01:00:00Z",
+            "completed_at": "2026-01-24T01:03:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20059,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T01:03:00Z",
+        "completed_at": "2026-01-24T01:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-24T01:03:00Z",
+            "completed_at": "2026-01-24T01:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2006": [
+      {
+        "id": 20061,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T01:00:00Z",
+        "completed_at": "2026-01-25T01:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-25T01:00:00Z",
+            "completed_at": "2026-01-25T01:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20062,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T01:00:00Z",
+        "completed_at": "2026-01-25T01:03:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-25T01:00:00Z",
+            "completed_at": "2026-01-25T01:03:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20069,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T01:03:00Z",
+        "completed_at": "2026-01-25T01:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-25T01:03:00Z",
+            "completed_at": "2026-01-25T01:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2007": [
+      {
+        "id": 20071,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T01:00:00Z",
+        "completed_at": "2026-01-26T01:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-26T01:00:00Z",
+            "completed_at": "2026-01-26T01:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20072,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T01:00:00Z",
+        "completed_at": "2026-01-26T01:03:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-26T01:00:00Z",
+            "completed_at": "2026-01-26T01:03:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20079,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T01:03:00Z",
+        "completed_at": "2026-01-26T01:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-26T01:03:00Z",
+            "completed_at": "2026-01-26T01:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2008": [
+      {
+        "id": 20081,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T01:00:00Z",
+        "completed_at": "2026-01-27T01:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-27T01:00:00Z",
+            "completed_at": "2026-01-27T01:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20082,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T01:00:00Z",
+        "completed_at": "2026-01-27T01:03:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-27T01:00:00Z",
+            "completed_at": "2026-01-27T01:03:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20089,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T01:03:00Z",
+        "completed_at": "2026-01-27T01:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-27T01:03:00Z",
+            "completed_at": "2026-01-27T01:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2009": [
+      {
+        "id": 20091,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T01:00:00Z",
+        "completed_at": "2026-01-28T01:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-28T01:00:00Z",
+            "completed_at": "2026-01-28T01:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20092,
+        "name": "gate",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T01:00:00Z",
+        "completed_at": "2026-01-28T01:03:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "test",
+            "started_at": "2026-01-28T01:00:00Z",
+            "completed_at": "2026-01-28T01:03:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20099,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T01:03:00Z",
+        "completed_at": "2026-01-28T01:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-28T01:03:00Z",
+            "completed_at": "2026-01-28T01:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2010": [
+      {
+        "id": 20101,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T02:00:00Z",
+        "completed_at": "2026-01-24T02:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-24T02:00:00Z",
+            "completed_at": "2026-01-24T02:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20109,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T02:03:00Z",
+        "completed_at": "2026-01-24T02:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-24T02:03:00Z",
+            "completed_at": "2026-01-24T02:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2011": [
+      {
+        "id": 20111,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T02:00:00Z",
+        "completed_at": "2026-01-25T02:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-25T02:00:00Z",
+            "completed_at": "2026-01-25T02:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20119,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T02:03:00Z",
+        "completed_at": "2026-01-25T02:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-25T02:03:00Z",
+            "completed_at": "2026-01-25T02:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2012": [
+      {
+        "id": 20121,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T02:00:00Z",
+        "completed_at": "2026-01-26T02:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-26T02:00:00Z",
+            "completed_at": "2026-01-26T02:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20129,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T02:03:00Z",
+        "completed_at": "2026-01-26T02:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-26T02:03:00Z",
+            "completed_at": "2026-01-26T02:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2013": [
+      {
+        "id": 20131,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T02:00:00Z",
+        "completed_at": "2026-01-27T02:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-27T02:00:00Z",
+            "completed_at": "2026-01-27T02:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20139,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T02:03:00Z",
+        "completed_at": "2026-01-27T02:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-27T02:03:00Z",
+            "completed_at": "2026-01-27T02:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2014": [
+      {
+        "id": 20141,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T02:00:00Z",
+        "completed_at": "2026-01-28T02:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-28T02:00:00Z",
+            "completed_at": "2026-01-28T02:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20149,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T02:03:00Z",
+        "completed_at": "2026-01-28T02:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-28T02:03:00Z",
+            "completed_at": "2026-01-28T02:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2015": [
+      {
+        "id": 20151,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T03:00:00Z",
+        "completed_at": "2026-01-24T03:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-24T03:00:00Z",
+            "completed_at": "2026-01-24T03:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20159,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-24T03:03:00Z",
+        "completed_at": "2026-01-24T03:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-24T03:03:00Z",
+            "completed_at": "2026-01-24T03:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2016": [
+      {
+        "id": 20161,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T03:00:00Z",
+        "completed_at": "2026-01-25T03:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-25T03:00:00Z",
+            "completed_at": "2026-01-25T03:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20169,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-25T03:03:00Z",
+        "completed_at": "2026-01-25T03:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-25T03:03:00Z",
+            "completed_at": "2026-01-25T03:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2017": [
+      {
+        "id": 20171,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T03:00:00Z",
+        "completed_at": "2026-01-26T03:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-26T03:00:00Z",
+            "completed_at": "2026-01-26T03:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20179,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T03:03:00Z",
+        "completed_at": "2026-01-26T03:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-26T03:03:00Z",
+            "completed_at": "2026-01-26T03:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2018": [
+      {
+        "id": 20181,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T03:00:00Z",
+        "completed_at": "2026-01-27T03:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-27T03:00:00Z",
+            "completed_at": "2026-01-27T03:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20189,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T03:03:00Z",
+        "completed_at": "2026-01-27T03:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-27T03:03:00Z",
+            "completed_at": "2026-01-27T03:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ],
+    "2019": [
+      {
+        "id": 20191,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T03:00:00Z",
+        "completed_at": "2026-01-28T03:02:00Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "build",
+            "started_at": "2026-01-28T03:00:00Z",
+            "completed_at": "2026-01-28T03:02:00Z",
+            "conclusion": "success"
+          }
+        ]
+      },
+      {
+        "id": 20199,
+        "name": "cleanup",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T03:03:00Z",
+        "completed_at": "2026-01-28T03:03:30Z",
+        "conclusion": "success",
+        "steps": [
+          {
+            "name": "cleanup",
+            "started_at": "2026-01-28T03:03:00Z",
+            "completed_at": "2026-01-28T03:03:30Z",
+            "conclusion": "success"
+          }
+        ]
+      }
+    ]
+  },
+  "checks": {
+    "sha-00": [
+      {
+        "name": "build",
+        "started_at": "2026-01-24T00:00:00Z",
+        "completed_at": "2026-01-24T00:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "gate",
+        "started_at": "2026-01-24T00:00:00Z",
+        "completed_at": "2026-01-24T00:03:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-24T00:03:00Z",
+        "completed_at": "2026-01-24T00:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-01": [
+      {
+        "name": "build",
+        "started_at": "2026-01-25T00:00:00Z",
+        "completed_at": "2026-01-25T00:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "gate",
+        "started_at": "2026-01-25T00:00:00Z",
+        "completed_at": "2026-01-25T00:03:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-25T00:03:00Z",
+        "completed_at": "2026-01-25T00:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-02": [
+      {
+        "name": "build",
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "gate",
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:03:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-26T00:03:00Z",
+        "completed_at": "2026-01-26T00:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-03": [
+      {
+        "name": "build",
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "gate",
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:03:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-27T00:03:00Z",
+        "completed_at": "2026-01-27T00:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-04": [
+      {
+        "name": "build",
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "gate",
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:03:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-28T00:03:00Z",
+        "completed_at": "2026-01-28T00:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-05": [
+      {
+        "name": "build",
+        "started_at": "2026-01-24T01:00:00Z",
+        "completed_at": "2026-01-24T01:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "gate",
+        "started_at": "2026-01-24T01:00:00Z",
+        "completed_at": "2026-01-24T01:03:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-24T01:03:00Z",
+        "completed_at": "2026-01-24T01:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-06": [
+      {
+        "name": "build",
+        "started_at": "2026-01-25T01:00:00Z",
+        "completed_at": "2026-01-25T01:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "gate",
+        "started_at": "2026-01-25T01:00:00Z",
+        "completed_at": "2026-01-25T01:03:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-25T01:03:00Z",
+        "completed_at": "2026-01-25T01:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-07": [
+      {
+        "name": "build",
+        "started_at": "2026-01-26T01:00:00Z",
+        "completed_at": "2026-01-26T01:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "gate",
+        "started_at": "2026-01-26T01:00:00Z",
+        "completed_at": "2026-01-26T01:03:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-26T01:03:00Z",
+        "completed_at": "2026-01-26T01:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-08": [
+      {
+        "name": "build",
+        "started_at": "2026-01-27T01:00:00Z",
+        "completed_at": "2026-01-27T01:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "gate",
+        "started_at": "2026-01-27T01:00:00Z",
+        "completed_at": "2026-01-27T01:03:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-27T01:03:00Z",
+        "completed_at": "2026-01-27T01:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-09": [
+      {
+        "name": "build",
+        "started_at": "2026-01-28T01:00:00Z",
+        "completed_at": "2026-01-28T01:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "gate",
+        "started_at": "2026-01-28T01:00:00Z",
+        "completed_at": "2026-01-28T01:03:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-28T01:03:00Z",
+        "completed_at": "2026-01-28T01:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-10": [
+      {
+        "name": "build",
+        "started_at": "2026-01-24T02:00:00Z",
+        "completed_at": "2026-01-24T02:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-24T02:03:00Z",
+        "completed_at": "2026-01-24T02:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-11": [
+      {
+        "name": "build",
+        "started_at": "2026-01-25T02:00:00Z",
+        "completed_at": "2026-01-25T02:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-25T02:03:00Z",
+        "completed_at": "2026-01-25T02:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-12": [
+      {
+        "name": "build",
+        "started_at": "2026-01-26T02:00:00Z",
+        "completed_at": "2026-01-26T02:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-26T02:03:00Z",
+        "completed_at": "2026-01-26T02:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-13": [
+      {
+        "name": "build",
+        "started_at": "2026-01-27T02:00:00Z",
+        "completed_at": "2026-01-27T02:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-27T02:03:00Z",
+        "completed_at": "2026-01-27T02:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-14": [
+      {
+        "name": "build",
+        "started_at": "2026-01-28T02:00:00Z",
+        "completed_at": "2026-01-28T02:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-28T02:03:00Z",
+        "completed_at": "2026-01-28T02:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-15": [
+      {
+        "name": "build",
+        "started_at": "2026-01-24T03:00:00Z",
+        "completed_at": "2026-01-24T03:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-24T03:03:00Z",
+        "completed_at": "2026-01-24T03:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-16": [
+      {
+        "name": "build",
+        "started_at": "2026-01-25T03:00:00Z",
+        "completed_at": "2026-01-25T03:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-25T03:03:00Z",
+        "completed_at": "2026-01-25T03:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-17": [
+      {
+        "name": "build",
+        "started_at": "2026-01-26T03:00:00Z",
+        "completed_at": "2026-01-26T03:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-26T03:03:00Z",
+        "completed_at": "2026-01-26T03:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-18": [
+      {
+        "name": "build",
+        "started_at": "2026-01-27T03:00:00Z",
+        "completed_at": "2026-01-27T03:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-27T03:03:00Z",
+        "completed_at": "2026-01-27T03:03:30Z",
+        "conclusion": "success"
+      }
+    ],
+    "sha-19": [
+      {
+        "name": "build",
+        "started_at": "2026-01-28T03:00:00Z",
+        "completed_at": "2026-01-28T03:02:00Z",
+        "conclusion": "success"
+      },
+      {
+        "name": "cleanup",
+        "started_at": "2026-01-28T03:03:00Z",
+        "completed_at": "2026-01-28T03:03:30Z",
+        "conclusion": "success"
+      }
+    ]
+  },
+  "shape": "no-required-long-job"
+}

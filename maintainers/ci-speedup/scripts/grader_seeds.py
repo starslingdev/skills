@@ -121,6 +121,7 @@ TRIAGE_ALLOWLIST = {
     "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)": AUTO_SEED,  # check_era_chain_spine_bound_to_kept_era (issue #80)
     "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)": AUTO_SEED,  # check_spine_heavy_check_disclosed
     "rendered per-workflow gate frequency matches the populations re-derivation": AUTO_SEED,        # check_workflow_gate_frequency_matches
+    "gate-frequency ordering has enough events, span, and non-overlapping intervals": AUTO_SEED,  # check_gate_frequency_confidence
     "pole groups are duration-ordered and Bottom line agrees with Long pole 1": AUTO_SEED,          # check_pole_groups_and_bottom_agree
     "no drilled pole's job is also framed as an 'Also noticed' minor-cleanup finding": AUTO_SEED,  # check_pole_not_reframed_as_hygiene
     "TOC 'Also noticed' pointer's on/off-path label matches the appendix": AUTO_SEED,             # check_toc_also_noticed_label_honest
@@ -248,6 +249,7 @@ CHECK_CLASS = {
     "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)": "fabricated-or-unsupported-finding",  # issue #80: a dropped-era PR's timing feeds the "typical PR waits N" makespan headline under a disclosure claiming the kept era — a measurement of a config that isn't the one disclosed
     "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)": "coverage-gap-dead-end",  # an undisclosed gap
     "rendered per-workflow gate frequency matches the populations re-derivation": "fabricated-or-unsupported-finding",  # a rendered frequency not backed by the re-derivation
+    "gate-frequency ordering has enough events, span, and non-overlapping intervals": "fabricated-or-unsupported-finding",  # ranked frequency lacks statistical support
     "pole groups are duration-ordered and Bottom line agrees with Long pole 1": "mis-ranked-lever",  # group order or headline disagrees with the measured pole ranking
     "no drilled pole's job is also framed as an 'Also noticed' minor-cleanup finding": "mis-ranked-lever",  # a major pole reframed as minor = a ranking error
     "TOC 'Also noticed' pointer's on/off-path label matches the appendix": "fabricated-or-unsupported-finding",  # a rendered label not backed by the appendix
