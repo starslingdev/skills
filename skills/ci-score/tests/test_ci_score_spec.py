@@ -7,6 +7,7 @@ stay legible in the artifact, not only in chat history.
 """
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -171,6 +172,84 @@ def test_methodology_and_skill_md_describe_the_basic_rubric():
     assert "13-check" not in m, "the granular canonical description survived in the methodology"
     sk = re.sub(r"\s+", " ", _SKILL_MD_PATH.read_text())
     assert "13-check" not in sk, "the granular canonical description survived in SKILL.md"
+
+
+def _literal_numeric_constants() -> dict[str, object]:
+    """Return module constants whose literal value contains a number.
+
+    The small evaluator deliberately accepts only data literals and arithmetic;
+    calls such as ``chr(0xFEFF)`` are strings at runtime and stay out of this
+    grade/read-bound contract.
+    """
+
+    def evaluate(node: ast.AST) -> object:
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, ast.Tuple):
+            return [evaluate(item) for item in node.elts]
+        if isinstance(node, ast.List):
+            return [evaluate(item) for item in node.elts]
+        if isinstance(node, ast.Dict):
+            return {
+                evaluate(key): evaluate(value)
+                for key, value in zip(node.keys, node.values)
+            }
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
+            return evaluate(node.left) * evaluate(node.right)
+        raise ValueError
+
+    def contains_number(value: object) -> bool:
+        if isinstance(value, bool):
+            return False
+        if isinstance(value, (int, float)):
+            return True
+        if isinstance(value, list):
+            return any(contains_number(item) for item in value)
+        if isinstance(value, dict):
+            return any(contains_number(item) for item in value.values())
+        return False
+
+    source = (_SCRIPTS_DIR / "practice_facts.py").read_text()
+    constants: dict[str, object] = {}
+    for statement in ast.parse(source).body:
+        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+            target = statement.targets[0]
+        elif isinstance(statement, ast.AnnAssign):
+            target = statement.target
+        else:
+            continue
+        if not isinstance(target, ast.Name) or not target.id.startswith("_"):
+            continue
+        try:
+            value = evaluate(statement.value)
+        except (TypeError, ValueError):
+            continue
+        if contains_number(value):
+            constants[target.id] = value
+    return constants
+
+
+def test_every_numeric_practice_fact_constant_is_bound_to_the_spec(spec):
+    recorded = spec.get("engine_constants", {})
+    live = _literal_numeric_constants()
+    assert not (live.keys() - recorded.keys()), (
+        "unrecorded module-level numeric constants: "
+        f"{sorted(live.keys() - recorded.keys())}"
+    )
+    assert not (recorded.keys() - live.keys()), (
+        f"stale engine constants: {sorted(recorded.keys() - live.keys())}"
+    )
+    for name, value in live.items():
+        assert recorded[name]["value"] == value, name
+        assert recorded[name]["reason"].strip(), name
+
+
+def test_methodology_lists_the_numeric_engine_contract(spec):
+    rows = _METHODOLOGY_PATH.read_text().splitlines()
+    for name, entry in spec.get("engine_constants", {}).items():
+        row = next((line for line in rows if line.startswith(f"| `{name}` |")), "")
+        assert row, name
+        assert entry["methodology_value"] in row, name
 
 
 def test_scorer_module_is_basic_sized():

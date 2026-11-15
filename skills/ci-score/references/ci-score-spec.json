@@ -228,6 +228,71 @@
     ],
     "speed_effectiveness_checks": "The decided path for measured speed into the composite (OD-CS16): size-fair effectiveness checks - retry-churn rate, self-inflicted queue time, shard balance, cache hit effectiveness - graded from the measured pipeline via the pole-anchored evidence machinery above. Raw gate-wait scoring (absolute or percentile) is REJECTED, not deferred: size-confounded (see OD-CS16)."
   },
+  "engine_constants": {
+    "_MAX_PARALLEL_DEPTH": {
+      "value": 64,
+      "methodology_value": "64",
+      "reason": "Bounds nested parallel groups so hostile aliases cannot exhaust Python recursion; groups beyond it are disclosed as unread."
+    },
+    "_MAX_WALK_STEPS": {
+      "value": 10000,
+      "methodology_value": "10,000",
+      "reason": "Bounds each parallel-step walk; the limit is above GitHub's documented per-job step limit while keeping alias expansion finite."
+    },
+    "_SCRIPT_MAX_BYTES": {
+      "value": 1048576,
+      "methodology_value": "1,048,576 bytes",
+      "reason": "Bounds the first-party script text inspected for history reads; larger files are left unread rather than partially graded."
+    },
+    "_MAX_LOCAL_ACTION_DEPTH": {
+      "value": 16,
+      "methodology_value": "16",
+      "reason": "Bounds nested local-action and reusable-workflow calls; deeper content is named as unread and cannot silently earn credit."
+    },
+    "_MAX_LOCAL_COMPOSITES": {
+      "value": 256,
+      "methodology_value": "256",
+      "reason": "Bounds distinct local composite actions read during one scan; content beyond the limit is named as unread."
+    },
+    "_SETUP_CACHE_INPUTS": {
+      "value": {
+        "actions/setup-go": [
+          "cache",
+          4
+        ],
+        "astral-sh/setup-uv": [
+          "enable-cache",
+          5
+        ],
+        "ruby/setup-ruby": [
+          "bundler-cache",
+          null
+        ]
+      },
+      "methodology_value": "setup-go 4; setup-uv 5; setup-ruby off",
+      "reason": "Pins the action input and first release whose dependency cache is on by default; the shared ci-speedup parity test guards the same table."
+    },
+    "_SETUP_NODE_AUTO_CACHE_FROM_MAJOR": {
+      "value": 5,
+      "methodology_value": "5",
+      "reason": "setup-node automatic package-manager caching begins at major 5, so this boundary decides dependency-cache credit."
+    },
+    "_PLAUSIBLE_MAJOR": {
+      "value": {
+        "actions/setup-go": 9,
+        "actions/setup-node": 9,
+        "astral-sh/setup-uv": 15,
+        "ruby/setup-ruby": 5
+      },
+      "methodology_value": "setup-go 9; setup-node 9; setup-uv 15; setup-ruby 5",
+      "reason": "Pins the highest plausible release major for version comments on known setup actions, preventing a comment that names no release from changing cache credit."
+    },
+    "_PLAUSIBLE_MAJOR_DEFAULT": {
+      "value": 20,
+      "methodology_value": "20",
+      "reason": "Provides the conservative plausibility ceiling for an otherwise unknown setup action's version comment."
+    }
+  },
   "decision_log": [
     {
       "id": "OD-CS13",
@@ -381,6 +446,14 @@
       "metadata_only": true,
       "decision": "Repeated hard-coded custom runner labels in at least three jobs produce ci.runner.swappable in Advisory notes, not part of the score. Advisories never enter passed/applicable. Use one repository variable per runner class; centralized expressions and standard labels are silent.",
       "why_no_version_bump": "Metadata-only advisory surface. The eleven checks, arithmetic and ci-score-v0.1.8 spec_version remain unchanged."
+    },
+    {
+      "id": "OD-CS28",
+      "status": "DECIDED 2026-11-15",
+      "title": "Grade and read-bound engine constants are part of the registry contract",
+      "metadata_only": true,
+      "decision": "Every module-level numeric data constant in practice_facts.py is recorded under engine_constants with its live value and rationale. An exhaustive contract test rejects an unrecorded constant, a stale entry or a value drift. These records change no grade; they bind the engine behavior already shipped.",
+      "why_no_version_bump": "Documentation and drift protection only. All eleven checks, their facts, score arithmetic and ci-score-v0.1.8 outputs are unchanged."
     }
   ],
   "changelog": [
