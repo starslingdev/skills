@@ -4830,10 +4830,10 @@ def _static_cache_family(
 ) -> str:
     """Return a stable cache-family token for log confirmation."""
     key_text = str(cache_key or "").casefold()
-    key_without_expressions = re.sub(r"\$\{\{.*?\}\}", " ", key_text)
+    key_literal_prefix = key_text.partition("${{")[0]
     key_tokens = [
         token.strip("._-")
-        for token in re.findall(r"[a-z][a-z0-9_.]*", key_without_expressions)
+        for token in re.findall(r"[a-z][a-z0-9_.]*", key_literal_prefix)
     ]
     key_tokens = [token for token in key_tokens if token]
     if isinstance(cache_paths, (list, tuple, set)):
@@ -4846,7 +4846,7 @@ def _static_cache_family(
         for token in re.findall(r"[a-z][a-z0-9_.]*", str(path or "").casefold())
     ]
     path_tokens = [token for token in path_tokens if token]
-    texts = [key_text, *(str(value or "").casefold() for value in values)]
+    texts = [key_literal_prefix, *(str(value or "").casefold() for value in values)]
     for text in texts:
         for family in (
             "sccache", "ccache", "staticcheck", "golangci", "buildkit",
@@ -4856,13 +4856,14 @@ def _static_cache_family(
             if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", text):
                 return family
     ignored = {
-        "build", "cache", "dependencies", "deps", "github", "home", "key",
-        "keys", "linux", "repository", "restore", "runner", "sha", "shared",
+        "build", "cache", "ci", "dependencies", "deps", "github", "home",
+        "key", "keys", "linux", "repository", "restore", "runner", "sha",
+        "shared", "ubuntu",
     }
     for token in reversed(path_tokens):
         if token in key_tokens and token not in ignored:
             return token
-    for token in reversed(key_tokens):
+    for token in key_tokens:
         if (token not in ignored
                 and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
             return token

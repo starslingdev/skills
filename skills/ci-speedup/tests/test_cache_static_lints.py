@@ -89,7 +89,7 @@ def test_opt61_scopes_confirmation_to_the_saved_key_family(tmp_path) -> None:
         assert status == "miss"
 
 
-def test_opt61_uses_the_specific_key_word_after_an_unlisted_prefix(tmp_path) -> None:
+def test_opt61_does_not_use_a_key_word_after_the_first_expression(tmp_path) -> None:
     for index, prefix in enumerate(("ubuntu", "ci")):
         rows = _scan(tmp_path / f"generic-prefix-{index}", f"""      - uses: actions/cache@v4
         with:
@@ -108,8 +108,33 @@ def test_opt61_uses_the_specific_key_word_after_an_unlisted_prefix(tmp_path) -> 
             f"Cache not found for input keys: {prefix}-Linux-pnpm-deadbeef",
             collect_runs._cache_keywords_for_finding(row),
         )
-        assert own_status == "miss"
+        assert row["cache_family"] == "declared-cache"
+        assert own_status == "unknown"
         assert unrelated_status == "unknown"
+
+
+def test_opt61_cache_family_stops_at_the_first_expression(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - uses: actions/cache@v4
+        with:
+          path: ~/.cache
+          key: tool-${{ runner.os }}-x64-${{ github.sha }}
+          restore-keys: other-${{ runner.os }}-
+      - run: tool build
+""")
+    row = next(item for item in rows if item["pattern"] == "OPT61"
+               and "restore" in item["evidence"].lower())
+    own_status, _line = collect_runs._cache_status_from_log(
+        "Cache not found for input keys: tool-Linux-x64-deadbeef",
+        collect_runs._cache_keywords_for_finding(row),
+    )
+    unrelated_status, _line = collect_runs._cache_status_from_log(
+        "Cache not found for input keys: pnpm-Linux-x64-deadbeef",
+        collect_runs._cache_keywords_for_finding(row),
+    )
+
+    assert row["cache_family"] == "tool"
+    assert own_status == "miss"
+    assert unrelated_status == "unknown"
 
 
 def test_opt61_restore_key_cannot_relabel_the_saved_key_family(tmp_path) -> None:
