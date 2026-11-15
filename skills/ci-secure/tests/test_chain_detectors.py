@@ -5283,11 +5283,18 @@ def test_p1424_gh_extension_single_quoted_substitution_is_text(tmp_path):
     )) == []
 
 
-def test_p1424_gh_extension_name_cannot_collide_with_builtin(tmp_path):
+@pytest.mark.parametrize(("name", "invocation"), [
+    ("pr", "gh pr list"),
+    ("repo", "gh repo view"),
+    ("workflow", "gh workflow list"),
+])
+def test_p1424_gh_extension_name_cannot_collide_with_builtin(
+    tmp_path, name, invocation,
+):
     """GitHub CLI refuses to install an extension over a built-in command."""
     assert _remote_exec_hits(tmp_path, _gh_ext_job(
-        "gh extension install example/gh-pr --pin v1",
-        "gh pr list",
+        f"gh extension install example/gh-{name} --pin v1",
+        invocation,
     )) == []
 
 

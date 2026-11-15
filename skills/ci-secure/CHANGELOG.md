@@ -13,6 +13,13 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-11-15** (#354) — P14.24 now follows command substitutions in shell
+  execution order for both mutable git fetches and GitHub CLI extensions,
+  ignores substitutions inside single quotes, and stays silent when an
+  extension name collides with a built-in `gh` command. Its references now
+  distinguish all three supported shapes and describe full commit pins,
+  immutable releases, and date-style release tags precisely.
+
 - P14.18 now keeps `pull_request_target` automation HIGH when it checks out
   attacker-head code, executes PR-controlled text, or calls review/merge APIs,
   while classifying label/comment-only jobs with none of those paths as MEDIUM

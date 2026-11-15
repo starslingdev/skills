@@ -4716,9 +4716,9 @@ _GH_EXTENSION_VALUE_OPTS = frozenset({"--pin"})
 # an execution which the CLI itself makes impossible.
 _GH_BUILTIN_COMMANDS = frozenset({
     "alias", "api", "attestation", "auth", "browse", "cache", "codespace",
-    "completion", "config", "extension", "gist", "gpg-key", "issue",
+    "completion", "config", "extension", "gist", "gpg-key", "help", "issue",
     "label", "org", "pr", "project", "release", "repo", "ruleset", "run",
-    "search", "secret", "ssh-key", "status", "variable", "workflow",
+    "search", "secret", "ssh-key", "status", "variable", "version", "workflow",
 })
 
 
