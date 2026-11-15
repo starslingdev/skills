@@ -7162,7 +7162,8 @@ def _iqr(xs: list[float]) -> float:
     return _median(s[(n + 1) // 2:]) - _median(s[: n // 2])
 
 
-def _bimodal_note(checks: list[dict[str, Any]], gate_p50: float | None = None) -> list[str]:
+def _bimodal_note(checks: list[dict[str, Any]], gate_p50: float | None = None,
+                  slow_ranked_names: set[str] | None = None) -> list[str]:
     """Surface checks whose duration is BIMODAL and whose median landed on the FAST
     mode — so the level-1 bar (a P50) under-states them and the P50 ranking can drop
     them below the spine even though they are a long gate on a large share of PRs.
@@ -7194,14 +7195,18 @@ def _bimodal_note(checks: list[dict[str, Any]], gate_p50: float | None = None) -
         rows.append((_clean_label(str(c.get("name", ""))), p50, lo, hi, frac))
     if not rows:
         return []
-    out = ["> **⚠️ Bimodal gates (P50 hides a frequent slow mode).** These checks rank "
-           "low by median — so the P50 spine puts them below the gate, and some aren't "
-           "in the Contents critical-path list above — but each is a long gate on a "
-           "large share of PRs:"]
+    out = ["> **⚠️ Bimodal gates (P50 hides a frequent slow mode).** Contents rows "
+           "display the slow mode when one of these checks is ranked there; checks outside "
+           "Contents can otherwise be easy to miss:"]
     for name, p50, _lo, hi, frac in rows:
-        out.append(f"> - `{name}` — P50 only **{_clock(p50)}**, but **~{_clock(hi)}** on "
-                   f"~{round(frac * 100)}% of PRs; on those it is among the slowest gates "
-                   "(median-ranked low, so easy to miss).")
+        if name in (slow_ranked_names or set()):
+            out.append(
+                f"> - `{name}` — Contents displays slow mode **~{_clock(hi)}**; P50 is "
+                f"**{_clock(p50)}**. The slow mode occurs on ~{round(frac * 100)}% of PRs.")
+        else:
+            out.append(f"> - `{name}` — P50 only **{_clock(p50)}**, but **~{_clock(hi)}** on "
+                       f"~{round(frac * 100)}% of PRs; on those it is among the slowest gates "
+                       "(median-ranked low, so easy to miss).")
     out.append("")
     return out
 
@@ -15810,7 +15815,12 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         if not isinstance(_joined.get("bimodal"), dict):
             _joined["bimodal"] = _bimodal_poles.get(str(_joined.get("name", "")))
         _bimodal_src.append(_joined)
-    out += _bimodal_note(_bimodal_src, _num(blocker.get("p50_s")))
+    _slow_ranked_names = {
+        _clean_label(str(p.get("check", ""))) for p in pole_wfs
+        if abs(_pole_headline(p)[0] - (_num(p.get("p50_s")) or 0.0)) > 0.5
+    }
+    out += _bimodal_note(
+        _bimodal_src, _num(blocker.get("p50_s")), _slow_ranked_names)
 
     opt81_rendered: set[int] = set()
     opt83_rendered: set[int] = set()

@@ -1149,8 +1149,9 @@ def test_bimodal_gate_headline_sizes_the_slow_mode_and_full_report_verifies(
     assert "is the longest check" in bottom
     callout = next(line for line in report.splitlines()
                    if line.startswith("> - `gate`"))
-    assert "P50 only **32s**" in callout
-    assert "but **~5m 50s**" in callout
+    assert "Contents displays slow mode **~5m 50s**" in callout
+    assert "P50 is **32s**" in callout
+    assert "ranks low" not in callout and "below the gate" not in callout
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
 
