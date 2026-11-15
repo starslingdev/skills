@@ -5199,7 +5199,13 @@ def _segment_pr_populations(
     # others. Both forms matter: a gate that self-skips AND a workflow that
     # simply doesn't run on a PR type each split the population. Otherwise the
     # single aggregate path gives the same answer.
-    bimodal = False
+    # A job-level largest-gap split is already sufficient reason to preserve
+    # the per-PR rows.  The older active/inactive test below catches
+    # path-conditional gates, but misses an always-active check whose fast mode
+    # is still substantial (for example 3m versus 5m50s).  Without populations
+    # the renderer cannot size that slow share and the verifier has no evidence
+    # with which to validate it.
+    bimodal = any(name in job_bimodal_all for name in pr_check_p50)
     for name in pr_check_p50:
         high = max((cm[name] for cm in capped if name in cm), default=0.0)
         if high < 120:
@@ -5283,7 +5289,10 @@ def _bimodal_split(durs: list[float], *, min_n: int = 8, min_frac: float = 0.30,
     if hi_med < min_high_s:
         return None  # a sub-minute "slow" mode isn't a meaningful gate (e.g. 2s->4s)
     return {"n": n, "slow_n": len(high), "slow_frac": round(len(high) / n, 2),
-            "low_p50_s": round(lo_med, 1), "high_p50_s": round(hi_med, 1)}
+            "low_p50_s": round(lo_med, 1), "high_p50_s": round(hi_med, 1),
+            # Preserve the largest-gap membership boundary.  The medians alone
+            # cannot reconstruct it when either cluster has a wide spread.
+            "slow_min_s": round(high[0], 1)}
 
 
 def _minority_gate_tail(observations: list[tuple[float, str]]) -> dict[str, Any] | None:
