@@ -7,6 +7,7 @@ import json
 import gzip
 import hashlib
 import importlib.util
+import math
 import os
 import re
 import shutil
@@ -67,6 +68,28 @@ def _bottom_line(report: str) -> str:
     return ""
 
 
+def _wilson_interval(count: int, total: int, z: float = 1.96) -> tuple[float, float]:
+    """Wilson score interval used to compare low-share gates meaningfully."""
+    if total <= 0:
+        return (0.0, 1.0)
+    proportion = max(0.0, min(1.0, count / total))
+    denominator = 1.0 + z * z / total
+    center = (proportion + z * z / (2.0 * total)) / denominator
+    radius = (z * math.sqrt(
+        proportion * (1.0 - proportion) / total
+        + z * z / (4.0 * total * total)
+    ) / denominator)
+    return (max(0.0, center - radius), min(1.0, center + radius))
+
+
+def _rendered_pole_order(report: str) -> list[str]:
+    return [
+        match.group(1)
+        for match in re.finditer(
+            r"(?m)^## [^\n]*Long pole \d+: `[^`]+` ▸ `([^`]+)` - ", report)
+    ]
+
+
 def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = "",
             *, recording: Path | None = None) -> list[str]:
     oracle = (_oracle_for_engine_span(recording, findings)
@@ -91,7 +114,36 @@ def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = ""
         if (match := _matching_gate(str(name), actual["gates"])) is not None
     ]
     actual_order = [name for name in actual["gate_order"] if name in set(comparable)]
-    if len(comparable) >= 2 and actual_order != comparable:
+    oracle_by_name = {
+        str(row.get("check") or ""): row for row in oracle_rows
+    }
+    order_supported = not oracle_rows
+    if oracle_rows and len(comparable) >= 2:
+        positions = {name: index for index, name in enumerate(actual_order)}
+        supported_pairs: list[tuple[str, str]] = []
+        for left_index, left_expected in enumerate(expected_order):
+            left_row = oracle_by_name.get(str(left_expected))
+            left_actual = _matching_gate(str(left_expected), actual["gates"])
+            if not left_row or left_actual is None:
+                continue
+            left_interval = _wilson_interval(
+                int(left_row.get("last_on") or 0), int(left_row.get("out_of") or 0))
+            for right_expected in expected_order[left_index + 1:]:
+                right_row = oracle_by_name.get(str(right_expected))
+                right_actual = _matching_gate(str(right_expected), actual["gates"])
+                if not right_row or right_actual is None:
+                    continue
+                right_interval = _wilson_interval(
+                    int(right_row.get("last_on") or 0),
+                    int(right_row.get("out_of") or 0))
+                if left_interval[0] > right_interval[1]:
+                    supported_pairs.append((left_actual, right_actual))
+        order_supported = all(
+            positions.get(left, 10**9) < positions.get(right, -1)
+            for left, right in supported_pairs)
+    elif len(comparable) >= 2:
+        order_supported = actual_order == comparable
+    if len(comparable) >= 2 and not order_supported:
         differences.append(
             "gate order differs: engine=" + repr(actual_order) + ", oracle=" + repr(comparable)
         )
@@ -120,7 +172,14 @@ def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = ""
         # the report still discloses the broader sampled-pr count separately.
         actual_share = (float(actual_gate["last_on"])
                         / max(1, observed_denominator or expected_completed))
-        if abs(actual_share - oracle_share) > 0.15:
+        oracle_count = int(row.get("last_on") or 0)
+        oracle_total = int(row.get("out_of") or expected_completed)
+        actual_count = int(actual_gate["last_on"])
+        actual_total = max(1, observed_denominator or expected_completed)
+        oracle_interval = _wilson_interval(oracle_count, oracle_total)
+        actual_interval = _wilson_interval(actual_count, actual_total)
+        if (actual_interval[1] < oracle_interval[0]
+                or oracle_interval[1] < actual_interval[0]):
             differences.append(
                 f"gate share differs for {expected_name!r}: "
                 f"engine={actual_share:.3f}, oracle={oracle_share:.3f}"
@@ -149,6 +208,47 @@ def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = ""
     for text in review.get("report_must_not_contain") or []:
         if str(text) in report:
             differences.append(f"forbidden report text present: {text!r}")
+    reviewed_poles = [str(name) for name in review.get("rendered_pole_order") or []]
+    if reviewed_poles:
+        rendered_poles = _rendered_pole_order(report)
+        if rendered_poles != reviewed_poles:
+            differences.append(
+                "rendered pole order differs: engine=" + repr(rendered_poles)
+                + ", reviewed=" + repr(reviewed_poles))
+    if recording is not None:
+        with gzip.open(recording / "month-wide.json.gz", "rt", encoding="utf-8") as stream:
+            month = json.load(stream)
+        selected = {
+            str(row.get("sha") or "")
+            for row in (findings.get("pr_critical_path") or {}).get("chain_facts") or []
+            if isinstance(row, dict)
+        }
+        selected_days = {
+            max(
+                (str(run.get("created_at") or "")
+                 for run in row.get("runs") or [] if isinstance(run, dict)),
+                default=str(row.get("created_at") or ""),
+            )[:10]
+            for row in month.get("pr_commits") or []
+            if (isinstance(row, dict)
+                and str(row.get("sha") or "") in selected
+                and (row.get("created_at") or row.get("jobs")))
+        }
+        oracle_days = (len(selected_days) if selected_days
+                       else int((oracle.get("sample") or {}).get("distinct_days") or 0))
+        actual_days = int((findings.get("pr_critical_path") or {}).get(
+            "sample_distinct_days") or 0)
+        if actual_days < oracle_days:
+            differences.append(
+                f"sample day spread differs: engine={actual_days}, oracle={oracle_days}")
+        incomplete = {
+            str(row.get("sha") or "")
+            for row in month.get("pr_commits") or []
+            if isinstance(row, dict) and not bool(row.get("completed"))
+        }
+        for sha in sorted(incomplete & selected):
+            differences.append(
+                f"in-flight commit entered the completed-only sample: {sha}")
     return differences
 
 
@@ -336,19 +436,20 @@ def _write_fixture(destination: Path, endpoint: str, payload: dict[str, Any]) ->
     )
 
 
-def _synthesize_month_replay(recording: Path, destination: Path) -> None:
+def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
     """Expose normalized month-wide facts through ordinary replay endpoints."""
     month_path = recording / "month-wide.json.gz"
     if not month_path.is_file():
-        return
+        return set()
     with gzip.open(month_path, "rt", encoding="utf-8") as stream:
         month = json.load(stream)
     manifest = load(recording / "manifest.json")
     repository = str(manifest["repository"])
+    recorded_runs_only = bool(manifest.get("replay_recorded_runs_only"))
     workflow_endpoint = f"repos/{repository}/actions/workflows?per_page=100"
     workflow_fixture = destination / _fixture_name(workflow_endpoint)
     if not workflow_fixture.is_file():
-        return
+        return set()
     workflow_payload = load(workflow_fixture)
     workflows = {
         str(row.get("name") or row.get("path") or ""): row
@@ -374,6 +475,7 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                 ).add(str(commit.get("sha") or ""))
 
     existing_heads: dict[int, set[str]] = {}
+    existing_run_ids: set[int] = set()
     existing_pages: dict[int, dict[str, Any]] = {}
     existing_runs_by_workflow_time: dict[
         tuple[str, str], list[dict[str, Any]]
@@ -410,13 +512,23 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                     str(workflow.get("name") or workflow.get("path") or ""),
                     str(run.get("created_at") or ""),
                 ), []).append(run)
-            payload["workflow_runs"] = [
-                run for run in payload.get("workflow_runs") or []
-                if (not isinstance(run, dict)
-                    or str(run.get("event") or "")
-                    not in {"pull_request", "pull_request_target", "merge_group"}
-                    or str(run.get("head_sha") or "") in month_shas)
-            ]
+            kept_runs = []
+            for run in payload.get("workflow_runs") or []:
+                if not isinstance(run, dict):
+                    kept_runs.append(run)
+                    continue
+                is_pr = str(run.get("event") or "") in {
+                    "pull_request", "pull_request_target", "merge_group"}
+                if is_pr and str(run.get("head_sha") or "") not in month_shas:
+                    continue
+                if recorded_runs_only and is_pr and run.get("id"):
+                    jobs_fixture = destination / _fixture_name(
+                        f"repos/{repository}/actions/runs/{int(run['id'])}"
+                        "/jobs?per_page=100")
+                    if not jobs_fixture.is_file():
+                        continue
+                kept_runs.append(run)
+            payload["workflow_runs"] = kept_runs
             fixture.write_text(
                 json.dumps(payload, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8")
@@ -425,6 +537,11 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                 str(run.get("head_sha") or "")
                 for run in payload.get("workflow_runs") or [] if isinstance(run, dict)
             }
+            existing_run_ids.update(
+                int(run.get("id") or 0)
+                for run in payload.get("workflow_runs") or []
+                if isinstance(run, dict) and run.get("id")
+            )
 
     runs_by_workflow: dict[int, list[dict[str, Any]]] = {}
     run_serial = 0
@@ -495,6 +612,14 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
         for run_index, source_run in enumerate(source_runs):
             workflow_name = str(source_run.get("workflow") or "")
             jobs = jobs_by_run.get(run_index) or []
+            jobs_recorded = (bool(source_run.get("jobs_recorded"))
+                             if "jobs_recorded" in source_run else bool(jobs))
+            # A normalized month row can list a workflow whose job endpoint was
+            # never captured.  Recorded-only fixtures omit those run rows rather
+            # than making every sample partial; replay marks every dimension that
+            # consequently shares the normalized month data with the oracle.
+            if recorded_runs_only and not jobs_recorded:
+                continue
             workflow = workflows.get(workflow_name)
             if not workflow:
                 continue
@@ -519,6 +644,10 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
             copied_run = len(copied_matches) == 1
             if copied_run:
                 run_id = int(copied_matches[0]["id"])
+                if run_id not in existing_run_ids:
+                    runs_by_workflow.setdefault(workflow_id, []).append(
+                        copied_matches[0])
+                    existing_run_ids.add(run_id)
             else:
                 run_serial += 1
                 run_id = 71_000_000 + run_serial
@@ -569,12 +698,9 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                     "runner_name": copied_job.get("runner_name") or "golden-recording",
                     "steps": copied_job.get("steps") or [],
                 })
-            jobs_recorded = (bool(source_run.get("jobs_recorded"))
-                             if "jobs_recorded" in source_run else bool(jobs))
             if not jobs_recorded:
-                # No fixture means the replay client observes a failed read.
-                # An empty successful payload would turn missing evidence into
-                # a clean run and shrink the gate sample silently.
+                # An explicit unrecorded run remains visible as a failed read
+                # unless this recording opted into the recorded-only replay.
                 if copied_run:
                     for filter_suffix in ("", "&filter=all"):
                         endpoint = (
@@ -629,9 +755,10 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> None:
                     f"?per_page=100{suffix}&page={page}",
                     payload,
                 )
+    return {"gate_order", "gate_p50", "gate_share", "sample"}
 
 
-def _dynamic_replay_copy(recording: Path, destination: Path) -> None:
+def _dynamic_replay_copy(recording: Path, destination: Path) -> set[str]:
     """Copy fixtures and alias the moving 30-day query to today's spelling."""
     source = recording / "api"
     destination.mkdir(parents=True)
@@ -655,7 +782,7 @@ def _dynamic_replay_copy(recording: Path, destination: Path) -> None:
             alias = destination / stamp.sub(target, path.name)
             if not alias.exists():
                 shutil.copy2(path, alias)
-    _synthesize_month_replay(recording, destination)
+    return _synthesize_month_replay(recording, destination)
 
 
 def restore_snapshot_names(checkout: Path) -> None:
@@ -693,7 +820,7 @@ def replay(recording: Path, work: Path, *, repo_root: Path) -> tuple[dict[str, A
         if result.returncode:
             raise RuntimeError(f"{' '.join(command[:2])} failed: {result.stderr}")
     fixtures = work / "api"
-    _dynamic_replay_copy(recording, fixtures)
+    shared_dimensions = _dynamic_replay_copy(recording, fixtures)
     env["CI_SPEEDUP_GH_FIXTURES"] = str(fixtures)
     env.pop("CI_SPEEDUP_GH_RECORD", None)
     skill = repo_root / "skills" / "ci-speedup"
@@ -712,6 +839,9 @@ def replay(recording: Path, work: Path, *, repo_root: Path) -> tuple[dict[str, A
     if run.returncode:
         raise RuntimeError(f"run.py failed:\n{run.stdout}\n{run.stderr}")
     findings = load(findings_path)
+    findings["_golden_comparison_independence"] = {
+        name: False for name in sorted(shared_dimensions)
+    }
     render = subprocess.run([
         sys.executable, str(scripts / "blocking_path.py"),
         "--in", str(findings_path), "--out", str(report_path),

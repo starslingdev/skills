@@ -16,21 +16,21 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1] / "golden"
 _REPOSITORIES = {
     "home-assistant-core": (
-        "the reviewed Bottom line remains open",
+        "issue #305 remains open after PR #318's ordering fix",
         (
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
     ),
     "vercel-nextjs": (
-        "the reviewed Bottom line remains open",
+        "issue #305 remains open after PR #318's ordering fix",
         (
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
     ),
     "ethereum-go-ethereum": (
-        "a true lint-to-test predecessor chain is currently reported as redundant setup",
+        "a true predecessor is misclassified; issue #305 remains after PR #318",
         (
             # The workflow's real dependency edge is still classified as OPT21.
             "forbidden finding present: OPT21",
@@ -39,7 +39,7 @@ _REPOSITORIES = {
         ),
     ),
     "microsoft-playwright": (
-        "the reviewed Bottom line remains open",
+        "issue #305 remains open after PR #318's ordering fix",
         (
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
@@ -118,7 +118,18 @@ def test_reference_oracle_does_not_import_the_engine() -> None:
         for node in ast.walk(ast.parse(source))
         if isinstance(node, ast.ImportFrom)
     )
-    assert imported.isdisjoint({"collect_runs", "blocking_path", "scan"})
+    skill = _ROOT.parents[2] / "skills" / "ci-speedup"
+    engine_modules = {
+        path.stem for path in (skill / "scripts").glob("*.py")
+    } | {"verify_report"}
+    assert imported.isdisjoint(engine_modules)
+
+
+def test_known_red_reasons_name_the_public_issue_and_fix_pr() -> None:
+    for name in ("home-assistant-core", "vercel-nextjs", "microsoft-playwright"):
+        reason, _markers = _REPOSITORIES[name]
+        assert "#305" in reason
+        assert "#318" in reason
 
 
 def test_reference_oracle_uses_month_wide_last_job_facts_and_ignores_bookkeeping() -> None:
@@ -253,6 +264,19 @@ def test_recorder_rewrites_long_api_ids_consistently(tmp_path: Path) -> None:
     assert joined.count(replacement) >= 2
 
 
+def test_recorder_preserves_a_full_hex_commit_sha(tmp_path: Path) -> None:
+    recorder = _load("record")
+    api = tmp_path / "api"
+    api.mkdir()
+    commit = "deadbeef1234" + "56789deadbeef1234" + "56789deadbe"
+    fixture = api / "commit.json"
+    fixture.write_text(json.dumps({"sha": commit}), encoding="utf-8")
+
+    recorder._sanitize_api_identifiers(api)
+
+    assert json.loads(fixture.read_text(encoding="utf-8"))["sha"] == commit
+
+
 def test_replay_exposes_month_wide_runs_and_jobs_as_deeper_api_pages(tmp_path: Path) -> None:
     compare = _load("compare")
     recording = tmp_path / "recording"
@@ -287,7 +311,9 @@ def test_replay_exposes_month_wide_runs_and_jobs_as_deeper_api_pages(tmp_path: P
         json.dump(month, stream)
 
     replay = tmp_path / "replay"
-    compare._dynamic_replay_copy(recording, replay)
+    shared = compare._dynamic_replay_copy(recording, replay)
+
+    assert shared == {"gate_order", "gate_p50", "gate_share", "sample"}
 
     page = json.loads((replay / compare._fixture_name(
         "repos/public/example/actions/workflows/1234/runs?per_page=100"
@@ -675,6 +701,61 @@ def test_replay_uses_one_commit_identity_on_copied_and_synthetic_pages(
     assert copied_jobs[0]["steps"] == [{"name": "Run test", "number": 1}]
 
 
+def test_recorded_only_replay_keeps_a_copied_run_with_normalized_jobs(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(json.dumps({
+        "repository": "public/example",
+        "replay_recorded_runs_only": True,
+    }), encoding="utf-8")
+
+    def fixture(endpoint: str, payload: dict[str, object]) -> None:
+        with gzip.open(api / (compare._fixture_name(endpoint) + ".gz"),
+                       "wt", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+
+    fixture("repos/public/example/actions/workflows?per_page=100", {
+        "workflows": [{"id": 11, "name": "CI", "path": ".github/workflows/ci.yml"}],
+    })
+    fixture("repos/public/example/actions/workflows/11/runs?per_page=100", {
+        "workflow_runs": [{
+            "id": 99, "event": "pull_request", "head_sha": "real-sha",
+            "created_at": "2026-11-01T00:00:00Z",
+            "head_commit": {"id": "real-sha"},
+        }],
+    })
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"pr_commits": [{
+            "sha": "commit-000001", "created_at": "2026-11-01T00:00:00Z",
+            "completed": True,
+            "runs": [{"workflow": "CI", "status": "completed",
+                      "created_at": "2026-11-01T00:00:00Z",
+                      "jobs_recorded": True}],
+            "jobs": [{
+                "workflow": "CI", "name": "test", "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-11-01T00:00:00Z",
+                "completed_at": "2026-11-01T00:01:00Z",
+            }],
+        }]}, stream)
+
+    replay = tmp_path / "replay"
+    compare._dynamic_replay_copy(recording, replay)
+
+    page = json.loads((replay / compare._fixture_name(
+        "repos/public/example/actions/workflows/11/runs?per_page=100"
+    )).read_text(encoding="utf-8"))["workflow_runs"]
+    assert [(row["id"], row["head_sha"]) for row in page] == [
+        (99, "commit-000001")]
+    jobs = json.loads((replay / compare._fixture_name(
+        "repos/public/example/actions/runs/99/jobs?per_page=100"
+    )).read_text(encoding="utf-8"))["jobs"]
+    assert [job["name"] for job in jobs] == ["test"]
+
+
 def test_replay_does_not_merge_ambiguous_same_second_commits(tmp_path: Path) -> None:
     compare = _load("compare")
     recording = tmp_path / "recording"
@@ -698,7 +779,7 @@ def test_replay_does_not_merge_ambiguous_same_second_commits(tmp_path: Path) -> 
         ],
     })
     with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
-        json.dump({"pr_commits": [
+        json.dump({"schema_version": 1, "pr_commits": [
             {"sha": "commit-a", "completed": True, "runs": [{
                 "workflow": "CI", "created_at": "2026-11-01T00:00:00Z"}], "jobs": []},
             {"sha": "commit-b", "completed": True, "runs": [{
@@ -821,11 +902,14 @@ def test_every_proposed_expectation_waits_for_owner_signoff() -> None:
     for path in expected_files:
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["review_status"] == "awaiting owner sign-off"
+        assert payload["human_review"]["minimum_last_finishes"] == 5
         assert payload["repository"]
         assert payload["oracle"]
         oracle = json.loads(path.with_name("oracle.json").read_text(encoding="utf-8"))
         assert payload["oracle"] == oracle
         manifest = json.loads(path.with_name("manifest.json").read_text(encoding="utf-8"))
+        assert len(manifest["commit"]) == 40
+        assert int(manifest["commit"], 16) >= 0
         sanitization = manifest["checkout_sanitization"]
         assert len(sanitization["snapshot_sha256"].replace("-", "")) == 64
         assert sanitization["repository_links"]
@@ -866,6 +950,167 @@ def test_comparison_rejects_wrong_month_wide_measurements() -> None:
     assert any("frequent gate absent" in row for row in differences)
 
 
+def test_comparison_uses_uncertainty_instead_of_ordering_a_tie() -> None:
+    compare = _load("compare")
+    findings = {
+        "pr_critical_path": {
+            "sampled_pr_count": 100,
+            "check_present_n_pr": 100,
+            "checks": [
+                {"name": "CI / second", "pole_n": 22, "p50_s": 90},
+                {"name": "CI / first", "pole_n": 22, "p50_s": 100},
+            ],
+        },
+        "findings": [],
+    }
+    expected = {"oracle": {
+        "sample": {"completed_with_eligible_jobs": 100},
+        "gate_order": ["CI / first", "CI / second"],
+        "gates": [
+            {"check": "CI / first", "last_on": 22, "out_of": 100,
+             "share": 0.22, "p50_s": 100},
+            {"check": "CI / second", "last_on": 22, "out_of": 100,
+             "share": 0.22, "p50_s": 90},
+        ],
+    }, "human_review": {}}
+
+    differences = compare.compare(findings, expected)
+
+    assert not any("gate order differs" in row for row in differences)
+
+
+def test_comparison_share_tolerance_is_meaningful_at_five_percent() -> None:
+    compare = _load("compare")
+    findings = {
+        "pr_critical_path": {
+            "sampled_pr_count": 100,
+            "check_present_n_pr": 100,
+            "checks": [{"name": "CI / test", "pole_n": 20, "p50_s": 100}],
+        },
+        "findings": [],
+    }
+    expected = {"oracle": {
+        "sample": {"completed_with_eligible_jobs": 100},
+        "gate_order": ["CI / test"],
+        "gates": [{
+            "check": "CI / test", "last_on": 5, "out_of": 100,
+            "share": 0.05, "p50_s": 100,
+        }],
+    }, "human_review": {}}
+
+    differences = compare.compare(findings, expected)
+
+    assert any("gate share differs" in row for row in differences)
+
+
+def test_comparison_checks_the_rendered_pole_order() -> None:
+    compare = _load("compare")
+    findings = {
+        "pr_critical_path": {
+            "sampled_pr_count": 100,
+            "checks": [
+                {"name": "CI / first", "pole_n": 60, "p50_s": 100},
+                {"name": "CI / second", "pole_n": 40, "p50_s": 90},
+            ],
+        },
+        "findings": [],
+    }
+    expected = {
+        "oracle": {"sample": {"completed_with_eligible_jobs": 100}},
+        "human_review": {"rendered_pole_order": ["first", "second"]},
+    }
+    report = (
+        "## Long pole 1: `ci.yml` ▸ `second` - 1m 30s\n\n"
+        "## Long pole 2: `ci.yml` ▸ `first` - 1m 40s\n"
+    )
+
+    differences = compare.compare(findings, expected, report)
+
+    assert differences == [
+        "rendered pole order differs: engine=['second', 'first'], "
+        "reviewed=['first', 'second']"
+    ]
+
+
+def test_comparison_checks_day_spread_and_completed_only_eligibility(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"schema_version": 1, "pr_commits": [
+            {
+                "sha": "complete", "created_at": "2026-11-01T00:00:00Z",
+                "completed": True,
+                "jobs": [{"workflow": "CI", "name": "test", "status": "completed",
+                          "started_at": "2026-11-01T00:00:00Z",
+                          "completed_at": "2026-11-01T00:02:00Z"}],
+            },
+            {
+                "sha": "inflight", "created_at": "2026-11-02T00:00:00Z",
+                "completed": False, "jobs": [],
+            },
+        ]}, stream)
+    findings = {
+        "pr_critical_path": {
+            "sampled_pr_count": 2,
+            "sample_distinct_days": 1,
+            "sample_span_first": "2026-11-01T00:00:00Z",
+            "sample_span_last": "2026-11-02T00:00:00Z",
+            "checks": [{"name": "CI / test", "pole_n": 1, "p50_s": 120}],
+            "chain_facts": [{"sha": "complete"}, {"sha": "inflight"}],
+        },
+        "findings": [],
+    }
+
+    differences = compare.compare(
+        findings, {"human_review": {}}, recording=recording)
+
+    assert any("sample day spread differs" in row for row in differences)
+    assert any("in-flight commit entered the completed-only sample" in row
+               for row in differences)
+
+
+def test_comparison_uses_run_creation_dates_for_sample_day_spread(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"schema_version": 1, "pr_commits": [
+            {
+                "sha": "first", "created_at": "2026-11-01T22:00:00Z",
+                "completed": True,
+                "runs": [{"created_at": "2026-11-01T22:00:00Z"}],
+                "jobs": [{"workflow": "CI", "name": "test", "status": "completed",
+                          "started_at": "2026-11-01T23:58:00Z",
+                          "completed_at": "2026-11-02T00:02:00Z"}],
+            },
+            {
+                "sha": "second", "created_at": "2026-11-01T20:00:00Z",
+                "completed": True,
+                "runs": [{"created_at": "2026-11-01T20:00:00Z"}],
+                "jobs": [{"workflow": "CI", "name": "test", "status": "completed",
+                          "started_at": "2026-11-01T20:00:00Z",
+                          "completed_at": "2026-11-01T20:02:00Z"}],
+            },
+        ]}, stream)
+    findings = {
+        "pr_critical_path": {
+            "sampled_pr_count": 2,
+            "sample_distinct_days": 1,
+            "checks": [{"name": "CI / test", "pole_n": 2, "p50_s": 120}],
+            "chain_facts": [{"sha": "first"}, {"sha": "second"}],
+        },
+        "findings": [],
+    }
+
+    differences = compare.compare(
+        findings, {"human_review": {}}, recording=recording)
+
+    assert not any("sample day spread differs" in row for row in differences)
+
+
 def test_comparison_keeps_the_reviewed_120_second_gate_p50_tolerance() -> None:
     compare = _load("compare")
     findings = {
@@ -889,7 +1134,7 @@ def test_comparison_keeps_the_reviewed_120_second_gate_p50_tolerance() -> None:
     assert any("gate p50 differs" in row for row in differences)
 
 
-def test_comparison_does_not_hide_order_changes_below_fifteen_percent() -> None:
+def test_comparison_does_not_order_overlapping_low_share_intervals() -> None:
     compare = _load("compare")
     findings = {
         "pr_critical_path": {
@@ -914,7 +1159,7 @@ def test_comparison_does_not_hide_order_changes_below_fifteen_percent() -> None:
 
     differences = compare.compare(findings, expected)
 
-    assert any("gate order differs" in row for row in differences)
+    assert not any("gate order differs" in row for row in differences)
 
 
 def test_bottom_line_expectation_does_not_match_a_later_section() -> None:
@@ -954,6 +1199,19 @@ def test_real_repository_report_matches_independent_expectation(
         tmp_path,
         repo_root=_ROOT.parents[2],
     )
+    assert findings["_golden_comparison_independence"] == {
+        "gate_order": False,
+        "gate_p50": False,
+        "gate_share": False,
+        "sample": False,
+    }
+    if recording_name in {"microsoft-playwright", "ethereum-go-ethereum"}:
+        critical = findings.get("pr_critical_path") or {}
+        sampled = int(critical.get("sampled_pr_count") or 0)
+        partial = int(critical.get("sample_partial_count") or 0)
+        assert sampled and partial * 2 < sampled, (
+            f"{recording_name} replay remains mostly partial: {partial}/{sampled}"
+        )
     differences = compare.compare(
         findings, expected, report, recording=recording)
 
