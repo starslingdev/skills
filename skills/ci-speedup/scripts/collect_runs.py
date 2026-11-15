@@ -5283,7 +5283,10 @@ def _bimodal_split(durs: list[float], *, min_n: int = 8, min_frac: float = 0.30,
     if hi_med < min_high_s:
         return None  # a sub-minute "slow" mode isn't a meaningful gate (e.g. 2s->4s)
     return {"n": n, "slow_n": len(high), "slow_frac": round(len(high) / n, 2),
-            "low_p50_s": round(lo_med, 1), "high_p50_s": round(hi_med, 1)}
+            "low_p50_s": round(lo_med, 1), "high_p50_s": round(hi_med, 1),
+            # Preserve the largest-gap membership boundary.  The medians alone
+            # cannot reconstruct it when either cluster has a wide spread.
+            "slow_min_s": round(high[0], 1)}
 
 
 def _minority_gate_tail(observations: list[tuple[float, str]]) -> dict[str, Any] | None:

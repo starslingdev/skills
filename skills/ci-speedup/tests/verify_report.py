@@ -13445,14 +13445,20 @@ def check_bimodal_pole_one_states_modes_and_slow_win(
     low = _num(bimodal.get("low_p50_s"))
     high = _num(bimodal.get("high_p50_s"))
     frac = _num(bimodal.get("slow_frac"))
+    slow_min = _num(bimodal.get("slow_min_s"))
     if (low is None or high is None or frac is None or frac <= 0
-            or high <= p50 * 1.15 or p50 > (low + high) / 2):
+            or slow_min is None or high <= p50 * 1.15
+            or p50 > (low + high) / 2):
         return Check(name, True, "Long pole 1 is not a fast-median bimodal gate", skipped=True)
 
-    midpoint = (low + high) / 2.0
     slow_ceilings: list[float] = []
     target = _cmp_name(pole_name)
-    for entry in _as_list(cp.get("populations")):
+    populations = _as_list(cp.get("populations"))
+    completeness = _as_list(cp.get("population_check_runs_complete"))
+    completion_aligned = len(completeness) == len(populations) and bool(populations)
+    ran_n = 0
+    slow_n = 0
+    for index, entry in enumerate(populations):
         try:
             _share, raw_checks = entry
             checks = [(str(check_name), float(duration))
@@ -13463,16 +13469,27 @@ def check_bimodal_pole_one_states_modes_and_slow_win(
                if _cmp_name(check_name) == target]
         siblings = [duration for check_name, duration in checks
                     if _cmp_name(check_name) != target]
-        if own and siblings and max(own) >= midpoint:
+        if not own:
+            continue
+        ran_n += 1
+        if max(own) < slow_min:
+            continue
+        slow_n += 1
+        if siblings:
             slow_ceilings.append(max(max(own) - max(siblings), 0.0))
-    positive = [value for value in slow_ceilings if value > 0]
-    if not positive:
+        elif completion_aligned and completeness[index] is True:
+            slow_ceilings.append(max(own))
+    if not slow_ceilings or ran_n <= 0:
         return Check(name, False, "bimodal Long pole 1 has no measured slow-share ceiling")
-    slow_pct = round(frac * 100)
+    slow_pct = round(slow_n / ran_n * 100)
+    all_sampled = ran_n == len(populations)
+    lead = (f"{slow_pct}% of sampled PRs wait"
+            if all_sampled else
+            f"Of sampled PRs where this check ran, {slow_pct}% wait")
     story = (
-        f"{slow_pct}% of sampled PRs wait about **{_fmt_clock(high)}** on this check; "
+        f"{lead} about **{_fmt_clock(high)}** on this check; "
         f"the other {100 - slow_pct}% wait about **{_fmt_clock(low)}**. The slow-mode "
-        f"win is about **{_fmt_clock(statistics.median(positive))}** (median of the "
+        f"win is about **{_fmt_clock(statistics.median(slow_ceilings))}** (median of the "
         "measured per-PR ceilings)."
     )
     bottom = next((line for line in report.splitlines()

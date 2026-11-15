@@ -1415,24 +1415,28 @@ def _bimodal_slow_mode_story(pole: dict[str, Any]) -> str:
     low = _num(bi.get("low_p50_s"))
     high = _num(bi.get("high_p50_s"))
     frac = _num(bi.get("slow_frac"))
-    if not low or not high or not frac or high <= low:
+    slow_min = _num(bi.get("slow_min_s"))
+    if not low or not high or not frac or not slow_min or high <= low:
         return ""
-    midpoint = (low + high) / 2.0
-    slow_ceilings = [
-        float(saving)
-        for row in (exact.get("rows") or [])
-        if isinstance(row, dict)
-        and (_num(row.get("before_s")) or 0.0) >= midpoint
-        and (saving := _num(row.get("saving_s"))) is not None
-        and saving > 0.0
-    ]
+    rows = [row for row in (exact.get("rows") or []) if isinstance(row, dict)]
+    ran_rows = [row for row in rows
+                if row.get("target_ran") is not False
+                and (_num(row.get("before_s")) or 0.0) > 0.0]
+    slow_rows = [row for row in ran_rows
+                 if (_num(row.get("before_s")) or 0.0) >= slow_min]
+    slow_ceilings = [float(saving) for row in slow_rows
+                     if (saving := _num(row.get("saving_s"))) is not None]
     if not slow_ceilings:
         return ""
-    slow_pct = round(frac * 100)
+    slow_pct = round(len(slow_rows) / len(ran_rows) * 100)
     fast_pct = 100 - slow_pct
     slow_win = _median(slow_ceilings)
+    all_sampled = len(ran_rows) == int(exact.get("total_n") or 0)
+    lead = (f"{slow_pct}% of sampled PRs wait"
+            if all_sampled else
+            f"Of sampled PRs where this check ran, {slow_pct}% wait")
     return (
-        f"{slow_pct}% of sampled PRs wait about **{_clock(high)}** on this check; "
+        f"{lead} about **{_clock(high)}** on this check; "
         f"the other {fast_pct}% wait about **{_clock(low)}**. The slow-mode win is "
         f"about **{_clock(slow_win)}** (median of the measured per-PR ceilings)."
     )
