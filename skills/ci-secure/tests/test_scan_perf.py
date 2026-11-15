@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -41,6 +42,17 @@ def _mk_workflows(tmp_path: Path, names: list[str]) -> list[Path]:
         p.write_text("on: push\n", encoding="utf-8")
         out.append(p)
     return out
+
+
+def test_bracket_normalizer_stops_at_first_unclosed_expression_quickly() -> None:
+    opening_count = 1_000
+    text = "${{" * opening_count + "x" * (100_000 - 3 * opening_count)
+    started = time.perf_counter()
+    normalized = scan._normalize_context_brackets(text)
+    elapsed = time.perf_counter() - started
+
+    assert normalized == text
+    assert elapsed < 0.5
 
 
 def test_prefetch_activity_enriches_every_workflow(tmp_path, monkeypatch) -> None:

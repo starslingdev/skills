@@ -13,6 +13,13 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-11-15** (#351) — ci-secure's narrow label/comment script proof now
+  fails closed on a line-leading HTML close-comment marker. Bracket-index
+  normalization uses a linear forward walk and stops at the first unclosed
+  template expression, and a source-level guard keeps action-repository API
+  reads pinned to `github.com` while audited-repository reads follow the
+  configured host.
+
 - P14.18 now keeps `pull_request_target` automation HIGH when it checks out
   attacker-head code, executes PR-controlled text, or calls review/merge APIs,
   while classifying label/comment-only jobs with none of those paths as MEDIUM
