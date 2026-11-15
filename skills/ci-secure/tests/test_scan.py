@@ -1180,6 +1180,67 @@ jobs:
     assert finding["severity"] == "HIGH"
 
 
+def test_p1418_html_close_comment_cannot_hide_a_merge_call(
+    tmp_path: Path,
+) -> None:
+    """A line-leading HTML close marker is a JavaScript line comment."""
+    _write_workflow(
+        tmp_path,
+        "danger.yml",
+        """on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  danger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.addLabels({
+            --> "
+            })
+            github.rest.pulls['mer'+'ge']({})
+            --> ")
+""",
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "HIGH"
+
+
+def test_p1418_bom_prefixed_html_close_comment_cannot_hide_a_merge_call(
+    tmp_path: Path,
+) -> None:
+    """U+FEFF is JavaScript whitespace, so it may precede ``-->``."""
+    bom = "\ufeff"
+    _write_workflow(
+        tmp_path,
+        "danger.yml",
+        """on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  danger:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.addLabels({
+            %s--> "
+            })
+            github.rest.pulls['mer'+'ge']({})
+            %s--> ")
+""" % (bom, bom),
+    )
+    finding = next(
+        f for f in _scan_dir(tmp_path)["findings"] if f["pattern"] == "P14.18"
+    )
+    assert finding["severity"] == "HIGH"
+
+
 @pytest.mark.parametrize(
     "permissions",
     (
