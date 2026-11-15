@@ -551,6 +551,19 @@ def test_fixture_materialization_excludes_recording_and_expectation_files(
     run_fixture(FIXTURE_ROOT / "serial-chain", monkeypatch, tmp_path)
 
 
+def test_path_partitioned_fixture_records_completed_jobs():
+    responses = json.loads((
+        FIXTURE_ROOT / "path-partitioned-monorepo" / "responses.json"
+    ).read_text(encoding="utf-8"))
+    jobs = [job for run_jobs in responses["jobs"].values() for job in run_jobs]
+
+    assert jobs
+    assert all(job.get("conclusion") == "success" for job in jobs), (
+        "completed fixture jobs must not be replayed as queued")
+    assert not responses.get("logs"), (
+        "the path-partitioned fixture must not restore unrelated Cargo logs")
+
+
 def test_named_fixtures_exercise_their_defining_interactions(
         monkeypatch, tmp_path):
     docs = {}
