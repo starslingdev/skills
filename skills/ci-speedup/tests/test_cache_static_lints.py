@@ -137,6 +137,20 @@ def test_opt61_cache_family_stops_at_the_first_expression(tmp_path) -> None:
     assert unrelated_status == "unknown"
 
 
+def test_opt61_cache_family_uses_the_first_specific_literal_word(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - uses: actions/cache@v4
+        with:
+          path: ~/.cache
+          key: pnpm-ccache-${{ github.sha }}
+          restore-keys: other-
+      - run: pnpm build
+""")
+    row = next(item for item in rows if item["pattern"] == "OPT61"
+               and "restore" in item["evidence"].lower())
+
+    assert row["cache_family"] == "pnpm"
+
+
 def test_opt61_restore_key_cannot_relabel_the_saved_key_family(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:

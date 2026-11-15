@@ -4846,7 +4846,16 @@ def _static_cache_family(
         for token in re.findall(r"[a-z][a-z0-9_.]*", str(path or "").casefold())
     ]
     path_tokens = [token for token in path_tokens if token]
-    texts = [key_literal_prefix, *(str(value or "").casefold() for value in values)]
+    ignored = {
+        "build", "cache", "ci", "dependencies", "deps", "github", "home",
+        "key", "keys", "linux", "repository", "restore", "runner", "sha",
+        "shared", "ubuntu",
+    }
+    for token in key_tokens:
+        if (token not in ignored
+                and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
+            return token
+    texts = [str(value or "").casefold() for value in values]
     for text in texts:
         for family in (
             "sccache", "ccache", "staticcheck", "golangci", "buildkit",
@@ -4855,15 +4864,7 @@ def _static_cache_family(
         ):
             if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", text):
                 return family
-    ignored = {
-        "build", "cache", "ci", "dependencies", "deps", "github", "home",
-        "key", "keys", "linux", "repository", "restore", "runner", "sha",
-        "shared", "ubuntu",
-    }
     for token in reversed(path_tokens):
-        if token in key_tokens and token not in ignored:
-            return token
-    for token in key_tokens:
         if (token not in ignored
                 and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
             return token
