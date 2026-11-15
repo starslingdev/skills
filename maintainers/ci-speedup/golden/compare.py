@@ -316,7 +316,8 @@ def _recorded_required_checks(recording: Path) -> set[str]:
                 if ("~DEFAULT_BRANCH" in excludes
                         or any(fnmatchcase(target, value) for value in excludes)):
                     continue
-        classic = payload.get("required_status_checks")
+        classic = (payload if "_protection_" in path.name
+                   else payload.get("required_status_checks"))
         if isinstance(classic, dict):
             names.update(
                 str(name) for name in classic.get("contexts") or [] if name)
@@ -442,10 +443,20 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
         for name in required_names
     }
     representative_count = max(required_counts.values(), default=0)
-    representative_required = {
-        name for name, count in required_counts.items()
-        if count and count == representative_count
-    }
+    requested_count = min(sample_count or representative_count, representative_count)
+    representative_required: set[str] = set()
+    representative_sources = list(in_span)
+    for name, _count in sorted(
+            required_counts.items(), key=lambda item: (-item[1], item[0])):
+        candidates = [
+            source for source in representative_sources
+            if any(matches_required(job, name)
+                   for job in source.get("jobs") or [] if isinstance(job, dict))
+        ]
+        if len(candidates) < requested_count:
+            continue
+        representative_required.add(name)
+        representative_sources = candidates
     eligible = []
     for source in in_span:
         jobs = [job for job in source.get("jobs") or [] if isinstance(job, dict)]
