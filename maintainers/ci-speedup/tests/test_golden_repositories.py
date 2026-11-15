@@ -532,6 +532,85 @@ def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
                for row in differences), differences
 
 
+def test_recorded_required_checks_read_classic_protection_response(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    with gzip.open(
+        api / "repos_public_example_branches_main_protection_required_status_checks.json.gz",
+        "wt",
+        encoding="utf-8",
+    ) as stream:
+        json.dump({
+            "contexts": ["lint"],
+            "checks": [{"context": "tests", "app_id": 15368}],
+        }, stream)
+
+    assert compare._recorded_required_checks(recording) == {"lint", "tests"}
+
+
+def test_engine_span_oracle_prefers_a_complete_required_suite(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
+    with gzip.open(
+        api / "repos_public_example.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({"default_branch": "main"}, stream)
+    with gzip.open(
+        api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [
+                    {"context": "lint"}, {"context": "tests"},
+                ]},
+            }],
+        }, stream)
+    commits = []
+    for index in range(3):
+        jobs = [{
+            "workflow": "CI", "name": "lint", "status": "completed",
+            "started_at": f"2026-11-0{index + 1}T00:00:00Z",
+            "completed_at": f"2026-11-0{index + 1}T00:01:00Z",
+        }]
+        if index < 2:
+            jobs.append({
+                "workflow": "CI", "name": "tests", "status": "completed",
+                "started_at": f"2026-11-0{index + 1}T00:00:00Z",
+                "completed_at": f"2026-11-0{index + 1}T00:10:00Z",
+            })
+        commits.append({
+            "sha": f"commit-{index}",
+            "created_at": f"2026-11-0{index + 1}T00:00:00Z",
+            "completed": True,
+            "jobs": jobs,
+        })
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"schema_version": 1, "pr_commits": commits}, stream)
+    findings = {"pr_critical_path": {
+        "sample_span_first": "2026-11-01T00:00:00Z",
+        "sample_span_last": "2026-11-03T00:00:00Z",
+        "sampled_pr_count": 2,
+    }}
+
+    oracle = compare._oracle_for_engine_span(recording, findings)
+
+    assert oracle["sample"]["completed_with_eligible_jobs"] == 2
+    assert oracle["gate_order"][0] == "CI / tests"
+    assert oracle["gates"][0]["last_on"] == 2
+
+
 def test_engine_span_oracle_ignores_engine_nested_gate_caps(
         tmp_path: Path) -> None:
     compare = _load("compare")
