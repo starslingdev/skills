@@ -469,7 +469,9 @@ def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
             "conditions": {"ref_name": {"include": ["refs/heads/main"]}},
             "rules": [{
                 "type": "required_status_checks",
-                "parameters": {"required_status_checks": [{"context": "lint"}]},
+                "parameters": {"required_status_checks": [
+                    {"context": "lint"}, {"context": "slow tests"},
+                ]},
             }],
         }, stream)
     with gzip.open(
@@ -503,6 +505,11 @@ def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
                         "started_at": "2026-11-01T00:00:00Z",
                         "completed_at": "2026-11-01T00:10:00Z",
                     },
+                    {
+                        "workflow": "CI", "name": "unrelated", "status": "completed",
+                        "started_at": "2026-11-01T00:00:00Z",
+                        "completed_at": "2026-11-01T00:20:00Z",
+                    },
                 ],
             }],
         }, stream)
@@ -521,7 +528,7 @@ def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
         },
     }
 
-    assert compare._recorded_required_checks(recording) == {"lint"}
+    assert compare._recorded_required_checks(recording) == {"lint", "slow tests"}
     differences = compare.compare(
         findings,
         {"human_review": {}},
@@ -530,6 +537,76 @@ def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
 
     assert any("independent leading gate absent: 'CI / slow tests'" in row
                for row in differences), differences
+
+
+def test_engine_span_oracle_includes_recorded_required_predecessors(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    checkout = recording / "checkout" / ".github" / "workflows"
+    checkout.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
+    (checkout / "ci.yml").write_text(
+        "name: CI\njobs:\n"
+        "  lint:\n    name: lint\n"
+        "  slow:\n    name: slow tests\n"
+        "  verdict:\n    name: verdict\n    needs: [lint, slow]\n"
+        "  unrelated:\n    name: unrelated\n",
+        encoding="utf-8",
+    )
+    with gzip.open(
+        api / "repos_public_example.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({"default_branch": "main"}, stream)
+    with gzip.open(
+        api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {
+                    "required_status_checks": [{"context": "verdict"}]
+                },
+            }],
+        }, stream)
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({
+            "schema_version": 1,
+            "pr_commits": [{
+                "sha": "commit-1", "created_at": "2026-11-01T00:00:00Z",
+                "completed": True,
+                "jobs": [
+                    {"workflow": "CI", "name": "lint", "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:01:00Z"},
+                    {"workflow": "CI", "name": "slow tests", "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:10:00Z"},
+                    {"workflow": "CI", "name": "verdict", "status": "completed",
+                     "started_at": "2026-11-01T00:10:00Z",
+                     "completed_at": "2026-11-01T00:10:10Z"},
+                    {"workflow": "CI", "name": "unrelated", "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:20:00Z"},
+                ],
+            }],
+        }, stream)
+    findings = {"pr_critical_path": {
+        "sample_span_first": "2026-11-01T00:00:00Z",
+        "sample_span_last": "2026-11-01T00:00:00Z",
+        "sampled_pr_count": 1,
+    }}
+
+    oracle = compare._oracle_for_engine_span(recording, findings)
+
+    assert oracle["gate_order"][0] == "CI / slow tests"
+    assert all(row["check"] != "CI / unrelated" for row in oracle["gates"])
 
 
 def test_recorded_required_checks_read_classic_protection_response(
