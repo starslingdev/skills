@@ -7730,6 +7730,18 @@ _RM_DOOR_UNCLASSIFIED = "unclassified"      # loud sentinel — a pattern with n
 # detectors (OPT70-OPT75). This table is the VISIBLE, reviewable whitelist the
 # thesis requires: no pattern skips the door silently.
 _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
+    # CLAMP — serial-gate savings are flat per-run setup estimates multiplied by
+    # the workflow's monthly volume.  A finding can name more jobs than the cost
+    # spine measured (for example a schedule-only sibling), while the verifier
+    # still bounds the credit by the resolved subset.  Route both serial-gate
+    # patterns through the same partial-coverage-aware clamp as OPT73 so the
+    # producer and verifier enforce one physical ceiling.
+    "OPT14": (_RM_DOOR_CLAMP,
+              "repeated setup — per-run modeled credit clamped to the affected "
+              "jobs' measured cost-spine billable"),
+    "OPT15": (_RM_DOOR_CLAMP,
+              "cross-workflow repeated build — per-run modeled credit clamped to "
+              "the affected jobs' measured cost-spine billable"),
     # DERIVE — whole-run cancel re-derives hit_rate x the affected jobs' measured
     # billable (implemented by `_reground_whole_run_cancel_saving`, run first).
     "OPT45": (_RM_DOOR_DERIVE,

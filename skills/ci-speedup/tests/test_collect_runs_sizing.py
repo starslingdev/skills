@@ -2054,6 +2054,43 @@ def test_opt73_within_measured_is_confirmed_not_clamped():
     assert f["runner_min_basis"] == "measured_spine_billable"
 
 
+def test_opt14_saving_is_capped_at_resolved_jobs_measured_compute(tmp_path):
+    """A partially measured serial-gate finding still obeys the physical bound."""
+    from collect_runs import _reground_runner_minute_savings
+
+    wf = ".github/workflows/skill-evals.yml"
+    f = {
+        "pattern": "OPT14",
+        "workflow_file": wf,
+        "affected_jobs": ["evals", "ci-speedup-evals"],
+    }
+    _size_finding(f, {}, monthly_volume=573)
+    assert f["runner_min_saving"] == 429.8
+
+    doc = {
+        "findings": [f],
+        "runner_minute_spine": _door_spine({"evals": 200.6}, wf=wf),
+    }
+    assert _bounds_tag(doc, tmp_path) == "FAIL"
+
+    _reground_runner_minute_savings(doc["findings"], doc["runner_minute_spine"])
+
+    assert f["runner_min_saving"] == 200.6
+    assert f["runner_min_basis"] == "measured_spine_clamped"
+    assert "cannot save more minutes than the jobs consume" in f["size_note"]
+    assert _bounds_tag(doc, tmp_path) == "PASS"
+
+
+def test_every_serial_gate_per_run_model_uses_the_measured_clamp():
+    """Both per-run-times-volume serial models share the physical ceiling."""
+    from collect_runs import _rm_door_policy
+
+    assert _SERIAL_GATE_PATTERNS == {"OPT14", "OPT15"}
+    assert {_rm_door_policy(pattern)[0] for pattern in _SERIAL_GATE_PATTERNS} == {
+        "clamp"
+    }
+
+
 # --- issue #52: exact job identity — matrix legs of one job counted ONCE ------
 # mastodon round-5: build-push-pr.yml's OPT73 named its cluster as the two matrix
 # legs of ONE reusable-workflow job (base `build-image / build-image`), and the
