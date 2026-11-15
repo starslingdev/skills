@@ -24,6 +24,7 @@ import base64
 import copy
 import datetime as _dt
 import fnmatch
+import functools
 import hashlib
 import itertools
 import json
@@ -18245,7 +18246,11 @@ def _detect_opt51_install_ratio(
     return out
 
 
+@functools.lru_cache(maxsize=None)
 def _struct_toks(s: str) -> frozenset[str]:
+    # Cached: the check-to-job matchers re-tokenize the same check and job names on
+    # every candidate pair (millions of calls on a large repo), and the result is an
+    # immutable function of the one string.
     return frozenset(t for t in _re.split(r"[^a-z0-9]+", (s or "").lower()) if t)
 
 
@@ -18572,6 +18577,7 @@ def _check_grounded_job_p50(
     return max(tier) if tier else None
 
 
+@functools.lru_cache(maxsize=None)
 def _name_template_regex(template: str) -> "_re.Pattern[str]":
     """Compile a workflow job `name:` template into a regex that matches its expanded
     check-run names. A matrix job's `name` carries `${{...}}` placeholders (e.g.
@@ -18579,6 +18585,8 @@ def _name_template_regex(template: str) -> "_re.Pattern[str]":
     concrete check-run (`UNIT Test (Shard 4)`). Replacing every `${{...}}` with `.+?`
     and escaping the literal spans yields a matcher for all of a job's legs. A name with
     no placeholder compiles to an exact match."""
+    # Cached for the same reason as `_struct_toks`: the binders recompile the same
+    # templates on every candidate pair; a compiled pattern is immutable.
     parts = _re.split(r"\$\{\{.*?\}\}", template)
     return _re.compile("^" + ".+?".join(_re.escape(p) for p in parts) + "$")
 

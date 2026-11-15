@@ -32,9 +32,11 @@ in silence.
 """
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 import pytest
@@ -107,3 +109,86 @@ def pytest_sessionfinish(session, exitstatus):
             "escaped via inherited GIT_DIR and rewrote the developer checkout). "
             "Find the test whose git subprocess is not confined to its tmp_path."
         )
+
+
+# --- CI sharding -------------------------------------------------------------
+# CI splits the suite into N parts that run on separate runners at the same time
+# (`--shard K/N` in .github/workflows/ci.yml). Whole test FILES are assigned, so a
+# module's shared fixtures never run twice, and they are balanced by each file's
+# measured time in tests/shard_weights.json (longest-first, onto the lighter part).
+# A file missing from that list gets the median weight; stale weights only make
+# the parts less even. They never drop a test: every collected file lands in
+# exactly one part (tests/test_test_sharding.py pins this). Refresh the weights with
+# `python3 -m pytest -n 4 --store-shard-weights tests/shard_weights.json`.
+
+_SHARD_WEIGHTS = _REPO_ROOT / "tests" / "shard_weights.json"
+
+
+def pytest_addoption(parser):
+    group = parser.getgroup("sharding")
+    group.addoption("--shard", default=None, metavar="K/N",
+                    help="run only part K of N (whole files, balanced by tests/shard_weights.json)")
+    group.addoption("--store-shard-weights", default=None, metavar="PATH",
+                    help="write each test file's measured total duration (seconds) to PATH as JSON")
+
+
+def parse_shard(value: str) -> tuple[int, int]:
+    try:
+        k, n = (int(part) for part in value.split("/"))
+    except ValueError:
+        raise pytest.UsageError(f"--shard expects K/N, e.g. 1/2; got {value!r}") from None
+    if n < 1 or not 1 <= k <= n:
+        raise pytest.UsageError(f"--shard {value!r}: need 1 <= K <= N")
+    return k, n
+
+
+def assign_shards(files, weights: dict[str, float], n: int) -> dict[str, int]:
+    """Map each file to a part 1..n. Deterministic for a given set of files and
+    weights, independent of the order the files arrive in."""
+    files = sorted(set(files))
+    known = sorted(weights.values())
+    default = known[len(known) // 2] if known else 1.0
+    load = [0.0] * n
+    assignment = {}
+    for f in sorted(files, key=lambda f: (-weights.get(f, default), f)):
+        part = min(range(n), key=lambda i: (load[i], i))
+        load[part] += weights.get(f, default)
+        assignment[f] = part + 1
+    return assignment
+
+
+def _item_file(item) -> str:
+    return item.nodeid.split("::", 1)[0]
+
+
+def pytest_collection_modifyitems(config, items):
+    value = config.getoption("--shard")
+    if not value:
+        return
+    k, n = parse_shard(value)
+    try:
+        weights = json.loads(_SHARD_WEIGHTS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        weights = {}
+    assignment = assign_shards((_item_file(i) for i in items), weights, n)
+    keep = [i for i in items if assignment[_item_file(i)] == k]
+    drop = [i for i in items if assignment[_item_file(i)] != k]
+    if drop:
+        config.hook.pytest_deselected(items=drop)
+    items[:] = keep
+
+
+_measured_file_seconds: defaultdict[str, float] = defaultdict(float)
+
+
+def pytest_runtest_logreport(report):
+    _measured_file_seconds[report.nodeid.split("::", 1)[0]] += report.duration
+
+
+def pytest_unconfigure(config):
+    path = config.getoption("--store-shard-weights", default=None)
+    # Workers (xdist) also see their own reports; only the controller writes.
+    if not path or hasattr(config, "workerinput") or not _measured_file_seconds:
+        return
+    data = {f: round(max(s, 0.1), 1) for f, s in sorted(_measured_file_seconds.items())}
+    Path(path).write_text(json.dumps(data, indent=1, sort_keys=True) + "\n", encoding="utf-8")

@@ -1,7 +1,10 @@
 name: CI
 
-# Runs the full test suite on every push to main and every pull request. Four pytest
-# workers share the work; every test still runs and any failure fails the suite.
+# Runs the full test suite on every push to main and every pull request. The suite is split
+# into two parts (`--shard K/2`, whole test files balanced by tests/shard_weights.json) that run
+# on two runners at once, each with four pytest workers; every test runs in exactly one part and
+# any failure fails the suite. A matrix job's result is `success` only when every part succeeded,
+# so the verdict below reads both parts through one `needs.<job>.result`.
 # Locally, `pytest -v` runs the same suite sequentially for easier debugging.
 #
 # The suite runs as two mutually exclusive jobs: self-hosted for pushes and same-repo PRs
@@ -37,7 +40,7 @@ permissions:
 
 jobs:
   test-self:
-    name: test (self-hosted)
+    name: test (self-hosted ${{ matrix.shard }}/2)
     # Never execute untrusted fork-PR code on the self-hosted runner: run only for pushes and
     # pull requests whose head is this same repository. Fork PRs get the identical suite on
     # GitHub-hosted runners via test-fork below.
@@ -45,6 +48,9 @@ jobs:
     # Without this, a dead runner pool leaves the job queued (self-hosted jobs wait up to 24h)
     # and the required `test` check pending with no signal. The suite runtime is measured by pytest.
     timeout-minutes: 30
+    strategy:
+      matrix:
+        shard: [1, 2]
     if: >-
       github.event_name == 'push' ||
       github.event.pull_request.head.repo.full_name == github.repository
@@ -89,10 +95,12 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest -v -n 4 --dist worksteal
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: pytest -v -n 4 --dist worksteal --shard "${SHARD}/2"
 
   test-fork:
-    name: test (fork)
+    name: test (fork ${{ matrix.shard }}/2)
     # Inverse of test-self's guard: fork PRs only, on GitHub-hosted runners with no access to
     # repo secrets. Same contract, different infrastructure. Lives in this workflow (not a
     # separate file) because the verdict job below must `needs:` it, and `needs` cannot see
@@ -102,6 +110,9 @@ jobs:
       github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      matrix:
+        shard: [1, 2]
     steps:
       - name: Checkout
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -136,7 +147,9 @@ jobs:
         run: pip install -e ".[dev]"
 
       - name: Run tests
-        run: pytest -v -n 4 --dist worksteal
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: pytest -v -n 4 --dist worksteal --shard "${SHARD}/2"
 
   # ONE check name carries the verdict for fork and non-fork alike. The two suite jobs are
   # mutually exclusive, so a branch protection rule naming either of them directly is
