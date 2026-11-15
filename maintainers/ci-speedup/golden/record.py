@@ -50,6 +50,7 @@ SNAPSHOT_SUFFIX = ".golden"
 # lists replay as failed reads, never as successful empty payloads.
 MONTH_JOB_LIST_READ_CAP = 400
 _LONG_NUMBER = re.compile(r"(?<![0-9])[0-9]{9,}(?![0-9])")
+_FULL_HEX_SHA = re.compile(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{40}(?![0-9A-Fa-f])")
 _PRIVATE_SHAPED_PARTS = (
     "sess" + "ion_",
     "/" + "users/",
@@ -608,12 +609,12 @@ def _sanitize_api_identifiers(api_dir: Path) -> dict[str, str]:
         else:
             text = path.read_text(encoding="utf-8", errors="replace")
         text_by_path[path] = text
-        tokens.update(_LONG_NUMBER.findall(path.name.removesuffix(".gz")))
-        tokens.update(_LONG_NUMBER.findall(text))
+        tokens.update(_long_numbers_outside_full_sha(path.name.removesuffix(".gz")))
+        tokens.update(_long_numbers_outside_full_sha(text))
     mapping = {token: str(70_000_001 + index) for index, token in enumerate(sorted(tokens))}
 
     def replace(value: str) -> str:
-        return _LONG_NUMBER.sub(lambda match: mapping[match.group(0)], value)
+        return _replace_long_numbers_outside_full_sha(value, mapping)
 
     for path in files:
         plain_name = path.name.removesuffix(".gz")
@@ -622,6 +623,32 @@ def _sanitize_api_identifiers(api_dir: Path) -> dict[str, str]:
         if target != path:
             path.unlink()
     return mapping
+
+
+def _long_numbers_outside_full_sha(value: str) -> list[str]:
+    """Return long decimal identifiers without treating commit SHAs as IDs."""
+    tokens: list[str] = []
+    cursor = 0
+    for sha in _FULL_HEX_SHA.finditer(value):
+        tokens.extend(_LONG_NUMBER.findall(value[cursor:sha.start()]))
+        cursor = sha.end()
+    tokens.extend(_LONG_NUMBER.findall(value[cursor:]))
+    return tokens
+
+
+def _replace_long_numbers_outside_full_sha(
+        value: str, mapping: dict[str, str]) -> str:
+    """Pseudonymize API IDs while preserving traceable 40-hex commit SHAs."""
+    pieces: list[str] = []
+    cursor = 0
+    for sha in _FULL_HEX_SHA.finditer(value):
+        pieces.append(_LONG_NUMBER.sub(
+            lambda match: mapping[match.group(0)], value[cursor:sha.start()]))
+        pieces.append(sha.group(0))
+        cursor = sha.end()
+    pieces.append(_LONG_NUMBER.sub(
+        lambda match: mapping[match.group(0)], value[cursor:]))
+    return "".join(pieces)
 
 
 def _public_history(history: dict[str, Any]) -> dict[str, Any]:
@@ -773,9 +800,8 @@ def record(repository: str, checkout: Path, output: Path, *, captured_at: dateti
     public_history = _public_history(history)
     _write_compressed_json(output / "month-wide.json.gz", public_history)
     scrub_recording(output, repository.split("/", 1)[0])
-    public_commit = _LONG_NUMBER.sub(
-        lambda match: identifier_mapping[match.group(0)], commit.stdout.strip()
-    )
+    public_commit = _replace_long_numbers_outside_full_sha(
+        commit.stdout.strip(), identifier_mapping)
     _write_manifest(
         repository, checkout, output, captured_at, log_cap_bytes, skipped,
         public_history, commit_override=public_commit,

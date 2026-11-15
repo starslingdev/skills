@@ -21,6 +21,8 @@ Before committing, the recorder rewrites long numeric API identifiers to
 stable eight-digit fixture identifiers across both response bodies and replay
 filenames. The relationship between runs, jobs, workflows, and endpoints stays
 intact while the public fixture follows the repository's identifier policy.
+Full 40-hex commit SHAs are preserved so a manifest remains traceable to its
+public source even when the SHA contains a long decimal run.
 
 The recorder also removes contributor identities. Every person's login becomes
 a stable `contributor-NNNN` alias (in URLs, fork `owner/name` values, merge
@@ -59,4 +61,9 @@ Replay also exposes the normalized month through ordinary workflow-run and
 job-list fixture names. It keeps the detailed live page 1, then materializes
 older page-2-and-later responses with deterministic fixture IDs. This lets a
 deeper sampling implementation consume the same pinned recording without a
-new network capture or an engine-written expectation.
+new network capture or an engine-written expectation. A manifest can opt into
+recorded-run-only replay when its month capture did not retain every job list;
+that mode exposes only run/job pairs with evidence instead of manufacturing a
+failed job read for every missing pair. Replay stamps the sample, gate share,
+gate order, and gate P50 comparisons as non-independent wherever those pages
+come from the same normalized month data as the oracle.
