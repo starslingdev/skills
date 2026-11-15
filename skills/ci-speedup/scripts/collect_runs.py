@@ -7721,7 +7721,7 @@ def _measured_billable_for_jobs(
 # shared, in one place.
 # =============================================================================
 _RM_DOOR_DERIVE = "derive"                  # saving = rate x measured (OPT45 cancel model)
-_RM_DOOR_CLAMP = "clamp"                    # saving = min(modeled, measured) (OPT73 cluster model)
+_RM_DOOR_CLAMP = "clamp"                    # saving = min(modeled, measured) (serial gates / OPT73)
 _RM_DOOR_NOT_DERIVABLE = "not_spine_derivable"  # visible whitelist — retained, stamped, reasoned
 _RM_DOOR_UNCLASSIFIED = "unclassified"      # loud sentinel — a pattern with no declared policy
 
@@ -7863,7 +7863,8 @@ def _reground_runner_minute_savings(
 
       1. OPT45 whole-run-cancel DERIVES from the spine first (unchanged path).
       2. Every remaining positive-rm finding gets a `runner_min_basis` stamp:
-         - CLAMP patterns (OPT73) whose affected jobs join the spine → saving is
+         - CLAMP patterns (the serial gates and OPT73) whose affected jobs join
+           the spine → saving is
            clamped to their measured billable (`measured_spine_clamped`, or
            `measured_spine_billable` when already within it); no join → UNSIZED at
            the source (`unmeasured_no_spine_match`, saving None — the #38
