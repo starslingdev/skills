@@ -264,6 +264,31 @@ def test_universal_step_identity_does_not_depend_on_display_name():
         "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600}) == []
 
 
+def test_dominant_step_identity_survives_matrix_name_interpolation():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((900, 100, 90), start=1):
+        jobs.append({
+            "name": f"Test (Shard {index})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [{
+                "number": 2,
+                "name": f"Run tests for shard {index}",
+                "conclusion": "success",
+                "started_at": start.isoformat(),
+                "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            }],
+        })
+
+    findings = cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900})
+
+    assert findings
+    assert findings[0]["legs_excluded_no_work"] == 0
+
+
 def test_a_working_leg_with_a_different_step_name_is_not_discarded():
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     jobs = []

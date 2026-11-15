@@ -10279,10 +10279,10 @@ def _detect_opt25_shard_imbalance(
         return (("number", number) if isinstance(number, int) and not isinstance(number, bool)
                 else ("position", position))
 
-    dominant_step_by_base: dict[str, str] = {}
-    step_seconds_by_base: dict[str, dict[str, float]] = {}
+    dominant_step_by_base: dict[str, tuple[str, int]] = {}
+    step_seconds_by_base: dict[str, dict[tuple[str, int], float]] = {}
     always_run_by_run: list[dict[str, set[tuple[str, int]]]] = []
-    non_universal_names_by_base: dict[str, set[str]] = {}
+    non_universal_steps_by_base: dict[str, set[tuple[str, int]]] = {}
     for run_jobs in jobs_per_run:
         active_steps_by_base: dict[str, list[dict[tuple[str, int], str]]] = {}
         for job in run_jobs:
@@ -10309,8 +10309,8 @@ def _detect_opt25_shard_imbalance(
                          if active_steps else set())
             always_run_by_base[base] = universal
             for steps in active_steps:
-                non_universal_names_by_base.setdefault(base, set()).update(
-                    name for identity, name in steps.items() if identity not in universal)
+                non_universal_steps_by_base.setdefault(base, set()).update(
+                    identity for identity in steps if identity not in universal)
         always_run_by_run.append(always_run_by_base)
 
     for run_jobs in jobs_per_run:
@@ -10323,7 +10323,7 @@ def _detect_opt25_shard_imbalance(
                 base = suffix_base[job_name]
             else:
                 continue
-            for step in job.get("steps") or []:
+            for position, step in enumerate(job.get("steps") or []):
                 if (not isinstance(step, dict)
                         or _is_preparation_step(str(step.get("name") or ""))
                         or str(step.get("conclusion") or "").lower() == "skipped"):
@@ -10332,18 +10332,18 @@ def _detect_opt25_shard_imbalance(
                 completed = _parse_dt(step.get("completed_at"))
                 if started is None or completed is None or completed <= started:
                     continue
-                step_name = str(step.get("name") or "")
+                step_identity = _step_identity(step, position)
                 seconds = (completed - started).total_seconds()
                 by_step = step_seconds_by_base.setdefault(base, {})
-                by_step[step_name] = by_step.get(step_name, 0.0) + seconds
+                by_step[step_identity] = by_step.get(step_identity, 0.0) + seconds
     for base, totals in step_seconds_by_base.items():
         if totals:
             distinctive_totals = {
-                name: seconds for name, seconds in totals.items()
-                if name in non_universal_names_by_base.get(base, set())}
+                identity: seconds for identity, seconds in totals.items()
+                if identity in non_universal_steps_by_base.get(base, set())}
             candidates = distinctive_totals or totals
             dominant_step_by_base[base] = max(
-                candidates, key=lambda step_name: (candidates[step_name], step_name))
+                candidates, key=lambda identity: (candidates[identity], identity))
 
     for run_jobs, always_run_by_base in zip(jobs_per_run, always_run_by_run):
         for j in run_jobs:
@@ -10366,19 +10366,19 @@ def _detect_opt25_shard_imbalance(
             active_work_steps = [
                 (position, step) for position, step in work_steps
                 if str(step.get("conclusion") or "").lower() != "skipped"]
-            dominant_name = dominant_step_by_base.get(base)
+            dominant_identity = dominant_step_by_base.get(base)
             distinctive_active_steps = [
                 step for position, step in active_work_steps
-                if (str(step.get("name") or "") == dominant_name
+                if (_step_identity(step, position) == dominant_identity
                     or _step_identity(step, position)
                     not in always_run_by_base.get(base, set()))]
-            dominant_steps = [step for _position, step in work_steps
-                              if str(step.get("name") or "") == dominant_name]
+            dominant_steps = [step for position, step in work_steps
+                              if _step_identity(step, position) == dominant_identity]
             # An active step identity that did not run on every leg is positive
             # evidence that this leg did real work (for example platform-specific
             # test steps). Only use the dominant sibling step to confirm an
             # otherwise workless leg; never discard that alternate work.
-            skipped_dominant = bool(dominant_name) and not distinctive_active_steps and (
+            skipped_dominant = dominant_identity is not None and not distinctive_active_steps and (
                 not dominant_steps or all(
                     str(step.get("conclusion") or "").lower() == "skipped"
                     for step in dominant_steps))
