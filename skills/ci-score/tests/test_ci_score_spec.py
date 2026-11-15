@@ -174,6 +174,59 @@ def test_methodology_and_skill_md_describe_the_basic_rubric():
     assert "13-check" not in sk, "the granular canonical description survived in SKILL.md"
 
 
+def _contains_number(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, list):
+        return any(_contains_number(item) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _contains_number(item)
+            for pair in value.items()
+            for item in pair
+        )
+    return False
+
+
+def _methodology_row_matches(
+    name: str, methodology_value: str, rows: list[str]
+) -> bool:
+    row = next((line for line in rows if line.startswith(f"| `{name}` |")), "")
+    cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+    return len(cells) >= 2 and cells[:2] == [f"`{name}`", methodology_value]
+
+
+def _methodology_value(name: str, value: object) -> str:
+    """Derive the human-facing table cell from the machine contract."""
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        suffix = " bytes" if name == "_SCRIPT_MAX_BYTES" else ""
+        return f"{value:,}{suffix}"
+    if name == "_SETUP_CACHE_INPUTS" and isinstance(value, dict):
+        return "; ".join(
+            f"{action.rsplit('/', 1)[-1]} "
+            f"{settings[1] if settings[1] is not None else 'off'}"
+            for action, settings in value.items()
+        )
+    if name == "_PLAUSIBLE_MAJOR" and isinstance(value, dict):
+        return "; ".join(
+            f"{action.rsplit('/', 1)[-1]} {major}"
+            for action, major in value.items()
+        )
+    raise AssertionError(f"no methodology display rule for {name}")
+
+
+def test_numeric_dictionary_keys_are_part_of_the_constant_contract():
+    assert _contains_number({64: "limit"})
+
+
+def test_methodology_value_must_match_the_whole_value_cell():
+    rows = ["| `_MAX_PARALLEL_DEPTH` | 640 | reason |"]
+    assert not _methodology_row_matches("_MAX_PARALLEL_DEPTH", "64", rows)
+
+
 def _literal_numeric_constants() -> dict[str, object]:
     """Return module constants whose literal value contains a number.
 
@@ -198,17 +251,6 @@ def _literal_numeric_constants() -> dict[str, object]:
             return evaluate(node.left) * evaluate(node.right)
         raise ValueError
 
-    def contains_number(value: object) -> bool:
-        if isinstance(value, bool):
-            return False
-        if isinstance(value, (int, float)):
-            return True
-        if isinstance(value, list):
-            return any(contains_number(item) for item in value)
-        if isinstance(value, dict):
-            return any(contains_number(item) for item in value.values())
-        return False
-
     source = (_SCRIPTS_DIR / "practice_facts.py").read_text()
     constants: dict[str, object] = {}
     for statement in ast.parse(source).body:
@@ -224,7 +266,7 @@ def _literal_numeric_constants() -> dict[str, object]:
             value = evaluate(statement.value)
         except (TypeError, ValueError):
             continue
-        if contains_number(value):
+        if _contains_number(value):
             constants[target.id] = value
     return constants
 
@@ -247,9 +289,9 @@ def test_every_numeric_practice_fact_constant_is_bound_to_the_spec(spec):
 def test_methodology_lists_the_numeric_engine_contract(spec):
     rows = _METHODOLOGY_PATH.read_text().splitlines()
     for name, entry in spec.get("engine_constants", {}).items():
-        row = next((line for line in rows if line.startswith(f"| `{name}` |")), "")
-        assert row, name
-        assert entry["methodology_value"] in row, name
+        expected = _methodology_value(name, entry["value"])
+        assert entry["methodology_value"] == expected, name
+        assert _methodology_row_matches(name, expected, rows), name
 
 
 def test_scorer_module_is_basic_sized():
