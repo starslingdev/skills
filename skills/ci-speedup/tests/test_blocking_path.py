@@ -6852,6 +6852,52 @@ def test_bimodal_slow_mode_story_uses_the_largest_gap_boundary():
     assert "slow-mode win is about **5m 30s**" in story
 
 
+def test_bimodal_slow_mode_story_requires_a_fast_median_and_nonzero_win():
+    rows = [
+        {"before_s": 350, "saving_s": 290, "target_ran": True}
+        for _ in range(4)
+    ] + [
+        {"before_s": 30, "saving_s": 0, "target_ran": True}
+        for _ in range(6)
+    ]
+    slow_median = _bimodal_story_pole(rows)
+    slow_median["p50_s"] = 330.0
+    assert bp._bimodal_slow_mode_story(slow_median) == ""
+
+    zero_rows = [
+        {"before_s": 350, "saving_s": 0, "target_ran": True}
+        for _ in range(4)
+    ] + rows[4:]
+    zero_win = _bimodal_story_pole(zero_rows)
+    zero_win["p50_s"] = 30.0
+    assert bp._bimodal_slow_mode_story(zero_win) == ""
+
+
+def test_only_long_pole_one_gets_the_slow_share_story():
+    doc = _pole_order_agreement_doc()
+    bimodal = {
+        "low_p50_s": 280.0,
+        "high_p50_s": 1000.0,
+        "slow_frac": 0.4,
+        "slow_min_s": 1000.0,
+    }
+    for row in doc["pr_critical_path"]["checks"]:
+        if row["name"] == "D":
+            row["bimodal"] = bimodal
+    for pole in doc["pr_critical_path"]["poles"]:
+        if pole["check"] == "D":
+            pole["bimodal"] = bimodal
+    for _share, rows in doc["pr_critical_path"]["populations"][:8]:
+        for row in rows:
+            if row[0] == "D":
+                row[1] = 1000.0
+
+    report = bp.render(doc)
+    section = _pole_section(report, "D")
+    assert "_Bimodal: **~16m 40s**" in section
+    assert "slow-mode win" not in section
+
+
 def test_frequency_gate_role_line_managed_floor_disclosed_not_misattributed():
     # Issue #22 class, site B — the managed-floor edge (greptile). The file-backed disclosure clause
     # frames the named check as the one to ATTACK ("sets the wall-clock floor on slow-mode PRs"), so

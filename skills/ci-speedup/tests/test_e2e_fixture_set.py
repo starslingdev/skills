@@ -1140,6 +1140,17 @@ def test_bimodal_gate_headline_sizes_the_slow_mode_and_full_report_verifies(
     assert "the other 60% wait about **30s**" in report
     assert "slow-mode win is about **4m 50s**" in report
     assert report.count("40% of sampled PRs wait about **5m 50s** on this check") == 2
+    contents = report.split("## 📋 Contents", 1)[1].split("<a id=\"long-pole-map\"", 1)[0]
+    gate_row = next(line for line in contents.splitlines() if "[gate]" in line)
+    assert "Slow mode 5m 50s (P50 " in gate_row
+    bottom = next(line for line in report.splitlines()
+                  if line.startswith("> **Bottom line.**"))
+    assert "has slow mode **5m 50s** (P50 **" in bottom
+    assert "is the longest check" in bottom
+    callout = next(line for line in report.splitlines()
+                   if line.startswith("> - `gate`"))
+    assert "P50 only **32s**" in callout
+    assert "but **~5m 50s**" in callout
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
 

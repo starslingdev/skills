@@ -13155,7 +13155,8 @@ def check_gate_frequency_confidence(report: str, findings_path: Path | None) -> 
                  "each workflow frequency has its re-derived interval/span and separated estimates")
 _POLE_GROUP_ROW_RE = re.compile(
     r"^(\d+)\.\s+\S+\s+\[([^\]]+)\]\(#pole-(\d+)\)\s+-\s+"
-    r"P50\s+([^·\n]+?)\s+·\s+finishes last on\s+(\d+)/(\d+)\s+PRs(.*)$",
+    r"((?:P50\s+[^·\n]+?|Slow mode\s+[^·\n]+?\s+\(P50\s+[^)\n]+\)))"
+    r"(?:\s+\(the gate\))?\s+·\s+finishes last on\s+(\d+)/(\d+)\s+PRs(.*)$",
     re.MULTILINE)
 _VR_POLE_HOLDS_UP_MIN_COUNT = 2
 _VR_POLE_LABEL_WIDTH = 33
@@ -13171,6 +13172,17 @@ def _vr_pole_headline_s(row: dict) -> float:
             and p50 <= (low + high) / 2):
         return high
     return p50
+
+
+def _vr_pole_row_durations(text: str) -> tuple[float | None, float | None]:
+    """Return the displayed headline and P50 from one Contents duration."""
+    if text.startswith("P50 "):
+        p50 = _parse_clock_to_s(text[4:])
+        return p50, p50
+    match = re.fullmatch(r"Slow mode\s+(.+?)\s+\(P50\s+(.+?)\)", text)
+    if not match:
+        return None, None
+    return _parse_clock_to_s(match.group(1)), _parse_clock_to_s(match.group(2))
 
 
 def _aggregation_upstream_gate_counts(data: dict) -> dict[str, int]:
@@ -13307,9 +13319,10 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
     first_name = ""
     first_full_name = ""
     first_p50_s: float | None = None
+    first_headline_s: float | None = None
     first_group = ""
     for index, match in enumerate(rows, 1):
-        number, label, anchor, p50_text, count_text, total_text, tail = match.groups()
+        number, label, anchor, duration_text, count_text, total_text, tail = match.groups()
         if int(number) != index or int(anchor) != index:
             failures.append(f"row {index} has numbering {number}/anchor {anchor}")
         if index == 1:
@@ -13327,12 +13340,13 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
             failures.append(
                 f"`{label}` drill frequency group {rendered_drill_groups!r} differs from "
                 f"Contents group `{expected_drill_group}`")
-        seconds = _parse_clock_to_s(p50_text)
+        headline_seconds, p50_seconds = _vr_pole_row_durations(duration_text)
         if index == 1:
-            first_p50_s = seconds
+            first_p50_s = p50_seconds
+            first_headline_s = headline_seconds
             first_group = group
-        if seconds is None:
-            failures.append(f"`{label}` has an unreadable P50 {p50_text!r}")
+        if headline_seconds is None or p50_seconds is None:
+            failures.append(f"`{label}` has an unreadable duration {duration_text!r}")
         if group == "rare-last" and not (
                 "ran on few PRs" in tail
                 or "a slower check usually ran alongside" in tail
@@ -13364,10 +13378,12 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
         stamped = by_name.get(_cmp_name(full_label))
         if stamped is None:
             failures.append(f"`{label}` has no matching stamped check")
-            if seconds is not None:
-                groups[group].append(seconds)
+            if headline_seconds is not None:
+                groups[group].append(headline_seconds)
         else:
-            groups[group].append(_vr_pole_headline_s(stamped))
+            stamped_headline = _vr_pole_headline_s(stamped)
+            if headline_seconds is not None:
+                groups[group].append(headline_seconds)
             stamped_count = max(
                 int(_num(stamped.get("pole_n")) or 0),
                 inherited_counts.get(_cmp_name(full_label), 0))
@@ -13382,9 +13398,16 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
             if stamped_count != count:
                 failures.append(
                     f"`{label}` renders {count} finishes, stamped {stamped_count}")
-            if seconds is not None and stamped_p50 is not None and abs(seconds - stamped_p50) > 1.0:
+            if (p50_seconds is not None and stamped_p50 is not None
+                    and abs(p50_seconds - stamped_p50) > 1.0):
                 failures.append(
-                    f"`{label}` renders P50 {_fmt_clock(seconds)}, stamped {_fmt_clock(stamped_p50)}")
+                    f"`{label}` renders P50 {_fmt_clock(p50_seconds)}, "
+                    f"stamped {_fmt_clock(stamped_p50)}")
+            if (headline_seconds is not None
+                    and abs(headline_seconds - stamped_headline) > 1.0):
+                failures.append(
+                    f"`{label}` renders headline {_fmt_clock(headline_seconds)}, "
+                    f"stamped {_fmt_clock(stamped_headline)}")
         if expected_denominator and total != expected_denominator:
             failures.append(f"`{label}` renders denominator {total}, not the sampled population")
 
@@ -13405,9 +13428,15 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
         "holds-up": "Checks that hold up most PRs",
         "rare-last": "Long but rarely the last to finish",
     }
+    first_duration = (
+        f"slow mode **{_fmt_clock(first_headline_s or 0.0)}** "
+        f"(P50 **{_fmt_clock(first_p50_s or 0.0)}**)"
+        if first_headline_s is not None and first_p50_s is not None
+        and abs(first_headline_s - first_p50_s) > 0.5
+        else f"P50 **{_fmt_clock(first_p50_s or 0.0)}**")
     expected_open = (
-        f"> **Bottom line.** Long pole 1, `{first_name}`, has P50 "
-        f"**{_fmt_clock(first_p50_s or 0.0)}** and is the longest check in "
+        f"> **Bottom line.** Long pole 1, `{first_name}`, has {first_duration} "
+        f"and is the longest check in "
         f"**{group_labels.get(first_group, '')}**."
     )
     if not first_name or not bottom.startswith(expected_open):
@@ -13481,6 +13510,16 @@ def check_bimodal_pole_one_states_modes_and_slow_win(
             slow_ceilings.append(max(own))
     if not slow_ceilings or ran_n <= 0:
         return Check(name, False, "bimodal Long pole 1 has no measured slow-share ceiling")
+    slow_win = statistics.median(slow_ceilings)
+    bottom = next((line for line in report.splitlines()
+                   if line.startswith("> **Bottom line.**")), "")
+    pole_body = pole_sections[0][2]
+    if slow_win <= 0:
+        if "slow-mode win is about" in bottom or "slow-mode win is about" in pole_body:
+            return Check(name, False,
+                         "bimodal Long pole 1 claims a win with a zero measured ceiling")
+        return Check(name, True,
+                     "bimodal Long pole 1 has no positive measured slow-share win")
     slow_pct = round(slow_n / ran_n * 100)
     all_sampled = ran_n == len(populations)
     lead = (f"{slow_pct}% of sampled PRs wait"
@@ -13489,15 +13528,13 @@ def check_bimodal_pole_one_states_modes_and_slow_win(
     story = (
         f"{lead} about **{_fmt_clock(high)}** on this check; "
         f"the other {100 - slow_pct}% wait about **{_fmt_clock(low)}**. The slow-mode "
-        f"win is about **{_fmt_clock(statistics.median(slow_ceilings))}** (median of the "
+        f"win is about **{_fmt_clock(slow_win)}** (median of the "
         "measured per-PR ceilings)."
     )
-    bottom = next((line for line in report.splitlines()
-                   if line.startswith("> **Bottom line.**")), "")
     failures = []
     if story not in bottom:
         failures.append("Bottom line omits the re-derived two-mode slow-share sentence")
-    if story not in pole_sections[0][2]:
+    if story not in pole_body:
         failures.append("Long pole 1 omits the re-derived two-mode slow-share sentence")
     return Check(name, not failures,
                  "; ".join(failures) if failures else
