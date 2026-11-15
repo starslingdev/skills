@@ -4496,10 +4496,18 @@ def _mutable_fetch_executions(
         # Collapsing alone lost them: `OUT=$(tools/setup.sh)` after a mutable
         # clone produced no finding, no gap and no suppression, while the
         # backtick spelling of the same construct still recorded one.
-        for segment in _commands_in_execution_order(command):
+        scope_cwds: dict[tuple[int, ...], str] = {(): cwd}
+
+        def _cwd_for_scope(scope: tuple[int, ...]) -> str:
+            if scope not in scope_cwds:
+                scope_cwds[scope] = _cwd_for_scope(scope[:-1])
+            return scope_cwds[scope]
+
+        for segment, scope in _commands_in_execution_order(command):
             pos += 1
             if not segment.strip():
                 continue
+            segment_cwd = _cwd_for_scope(scope)
             command_lines.append((pos, line_no))
             tokens = _strip_command_prefix(_shell_tokens(segment))
             if not tokens:
@@ -4515,7 +4523,7 @@ def _mutable_fetch_executions(
                         gap(f"a command on line {line_no} could not be parsed "
                             f"as shell and mentions a fetch or an execution, "
                             f"so it was NOT checked — review it by hand")
-                    if _UNPARSED_CD_RE.search(segment):
+                    if not scope and _UNPARSED_CD_RE.search(segment):
                         # A `cd` nobody could read leaves the working directory
                         # stale, so every path resolved after it in this step
                         # would be wrong. That half-read step is abandoned.
@@ -4523,11 +4531,14 @@ def _mutable_fetch_executions(
                         break
                 continue
             if tokens[0] == "cd" and len(tokens) > 1 and not tokens[1].startswith("-"):
-                cwd = _resolve_path(cwd, tokens[1])
+                scope_cwds[scope] = _resolve_path(segment_cwd, tokens[1])
+                if not scope:
+                    cwd = scope_cwds[scope]
                 continue
             if tokens[0] == "git":
                 sub, gdir, args = _git_subcommand(tokens)
-                base = _resolve_path(cwd, gdir) if gdir else cwd
+                base = (_resolve_path(segment_cwd, gdir)
+                        if gdir else segment_cwd)
                 if sub == "remote" and args[:1] == ["add"]:
                     positionals = [a for a in args[1:] if not a.startswith("-")]
                     if (len(positionals) >= 2
@@ -4607,7 +4618,8 @@ def _mutable_fetch_executions(
                 if _leading_unresolved_var(path):
                     unresolved_execs.append((line_no, path))
                     continue
-                executions.append((pos, line_no, _resolve_path(cwd, path), path))
+                executions.append((pos, line_no,
+                                   _resolve_path(segment_cwd, path), path))
 
     # A path led by an unresolvable shell variable is a coverage gap ONLY where
     # there is a fetched tree it might have run out of — otherwise every
@@ -4800,26 +4812,38 @@ def _single_quoted_flags(text: str) -> list[bool]:
     return flags
 
 
-def _commands_in_execution_order(command: str) -> list[str]:
+def _commands_in_execution_order(
+    command: str,
+) -> list[tuple[str, tuple[int, ...]]]:
     """Each command of `command`, preceded by the commands its `$( … )`
     substitutions run, in the order the shell runs them.
 
     `install && out=$(gh <name>)` installs first and then runs: reading every
     substitution body ahead of the whole line put the run before the install.
     A substitution inside single quotes is printed text, never run, so its body
-    is not a command at all.
+    is not a command at all. The scope tuple keeps each substitution's shell
+    state separate from its parent while preserving their shared filesystem.
     """
-    flags = _single_quoted_flags(command)
-    subs = iter(_COMMAND_SUBSTITUTION_RE.finditer(command))
-    out: list[str] = []
-    for segment in _install_command_segments(
-            _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
-        for _ in range(segment.count("$SUBST")):
-            match = next(subs, None)
-            if match is not None and not flags[match.start()]:
-                out.extend(_commands_in_execution_order(match.group(0)[2:-1]))
-        out.append(segment)
-    return out
+    def _ordered(
+        text: str,
+        scope: tuple[int, ...],
+    ) -> list[tuple[str, tuple[int, ...]]]:
+        flags = _single_quoted_flags(text)
+        subs = iter(_COMMAND_SUBSTITUTION_RE.finditer(text))
+        out: list[tuple[str, tuple[int, ...]]] = []
+        child = 0
+        collapsed = _COMMAND_SUBSTITUTION_RE.sub("$SUBST", text)
+        for segment in _install_command_segments(collapsed):
+            for _ in range(segment.count("$SUBST")):
+                match = next(subs, None)
+                if match is not None and not flags[match.start()]:
+                    child += 1
+                    out.extend(_ordered(
+                        match.group(0)[2:-1], scope + (child,)))
+            out.append((segment, scope))
+        return out
+
+    return _ordered(command, ())
 
 
 def _gh_extension_executions(
@@ -4840,7 +4864,7 @@ def _gh_extension_executions(
     invocations: list[tuple[int, int, str, str]] = []
     pos = 0
     for line_no, raw, command, _new_step in _job_shell_commands(text, job_range):
-        for segment in _commands_in_execution_order(command):
+        for segment, _scope in _commands_in_execution_order(command):
             pos += 1
             tokens = _strip_command_prefix(_shell_tokens(segment))
             if not tokens or tokens[0] != "gh" or len(tokens) < 2:

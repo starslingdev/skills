@@ -4501,6 +4501,20 @@ def test_p1424_clone_before_substitution_execution_keeps_shell_order(tmp_path):
     assert len(hits) == 1, hits
 
 
+def test_p1424_substitution_cd_does_not_change_parent_shell_cwd(tmp_path):
+    """A command substitution runs in a subshell with its own directory."""
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone "$TOOLS_URL" tools && out=$(cd /tmp; pwd) && python3 tools/setup.py
+    """)
+    assert len(hits) == 1, hits
+
+
 def test_p1424_single_quoted_substitutions_are_text_not_commands(tmp_path):
     """The shell does not execute command substitutions inside single quotes."""
     assert _remote_exec_hits(tmp_path, """\
