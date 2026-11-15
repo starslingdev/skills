@@ -5821,6 +5821,20 @@ _P1418_COSMETIC_CALL_RE = re.compile(
 )
 
 
+def _p1418_js_lstrip(line: str) -> str:
+    """Strip leading whitespace JavaScript accepts but Python may not.
+
+    Python's ``str.lstrip`` covers the ordinary JavaScript whitespace set but
+    not U+FEFF. JavaScript accepts U+FEFF before the line-leading ``-->``
+    comment token, so skipping it here would let executable text hide behind
+    what this narrow recognizer mistakes for an argument string.
+    """
+    stripped = line.lstrip()
+    while stripped.startswith("\ufeff"):
+        stripped = stripped[1:].lstrip()
+    return stripped
+
+
 def _p1418_is_one_cosmetic_call(script: str) -> bool:
     """Prove the narrow inline-script shape eligible for MEDIUM.
 
@@ -5831,7 +5845,8 @@ def _p1418_is_one_cosmetic_call(script: str) -> bool:
     """
     if "${{" in script or "`" in script:
         return False
-    if any(line.lstrip().startswith("-->") for line in script.splitlines()):
+    if any(_p1418_js_lstrip(line).startswith("-->")
+           for line in script.splitlines()):
         return False
     match = _P1418_COSMETIC_CALL_RE.match(script)
     if match is None:
