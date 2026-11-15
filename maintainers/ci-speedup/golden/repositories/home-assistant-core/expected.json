@@ -1,10 +1,16 @@
 {
   "human_review": {
     "bottom_line_must_contain": "Run tests Python 3.14.10 (7)",
+    "minimum_last_finishes": 5,
     "findings_must_appear": [],
     "findings_must_not_appear": [],
     "report_must_contain": [],
     "report_must_not_contain": [],
+    "rendered_pole_order": [
+      "Check hassfest",
+      "Prepare dependencies (3.14.10)",
+      "Collect information & changes data"
+    ],
     "review_notes": "Proposed from the independent month-wide oracle: lead with the longest check among gates observed on at least five completed PR commits. Awaiting owner review."
   },
   "oracle": {
