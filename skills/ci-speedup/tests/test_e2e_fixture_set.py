@@ -1017,7 +1017,7 @@ def _pr_commit_tail_fixture(root: Path) -> Path:
     return fixture
 
 
-def _bimodal_gate_fixture(root: Path) -> Path:
+def _bimodal_gate_fixture(root: Path, *, durations: list[int] | None = None) -> Path:
     """Twenty PRs where a required gate has distinct fast and slow modes."""
     fixture = root / "bimodal-gate"
     workflows = fixture / "workflows"
@@ -1038,8 +1038,10 @@ jobs:
         encoding="utf-8",
     )
     base = datetime(2026, 1, 24, tzinfo=timezone.utc)
-    durations = [28, 29, 29, 30, 30, 30, 31, 31, 31, 32, 32, 33,
-                 315, 325, 335, 345, 355, 365, 375, 382]
+    durations = durations or [
+        28, 29, 29, 30, 30, 30, 31, 31, 31, 32, 32, 33,
+        315, 325, 335, 345, 355, 365, 375, 382,
+    ]
     runs = []
     jobs: dict[str, list[dict]] = {}
     checks: dict[str, list[dict]] = {}
@@ -1156,6 +1158,22 @@ def test_bimodal_gate_headline_sizes_the_slow_mode_and_full_report_verifies(
         and not check.ok
         for check in rejected
     )
+
+
+def test_always_active_bimodal_gate_persists_populations_for_full_verification(
+        monkeypatch, tmp_path):
+    fixture = _bimodal_gate_fixture(
+        tmp_path, durations=[180] * 12 + [350] * 8)
+    run_root = tmp_path / "run-always-active-bimodal"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    assert len(doc["pr_critical_path"]["populations"]) == 20
+    assert "40% of sampled PRs wait about **5m 50s** on this check" in report
+    assert "the other 60% wait about **3m 00s**" in report
+    assert "slow-mode win is about **4m 52s**" in report
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
 
 
 def test_pr_commit_projection_discloses_the_population_and_slow_tail(

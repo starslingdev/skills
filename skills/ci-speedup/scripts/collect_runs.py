@@ -5199,7 +5199,13 @@ def _segment_pr_populations(
     # others. Both forms matter: a gate that self-skips AND a workflow that
     # simply doesn't run on a PR type each split the population. Otherwise the
     # single aggregate path gives the same answer.
-    bimodal = False
+    # A job-level largest-gap split is already sufficient reason to preserve
+    # the per-PR rows.  The older active/inactive test below catches
+    # path-conditional gates, but misses an always-active check whose fast mode
+    # is still substantial (for example 3m versus 5m50s).  Without populations
+    # the renderer cannot size that slow share and the verifier has no evidence
+    # with which to validate it.
+    bimodal = any(name in job_bimodal_all for name in pr_check_p50)
     for name in pr_check_p50:
         high = max((cm[name] for cm in capped if name in cm), default=0.0)
         if high < 120:
