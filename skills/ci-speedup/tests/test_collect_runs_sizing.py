@@ -2403,6 +2403,19 @@ def test_cap_resolves_a_name_override_to_its_own_rows():
     assert f["runner_min_basis"] == "measured_spine_clamped"
 
 
+def test_serial_gate_clamp_resolves_name_override_before_foreign_fallback():
+    """The partial clamp binds the affected job's display name in its workflow."""
+    from collect_runs import _reground_runner_minute_savings
+
+    f = {"pattern": "OPT14", "workflow_file": _ALIAS_A,
+         "affected_jobs": ["lint"], "runner_min_saving": 20000.0,
+         "sizing_basis": "modeled"}
+    _reground_runner_minute_savings([f], _alias_spine(), job_graph=_ALIAS_GRAPH)
+
+    assert f["runner_min_saving"] == 13381.6
+    assert f["runner_min_basis"] == "measured_spine_clamped"
+
+
 def test_cap_needs_every_affected_job_measured():
     # Three affected jobs, only one found in the cost data: the measured sum is
     # a floor, not a ceiling, so the 120 min/mo estimate stands uncapped.

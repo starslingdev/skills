@@ -7491,20 +7491,21 @@ def _reground_whole_run_cancel_saving(
 
 
 def _all_runs_excluded(wf: str, jobs: "list[str]", all_index: Any,
-                       completed: float) -> bool:
+                       completed: float, job_graph: Any = None) -> bool:
     """True when the affected jobs measure NO completed-run compute but DO have
     compute across every sampled run: every sampled run of them was timed out,
     cancelled or killed. A distinct state, never "no compute" or a coverage gap."""
     if completed > 0 or all_index is None:
         return False
     a_wf_job, a_job = all_index
-    every, matched, _distinct = _measured_billable_for_jobs(wf, jobs, a_wf_job, a_job)
+    every, matched, _distinct = _measured_billable_for_jobs(
+        wf, jobs, a_wf_job, a_job, job_graph=job_graph)
     return matched > 0 and every > 0
 
 
 def _mark_all_runs_excluded(f: dict[str, Any]) -> None:
     """A saving DERIVED from completed-run compute (OPT45/OPT29), clamped to it
-    (OPT73) or capped at it (a modeled estimate) has no basis when every sampled run
+    (the serial gates / OPT73) or capped at it (a modeled estimate) has no basis when every sampled run
     of its jobs was excluded: it renders unsized and not derivable, with the reason,
     never as a coverage gap and never sized against the excluded minutes."""
     f["runner_min_saving"] = None
@@ -7658,13 +7659,17 @@ def _measured_billable_for_jobs(
         wf: str, jobs: "list[str]",
         by_wf_job: dict[tuple[str, str], float],
         by_job: dict[str, list[float]],
-        templated: frozenset[str] = frozenset()) -> tuple[float, int, int]:
+        templated: frozenset[str] = frozenset(),
+        job_graph: Any = None) -> tuple[float, int, int]:
     """Sum the measured monthly billable compute of a finding's affected `jobs`
     against the shared index. Returns
     `(measured_min_per_month, matched_jobs, distinct_jobs)` — matched < distinct
     means partial coverage (the sum is an understatement, the safe direction).
-    Prefers the exact (workflow_file, base) row; falls back to the workflow-agnostic
-    `by_job` max for a reusable-workflow caller that lost the callee's file.
+    Prefers an own-workflow row after resolving the YAML key ↔ declared display
+    name through `job_graph`; only then falls back to the workflow-agnostic
+    literal-key `by_job` max for a reusable-workflow caller that lost the callee's
+    file. A graph-derived alias never enters that fallback, so a foreign job with
+    the same display name cannot set the bound.
 
     EXACT JOB IDENTITY (issue #52). The affected jobs are first reduced to their
     DISTINCT (workflow_file, base-job) identities — a base-job being the full job
@@ -7691,9 +7696,14 @@ def _measured_billable_for_jobs(
         base = _whole_run_cancel_base_key(j)
         if not base or base in seen:
             continue
-        seen.add(base)
-        key = (wf, base)
-        if key in by_wf_job:
+        cands = _own_workflow_job_identities(job_graph, wf, j)
+        key = next(((wf, cand) for cand in cands
+                    if (wf, cand) in by_wf_job), None)
+        ident = key[1] if key else base
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if key is not None:
             matched += 1
             measured += by_wf_job[key]
         elif base not in templated:
@@ -7950,10 +7960,11 @@ def _reground_runner_minute_savings(
         wf = str(f.get("workflow_file") or "")
         jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j).strip()]
         measured, matched, distinct = (_measured_billable_for_jobs(
-            wf, jobs, by_wf_job, by_job, _templated_job_bases(job_graph, wf))
+            wf, jobs, by_wf_job, by_job, _templated_job_bases(job_graph, wf),
+            job_graph)
                                        if jobs else (0.0, 0, 0))
         if matched > 0 and measured <= 0 and _all_runs_excluded(
-                wf, jobs, all_index, measured):
+                wf, jobs, all_index, measured, job_graph):
             _mark_all_runs_excluded(f)
             continue
         if matched == 0 or measured <= 0:

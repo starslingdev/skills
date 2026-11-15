@@ -352,6 +352,7 @@ def test_opt14_credit_is_capped_by_measured_completed_compute_through_collect(
         workflow_path.read_text(encoding="utf-8")
         + """
   evals:
+    name: Quality checks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -396,7 +397,7 @@ def test_opt14_credit_is_capped_by_measured_completed_compute_through_collect(
         if index % 20 < 7:
             run_jobs.append({
                 "id": 50_000 + index,
-                "name": "evals",
+                "name": "Quality checks",
                 "status": "completed",
                 "conclusion": "success",
                 "labels": ["self-hosted", "linux"],
