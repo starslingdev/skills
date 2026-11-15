@@ -234,8 +234,8 @@ def test_collect_renders_a_capped_default_branch_push_lane_and_verifies(
             "**2m 00s until all checks finish**",
             "**35m 00s until all checks finish**", 1),
         report.replace(
-            "- 2m 00s (the gate)",
-            "- 35m 00s (the gate)", 1),
+                "- P50 2m 00s (the gate)",
+                "- P50 35m 00s (the gate)", 1),
         report.replace(
             "## 📋 Contents",
             "**Merge score:** 35m 00s\n\n## 📋 Contents", 1),

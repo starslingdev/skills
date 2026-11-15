@@ -32,6 +32,7 @@ REQUIRED_DECISIONS = {
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
+    "verify_report.py:_VR_POLE_HOLDS_UP_MIN_COUNT",
     "verify_report.py:_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX",
     "verify_report.py:_VR_RARE_PRESENCE_MIN_PR",
     "verify_report.py:_VR_RARE_PRESENCE_FRAC",
@@ -211,6 +212,7 @@ REQUIRED_CURRENT_SOURCES = {
     "verify_report.py:_VR_OPT84_MIN_SHARE": 0.0,
     "verify_report.py:_VR_OPT84_MIN_STEP_S": 20.0,
     "verify_report.py:_VR_PARTIAL_MISS_FLOOR_PCT": 40.0,
+    "verify_report.py:_VR_POLE_HOLDS_UP_MIN_COUNT": 2,
     "verify_report.py:_VR_POLE_RECUR_FLOOR": 2,
     "verify_report.py:_VR_RARE_PRESENCE_FRAC": 0.5,
     "verify_report.py:_VR_RARE_PRESENCE_MIN_PR": 6,

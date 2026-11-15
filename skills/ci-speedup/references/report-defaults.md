@@ -173,9 +173,8 @@ invariant.
 **Approval status:** awaiting owner approval.
 ### `holds-up-threshold`
 
-**Current value:** a check is recurrent after finishing last on 2 sampled PRs
-(`_POLE_RECUR_FLOOR`); current main has no explicit two-group presentation.
-#318 provisionally keeps 2 as
+**Current value:** before #318, a check was recurrent after finishing last on 2 sampled PRs
+(`_POLE_RECUR_FLOOR`) without an explicit two-group presentation. #318 provisionally keeps 2 as
 `gate_frequency_contract.POLE_HOLDS_UP_MIN_COUNT`, while #317 provisionally
 requires 5 as `gate_frequency_contract.GATE_MIN_COUNT_FOR_RANKING`.
 
@@ -719,6 +718,7 @@ implementation lands.
     "sources": {
       "blocking_path.py:_POLE_RECUR_FLOOR": 2,
       "collect_runs.py:_POLE_RECUR_FLOOR": 2,
+      "verify_report.py:_VR_POLE_HOLDS_UP_MIN_COUNT": 2,
       "verify_report.py:_VR_POLE_RECUR_FLOOR": 2
     }
   },

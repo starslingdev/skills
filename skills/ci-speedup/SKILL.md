@@ -302,8 +302,8 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    slowest check gating your merge* (or just say "check"); "runner-minutes" →
    *cloud CI billing minutes*. Avoid "lever" and "critical path" in the chat
    entirely — the whole close reads like a plain sentence to a PM.
-   **Open with the measured result** — lead with the slowest check gating the merge
-   and its developer-wait cost; never call a bill finding the largest saving.
+   **Open with the report's Long pole 1** and its developer-wait cost. Preserve **Checks that hold up most PRs**, then
+   **Long but rarely the last to finish** with its report reason; do not call a rare-last row a gating check or a bill finding the largest saving.
    **Era disclosures lead even earlier**: when the report's top matter shows a
    config-era ⚠️, say it before any number — narrowed ("measures only the N runs
    since <workflow> changed <when>"); disclosed_pre (headline measures the PREVIOUS
