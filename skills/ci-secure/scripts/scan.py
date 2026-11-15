@@ -3641,24 +3641,6 @@ _EXPRESSION_TOKEN_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
 _COMMAND_SUBSTITUTION_RE = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)", re.S)
 
 
-def _substitution_command_bodies(command: str) -> list[str]:
-    """Every command run INSIDE a `$( … )` substitution, at any nesting depth.
-
-    `$(…)` runs its body and its OUTPUT becomes a word, so the body is a command
-    in its own right. A body can itself hold a substitution —
-    `OUT=$(echo $(tools/setup.sh))` — and reading only the outer level left the
-    inner `tools/setup.sh` unscanned: no finding, no gap, a silent false clean.
-    Each body is recursed into before it is split, so an execution nested one or
-    more levels deep is still seen.
-    """
-    out: list[str] = []
-    for match in _COMMAND_SUBSTITUTION_RE.finditer(command):
-        inner = match.group(0)[2:-1]
-        out.extend(_substitution_command_bodies(inner))
-        out.extend(_install_command_segments(inner))
-    return out
-
-
 def _shell_tokens(segment: str) -> list[str]:
     """`segment` split the way a shell would, or `[]` when it cannot be.
 
@@ -4514,9 +4496,7 @@ def _mutable_fetch_executions(
         # Collapsing alone lost them: `OUT=$(tools/setup.sh)` after a mutable
         # clone produced no finding, no gap and no suppression, while the
         # backtick spelling of the same construct still recorded one.
-        bodies = _substitution_command_bodies(command)
-        for segment in bodies + _install_command_segments(
-                _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
+        for segment in _commands_in_execution_order(command):
             pos += 1
             if not segment.strip():
                 continue
@@ -4731,6 +4711,15 @@ def _mutable_fetch_executions(
 # (`gh extension install .`) is the repository's own code.
 _GH_EXTENSION_GROUPS = frozenset({"extension", "extensions", "ext"})
 _GH_EXTENSION_VALUE_OPTS = frozenset({"--pin"})
+# `gh extension install` refuses names that shadow one of gh's built-in
+# commands. Treating a later `gh pr` as an invocation of `OWNER/gh-pr` invents
+# an execution which the CLI itself makes impossible.
+_GH_BUILTIN_COMMANDS = frozenset({
+    "alias", "api", "attestation", "auth", "browse", "cache", "codespace",
+    "completion", "config", "extension", "gist", "gpg-key", "issue",
+    "label", "org", "pr", "project", "release", "repo", "ruleset", "run",
+    "search", "secret", "ssh-key", "status", "variable", "workflow",
+})
 
 
 @dataclass(frozen=True)
@@ -4888,8 +4877,11 @@ def _gh_extension_executions(
                         f"line {line_no} is pinned to a full commit id, so it "
                         f"is deliberately not reported", kind=_KIND_SUPPRESSED)
                 continue
+            name = _gh_extension_name(target)
+            if name in _GH_BUILTIN_COMMANDS:
+                continue
             installs.append(_GhExtensionInstall(
-                line_no, raw, target, _gh_extension_name(target), pin, pos))
+                line_no, raw, target, name, pin, pos))
 
     spans = _step_spans(text)
     pairs: list[tuple[_GhExtensionInstall, int, str]] = []
@@ -4923,7 +4915,7 @@ def _gh_extension_ref_description(ref: str | None) -> str:
     extension reads it as a release TAG name."""
     if ref is None:
         return "its latest release (no `--pin`)"
-    if _ABBREV_SHA_RE.match(ref):
+    if _ABBREV_SHA_RE.match(ref) and not ref.isdigit():
         return (f"`{ref}` (an ABBREVIATED commit id: the GitHub CLI resolves "
                 f"it when the job installs the extension, and a binary "
                 f"extension reads it as a release tag name, so it names no "

@@ -4483,6 +4483,37 @@ def test_p1424_an_interpreter_inside_a_substitution_is_not_lost(tmp_path):
     assert len(hits) == 1
 
 
+def test_p1424_clone_before_substitution_execution_keeps_shell_order(tmp_path):
+    """A substitution in the second command runs after the clone on its left.
+
+    Hoisting every substitution body ahead of the whole line inverted that
+    order and silently lost the visible fetch-and-run chain.
+    """
+    hits = _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: git clone --branch main "$TOOLS_URL" tools && out=$(python3 tools/setup.py)
+    """)
+    assert len(hits) == 1, hits
+
+
+def test_p1424_single_quoted_substitutions_are_text_not_commands(tmp_path):
+    """The shell does not execute command substitutions inside single quotes."""
+    assert _remote_exec_hits(tmp_path, """\
+        name: x
+        on: push
+        jobs:
+          b:
+            runs-on: ubuntu-latest
+            steps:
+              - run: echo '$(git clone --branch main "$TOOLS_URL" tools)'; echo '$(python3 tools/setup.py)'
+    """) == []
+
+
 def test_p1424_a_substitution_that_only_reads_stays_quiet(tmp_path):
     """The control that keeps the original fix intact: `$(ls tools/x.sql)`
     lists a path, it does not execute it, and `ls` is this code's own example
@@ -5250,6 +5281,32 @@ def test_p1424_gh_extension_single_quoted_substitution_is_text(tmp_path):
         "echo '$(gh extension install github/gh-actions-lock)'",
         "echo '$(gh actions-lock --verify)'",
     )) == []
+
+
+def test_p1424_gh_extension_name_cannot_collide_with_builtin(tmp_path):
+    """GitHub CLI refuses to install an extension over a built-in command."""
+    assert _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install example/gh-pr --pin v1",
+        "gh pr list",
+    )) == []
+
+
+def test_p1424_date_style_extension_tag_is_not_called_a_short_sha(tmp_path):
+    """An all-digit release tag is a tag, not evidence of an abbreviated SHA."""
+    hits = _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install example/gh-tool --pin 20261111",
+        "gh tool --help",
+    ))
+    assert len(hits) == 1, hits
+    assert "ABBREVIATED" not in (hits[0].derived_note or "")
+
+
+def test_p1424_admission_doc_names_all_three_shapes_and_both_pins():
+    why = (_SKILL / "references" / "why-these-ten.md").read_text()
+    prose = " ".join(why.split())
+    assert "P14.24 detects three shapes" in prose
+    assert "a tag on a release GitHub publishes as immutable" in prose
+    assert "`20261111` is a date-style tag, not an abbreviated commit id" in prose
 
 
 def test_p1424_gh_extension_install_of_the_scanned_repository_is_silent(tmp_path):
