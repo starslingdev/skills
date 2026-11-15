@@ -225,8 +225,8 @@ def compare(findings: dict[str, Any], expected: dict[str, Any], report: str = ""
         }
         selected_days = {
             max(
-                (str(job.get("completed_at") or "")
-                 for job in row.get("jobs") or [] if isinstance(job, dict)),
+                (str(run.get("created_at") or "")
+                 for run in row.get("runs") or [] if isinstance(run, dict)),
                 default=str(row.get("created_at") or ""),
             )[:10]
             for row in month.get("pr_commits") or []
@@ -475,6 +475,7 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
                 ).add(str(commit.get("sha") or ""))
 
     existing_heads: dict[int, set[str]] = {}
+    existing_run_ids: set[int] = set()
     existing_pages: dict[int, dict[str, Any]] = {}
     existing_runs_by_workflow_time: dict[
         tuple[str, str], list[dict[str, Any]]
@@ -536,6 +537,11 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
                 str(run.get("head_sha") or "")
                 for run in payload.get("workflow_runs") or [] if isinstance(run, dict)
             }
+            existing_run_ids.update(
+                int(run.get("id") or 0)
+                for run in payload.get("workflow_runs") or []
+                if isinstance(run, dict) and run.get("id")
+            )
 
     runs_by_workflow: dict[int, list[dict[str, Any]]] = {}
     run_serial = 0
@@ -638,6 +644,10 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
             copied_run = len(copied_matches) == 1
             if copied_run:
                 run_id = int(copied_matches[0]["id"])
+                if run_id not in existing_run_ids:
+                    runs_by_workflow.setdefault(workflow_id, []).append(
+                        copied_matches[0])
+                    existing_run_ids.add(run_id)
             else:
                 run_serial += 1
                 run_id = 71_000_000 + run_serial

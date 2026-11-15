@@ -701,6 +701,61 @@ def test_replay_uses_one_commit_identity_on_copied_and_synthetic_pages(
     assert copied_jobs[0]["steps"] == [{"name": "Run test", "number": 1}]
 
 
+def test_recorded_only_replay_keeps_a_copied_run_with_normalized_jobs(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(json.dumps({
+        "repository": "public/example",
+        "replay_recorded_runs_only": True,
+    }), encoding="utf-8")
+
+    def fixture(endpoint: str, payload: dict[str, object]) -> None:
+        with gzip.open(api / (compare._fixture_name(endpoint) + ".gz"),
+                       "wt", encoding="utf-8") as stream:
+            json.dump(payload, stream)
+
+    fixture("repos/public/example/actions/workflows?per_page=100", {
+        "workflows": [{"id": 11, "name": "CI", "path": ".github/workflows/ci.yml"}],
+    })
+    fixture("repos/public/example/actions/workflows/11/runs?per_page=100", {
+        "workflow_runs": [{
+            "id": 99, "event": "pull_request", "head_sha": "real-sha",
+            "created_at": "2026-11-01T00:00:00Z",
+            "head_commit": {"id": "real-sha"},
+        }],
+    })
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"pr_commits": [{
+            "sha": "commit-000001", "created_at": "2026-11-01T00:00:00Z",
+            "completed": True,
+            "runs": [{"workflow": "CI", "status": "completed",
+                      "created_at": "2026-11-01T00:00:00Z",
+                      "jobs_recorded": True}],
+            "jobs": [{
+                "workflow": "CI", "name": "test", "status": "completed",
+                "conclusion": "success",
+                "started_at": "2026-11-01T00:00:00Z",
+                "completed_at": "2026-11-01T00:01:00Z",
+            }],
+        }]}, stream)
+
+    replay = tmp_path / "replay"
+    compare._dynamic_replay_copy(recording, replay)
+
+    page = json.loads((replay / compare._fixture_name(
+        "repos/public/example/actions/workflows/11/runs?per_page=100"
+    )).read_text(encoding="utf-8"))["workflow_runs"]
+    assert [(row["id"], row["head_sha"]) for row in page] == [
+        (99, "commit-000001")]
+    jobs = json.loads((replay / compare._fixture_name(
+        "repos/public/example/actions/runs/99/jobs?per_page=100"
+    )).read_text(encoding="utf-8"))["jobs"]
+    assert [job["name"] for job in jobs] == ["test"]
+
+
 def test_replay_does_not_merge_ambiguous_same_second_commits(tmp_path: Path) -> None:
     compare = _load("compare")
     recording = tmp_path / "recording"
@@ -1014,6 +1069,46 @@ def test_comparison_checks_day_spread_and_completed_only_eligibility(
     assert any("sample day spread differs" in row for row in differences)
     assert any("in-flight commit entered the completed-only sample" in row
                for row in differences)
+
+
+def test_comparison_uses_run_creation_dates_for_sample_day_spread(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    recording.mkdir()
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"schema_version": 1, "pr_commits": [
+            {
+                "sha": "first", "created_at": "2026-11-01T22:00:00Z",
+                "completed": True,
+                "runs": [{"created_at": "2026-11-01T22:00:00Z"}],
+                "jobs": [{"workflow": "CI", "name": "test", "status": "completed",
+                          "started_at": "2026-11-01T23:58:00Z",
+                          "completed_at": "2026-11-02T00:02:00Z"}],
+            },
+            {
+                "sha": "second", "created_at": "2026-11-01T20:00:00Z",
+                "completed": True,
+                "runs": [{"created_at": "2026-11-01T20:00:00Z"}],
+                "jobs": [{"workflow": "CI", "name": "test", "status": "completed",
+                          "started_at": "2026-11-01T20:00:00Z",
+                          "completed_at": "2026-11-01T20:02:00Z"}],
+            },
+        ]}, stream)
+    findings = {
+        "pr_critical_path": {
+            "sampled_pr_count": 2,
+            "sample_distinct_days": 1,
+            "checks": [{"name": "CI / test", "pole_n": 2, "p50_s": 120}],
+            "chain_facts": [{"sha": "first"}, {"sha": "second"}],
+        },
+        "findings": [],
+    }
+
+    differences = compare.compare(
+        findings, {"human_review": {}}, recording=recording)
+
+    assert not any("sample day spread differs" in row for row in differences)
 
 
 def test_comparison_keeps_the_reviewed_120_second_gate_p50_tolerance() -> None:
