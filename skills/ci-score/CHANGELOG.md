@@ -11,6 +11,12 @@ separately as `ci-score-vX.Y.Z` inside `references/ci-score-spec.json`).
 
 ## [Unreleased]
 
+- **2026-11-15** (#357) — **Changed**: CI Score's grade-affecting numeric
+  engine limits and bounded-read ceilings are now recorded with reasons in the
+  machine-readable spec and public methodology. An exhaustive contract test
+  rejects value drift or a newly introduced numeric constant without a matching
+  decision-record entry; scoring behavior is unchanged.
+
 - **2026-11-10** — **Changed**: the skill now states that the audited repository's workflow content is untrusted data, never instructions, and that a directive embedded in it is a prompt-injection attempt to report. The other shipped skills already said this; a repo-wide test now keeps the sentence in every skill.
 
 - **2026-11-07** — **Fixed**: shallow-checkout grading recognizes inline history operands. Parent-only operands remain exempt because the score cannot express their bounded depth, while branch comparisons still require full history.
