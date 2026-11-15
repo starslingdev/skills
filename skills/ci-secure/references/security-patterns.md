@@ -20,7 +20,7 @@ fix recipe consumed by per-finding fix subagents.
 - [P14.11 — Impostor / Unreachable SHA on Action Reference](#p1411--impostor--unreachable-sha-on-action-reference)
 - [P14.14 — Whole-Context Dump via `toJSON(secrets|github|env)`](#p1414--whole-context-dump-via-tojsonsecretsgithubenv)
 - [P14.15 — Attacker-Controlled Write to `$GITHUB_ENV` or `$GITHUB_PATH`](#p1415--attacker-controlled-write-to-github_env-or-github_path)
-- [P14.18 — `pull-requests: write` Granted to Workflow With Untrusted Trigger](#p1418--pull-requests-write-granted-to-workflow-with-untrusted-trigger)
+- [P14.18 — Workflow That Outside Activity Can Start Has `pull-requests: write`](#p1418--workflow-that-outside-activity-can-start-has-pull-requests-write)
 - [P14.19 — Cache or Artifact `path:` Includes Known Credential Files](#p1419--cache-or-artifact-path-includes-known-credential-files)
 - [P14.24 — Unverified Remote Code Execution (`curl | bash` and mutable fetch-and-run)](#p1424--unverified-remote-code-execution-curl--bash-and-mutable-fetch-and-run)
 - [P14.25 — Dependency Install Scripts Executed in a Privileged Job](#p1425--dependency-install-scripts-executed-in-a-privileged-job)
@@ -516,7 +516,7 @@ P14.10 catches the *direct* template-injection sink (the substituted value becom
 
 ---
 
-### P14.18 — `pull-requests: write` Granted to Workflow With Untrusted Trigger
+### P14.18 — Workflow That Outside Activity Can Start Has `pull-requests: write`
 
 <!-- METADATA
 pattern: P14.18
@@ -525,15 +525,15 @@ detector: yaml-workflow-correlated
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
 fix_strategy: split-trusted-untrusted-workflows
 fix-surface: yaml
-title_template: "pull-requests: write on an untrusted trigger in {basename}"
+title_template: "pull-requests: write on a workflow outside activity can start in {basename}"
 correlation: pr-write-and-untrusted-trigger
 -->
 
-**TL;DR.** A workflow declares `pull-requests: write` anywhere in the document **and** is triggered by a member of the untrusted-event family. The scanner keeps this HIGH when it sees PR-controlled execution, an attacker-head checkout, or review/merge API calls; a label/comment-only workflow with none of those paths is MEDIUM hygiene.
+**TL;DR.** A workflow that people outside your team can start — for example by opening a pull request, commenting on an issue, or finishing another workflow (`pull_request_target`, `issue_comment`, `workflow_run`, and a few similar events) — has a job that is allowed to change pull requests (`pull-requests: write`: comment, label, approve, merge). It is HIGH when a job holding that permission checks out the pull request's code, runs text the pull request author controls, calls the review or merge API, or does anything the scanner cannot prove harmless; it is MEDIUM only when every such job does nothing but add one label or post one comment.
 
 **What an attacker can do.** A workflow compromise (injection, poisoned dependency, compromised action) self-approves and merges the malicious PR, bypassing branch protection's human-review requirement — elementary-data Apr 2026 chained this to PyPI + GHCR in 10 minutes.
 
-**Anti-pattern**: a workflow declares `pull-requests: write` **and** is triggered by any member of the untrusted-event family — `pull_request_target`, `issue_comment`, `workflow_run`, `issues`, `pull_request_review`, `pull_request_review_comment`, `discussion`, `discussion_comment`, `fork`, `watch`, `repository_dispatch` (this is the whole set; `scan.py`'s `_UNTRUSTED_TRIGGERS` is its source of truth). A compromise of any step in that workflow can self-approve or merge the PR, bypassing branch protection that requires reviewer approval. The elementary-data 2026 incident chained this exact pivot (default-write token + injection → forged `github-actions[bot]` commit → dispatched release workflow → PyPI publish in 10 minutes).
+**Anti-pattern**: a workflow declares `pull-requests: write` **and** can be started by outside activity — `pull_request_target`, `issue_comment`, `workflow_run`, `issues`, `pull_request_review`, `pull_request_review_comment`, `discussion`, `discussion_comment`, `fork`, `watch`, `repository_dispatch` (that is the full list the check looks for). A compromise of any step in that workflow can self-approve or merge the PR, bypassing branch protection that requires reviewer approval. The elementary-data 2026 incident chained this exact pivot (default-write token + injection → forged `github-actions[bot]` commit → dispatched release workflow → PyPI publish in 10 minutes).
 
 **Prioritization**: an occurrence with an attacker-head checkout, PR-controlled execution, or review/merge API call is HIGH because it exposes a direct path to branch-protection bypass. An occurrence with none of those paths is MEDIUM: keep the automation cosmetic and review changes for any newly introduced execution or review/merge operation.
 
@@ -542,9 +542,9 @@ correlation: pr-write-and-untrusted-trigger
 1. **Move `pull-requests: write` to a job that does NOT run on the untrusted trigger** — typically by splitting into two workflows (one on `pull_request_target` that uploads an artifact, one on `workflow_run` that consumes the artifact and posts the comment). Same shape as P14.9 fix.
 2. **Use a GitHub App** for the comment / approve operation. Astral's `astral-sh-bot` pattern: credentials live outside the repo, the App listens on the same webhook events, and a workflow file compromise doesn't expose the App's installation token.
 
-**Platform change, June 18 2026:** enterprise/org/repo policies for *who and what can trigger workflows* shipped, but they are **opt-in and evaluate-mode** — nothing changes on default configuration, so this vector is intact by default.
+**Platform change, June 18 2026:** GitHub added settings that let an enterprise, organization or repository limit who can start workflows. They are off by default, so they do not protect you unless you turned them on, and this risk remains live by default.
 
-The org-level setting *"Allow GitHub Actions to create and approve pull requests"* should be **disabled** regardless; it is an org/repo setting, not a workflow fact, so no detector in this catalog can see it — verify it by hand. P14.18 catches the per-workflow opt-in even when the org-level setting allows it.
+The setting *"Allow GitHub Actions to create and approve pull requests"* should be **disabled** regardless. It is an org/repo setting, not a workflow fact, so the YAML cannot show it; when a P14.18 finding exists and `gh` can reach the repository, the scan reads the repository's effective value and records it on the finding (`actions_can_approve_prs`), and otherwise records it as not checked — verify it by hand then. P14.18 fires on the per-workflow opt-in whatever the setting says.
 
 `detector: yaml-workflow-correlated` with `correlation: pr-write-and-untrusted-trigger` — fires once per workflow whose `on:` keys include any untrusted-event family member AND whose effective workflow/job permissions grant `pull-requests: write` (including `write-all`). A job-level permissions block replaces the workflow-level block, so a job that narrows `write-all` to read-only does not inherit the write grant.
 
