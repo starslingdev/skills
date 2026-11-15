@@ -448,6 +448,68 @@ def test_engine_span_oracle_derives_population_and_gates_without_chain_facts(
     assert oracle["gate_order"] == ["CI / test", "Lint / lint"]
 
 
+def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    with gzip.open(
+        api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [{"context": "lint"}]},
+            }],
+        }, stream)
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({
+            "schema_version": 1,
+            "pr_commits": [{
+                "sha": "commit-1",
+                "created_at": "2026-11-01T00:00:00Z",
+                "completed": True,
+                "jobs": [
+                    {
+                        "workflow": "CI", "name": "lint", "status": "completed",
+                        "started_at": "2026-11-01T00:00:00Z",
+                        "completed_at": "2026-11-01T00:01:00Z",
+                    },
+                    {
+                        "workflow": "CI", "name": "slow tests", "status": "completed",
+                        "started_at": "2026-11-01T00:00:00Z",
+                        "completed_at": "2026-11-01T00:10:00Z",
+                    },
+                ],
+            }],
+        }, stream)
+    findings = {
+        "required_checks": ["lint"],
+        "pr_critical_path": {
+            "sample_span_first": "2026-11-01T00:00:00Z",
+            "sample_span_last": "2026-11-01T00:00:00Z",
+            "sampled_pr_count": 1,
+            "check_present_n_pr": 1,
+            "chain_summary": {"makespan_p50_s": 60},
+            "checks": [{
+                "name": "CI / lint", "required_reachable": True,
+                "pole_n": 1, "present_on": 1, "p50_s": 60,
+            }],
+        },
+    }
+
+    differences = compare.compare(
+        findings,
+        {"human_review": {}},
+        recording=recording,
+    )
+
+    assert any("independent leading gate absent: 'CI / slow tests'" in row
+               for row in differences), differences
+
+
 def test_engine_span_oracle_matches_the_most_specific_nested_gate_cap(
         tmp_path: Path) -> None:
     compare = _load("compare")
