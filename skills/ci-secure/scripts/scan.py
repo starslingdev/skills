@@ -4801,16 +4801,21 @@ def _gh_extension_name(target: str) -> str | None:
     return base or None
 
 
-def _single_quoted_flags(text: str) -> list[bool]:
-    """Per character of `text`: is it inside single quotes? (`_shell_scan`'s
-    quoting rules, which do not say WHICH quote a data character sits in.)"""
+def _inert_flags(text: str) -> list[bool]:
+    """Per character of `text`: is it printed text the shell never expands?
+
+    True inside single quotes, and for the character a backslash escapes
+    outside them: a backslash before `$(` or a backtick makes it literal text,
+    both unquoted and inside double quotes. `_shell_scan`'s quoting rules do
+    not say WHICH quote a data character sits in, nor whether a backslash made
+    it literal."""
     flags: list[bool] = []
     quote: str | None = None
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
         if quote != "'" and ch == "\\" and i + 1 < n:
-            flags += [False, False]
+            flags += [False, True]
             i += 2
             continue
         if quote:
@@ -4825,34 +4830,60 @@ def _single_quoted_flags(text: str) -> list[bool]:
     return flags
 
 
+# A `$( … )` substitution, or a backtick one (its body may escape a backtick).
+_ANY_SUBSTITUTION_RE = re.compile(
+    _COMMAND_SUBSTITUTION_RE.pattern + r"|`(?:[^`\\]|\\.)*`", re.S)
+
+
 def _commands_in_execution_order(
     command: str,
 ) -> list[tuple[str, tuple[int, ...]]]:
-    """Each command of `command`, preceded by the commands its `$( … )`
-    substitutions run, in the order the shell runs them.
+    """Each command of `command`, preceded by the commands its `$( … )` and
+    backtick substitutions run, in the order the shell runs them.
 
     `install && out=$(gh <name>)` installs first and then runs: reading every
     substitution body ahead of the whole line put the run before the install.
-    A substitution inside single quotes is printed text, never run, so its body
-    is not a command at all. The scope tuple keeps each substitution's shell
-    state separate from its parent while preserving their shared filesystem.
+    A substitution inside single quotes, or one whose `$` or backtick is
+    escaped with a backslash, is printed text, never run, so its body is not a
+    command at all. The scope tuple keeps each substitution's shell state
+    separate from its parent while preserving their shared filesystem.
     """
     def _ordered(
         text: str,
         scope: tuple[int, ...],
     ) -> list[tuple[str, tuple[int, ...]]]:
-        flags = _single_quoted_flags(text)
-        subs = iter(_COMMAND_SUBSTITUTION_RE.finditer(text))
+        inert = _inert_flags(text)
+        # (body, runs?) per collapsed substitution, left to right. A `$( … )`
+        # is collapsed even when inert, so a `|` inside it never splits the
+        # line; an inert backtick is plain text and stays as written.
+        subs: list[tuple[str, bool]] = []
+        pieces: list[str] = []
+        at = 0
+        while True:
+            match = _ANY_SUBSTITUTION_RE.search(text, at)
+            if match is None:
+                break
+            runs = not inert[match.start()]
+            backtick = match.group(0).startswith("`")
+            if backtick and not runs:
+                pieces.append(text[at:match.start() + 1])
+                at = match.start() + 1
+                continue
+            pieces.append(text[at:match.start()] + "$SUBST")
+            subs.append((match.group(0)[1:-1] if backtick
+                         else match.group(0)[2:-1], runs))
+            at = match.end()
+        pieces.append(text[at:])
+        collapsed = "".join(pieces)
+        pending = iter(subs)
         out: list[tuple[str, tuple[int, ...]]] = []
         child = 0
-        collapsed = _COMMAND_SUBSTITUTION_RE.sub("$SUBST", text)
         for segment in _install_command_segments(collapsed):
             for _ in range(segment.count("$SUBST")):
-                match = next(subs, None)
-                if match is not None and not flags[match.start()]:
+                sub = next(pending, None)
+                if sub is not None and sub[1]:
                     child += 1
-                    out.extend(_ordered(
-                        match.group(0)[2:-1], scope + (child,)))
+                    out.extend(_ordered(sub[0], scope + (child,)))
             out.append((segment, scope))
         return out
 

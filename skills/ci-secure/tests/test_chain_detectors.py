@@ -4528,6 +4528,17 @@ def test_p1424_single_quoted_substitutions_are_text_not_commands(tmp_path):
     """) == []
 
 
+@pytest.mark.parametrize("echo", [
+    r"echo \$(python3 tools/setup.py)",
+    r'echo "\$(python3 tools/setup.py)"',
+])
+def test_p1424_escaped_substitution_is_text_not_a_command(tmp_path, echo):
+    """A backslash before `$(` makes it printed text, unquoted and inside
+    double quotes alike, so its body never runs."""
+    assert _remote_exec_hits(tmp_path, _gh_ext_job(
+        'git clone --branch main "$TOOLS_URL" tools && ' + echo)) == []
+
+
 def test_p1424_a_substitution_that_only_reads_stays_quiet(tmp_path):
     """The control that keeps the original fix intact: `$(ls tools/x.sql)`
     lists a path, it does not execute it, and `ls` is this code's own example
@@ -5295,6 +5306,30 @@ def test_p1424_gh_extension_single_quoted_substitution_is_text(tmp_path):
         "echo '$(gh extension install github/gh-actions-lock)'",
         "echo '$(gh actions-lock --verify)'",
     )) == []
+
+
+@pytest.mark.parametrize("echo", [
+    r"echo \$(gh check)",
+    r'echo "\$(gh check)"',
+    r"echo \`gh check\`",
+])
+def test_p1424_gh_extension_escaped_substitution_is_text(tmp_path, echo):
+    """An escaped `$(` or backtick is printed, never run."""
+    assert _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install acme/gh-check && " + echo)) == []
+
+
+@pytest.mark.parametrize("run", [
+    "r=`gh check`",
+    'r="`gh check`"',
+    # An escaped BACKSLASH leaves the `$(` after it live.
+    r"echo \\$(gh check)",
+])
+def test_p1424_gh_extension_backtick_substitution_runs(tmp_path, run):
+    """A backtick substitution runs its body, as `$( … )` does."""
+    hits = _remote_exec_hits(tmp_path, _gh_ext_job(
+        "gh extension install acme/gh-check && " + run))
+    assert len(hits) == 1, hits
 
 
 @pytest.mark.parametrize(("name", "invocation"), [
