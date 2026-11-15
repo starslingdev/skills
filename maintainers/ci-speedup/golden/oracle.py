@@ -76,7 +76,10 @@ def _eligible_jobs(commit: dict[str, Any], cutoff_s: int) -> tuple[list[dict[str
     return jobs, excluded
 
 
-def compute(recording: dict[str, Any], *, bookkeeping_cutoff_s: int = DEFAULT_BOOKKEEPING_CUTOFF_S) -> dict[str, Any]:
+def compute(recording: dict[str, Any], *,
+            bookkeeping_cutoff_s: int = DEFAULT_BOOKKEEPING_CUTOFF_S,
+            gate_by_sha: dict[str, str] | None = None,
+            gate_caps: dict[str, float] | None = None) -> dict[str, Any]:
     """Compute month-wide gate shares and wait facts from normalized data."""
     if recording.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unsupported golden recording schema")
@@ -91,11 +94,13 @@ def compute(recording: dict[str, Any], *, bookkeeping_cutoff_s: int = DEFAULT_BO
     wait_s: list[float] = []
     bookkeeping: Counter[str] = Counter()
     commits_with_jobs = 0
+    eligible_by_commit: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
     for commit in completed:
         jobs, excluded = _eligible_jobs(commit, bookkeeping_cutoff_s)
         bookkeeping.update(excluded)
         if not jobs:
             continue
+        eligible_by_commit.append((commit, jobs))
         commits_with_jobs += 1
         earliest_job = min(
             instant for job in jobs
@@ -111,15 +116,60 @@ def compute(recording: dict[str, Any], *, bookkeeping_cutoff_s: int = DEFAULT_BO
             if (instant := _instant(job.get("completed_at"))) is not None
         )
         wait_s.append((latest - earliest).total_seconds())
-        last_at = max(_instant(job.get("completed_at")) for job in jobs)
         for job in jobs:
-            if _instant(job.get("completed_at")) != last_at:
-                continue
             name = _check_name(job)
-            gate_counts[name] += 1
             duration = _seconds(job.get("started_at"), job.get("completed_at"))
             if duration is not None:
+                # The engine reports each check's ordinary P50, independent of
+                # whether that occurrence happened to finish last.  Gate share
+                # remains conditional below; timing does not.
                 gate_durations[name].append(duration)
+    p50_by_check = {
+        name: statistics.median(durations)
+        for name, durations in gate_durations.items() if durations
+    }
+
+    def gate_cap(name: str) -> float:
+        if not gate_caps:
+            return p50_by_check[name]
+        if name in gate_caps:
+            return float(gate_caps[name])
+        candidates = [
+            (candidate, value) for candidate, value in gate_caps.items()
+            if name.endswith(" / " + candidate)
+            or candidate.endswith(" / " + name)
+        ]
+        if candidates:
+            depth = max(candidate.count(" / ") for candidate, _value in candidates)
+            most_specific = [
+                value for candidate, value in candidates
+                if candidate.count(" / ") == depth
+            ]
+            if len(most_specific) == 1:
+                return float(most_specific[0])
+        return p50_by_check[name]
+
+    for commit, jobs in eligible_by_commit:
+        forced_gate = (gate_by_sha or {}).get(str(commit.get("sha") or ""))
+        capped = {
+            _check_name(job): min(
+                _seconds(job.get("started_at"), job.get("completed_at")) or 0.0,
+                gate_cap(_check_name(job)),
+            )
+            for job in jobs
+        }
+        longest = max(capped.values(), default=0.0)
+        for job in jobs:
+            job_name = _check_name(job)
+            leaf_name = str(job.get("name") or "")
+            if forced_gate:
+                is_gate = forced_gate in {job_name, leaf_name}
+            else:
+                is_gate = capped.get(job_name) == longest
+            if not is_gate:
+                continue
+            name = job_name
+            gate_counts[name] += 1
 
     denominator = commits_with_jobs
     gates = [
@@ -132,7 +182,8 @@ def compute(recording: dict[str, Any], *, bookkeeping_cutoff_s: int = DEFAULT_BO
         }
         for name, count in gate_counts.items()
     ]
-    gates.sort(key=lambda row: (-row["last_on"], -row["p50_s"], row["check"]))
+    gates.sort(key=lambda row: (
+        -row["last_on"], -gate_cap(str(row["check"])), row["check"]))
     return {
         "schema_version": SCHEMA_VERSION,
         "repository": str(recording.get("repository") or ""),

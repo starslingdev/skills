@@ -2119,7 +2119,8 @@ def _verdict_action_via_gh(reference):
         if not gh.check_prereqs():
             return None
         response = json.loads(gh.run_gh_api(
-            "repos/" + prefix[:-1] + "/commits/" + quote(version, safe="")))
+            "repos/" + prefix[:-1] + "/commits/" + quote(version, safe=""),
+            hostname="github.com"))
         sha = response.get("sha")
         return sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha) else None
     except Exception:

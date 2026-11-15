@@ -30,6 +30,7 @@ decision the JSON can answer.
   "workflow_activity": {"runs_30d": 218, "last_run": "...", "dormant": false},
   "evidence": "   8: job `bench` on `pull_request_target` checks out `${{ github.event.pull_request.head.sha }}` then executes from the tree <-- here",
   "fix_strategy": "switch-to-pull-request-or-drop-head-checkout",
+  "fix_guidance": "Optional evidence-specific guidance when this occurrence needs a narrower fix than the catalog default.",
   "fix_recipe_anchor": "p149--fork-code-executed-with-privileges"
 }
 ```
@@ -59,9 +60,12 @@ sentence under "What an attacker could do then".
 
 ## The attacker_scenario merged in at Phase 2.5
 
-The one non-scripted field. Written once per pattern group and merged onto
-**every member** of that group. One field per plain section the report
-renders at the top of the finding, in this order (rules per field:
+The one usually non-scripted field. Written once per
+`(pattern, severity, fix_strategy)` profile and merged onto every member of
+that profile, so a group that mixes a detector-lowered profile with the
+catalog one gets one object per profile; the report shows the group's most
+exposed profile. One field per plain section the report renders at the top
+of the finding, in this order (rules per field:
 [scenario-authoring.md](scenario-authoring.md)):
 
 ```json
@@ -78,10 +82,13 @@ renders at the top of the finding, in this order (rules per field:
 }
 ```
 
-A field may also be a list of strings (one line each). An older run's single
-string is still accepted and renders under "What an attacker could do then"
-alone; `tests/verify_report.py` then counts that finding as not
-repo-specific, exactly like the catalog's generic stand-in.
+A field may also be a list of strings (one line each). A single string —
+from an older run, or supplied by the scanner itself (P14.18's MEDIUM
+cosmetic profile) — is still accepted and renders under "What an attacker
+could do then" alone; `tests/verify_report.py` then counts that finding as
+not repo-specific, exactly like the catalog's generic stand-in. So Phase 2.5
+keeps a scanner-supplied string's claim as that profile's `attacker_could`
+and replaces the string with the full object.
 
 ## Top-level blocks
 

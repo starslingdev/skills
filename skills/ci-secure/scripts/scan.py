@@ -36,6 +36,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -109,6 +110,9 @@ class FindingExtra(Finding, total=False):
     # requests" repository setting, read over the API. `state` is "true",
     # "false" or "unread" (the reason in `detail`) — never guessed.
     actions_can_approve_prs: dict[str, str]
+    # Detector-specific guidance for findings whose evidence changes the
+    # appropriate remediation within one catalog pattern.
+    fix_guidance: str
     audit_id: str
     audit_url: str
     # "source" (evidence quotes the workflow verbatim) or "derived" (evidence
@@ -434,15 +438,70 @@ class RawHit:
     # `evidence` would either lose the verbatim quote or dress the derived half
     # as source; a separate field keeps both honest.
     derived_note: str | None = None
+    # A small number of evidence-sensitive patterns have a catalog default
+    # severity but can prove a narrower risk profile for this occurrence.
+    severity_override: Severity | None = None
+    attacker_scenario: str | None = None
+    fix_strategy_override: str | None = None
+    fix_guidance: str | None = None
 
 
-def detect_regex(file_path: Path, pattern: str) -> Iterator[RawHit]:
+_TEMPLATE_EXPRESSION_RE = re.compile(r"\$\{\{(?:(?!\}\}).)*\}\}", re.DOTALL)
+_CONTEXT_PATH_RE = re.compile(
+    r"\b(?P<path>(?:inputs|client_payload|repository_dispatch\.client_payload|"
+    r"github\.event)(?:(?:\.[A-Za-z_][A-Za-z0-9_-]*)|"
+    r"(?:\s*\[\s*(?:'[^']+'|\"[^\"]+\")\s*\]))+)",
+)
+_CONTEXT_BRACKET_KEY_RE = re.compile(
+    r"\s*\[\s*(?:'(?P<single>[^']+)'|\"(?P<double>[^\"]+)\")\s*\]",
+)
+
+
+def _normalize_context_brackets(text: str) -> str:
+    """Turn quoted context indexes into dotted paths without moving offsets.
+
+    The detector patterns describe context paths in dotted form. GitHub also
+    accepts bracket indexing, which is required for names containing a hyphen.
+    Each complete bracket chain is rewritten at once so a chain such as
+    ``github.event['inputs']['max-items']`` remains one path. Spaces pad the
+    shorter dotted spelling to the original length, preserving source offsets
+    and line attribution for the raw workflow text.
+    """
+    def _replace_path(match: re.Match[str]) -> str:
+        path = match.group("path")
+
+        def _replace_key(key_match: re.Match[str]) -> str:
+            key = key_match.group("single") or key_match.group("double") or ""
+            return "." + re.sub(r"[^A-Za-z0-9_]", "_", key)
+
+        dotted = _CONTEXT_BRACKET_KEY_RE.sub(_replace_key, path)
+        # Pad before the replacement so every dotted and bracket segment stays
+        # attached. The total length is unchanged, so later source offsets
+        # still line up with the original workflow text.
+        return " " * (len(path) - len(dotted)) + dotted
+
+    def _replace_expression(match: re.Match[str]) -> str:
+        return _CONTEXT_PATH_RE.sub(_replace_path, match.group(0))
+
+    # Shell text may contain bracket-looking strings whose quoted key embeds a
+    # template expression. Rewriting the whole shell scalar would consume that
+    # expression and hide the injection, so only expression bodies are
+    # normalized.
+    return _TEMPLATE_EXPRESSION_RE.sub(_replace_expression, text)
+
+
+def detect_regex(file_path: Path, pattern: str, *,
+                 normalize_context_brackets: bool = False) -> Iterator[RawHit]:
     content = _read_text_safe(file_path)
     if not content:
         return
+    match_content = (
+        _normalize_context_brackets(content)
+        if normalize_context_brackets else content
+    )
     lines = content.splitlines()
     compiled = re.compile(pattern, re.MULTILINE)
-    for m in compiled.finditer(content):
+    for m in compiled.finditer(match_content):
         line_no = content.count("\n", 0, m.start()) + 1
         idx = line_no - 1
         start = max(0, idx - 1)
@@ -891,7 +950,7 @@ def _is_shape_safe_operand(expr: str) -> bool:
 
 
 def detect_yaml_run_injection(
-    file_path: Path, pattern: str
+    file_path: Path, pattern: str, *, normalize_context_brackets: bool = False,
 ) -> Iterator[RawHit]:
     """Apply a regex only to the text of ``jobs.*.steps.*.run`` scalars.
 
@@ -926,6 +985,10 @@ def detect_yaml_run_injection(
     if not isinstance(jobs, dict):
         return
     compiled = re.compile(pattern)
+    match_text = (
+        _normalize_context_brackets(text)
+        if normalize_context_brackets else text
+    )
     lines = text.splitlines()
     triggers = _on_trigger_names(_get_on_node(doc))
     job_nodes = _job_nodes(text)
@@ -981,7 +1044,11 @@ def detect_yaml_run_injection(
             # step.
             search_cursor = run_node.start_mark.index
             run_end = run_node.end_mark.index
-            for m in compiled.finditer(run_text):
+            match_run_text = (
+                _normalize_context_brackets(run_text)
+                if normalize_context_brackets else run_text
+            )
+            for m in compiled.finditer(match_run_text):
                 snippet = m.group(0)
                 if _is_shape_safe_expression(snippet):
                     logger.debug(
@@ -990,7 +1057,7 @@ def detect_yaml_run_injection(
                         snippet, file_path,
                     )
                     continue
-                idx = text.find(snippet, search_cursor, run_end)
+                idx = match_text.find(snippet, search_cursor, run_end)
                 if idx < 0:
                     # The match exists in the parsed scalar but not
                     # verbatim in the raw file. This happens with YAML
@@ -5646,6 +5713,10 @@ def _walk_pull_requests_write(
         )
         return
     if isinstance(node, dict):
+        permissions = node.get("permissions")
+        if isinstance(permissions, str) \
+                and permissions.strip().lower() == "write-all":
+            yield path + ("permissions",)
         if (
             "pull-requests" in node
             and isinstance(node["pull-requests"], str)
@@ -5701,6 +5772,107 @@ def _find_pull_requests_write_line(lines: list[str]) -> int | None:
     return None
 
 
+def _p1418_grants_pr_write(permissions: Any) -> bool:
+    """Whether one workflow/job permissions value grants PR write access."""
+    if isinstance(permissions, str):
+        return permissions.strip().lower() == "write-all"
+    if not isinstance(permissions, dict):
+        return False
+    value = permissions.get("pull-requests")
+    return isinstance(value, str) and value.strip().lower() == "write"
+
+
+def _p1418_write_scoped_jobs(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Jobs whose effective permissions include ``pull-requests: write``.
+
+    A job-level permissions block replaces the workflow-level block; an
+    unrelated read-only job therefore cannot lend its steps to the job that
+    owns the write token, or make that token look more dangerous than it is.
+    """
+    workflow_write = _p1418_grants_pr_write(doc.get("permissions"))
+    scoped: list[tuple[str, dict[str, Any]]] = []
+    for name, job in _walk_jobs(doc):
+        if "permissions" in job:
+            has_write = _p1418_grants_pr_write(job.get("permissions"))
+        else:
+            has_write = workflow_write
+        if has_write:
+            scoped.append((name, job))
+    return scoped
+
+
+_P1418_COSMETIC_CALL_RE = re.compile(
+    r"^\s*(?:await\s+)?(?:github\.)?(?:rest\.)?issues\."
+    r"(?:addLabels|createComment)\s*\(",
+    re.I,
+)
+
+
+def _p1418_is_one_cosmetic_call(script: str) -> bool:
+    """Prove the narrow inline-script shape eligible for MEDIUM.
+
+    The accepted program is exactly one label/comment API call. Its argument
+    may be an object or arrays of literal labels, but it may not contain a
+    nested call, a template expression, or trailing JavaScript. This is
+    intentionally a positive proof rather than a deny-list of dangerous JS.
+    """
+    if "${{" in script or "`" in script:
+        return False
+    match = _P1418_COSMETIC_CALL_RE.match(script)
+    if match is None:
+        return False
+    opening = match.end() - 1
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(opening, len(script)):
+        char = script[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        # This is a deliberately small recognizer, not a JavaScript parser.
+        # Quotes inside comments and regex literals have different lexical
+        # rules and can otherwise desynchronise the string state below.  Fail
+        # closed on every such shape instead of proving it cosmetic.
+        if char == "/" or script.startswith("<!--", index):
+            return False
+        if char in ("'", '"', "`"):
+            quote = char
+        elif char == "(":
+            depth += 1
+            if depth > 1:
+                return False
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return not script[index + 1:].strip().strip(";").strip()
+            if depth < 0:
+                return False
+    return False
+
+
+def _p1418_script_risk(script: str) -> str | None:
+    """Specific HIGH reason for a script, before the generic fail-closed one."""
+    for expression in re.findall(r"\$\{\{.*?\}\}", script, re.S):
+        lowered = expression.lower()
+        if ("github.event.pull_request." in lowered or "github.head_ref" in lowered) \
+                and not _is_shape_safe_expression(expression):
+            return "executes attacker-controlled PR text"
+    flattened = re.sub(r"[\s.\[\]'\"]+", ".", script.lower())
+    if "pulls.createreview" in flattened \
+            or re.search(r"/pulls/[^'\"\s]+/reviews\b", script, re.I):
+        return "review API"
+    if "pulls.merge" in flattened \
+            or re.search(r"/pulls/[^'\"\s]+/merge\b", script, re.I):
+        return "merge API"
+    return None
+
+
 def _correlation_pr_write_and_untrusted_trigger(
     file_path: Path,
 ) -> Iterator[RawHit]:
@@ -5724,14 +5896,93 @@ def _correlation_pr_write_and_untrusted_trigger(
     line = _find_pull_requests_write_line(text.splitlines()) or _find_line_for_top_level_key(
         text.splitlines(), "permissions"
     ) or 1
+    risk_reasons: list[str] = []
+    scoped_jobs = _p1418_write_scoped_jobs(doc)
+    # A job-level permissions block replaces the workflow-level grant.  A
+    # workflow-wide write-all declaration therefore exposes no PR-write token
+    # when every job narrows it to a read-only block.
+    if not scoped_jobs:
+        return
+    all_scoped_jobs_cosmetic = bool(scoped_jobs)
+    for _job_name, job in scoped_jobs:
+        steps = _job_steps(job)
+        job_is_cosmetic = len(steps) == 1
+        if not steps:
+            job_is_cosmetic = False
+        for step in steps:
+            uses = step.get("uses")
+            with_block = step.get("with")
+            if isinstance(uses, str) and uses.startswith("actions/checkout") \
+                    and isinstance(with_block, dict) \
+                    and any(_attacker_head_ref(with_block.get(key))
+                            for key in ("ref", "repository")):
+                risk_reasons.append("checks out attacker-head PR code")
+            run = step.get("run")
+            if isinstance(run, str) and re.search(
+                r"\$\{\{\s*(?:github\.event\.pull_request\.(?!number\b|id\b|commits\b|sha\b|head_sha\b|merge_commit_sha\b|fork\b|merged\b|author_association\b)|github\.head_ref\b)",
+                run,
+            ):
+                risk_reasons.append("executes attacker-controlled PR text")
+            script = with_block.get("script") if isinstance(with_block, dict) else None
+            action_id = uses.split("@", 1)[0].lower() if isinstance(uses, str) else ""
+            is_github_script = (
+                action_id == "actions/github-script"
+                and isinstance(script, str)
+            )
+            if is_github_script:
+                specific_risk = _p1418_script_risk(script)
+                if specific_risk:
+                    risk_reasons.append(specific_risk)
+                if not _p1418_is_one_cosmetic_call(script):
+                    job_is_cosmetic = False
+            else:
+                job_is_cosmetic = False
+        all_scoped_jobs_cosmetic = all_scoped_jobs_cosmetic and job_is_cosmetic
+
+    # Preserve order while keeping the evidence compact when two risky legs
+    # coexist in one workflow.
+    risk_reasons = list(dict.fromkeys(risk_reasons))
+    if not risk_reasons and not all_scoped_jobs_cosmetic:
+        risk_reasons.append(
+            "workflow is not limited to label/comment-only github-script automation"
+        )
+    if risk_reasons:
+        profile = "; HIGH because " + ", ".join(risk_reasons)
+        severity_override: Severity | None = None
+        attacker_scenario = None
+        fix_strategy_override = None
+        fix_guidance = None
+    else:
+        profile = (
+            "; MEDIUM hygiene: no checkout, no PR-code execution, and no "
+            "review/merge API"
+        )
+        severity_override = "MEDIUM"
+        attacker_scenario = (
+            "A pull request author can influence cosmetic label or comment "
+            "automation, but this workflow does not execute PR content or "
+            "call review or merge APIs."
+        )
+        fix_strategy_override = "limit-cosmetic-pr-automation"
+        fix_guidance = (
+            "Keep the job limited to cosmetic labeling or commenting; remove "
+            "`pull-requests: write` if it is unused, and do not add PR-head "
+            "checkout, PR-controlled execution, or review/merge API calls."
+        )
+
     yield RawHit(
         line=line,
         evidence=(
             f"{line:>4}: workflow triggers on {sorted(untrusted)} AND "
-            f"grants `pull-requests: write` at scope `{sample_scope}` <-- here"
+            f"grants `pull-requests: write` at scope `{sample_scope}`"
+            f"{profile} <-- here"
         ),
         match_text=sample_scope,
         derived=True,
+        severity_override=severity_override,
+        attacker_scenario=attacker_scenario,
+        fix_strategy_override=fix_strategy_override,
+        fix_guidance=fix_guidance,
     )
 
 
@@ -6184,7 +6435,8 @@ def _gh_repo_visible(repo: str) -> bool:
     a CRITICAL impostor finding."""
     try:
         result = subprocess.run(
-            ["gh", "api", f"repos/{repo}", "--silent"],
+            ["gh", "api", f"repos/{repo}", "--silent",
+             "--hostname", "github.com"],
             capture_output=True, text=True, timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -6205,7 +6457,8 @@ def _gh_commit_probe(repo: str, sha: str) -> bool | None:
     """
     try:
         result = subprocess.run(
-            ["gh", "api", f"repos/{repo}/commits/{sha}", "--silent"],
+            ["gh", "api", f"repos/{repo}/commits/{sha}", "--silent",
+             "--hostname", "github.com"],
             capture_output=True, text=True, timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -6263,7 +6516,8 @@ def _gh_peel_tag_object(repo: str, sha: str) -> tuple[str | None, bool]:
         seen.add(current)
         try:
             result = subprocess.run(
-                ["gh", "api", f"repos/{repo}/git/tags/{current}"],
+                ["gh", "api", f"repos/{repo}/git/tags/{current}",
+                 "--hostname", "github.com"],
                 capture_output=True, text=True, timeout=30,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -6469,6 +6723,13 @@ def _dedupe_occurrences(findings: list[Finding]) -> list[Finding]:
 _DEFAULT_GH_SKIP_REASON = "gh not authenticated (run gh auth login)"
 
 
+def _gh_unavailable_reason() -> str:
+    """Specific guidance when the optional gh-backed checks cannot run."""
+    if shutil.which("gh") is None:
+        return "gh not installed (install the GitHub CLI)"
+    return _DEFAULT_GH_SKIP_REASON
+
+
 def scan(
     catalog: list[CatalogEntry],
     root: Path,
@@ -6662,7 +6923,10 @@ def _scan_once(
 
             if entry.detector == "regex":
                 assert entry.match is not None  # validated in __post_init__
-                hits = list(detect_regex(wf, entry.match))
+                hits = list(detect_regex(
+                    wf, entry.match,
+                    normalize_context_brackets=entry.pattern == "P14.15",
+                ))
             elif entry.detector == "yaml-path":
                 assert entry.yaml_path is not None
                 hits = list(
@@ -6676,7 +6940,10 @@ def _scan_once(
                 hits = list(detect_yaml_on_trigger(wf, entry.trigger_keys))
             elif entry.detector == "yaml-run-injection":
                 assert entry.match is not None
-                hits = list(detect_yaml_run_injection(wf, entry.match))
+                hits = list(detect_yaml_run_injection(
+                    wf, entry.match,
+                    normalize_context_brackets=entry.pattern == "P14.10",
+                ))
             elif entry.detector == "yaml-job-correlated":
                 assert entry.correlation, "validated in __post_init__"
                 corr_fn = _JOB_CORRELATIONS.get(entry.correlation)
@@ -6746,7 +7013,7 @@ def _scan_once(
                 fmt_vars = {
                     "basename": basename,
                     "pattern": entry.pattern,
-                    "severity": entry.severity,
+                    "severity": hit.severity_override or entry.severity,
                     "match_text": hit.match_text,
                 }
                 try:
@@ -6763,7 +7030,7 @@ def _scan_once(
                 findings.append({
                     "id": f"f{finding_seq}",
                     "pattern": entry.pattern,
-                    "severity": entry.severity,
+                    "severity": hit.severity_override or entry.severity,
                     "title": title,
                     "workflow_file": rel,
                     "line": hit.line,
@@ -6784,7 +7051,13 @@ def _scan_once(
                     # the two differently so a derived sentence is never
                     # dressed as source the reader can go and find.
                     "evidence_kind": "derived" if hit.derived else "source",
-                    "fix_strategy": entry.fix_strategy,
+                    "fix_strategy": (
+                        hit.fix_strategy_override or entry.fix_strategy
+                    ),
+                    **({"attacker_scenario": hit.attacker_scenario}
+                       if hit.attacker_scenario else {}),
+                    **({"fix_guidance": hit.fix_guidance}
+                       if hit.fix_guidance else {}),
                     "fix_recipe_anchor": entry.anchor,
                     # `risk` and `risk_note` are deliberately absent.
                     # The orchestrator scores them per group against
@@ -7149,13 +7422,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    gh_skip_reason = _DEFAULT_GH_SKIP_REASON
+    gh_skip_reason = _gh_unavailable_reason()
     if args.gh_impostor == "on":
         from gh_utils import check_prereqs  # noqa: E402
         if not check_prereqs():
             print(
-                "ERROR: --gh-impostor=on but gh is not authenticated "
-                "(gh auth login)",
+                f"ERROR: --gh-impostor=on but {gh_skip_reason}",
                 file=sys.stderr,
             )
             return 2

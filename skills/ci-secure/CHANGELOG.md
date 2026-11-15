@@ -11,6 +11,16 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- P14.18 now keeps `pull_request_target` automation HIGH when it checks out
+  attacker-head code, executes PR-controlled text, or calls review/merge APIs,
+  while classifying label/comment-only jobs with none of those paths as MEDIUM
+  hygiene and recommending that their cosmetic scope stay narrow. Its
+  fail-closed script proof now rejects comments and regex literals, recognizes
+  effective `write-all` grants, and gives cosmetic jobs a completion check that
+  permits a still-required `pull-requests: write` grant.
+
 ### Added
 
 - **2026-11-12** — P14.18 findings carry GitHub's "Allow GitHub Actions to
@@ -383,6 +393,17 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
+- **2026-11-12** (#332) — Optional GitHub checks now distinguish a missing
+  `gh` executable from an installed CLI that is not authenticated, so the
+  skip guidance tells users whether to install or log in. The README count is
+  updated to the two network lookups plus seven API-gated config facts.
+
+- **2026-11-12** (#324) — P14.10 and P14.15 now treat quoted bracket-indexed
+  attacker inputs like their dotted equivalents, including hyphenated input
+  names and mixed dotted/bracket `github.event` / `client_payload` lookups.
+  Normalization stays inside template expressions and preserves multiline
+  source attribution; bracket access on non-source contexts remains silent.
+
 - **2026-11-12** (#345) — ci-secure: the default-branch review check, when it
   fails on the rule's own settings, now also names anyone short of an admin
   on a bypass list (with the classic or ruleset setting to change) and any
@@ -394,6 +415,13 @@ entries are dated (UTC). Format loosely follows
   behind a plain `404 Not Found`. The fact remains measured, names that classic
   protection was unread, and still fails closed on rate limits, timeouts and
   server errors.
+
+- **2026-11-12** (#332) — P14.11 now sends every repository, commit and tag
+  lookup to github.com explicitly. Workflow action references resolve there,
+  so a caller whose `GH_HOST` points at GitHub Enterprise Server can no longer
+  verify a same-named repository on the wrong server. The config-fact verdict
+  action resolver uses the same host pin, while audited-repository API calls
+  continue to follow the repository's selected host.
 
 - **2026-11-11** (#331) — A GitHub CLI extension pinned to a tag on a
   release GitHub has locked as immutable is no longer reported (P14.24). That

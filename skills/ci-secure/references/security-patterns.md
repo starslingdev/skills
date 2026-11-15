@@ -95,7 +95,7 @@ to the fix agent as a constraint.
 pattern: P14.10
 severity: HIGH
 detector: yaml-run-injection
-match: "\$\{\{\s*(github\.event\.(issue|comment|pull_request|discussion|workflow_run|head_commit|inputs|client_payload)\.[a-zA-Z_.]+|github\.event\.inputs\.[a-zA-Z_0-9]+|github\.head_ref)(\s*\|\|[^}]*?)?\s*\}\}"
+match: "\$\{\{\s*(github\.event\.(issue|comment|pull_request|discussion|workflow_run|head_commit|inputs|client_payload)\.[a-zA-Z_0-9.]+|github\.event\.inputs\.[a-zA-Z_0-9]+|inputs\.[a-zA-Z_0-9]+|github\.head_ref)(\s*\|\|[^}]*?)?\s*\}\}"
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
 fix_strategy: env-var-indirection
 fix-surface: yaml
@@ -116,18 +116,19 @@ Attacker-controllable expression sources:
 - `github.event.head_commit.message` and any other commit metadata on `push` triggers
 - `github.head_ref` (PR source branch name)
 - `github.event.workflow_run.head_branch`, `.display_title`
-- `workflow_dispatch` inputs that accept free-form strings, in their `github.event.inputs.*` spelling
+- `workflow_dispatch` and reusable-workflow inputs that accept free-form
+  strings, in either their `github.event.inputs.*` or `inputs.*` spelling
 - Anything from `repository_dispatch.client_payload`
 - Output of an earlier step derived from any of the above
 
 A **`||` fallback does not sanitize anything.** `${{ github.head_ref || github.ref_name }}` is matched, because `||` returns the FIRST operand whenever it is truthy — so on a pull request the branch name an attacker chose is exactly what lands in the shell, and the safe-looking right-hand side never evaluates. The match therefore tolerates ` || <anything>` after the context path, and the value-shape exclusion above is judged on the first operand only: `${{ github.event.pull_request.title || '' }}` stays a finding, while `${{ github.event.pull_request.number || 0 }}` remains excluded. (cal.com's `production-build-without-database.yml:72` interpolated `${{ github.head_ref || github.ref_name }}` into a `run:` block holding roughly a dozen secrets and went unreported for exactly this reason.)
 
-The bare `inputs.*` context is deliberately **not** matched. It resolves to a
-`workflow_call` input on a reusable workflow, and a caller who can set that
-input already has write access to a workflow file in the repo — an insider,
-not the outsider the catalog's admission test requires. (`workflow_dispatch`
-inputs remain in scope via their `github.event.inputs.*` spelling, which is
-what the trigger actually populates.)
+Quoted bracket indexing is normalized to the same dotted source paths before
+matching. This includes `inputs['max-items']`, `github.event.inputs["name"]`
+and chained forms such as `github.event['client_payload']['command']`; bracket
+indexing is required for input names containing a hyphen. The same
+normalization is used by P14.15. Other contexts such as `matrix['os']` remain
+outside this source list.
 
 The `yaml-run-injection` detector walks `jobs.*.steps.*.run` and only fires when the regex matches inside a `run:` scalar — the actual shell context. Expressions in `env:`, `with:`, or `name:` blocks are structurally excluded: those are not shell contexts for this sink. That is a statement about *this* sink only — an action that shells out its own inputs turns a `with:` value into shell code inside the action's body, which is a different, undetected class.
 
@@ -385,9 +386,9 @@ nothing.
 the commit the latest release tag points at:
 
 ```bash
-gh api repos/OWNER/REPO/commits/BAD_SHA          # 404 → not in the canonical repo
-gh api repos/OWNER/REPO/releases/latest --jq .tag_name
-gh api repos/OWNER/REPO/git/ref/tags/TAG --jq .object.sha   # pin this instead
+gh api repos/OWNER/REPO/commits/BAD_SHA --hostname github.com          # 404 → not in the canonical repo
+gh api repos/OWNER/REPO/releases/latest --hostname github.com --jq .tag_name
+gh api repos/OWNER/REPO/git/ref/tags/TAG --hostname github.com --jq .object.sha   # pin this instead
 ```
 
 Verify the new pin the same way before committing it.
@@ -528,24 +529,24 @@ title_template: "pull-requests: write on a workflow outside activity can start i
 correlation: pr-write-and-untrusted-trigger
 -->
 
-**TL;DR.** A workflow that people outside your team can start — for example by opening a pull request, commenting on an issue, or finishing another workflow (`pull_request_target`, `issue_comment`, `workflow_run`, and a few similar events) — is also allowed to change pull requests (`pull-requests: write`: comment, label, approve, merge). The permission counts wherever the file grants it, even if only one job uses it. Whether that is a real risk depends on what the workflow does with it, which the attacker scenario in each finding assesses for that workflow.
+**TL;DR.** A workflow that people outside your team can start — for example by opening a pull request, commenting on an issue, or finishing another workflow (`pull_request_target`, `issue_comment`, `workflow_run`, and a few similar events) — has a job that is allowed to change pull requests (`pull-requests: write`: comment, label, approve, merge). It is HIGH when a job holding that permission checks out the pull request's code, runs text the pull request author controls, calls the review or merge API, or does anything the scanner cannot prove harmless; it is MEDIUM only when every such job does nothing but add one label or post one comment.
 
 **What an attacker can do.** A workflow compromise (injection, poisoned dependency, compromised action) self-approves and merges the malicious PR, bypassing branch protection's human-review requirement — elementary-data Apr 2026 chained this to PyPI + GHCR in 10 minutes.
 
 **Anti-pattern**: a workflow declares `pull-requests: write` **and** can be started by outside activity — `pull_request_target`, `issue_comment`, `workflow_run`, `issues`, `pull_request_review`, `pull_request_review_comment`, `discussion`, `discussion_comment`, `fork`, `watch`, `repository_dispatch` (that is the full list the check looks for). A compromise of any step in that workflow can self-approve or merge the PR, bypassing branch protection that requires reviewer approval. The elementary-data 2026 incident chained this exact pivot (default-write token + injection → forged `github-actions[bot]` commit → dispatched release workflow → PyPI publish in 10 minutes).
 
-**Prioritization**: every occurrence is a HIGH finding — a direct bypass of branch protection's human-review requirement. Attack first the workflows that also run attacker-supplied content (a template-injection sink, a fork checkout), since those hand the write scope to a stranger rather than requiring a separate compromise.
+**Prioritization**: an occurrence with an attacker-head checkout, PR-controlled execution, or review/merge API call is HIGH because it exposes a direct path to branch-protection bypass. An occurrence with none of those paths is MEDIUM: keep the automation cosmetic and review changes for any newly introduced execution or review/merge operation.
 
-**Fix recipe**: Two structural options:
+**Fix recipe**: For a MEDIUM label/comment-only occurrence, keep the job limited to those cosmetic operations, remove `pull-requests: write` if it is unused, and do not add PR-head checkout, PR-controlled execution, or review/merge API calls. For a HIGH occurrence, use one of these structural options:
 
 1. **Move `pull-requests: write` to a job that does NOT run on the untrusted trigger** — typically by splitting into two workflows (one on `pull_request_target` that uploads an artifact, one on `workflow_run` that consumes the artifact and posts the comment). Same shape as P14.9 fix.
 2. **Use a GitHub App** for the comment / approve operation. Astral's `astral-sh-bot` pattern: credentials live outside the repo, the App listens on the same webhook events, and a workflow file compromise doesn't expose the App's installation token.
 
 **Platform change, June 18 2026:** GitHub added settings that let an enterprise, organization or repository limit who can start workflows. They are off by default, so they do not protect you unless you turned them on, and this risk remains live by default.
 
-The org-level setting *"Allow GitHub Actions to create and approve pull requests"* should be **disabled** regardless; it is an org/repo setting, not a workflow fact, so no detector in this catalog can see it — verify it by hand. P14.18 catches the per-workflow opt-in even when the org-level setting allows it.
+The setting *"Allow GitHub Actions to create and approve pull requests"* should be **disabled** regardless. It is an org/repo setting, not a workflow fact, so the YAML cannot show it; when a P14.18 finding exists and `gh` can reach the repository, the scan reads the repository's effective value and records it on the finding (`actions_can_approve_prs`), and otherwise records it as not checked — verify it by hand then. P14.18 fires on the per-workflow opt-in whatever the setting says.
 
-`detector: yaml-workflow-correlated` with `correlation: pr-write-and-untrusted-trigger` — fires once per workflow whose `on:` keys include any untrusted-event family member AND that declares `pull-requests: write` **at any scope in the document**. The detector walks the whole parsed document for the declaration rather than tying it to a particular job, because a write granted anywhere in a workflow that an outsider's event can start is reachable; it does not attempt to prove which job would use it.
+`detector: yaml-workflow-correlated` with `correlation: pr-write-and-untrusted-trigger` — fires once per workflow whose `on:` keys include any untrusted-event family member AND whose effective workflow/job permissions grant `pull-requests: write` (including `write-all`). A job-level permissions block replaces the workflow-level block, so a job that narrows `write-all` to read-only does not inherit the write grant.
 
 **Sources**: StepSecurity "Prevent actions creating/approving PRs"; Wiz "Automated pull request creation/approval".
 
