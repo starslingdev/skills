@@ -1,12 +1,17 @@
 {
   "human_review": {
     "bottom_line_must_contain": "32bit tests",
+    "minimum_last_finishes": 5,
     "findings_must_appear": [],
     "findings_must_not_appear": [
       "OPT21"
     ],
     "report_must_contain": [],
     "report_must_not_contain": [],
+    "rendered_pole_order": [
+      "Lint",
+      "validate-pr"
+    ],
     "review_notes": "Proposed from the public workflow and independent oracle: the lint step is a true predecessor of tests, not redundant setup; the longest meaningful month-wide gate is 32bit tests. Awaiting owner review."
   },
   "oracle": {
