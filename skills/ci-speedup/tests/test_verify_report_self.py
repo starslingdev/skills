@@ -12460,3 +12460,105 @@ def test_chain_fact_unreadable_member_does_not_disappear(value):
 ])
 def test_domain_leakage_keeps_prose_and_code_blocks_visible(tmp_path, fragment):
     assert _tag_for(_good() + "\n" + fragment + "\n", _LEAK, tmp_path) == "FAIL"
+
+
+def test_bimodal_verifier_credits_a_complete_single_check_population(tmp_path):
+    vr = _load_verify_report()
+    story = (
+        "40% of sampled PRs wait about **5m 50s** on this check; the other 60% "
+        "wait about **30s**. The slow-mode win is about **5m 50s** (median of the "
+        "measured per-PR ceilings)."
+    )
+    report = f"""# report
+
+> **Bottom line.** Long pole 1, `gate`, has P50 **30s**. {story}
+
+## 📋 Contents
+
+1. 🟠 [gate](#pole-1) - P50 30s · finishes last on 20/20 PRs
+
+## 🟠 Long pole 1: `ci.yml` ▸ `gate` - 5m 50s
+
+_{story}_
+"""
+    slow = [315.0, 325.0, 335.0, 345.0, 355.0, 365.0, 375.0, 382.0]
+    populations = [[0.05, [["gate", value]]] for value in slow]
+    populations += [[0.05, [["gate", 30.0]]] for _ in range(12)]
+    findings = {
+        "pr_critical_path": {
+            "checks": [{
+                "name": "gate",
+                "p50_s": 30.0,
+                "bimodal": {
+                    "low_p50_s": 30.0,
+                    "high_p50_s": 350.0,
+                    "slow_frac": 0.4,
+                    "slow_min_s": 315.0,
+                },
+            }],
+            "populations": populations,
+            "population_check_runs_complete": [True] * 20,
+        },
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(findings), encoding="utf-8")
+
+    result = vr.check_bimodal_pole_one_states_modes_and_slow_win(
+        report, findings_path)
+    assert result.ok and not result.skipped, result.detail
+
+    findings["pr_critical_path"]["population_check_runs_complete"] = [False] * 20
+    findings_path.write_text(json.dumps(findings), encoding="utf-8")
+    rejected = vr.check_bimodal_pole_one_states_modes_and_slow_win(
+        report, findings_path)
+    assert not rejected.ok
+
+
+def test_bimodal_verifier_does_not_demand_a_zero_second_win(tmp_path):
+    vr = _load_verify_report()
+    report = """# report
+
+> **Bottom line.** Long pole 1, `gate`, has slow mode **5m 50s** (P50 **30s**).
+
+## 📋 Contents
+
+1. 🔴 [gate](#pole-1) - Slow mode 5m 50s (P50 30s) · finishes last on 8/20 PRs
+
+## 🔴 Long pole 1: `ci.yml` ▸ `gate` - 5m 50s
+
+_Bimodal: **~5m 50s** on ~40% of runs, **~30s** on the rest._
+"""
+    populations = [
+        [0.05, [["gate", 350.0], ["sibling", 350.0]]] for _ in range(8)
+    ] + [
+        [0.05, [["gate", 30.0], ["sibling", 30.0]]] for _ in range(12)
+    ]
+    findings = {
+        "pr_critical_path": {
+            "checks": [{
+                "name": "gate",
+                "p50_s": 30.0,
+                "bimodal": {
+                    "low_p50_s": 30.0,
+                    "high_p50_s": 350.0,
+                    "slow_frac": 0.4,
+                    "slow_min_s": 315.0,
+                },
+            }],
+            "populations": populations,
+            "population_check_runs_complete": [True] * 20,
+        },
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(findings), encoding="utf-8")
+
+    result = vr.check_bimodal_pole_one_states_modes_and_slow_win(
+        report, findings_path)
+    assert result.ok, result.detail
+
+    zero_story = report.replace(
+        "_Bimodal:",
+        "_The slow-mode win is about **0s**._\n\n_Bimodal:")
+    rejected = vr.check_bimodal_pole_one_states_modes_and_slow_win(
+        zero_story, findings_path)
+    assert not rejected.ok
