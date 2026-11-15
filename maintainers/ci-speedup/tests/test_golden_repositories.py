@@ -455,13 +455,31 @@ def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
     api = recording / "api"
     api.mkdir(parents=True)
     with gzip.open(
+        api / "repos_public_example.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({"default_branch": "main"}, stream)
+    with gzip.open(
         api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
     ) as stream:
         json.dump({
             "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["refs/heads/main"]}},
             "rules": [{
                 "type": "required_status_checks",
                 "parameters": {"required_status_checks": [{"context": "lint"}]},
+            }],
+        }, stream)
+    with gzip.open(
+        api / "repos_public_example_rulesets_2.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["refs/heads/release"]}},
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {
+                    "required_status_checks": [{"context": "release-only"}]
+                },
             }],
         }, stream)
     with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
