@@ -35,6 +35,7 @@ _HELD_BACK = {
     "candidate_is_an_action", "eslint_config_unreadable",
     "typescript_version_unreadable", "working_directory_unknown",
     "type_aware_lint_scan_missing", "type_aware_config_reader_failed",
+    "install_layout_unreadable",
 }
 # Decided before any candidate step is chosen: listed with the job, no step.
 _POLE_LEVEL = {
@@ -46,6 +47,7 @@ _POLE_LEVEL = {
 _VERDICTS = {
     "pole_not_file_backed", "no_candidate_step", "tool_not_in_table",
     "target_already_in_use", "tsc_emits_not_in_v1", "eslint_reported_by_opt82",
+    "install_swap_blocked",
 }
 
 
@@ -1079,7 +1081,7 @@ def test_scan_gates_hold_back_in_plain_english_on_both_sides():
     for g, want in _SCAN_GATE_PHRASES.items():
         assert bp._OPT84_WITHHOLD_PHRASES[g] == want, g
         assert vr._VR_OPT84_WITHHOLD_PHRASES[g] == want, g
-    assert len(bp._OPT84_WITHHOLD_PHRASES) == len(vr._VR_OPT84_HELD_BACK_GATES) == 17
+    assert len(bp._OPT84_WITHHOLD_PHRASES) == len(vr._VR_OPT84_HELD_BACK_GATES) == 18
 
 
 def test_step_gates_are_every_held_back_gate_but_the_pole_level_ones():

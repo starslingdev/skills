@@ -7602,12 +7602,88 @@ def _tal_block(**overrides: Any) -> dict[str, Any]:
         # package.json `"prettier"` key naming a shared config. Any of them may
         # load plugins, so OPT84 reads the dir as "plugins unknown".
         "prettier_config_unreadable": {},
+        # OPT84's install row (npm / pnpm / Yarn install -> `bun install`):
+        # what the repo ROOT says about its package manager, or None when it
+        # was not read (the row then holds back). `_tal_package_manager_read`:
+        # {"lockfiles": the lockfile names present, "package_manager_field":
+        # the root package.json `packageManager` string or None,
+        # "pnpm_workspace": a root `pnpm-workspace.yaml` exists, "pnpmfile":
+        # the pnpm hook files present, "yarn_pnp": Yarn Plug'n'Play is on,
+        # "unreadable": the files that exist and could not be read}.
+        "package_manager": None,
     }
     unknown = set(overrides) - set(block)
     if unknown:
         raise KeyError(f"_tal_block: not a type_aware_lint key: {sorted(unknown)}")
     block.update(overrides)
     return block
+
+
+# The root files OPT84's install row reads (npm / pnpm / Yarn -> `bun install`).
+# Lockfiles: bun's own two mean the repo already uses bun.
+_TAL_LOCKFILES = ("bun.lock", "bun.lockb", "package-lock.json", "npm-shrinkwrap.json",
+                  "pnpm-lock.yaml", "yarn.lock")
+# pnpm's install-time hook files (pnpm's `.pnpmfile.cjs`, and the ESM form).
+_TAL_PNPMFILES = (".pnpmfile.cjs", ".pnpmfile.mjs")
+# Yarn Plug'n'Play's generated loader files.
+_TAL_PNP_FILES = (".pnp.cjs", ".pnp.js", ".pnp.loader.mjs")
+
+
+def _tal_package_manager_read(root: Path) -> dict[str, Any]:
+    """What the repo root says about its package manager, for OPT84's install
+    row. Yarn Plug'n'Play is on when a PnP loader file is committed, or when a
+    `.yarnrc.yml` (Yarn 2+) leaves `nodeLinker` unset or sets it to `pnp`:
+    `pnp` is Yarn's documented default. A file that exists and cannot be read
+    (or a `nodeLinker` given through `${...}` interpolation) is listed in
+    `unreadable`, so the row holds back instead of guessing."""
+    lockfiles = sorted(n for n in _TAL_LOCKFILES if (root / n).is_file())
+    pnpmfile = sorted(n for n in _TAL_PNPMFILES if (root / n).is_file())
+    unreadable: list[str] = []
+    pm_field: "str | None" = None
+    pkg = root / "package.json"
+    if pkg.is_file():
+        try:
+            text = _read_config_text(pkg)
+            data = json.loads(text) if text is not None else None
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            unreadable.append("package.json")
+        elif isinstance(data.get("packageManager"), str):
+            pm_field = data["packageManager"].strip()
+    yarn_pnp = any((root / n).is_file() for n in _TAL_PNP_FILES)
+    yrc = root / ".yarnrc.yml"
+    if yrc.is_file():
+        try:
+            text = _read_config_text(yrc)
+            data = yaml.safe_load(text) if text is not None else None
+            ok = text is not None
+        except (OSError, yaml.YAMLError):
+            data, ok = None, False
+        if not ok or (data is not None and not isinstance(data, dict)):
+            unreadable.append(".yarnrc.yml")
+        else:
+            linker = (data or {}).get("nodeLinker")
+            if linker is not None and (not isinstance(linker, str) or "${" in linker):
+                unreadable.append(".yarnrc.yml")
+            elif linker is None or linker.strip() == "pnp":
+                yarn_pnp = True
+    ws = root / "pnpm-workspace.yaml"
+    pnpm_workspace = ws.is_file()
+    if pnpm_workspace:
+        try:
+            text = _read_config_text(ws)
+            data = yaml.safe_load(text) if text is not None else None
+        except (OSError, yaml.YAMLError):
+            text, data = None, None
+        if text is None:
+            unreadable.append("pnpm-workspace.yaml")
+        elif isinstance(data, dict) and data.get("pnpmfile"):
+            # a hook file set in the workspace settings, wherever it lives
+            pnpmfile.append(f"pnpm-workspace.yaml pnpmfile: {data.get('pnpmfile')}")
+    return {"lockfiles": lockfiles, "package_manager_field": pm_field,
+            "pnpm_workspace": pnpm_workspace, "pnpmfile": pnpmfile,
+            "yarn_pnp": yarn_pnp, "unreadable": sorted(unreadable)}
 
 
 def _tal_pnpm_catalogs(root: Path) -> dict[str, dict[str, str]]:
@@ -8065,6 +8141,7 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         prettier_plugins=prettier_plugins,
         prettier_plugin_files=prettier_plugin_files,
         prettier_config_unreadable=prettier_config_unreadable,
+        package_manager=_tal_package_manager_read(root),
     )
 
 

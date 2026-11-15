@@ -20770,6 +20770,14 @@ _OPT84_FIX_STRATEGY = "slow-tool-on-pole-has-native-drop-in"
 _OPT84_MIN_SHARE = 0.0
 _OPT84_MIN_STEP_S = 20.0
 _OPT84_CATEGORIES = frozenset({"scan", "build"})
+# The install row (npm / pnpm / Yarn install -> `bun install`). Unlike the lint
+# rows it has a share-of-pole floor: an install is on every job, so only one
+# that is a heavy share of the pole's own measured time is the lever. The
+# floor is OPT83's (`_OPT83_MIN_SHARE`), on top of the 20s absolute floor. An
+# `install`-category step is a candidate only for this row; a `scan` / `build`
+# step that installs first reports the row only when its p50 clears the floor.
+_OPT84_INSTALL_CATEGORY = "install"
+_OPT84_INSTALL_MIN_SHARE = 0.15
 _OPT84_CEILING_BASIS = (
     "the step's own measured p50: the most swapping its tool can remove from this "
     "pole, not a forecast of the saving")
@@ -20785,6 +20793,10 @@ _OPT84_VERDICT_GATES = frozenset({
     "target_already_in_use",
     "tsc_emits_not_in_v1",
     "eslint_reported_by_opt82",
+    # The install row's swap is blocked by a caveat the read can see: Yarn
+    # Plug'n'Play (bun's linkers are hoisted or isolated, no PnP mode) or a
+    # pnpm install-time hook file bun's pnpm migration does not carry.
+    "install_swap_blocked",
 })
 # Exits where the audit could not decide: counted AND listed with job + step.
 _OPT84_HELD_BACK_GATES = frozenset({
@@ -20808,6 +20820,11 @@ _OPT84_HELD_BACK_GATES = frozenset({
     # (the block carries `error`). Nothing the read needs can be trusted.
     "type_aware_lint_scan_missing",
     "type_aware_config_reader_failed",
+    # The install row found, but the scan carries no package-manager read of
+    # the repo root, or a file it needs (`package.json`, `.yarnrc.yml`,
+    # `pnpm-workspace.yaml`) could not be read: whether bun is already in use
+    # or a caveat blocks the swap is unknown.
+    "install_layout_unreadable",
 })
 # The held-back gates decided on one STEP: their listing names the step. Every
 # other held-back gate is pole-level and is listed with the job only. A STRING
@@ -20818,6 +20835,7 @@ _OPT84_STEP_GATES = frozenset({
     "delegated_script_unresolved", "package_json_unreadable",
     "candidate_is_an_action", "eslint_config_unreadable",
     "typescript_version_unreadable", "working_directory_unknown",
+    "install_layout_unreadable",
 })
 
 
@@ -20861,6 +20879,12 @@ _OPT84_DOCS: dict[str, dict[str, "str | None"]] = {
         "docs_url": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
         "migration_docs_url": None,
     },
+    # Checked 2026-11-15: `bun install`'s own page, and its lockfile page,
+    # which covers migrating package-lock.json, yarn.lock and pnpm-lock.yaml.
+    "install": {
+        "docs_url": "https://bun.com/docs/pm/cli/install",
+        "migration_docs_url": "https://bun.com/docs/pm/lockfile",
+    },
 }
 # The swap table's DETECTED rows, as data. `binaries`: {leaf binary: flags of
 # which at least one must be present (empty = any invocation)}. `targets`: leaf
@@ -20878,7 +20902,62 @@ _OPT84_TABLE: dict[str, dict[str, Any]] = {
     "tsc": {"source_tool": "tsc", "package": "typescript", "target": "typescript@7",
             "binaries": {"tsc": ("--noEmit",)}, "targets": (), "target_major": 7,
             "published_range": "8-12× (vendor-stated)"},
+    # Matched by `_opt84_install_kind`, not by `binaries`: an install is a
+    # package-manager subcommand, and `bun` alone is not the target (`bun
+    # test` is not an install). `published_range` is bun's own CI numbers
+    # (https://bun.com/package-manager: "CI without a cache" 5-19×, "CI with a
+    # warm cache" 8-21×, one Next.js app), never this repo's.
+    "install": {"source_tool": "npm / pnpm / Yarn install", "package": "",
+                "target": "bun install", "binaries": {}, "targets": (),
+                "target_major": None,
+                "published_range": "5-21× in CI (vendor-stated)"},
 }
+# npm / pnpm / Yarn install flags that take a separate value (never a package).
+_OPT84_INSTALL_VALUE_FLAGS = frozenset({
+    "--network-timeout", "--registry", "--cache-folder", "--cache", "--cache-dir",
+    "--modules-folder", "--store-dir", "--filter", "-F", "--mutex", "--loglevel",
+    "--reporter", "--workspace", "-w", "--network-concurrency",
+    "--child-concurrency", "--omit", "--include", "--prefer-offline-dir",
+    "--fetch-timeout", "--fetch-retries"})
+_OPT84_INSTALL_SUBCOMMANDS = {"npm": ("ci", "clean-install", "install", "i"),
+                              "pnpm": ("install", "i")}
+
+
+def _opt84_install_kind(tokens: list[str]) -> "str | None":
+    """"row" when the leaf installs the repo's dependencies with npm, pnpm or
+    Yarn (`npm ci`, `npm install`, `pnpm install`, `yarn`, `yarn install`,
+    flags only), "target" when it is `bun install` / `bun i` / `bun ci`, None
+    otherwise. A global install (`-g`) or one naming packages (`npm install
+    foo`) is not the repo's dependency install."""
+    t = list(tokens)
+    if not t:
+        return None
+    b = t[0].rsplit("/", 1)[-1].split("@", 1)[0]
+    args = t[1:]
+    if b == "bun":
+        return "target" if args[:1] and args[0] in ("install", "i", "ci") else None
+    if b in _OPT84_INSTALL_SUBCOMMANDS:
+        if not args or args[0] not in _OPT84_INSTALL_SUBCOMMANDS[b]:
+            return None
+        rest = args[1:]
+    elif b == "yarn":
+        rest = args[1:] if args[:1] == ["install"] else args
+    else:
+        return None
+    skip = False
+    for a in rest:
+        if skip:
+            skip = False
+            continue
+        flag = a.split("=", 1)[0]
+        if flag in ("-g", "--global", "--location"):
+            return None
+        if a in _OPT84_INSTALL_VALUE_FLAGS:
+            skip = True
+            continue
+        if not a.startswith("-"):
+            return None                     # names a package, or is a script
+    return "row"
 # `published_range` is the catalog's published range for the swap: OTHER repos'
 # numbers, rendered as such, never this repo's saving.
 # ESLint plugins whose rules oxlint may not carry one for one: any of these on
@@ -21400,6 +21479,9 @@ def _opt84_classify(tokens: list[str]) -> "tuple[str | None, str | None]":
     """(row, kind) for one leaf: kind "row" (a table tool this row swaps),
     "target" (the row's target already runs), "emits" (a `tsc` that is not a
     `--noEmit` type-check), or (None, None) when the leaf is not in the table."""
+    k = _opt84_install_kind(tokens)
+    if k is not None:
+        return "install", k
     t = _opt84_leaf_tokens(tokens)
     b = _opt84_binary(t)
     args = t[1:]
@@ -21554,6 +21636,11 @@ def _opt84_benchmark_commands(row: str, tokens: list[str], runner: str,
     ESLint row both are cold (`--cache` and its cache flags dropped); the
     Prettier and tsc rows keep the command's flags as CI runs them."""
     import shlex
+    pre = f"cd {shlex.quote(wd)} && " if wd else ""
+    if row == "install":
+        # Both from a fresh `node_modules`; the first `bun install` migrates the
+        # lockfile and leaves the old one in place (bun's lockfile docs).
+        return [f"({pre}time {shlex.join(tokens)})", f"({pre}time bun install)"]
     t = _opt84_leaf_tokens(tokens)
     args = t[1:]
     if row == "eslint":
@@ -21773,6 +21860,82 @@ def _opt84_prettier_fit(block: dict[str, Any], leaves: "list[dict[str, Any]]",
     return reasons
 
 
+def _opt84_install_leaves(leaves: list[dict[str, Any]], run: str,
+                          wd: str) -> list[dict[str, Any]]:
+    """The leaves with Yarn installs made readable: the shared resolver reads
+    `yarn install ...` as the binary `install` under the `yarn` runner, and a
+    bare `yarn` / `yarn --frozen-lockfile` (Yarn's install) as no leaf at all.
+    Both come back as `yarn ...` leaves; a bare one only when it is written in
+    the step's own `run:` (one a package script runs is not seen: a residual)."""
+    import shlex
+    out: list[dict[str, Any]] = []
+    for lf in leaves:
+        t = list(lf.get("tokens") or [])
+        if lf.get("runner") == "yarn" and t[:1] == ["install"]:
+            t = ["yarn", *t]
+            lf = {**lf, "tokens": t, "command": shlex.join(t)}
+        out.append(lf)
+    have = {str(lf.get("command") or "") for lf in out}
+    for seg in _OPT82_SEGMENT_SPLIT_RE.split(run or ""):
+        toks = _opt82_tokens(seg.strip())
+        if (toks[:1] == ["yarn"] and all(a.startswith("-") for a in toks[1:])
+                and _opt84_install_kind(toks) == "row"
+                and shlex.join(toks) not in have):
+            out.append({"command": shlex.join(toks), "tokens": toks,
+                        "runner": "yarn", "wd": wd, "chain": []})
+            have.add(shlex.join(toks))
+    return out
+
+
+def _opt84_install_fit(block: dict[str, Any],
+                       runs_on: Any) -> "tuple[str, list[str]]":
+    """The install row's verdict from the scan's root package-manager read:
+    ("held", []) when it was not read or a file it needs could not be;
+    ("in_use", []) when bun is already the repo's package manager (a
+    `bun.lock` / `bun.lockb`, or `packageManager: bun@...`); ("blocked",
+    reasons) when a caveat bun cannot carry is present; else ("dual-run",
+    reasons): the side-by-side run is always the recipe, and the reasons are
+    the caveats it must check, each from bun's own docs."""
+    pm = block.get("package_manager")
+    if not isinstance(pm, dict) or pm.get("unreadable"):
+        return "held", []
+    locks = [str(x) for x in pm.get("lockfiles") or []]
+    field = str(pm.get("package_manager_field") or "")
+    if any(x in ("bun.lock", "bun.lockb") for x in locks) or field.startswith("bun@"):
+        return "in_use", []
+    blocked: list[str] = []
+    if pm.get("yarn_pnp"):
+        blocked.append("Yarn Plug'n'Play is on, and bun installs only into "
+                       "`node_modules` (its hoisted or isolated linker)")
+    for h in pm.get("pnpmfile") or []:
+        blocked.append(f"a pnpm install hook (`{h}`) rewrites packages at install "
+                       "time, and bun's pnpm migration does not carry it")
+    if blocked:
+        return "blocked", blocked
+    old = [x for x in locks if x not in ("bun.lock", "bun.lockb")]
+    reasons = [
+        (f"the first `bun install` migrates `{'`, `'.join(old)}` to `bun.lock` and "
+         "keeps the old lockfile: delete it only after both installs pass the tests"
+         if old else
+         "no lockfile was found at the repo root: commit the `bun.lock` the first "
+         "install writes, so CI can install with `bun ci` (`--frozen-lockfile`)"),
+        ("bun runs a dependency's install scripts (a native addon's node-gyp build, "
+         "for example) only for packages on its default trusted list or in "
+         "`trustedDependencies`: a skipped build shows up in the side-by-side test "
+         "run, and the scripts it skips are code that no longer runs at install"),
+        ("bun replaces the installer only: the scripts and tests keep running on "
+         "Node unless the repo moves its runtime on purpose"),
+    ]
+    if pm.get("pnpm_workspace"):
+        reasons.append("bun moves the `pnpm-workspace.yaml` package list and "
+                       "catalogs into the root `package.json` `workspaces` field")
+    ro = json.dumps(runs_on, default=str).lower() if runs_on is not None else ""
+    if "windows" in ro:
+        reasons.append("this job runs on Windows: bun supports Windows 10 version "
+                       "1809 or later; confirm the install and tests on this runner")
+    return "dual-run", reasons
+
+
 def _detect_opt84_tool_swap(
     poles: list[dict[str, Any]],
     wf_docs: dict[str, Any],
@@ -21922,8 +22085,10 @@ def _detect_opt84_tool_swap(
                 else "pole_step_timings_unavailable", wf, job)
             continue
         cands = [(n, c, d) for n, c, d in measured
-                 if c in _OPT84_CATEGORIES and d >= _OPT84_MIN_STEP_S
-                 and d >= _OPT84_MIN_SHARE * job_p50]
+                 if d >= _OPT84_MIN_STEP_S and d >= _OPT84_MIN_SHARE * job_p50
+                 and (c in _OPT84_CATEGORIES
+                      or (c == _OPT84_INSTALL_CATEGORY
+                          and d >= _OPT84_INSTALL_MIN_SHARE * job_p50))]
         if not cands:
             _no("no_candidate_step", wf, job)
             continue
@@ -22037,9 +22202,11 @@ def _detect_opt84_tool_swap(
             if opaque:
                 _no(opaque, wf, job, name, table_tool_seen=_opt84_any_row(leaves))
                 continue
+            leaves = _opt84_install_leaves(leaves, run, wd)
             found: list[tuple[str, dict[str, Any]]] = []
             targets: set[str] = set()
             emits = False
+            install_blocked: list[str] = []
             for lf in leaves:
                 row, kind = _opt84_classify(lf["tokens"])
                 if kind == "target":
@@ -22058,12 +22225,19 @@ def _detect_opt84_tool_swap(
                                  for g in grp["group"]):
                         grp["group"].append(lf)
             silenced = [r for r, _lf in found if r in targets]
+            if ("install" in targets and p50 >= _OPT84_INSTALL_MIN_SHARE * job_p50
+                    and not any(r == "install" for r, _lf in found)):
+                silenced.append("install")      # a heavy `bun install` already
             found = [(r, lf) for r, lf in found if r not in targets]
             deferred = (wf, yaml_key, " ".join(name.split())) in opt82_steps
             tools: list[dict[str, Any]] = []
             held: "str | None" = None
             for row, lf in found:
                 spec_row = _OPT84_TABLE[row]
+                if category == _OPT84_INSTALL_CATEGORY and row != "install":
+                    continue        # an install step is a candidate for that row only
+                if row == "install" and p50 < _OPT84_INSTALL_MIN_SHARE * job_p50:
+                    continue        # an install inside a quick scan / build step
                 group = lf.get("group") or [lf]
                 lwds = list(dict.fromkeys(str(g["wd"] or "") for g in group))
                 lwd = str(lf["wd"] or "")
@@ -22071,7 +22245,19 @@ def _detect_opt84_tool_swap(
                 if version is _OPT84_VERSION_UNREADABLE:
                     version = None              # informational here; tsc reads majors
                 fit, reasons = "drop-in", []
-                if row == "tsc":
+                if row == "install":
+                    verdict, why = _opt84_install_fit(tal, spec.get("runs-on"))
+                    if verdict == "held":
+                        held = held or "install_layout_unreadable"
+                        continue
+                    if verdict == "in_use":
+                        silenced.append(row)
+                        continue
+                    if verdict == "blocked":
+                        install_blocked += why
+                        continue
+                    fit, reasons, version = "dual-run", why, None
+                elif row == "tsc":
                     majors = [(g, _opt84_major(_opt84_version(
                         tal, str(g["wd"] or ""), spec_row["package"]))) for g in group]
                     if any(m is None for _g, m in majors):
@@ -22172,6 +22358,9 @@ def _detect_opt84_tool_swap(
                     _no("eslint_reported_by_opt82", wf, job, name)
                 elif silenced:
                     _no("target_already_in_use", wf, job, name)
+                elif install_blocked:
+                    _no("install_swap_blocked", wf, job, name,
+                        why="; ".join(install_blocked))
                 elif emits:
                     _no("tsc_emits_not_in_v1", wf, job, name)
                 else:
