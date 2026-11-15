@@ -29,6 +29,7 @@ REQUIRED_DECISIONS = {
     "dependency-cache-floor", "cold-cache-miss-threshold",
     "cache-partial-miss-floor",
     "ceiling-minimum-gates", "partial-majority-rule",
+    "history-drift-thresholds", "history-drift-budget",
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
@@ -171,6 +172,25 @@ REQUIRED_CURRENT_SOURCES = {
     "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_DENOMINATOR": 2,
     "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_NUMERATOR": 1,
     "pr_sample_contract.py:PR_SAMPLE_TARGET": 100,
+    "shift_left.py:API_BUDGET_DEFAULT": 60,
+    "shift_left.py:API_BUDGET_MAX": 110,
+    "shift_left.py:ATTRIBUTION_CALL_CAP": 5,
+    "shift_left.py:BASELINE_RUNS": 20,
+    "shift_left.py:CREEP_MAX_JUMP_FRACTION": 0.5,
+    "shift_left.py:CREEP_MIN_NONDECREASING": 10,
+    "shift_left.py:CREEP_MIN_RUNS": 15,
+    "shift_left.py:CREEP_WINDOW": 5,
+    "shift_left.py:DEADLINE_DEFAULT_S": 120,
+    "shift_left.py:L2_MIN_BASELINE": 8,
+    "shift_left.py:L3_MIN_HISTORY": 15,
+    "shift_left.py:MAX_RUNS_LIMIT": 50,
+    "shift_left.py:MAX_WORKFLOWS": 5,
+    "shift_left.py:NOISE_FLOOR_S": 2.0,
+    "shift_left.py:NOISE_SIGMAS": 3.0,
+    "shift_left.py:PAGE_CAP": 2,
+    "shift_left.py:RELATIVE_THRESHOLD": 0.1,
+    "shift_left.py:STEP_HOLD": 3,
+    "shift_left.py:STEP_PRE_MIN": 8,
     "verify_report.py:_CEILING_MIN_GATING_PR": 5,
     "verify_report.py:_VR_AGG_GATE_TRIVIAL_S": 30.0,
     "verify_report.py:_VR_CACHE_COLD_MISS_PCT": 99.5,
@@ -416,4 +436,20 @@ def test_every_shared_pr_sample_constant_is_reviewed():
         for row in _contract(DOC.read_text(encoding="utf-8")).values()
         for source in row.get("sources", {})
     }
+    assert shared <= documented, sorted(shared - documented)
+
+
+def test_every_history_drift_constant_is_reviewed():
+    """shift_left.py's thresholds and API caps decide what its history-drift
+    summary calls a slowdown, step change or creep, and how much GitHub API it
+    may spend (#282). A constant added there must be reviewed here too."""
+    path = SCRIPTS / "shift_left.py"
+    shared = {f"shift_left.py:{name}" for name in _assignments(path)
+              if name.isupper()}
+    documented = {
+        source
+        for row in _contract(DOC.read_text(encoding="utf-8")).values()
+        for source in row.get("sources", {})
+    }
+    assert shared, "shift_left.py exposes no reviewable constants"
     assert shared <= documented, sorted(shared - documented)

@@ -34,6 +34,7 @@ unversioned and updates by reinstall from `main`.
 ### Fixed
 
 - **2026-11-15** — Stop the shift-left history collector chasing a pull-request job that main has not run in the last 20 successful pushes. It now reports that job as new after those 20 runs and spends the remaining budget on the other workflows, which a single added job previously left uncollected. The Markdown summary also states the GitHub API calls spent against the budget. (#282)
+- **2026-11-15** — Name every shift-left threshold and API cap as a constant and list them for owner review in `references/report-defaults.md` (`history-drift-thresholds`, `history-drift-budget`), with a contract test that fails when one is added unreviewed. A new test holds that the audit report renders identically with or without a shift-left result. No output changes. (#282)
 - **2026-11-12** — Cap baseline job-log reads across an entire post-fix verification, persist the sampled baseline and any in-flight sample or rerun state for later polls even when the branch-head lookup is temporarily unavailable, and disclose the calls used against the budget.
 - **2026-11-11** — Exclude matrix legs whose dominant test step was skipped when their only remaining steps ran on every leg, while preserving platform-specific legs as real work.
 

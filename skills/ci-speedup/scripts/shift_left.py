@@ -23,6 +23,17 @@ RELATIVE_THRESHOLD = 0.10
 STEP_HOLD = 3
 CREEP_WINDOW = 5
 CREEP_MIN_RUNS = 15
+NOISE_FLOOR_S = 2.0
+NOISE_SIGMAS = 3.0
+CREEP_MIN_NONDECREASING = 10
+CREEP_MAX_JUMP_FRACTION = 0.5
+MAX_RUNS_LIMIT = 50
+PAGE_CAP = 2
+MAX_WORKFLOWS = 5
+ATTRIBUTION_CALL_CAP = 5
+API_BUDGET_DEFAULT = 60
+API_BUDGET_MAX = 110
+DEADLINE_DEFAULT_S = 120
 
 
 class CollectionError(RuntimeError):
@@ -55,10 +66,10 @@ def _stats(values: Iterable[float]) -> dict[str, float]:
     median = float(statistics.median(sample))
     mad = float(statistics.median(abs(value - median) for value in sample))
     sigma = 1.4826 * mad
-    noise = max(2.0, 3.0 * sigma)
+    noise = max(NOISE_FLOOR_S, NOISE_SIGMAS * sigma)
     return {"median_s": round(median, 6), "mad_s": round(mad, 6),
             "robust_sigma_s": round(sigma, 6), "noise_band_s": round(noise, 6),
-            "relative_threshold_s": round(median * 1.10, 6)}
+            "relative_threshold_s": round(median * (1 + RELATIVE_THRESHOLD), 6)}
 
 
 def _change_percent(delta: float, baseline: float) -> float | None:
@@ -183,7 +194,7 @@ def _attribution(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _step(rows: list[dict[str, Any]], baseline_runs: int, min_history: int):
-    for index in range(min_history, len(rows) - 3):
+    for index in range(min_history, len(rows) - STEP_HOLD):
         before = rows[max(0, index - baseline_runs):index]
         if len(before) < min_history:
             continue
@@ -192,14 +203,14 @@ def _step(rows: list[dict[str, Any]], baseline_runs: int, min_history: int):
         boundary = summary["median_s"] + max(
             RELATIVE_THRESHOLD * summary["median_s"], summary["noise_band_s"])
         after = float(statistics.median(row["duration_s"] for row in post))
-        first_four = [float(row["duration_s"]) for row in post[:4]]
-        newest_three = [float(row["duration_s"]) for row in post[-3:]]
+        first_four = [float(row["duration_s"]) for row in post[:STEP_HOLD + 1]]
+        newest_three = [float(row["duration_s"]) for row in post[-STEP_HOLD:]]
         held = (after > summary["relative_threshold_s"]
                 and after - summary["median_s"] > summary["noise_band_s"]
-                and sum(value > boundary for value in first_four) >= 3
+                and sum(value > boundary for value in first_four) >= STEP_HOLD
                 and all(value > boundary for value in newest_three))
         if held:
-            first_slow = next(row for row in post[:4]
+            first_slow = next(row for row in post[:STEP_HOLD + 1]
                               if float(row["duration_s"]) > boundary)
             return {"row": first_slow, "baseline": summary, "after_s": round(after, 6),
                     "change": _change_percent(after - summary["median_s"],
@@ -222,9 +233,9 @@ def _creep(rows: list[dict[str, Any]], min_history: int):
         slopes = [(values[j] - values[i]) / (j - i)
                   for i in range(len(values)) for j in range(i + 1, len(values))]
         adjacent = [values[i] - values[i - 1] for i in range(1, len(values))]
-        if statistics.median(slopes) <= 0 or sum(delta >= 0 for delta in adjacent) < 10:
+        if statistics.median(slopes) <= 0 or sum(delta >= 0 for delta in adjacent) < CREEP_MIN_NONDECREASING:
             continue
-        if max(adjacent) >= 0.5 * rise:
+        if max(adjacent) >= CREEP_MAX_JUMP_FRACTION * rise:
             continue
         return {"row": window[CREEP_WINDOW], "baseline": first,
                 "recent_s": round(last_median, 6),
@@ -298,7 +309,8 @@ def _parse_time(value: Any) -> dt.datetime | None:
 
 
 class GhClient:
-    def __init__(self, budget: int, timeout: int, deadline_seconds: int = 120):
+    def __init__(self, budget: int, timeout: int,
+                 deadline_seconds: int = DEADLINE_DEFAULT_S):
         self.budget, self.timeout, self.calls = budget, timeout, 0
         self.deadline = time.monotonic() + deadline_seconds
 
@@ -328,7 +340,7 @@ def _runs(doc: Any) -> list[dict[str, Any]]:
     return [row for row in doc["workflow_runs"] if isinstance(row, dict)]
 
 
-def _paginate(client: Any, endpoint: str, key: str, *, max_pages: int = 2,
+def _paginate(client: Any, endpoint: str, key: str, *, max_pages: int = PAGE_CAP,
               per_page: int = 100) -> tuple[list[dict[str, Any]], bool]:
     items: list[dict[str, Any]] = []
     total = None
@@ -348,7 +360,7 @@ def _paginate(client: Any, endpoint: str, key: str, *, max_pages: int = 2,
 
 def _jobs_for_run(repo: str, run_id: Any, client: Any) -> tuple[list[dict[str, Any]], bool]:
     return _paginate(client, f"repos/{repo}/actions/runs/{run_id}/jobs?filter=latest",
-                     "jobs", max_pages=2)
+                     "jobs", max_pages=PAGE_CAP)
 
 
 def _job_records(run: dict[str, Any], jobs: Any) -> list[dict[str, Any]]:
@@ -406,7 +418,7 @@ def _latest_pr_runs(rows: list[dict[str, Any]], head: str) -> list[dict[str, Any
 
 
 def collect_history(repo: str, branch: str, *, pr_number: int | None,
-                    max_runs: int, client: GhClient, max_workflows: int = 5):
+                    max_runs: int, client: GhClient, max_workflows: int = MAX_WORKFLOWS):
     """Collect candidate-first L2 history or bounded per-workflow L3 history."""
     coverage: dict[str, Any] = {"partial_workflows": {}, "partial_identities": [],
                                 "omitted_workflows": [], "absent_identities": [],
@@ -424,7 +436,7 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
         pr_runs, pr_truncated = _paginate(client,
             f"repos/{repo}/actions/runs?head_sha={quote(head, safe='')}"
             "&event=pull_request&status=completed",
-            "workflow_runs", max_pages=2)
+            "workflow_runs", max_pages=PAGE_CAP)
         if pr_truncated:
             coverage["candidate_partial"] = "pull-request run list reached page cap"
         for run in _latest_pr_runs(pr_runs, head):
@@ -442,7 +454,7 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
                         if workflow_id in eligible_workflows]
     else:
         workflows, workflows_truncated = _paginate(
-            client, f"repos/{repo}/actions/workflows?", "workflows", max_pages=2)
+            client, f"repos/{repo}/actions/workflows?", "workflows", max_pages=PAGE_CAP)
         active = [row for row in workflows if row.get("state") == "active" and row.get("id")]
         active.sort(key=lambda row: (str(row.get("path", "")), int(row.get("id", 0))))
         workflow_ids = [str(row["id"]) for row in active[:max_workflows]]
@@ -462,7 +474,7 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
             runs, runs_truncated = _paginate(client,
                 f"repos/{repo}/actions/workflows/{workflow_id}/runs?"
                 f"branch={quote(branch, safe='')}&event=push&status=completed",
-                "workflow_runs", max_pages=2)
+                "workflow_runs", max_pages=PAGE_CAP)
             selected = _successful_push_runs(runs, branch)
             for run in selected:
                 jobs, jobs_truncated = _jobs_for_run(repo, run.get("id"), client)
@@ -579,7 +591,7 @@ def _apply_coverage(report: dict[str, Any], coverage: dict[str, Any], *,
 
 
 def _fill_attribution(repo: str, report: dict[str, Any], client: GhClient,
-                      max_calls: int = 5) -> None:
+                      max_calls: int = ATTRIBUTION_CALL_CAP) -> None:
     cache = {}
     calls = 0
     for item in report.get("observations", []):
@@ -671,18 +683,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", required=True)
     parser.add_argument("--branch", default="main")
     parser.add_argument("--pr", type=int)
-    parser.add_argument("--max-runs", type=int, default=20)
-    parser.add_argument("--api-budget", type=int, default=60)
+    parser.add_argument("--max-runs", type=int, default=BASELINE_RUNS)
+    parser.add_argument("--api-budget", type=int, default=API_BUDGET_DEFAULT)
     parser.add_argument("--timeout-seconds", type=int, default=15)
-    parser.add_argument("--deadline-seconds", type=int, default=120)
+    parser.add_argument("--deadline-seconds", type=int, default=DEADLINE_DEFAULT_S)
     parser.add_argument("--output-byte-limit", type=int, default=2 * 1024 * 1024)
     parser.add_argument("--output", type=Path)
     args = parser.parse_args(argv)
     minimum_runs = L2_MIN_BASELINE if args.pr is not None else L3_MIN_HISTORY
-    if not minimum_runs <= args.max_runs <= 50:
-        parser.error(f"--max-runs must be between {minimum_runs} and 50")
-    if not 1 <= args.api_budget <= 110:
-        parser.error("--api-budget must be between 1 and 110")
+    if not minimum_runs <= args.max_runs <= MAX_RUNS_LIMIT:
+        parser.error(f"--max-runs must be between {minimum_runs} and {MAX_RUNS_LIMIT}")
+    if not 1 <= args.api_budget <= API_BUDGET_MAX:
+        parser.error(f"--api-budget must be between 1 and {API_BUDGET_MAX}")
     if not 10 <= args.deadline_seconds <= 300:
         parser.error("--deadline-seconds must be between 10 and 300")
     if not 4096 <= args.output_byte_limit <= 4 * 1024 * 1024:

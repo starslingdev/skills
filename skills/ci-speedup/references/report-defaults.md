@@ -630,6 +630,48 @@ them from findings or omit the hidden count.
 
 **Approval status:** awaiting owner approval.
 
+### `history-drift-thresholds`
+
+**Current value:** the history-drift summary (`scripts/shift_left.py`) compares
+a pull-request job with the median of up to 20 comparable successful main runs
+(`BASELINE_RUNS`) and needs at least 8 of them (`L2_MIN_BASELINE`). A slowdown
+must exceed the median by 10% (`RELATIVE_THRESHOLD`) and by a noise band of
+`max(2 seconds, 3 robust MAD sigmas)` (`NOISE_FLOOR_S`, `NOISE_SIGMAS`). A main
+step change needs 8 earlier runs (`STEP_PRE_MIN`), 3 of the first 4 later runs
+and all 3 newest runs above the boundary (`STEP_HOLD`), and 15 runs of history
+(`L3_MIN_HISTORY`). Creep needs a 15-run window (`CREEP_MIN_RUNS`) whose last 5
+runs (`CREEP_WINDOW`) clear the same band against its first 5, with at least 10
+non-decreasing adjacent runs (`CREEP_MIN_NONDECREASING`) and no single jump of
+half the rise or more (`CREEP_MAX_JUMP_FRACTION`).
+
+**Report statements:** every `slowdown`, `step_change`, `creep` and
+`no_baseline` line in the history-drift summary. The audit report does not read
+this summary, and `tests/test_shift_left_report_only.py` holds that boundary.
+
+**Reason:** A median and MAD band stay stable when one run is an outlier, and
+the hold and window rules keep a three-run spike from reading as a shift.
+
+**Proposed decision:** **Keep 20 / 8 / 10% / 2 s / 3 sigma / 8 / 3 / 15 / 5 / 10 /
+0.5.** Added by #282; awaiting owner approval.
+
+### `history-drift-budget`
+
+**Current value:** at most 60 GitHub API calls by default and 110 at most
+(`API_BUDGET_DEFAULT`, `API_BUDGET_MAX`), a 120-second collection deadline
+(`DEADLINE_DEFAULT_S`), 2 pages per list (`PAGE_CAP`), 5 active workflows when
+no pull request is named (`MAX_WORKFLOWS`), 5 merge-attribution lookups
+(`ATTRIBUTION_CALL_CAP`), and `--max-runs` up to 50 (`MAX_RUNS_LIMIT`).
+
+**Report statements:** the summary's API-calls line, every `partial` identity,
+and the coverage block naming workflows that were not collected.
+
+**Reason:** The summary runs only when an operator invokes it, outside the
+audit, so it carries its own hard cap. Missing history is stated as partial,
+never as a clean result.
+
+**Proposed decision:** **Keep 60 / 110 / 120 s / 2 / 5 / 5 / 50.** Added by
+#282; awaiting owner approval.
+
 ## Machine-readable contract
 
 The suite compares this block with named engine constants. Proposed values that
@@ -1009,6 +1051,35 @@ implementation lands.
     "sources": {
       "collect_runs.py:_DEEPEN_TOP_CHECKS": 12,
       "collect_runs.py:_SHALLOW_RUNS": 10
+    }
+  },
+  "history-drift-budget": {
+    "decision": "history-drift-budget",
+    "sources": {
+      "shift_left.py:API_BUDGET_DEFAULT": 60,
+      "shift_left.py:API_BUDGET_MAX": 110,
+      "shift_left.py:ATTRIBUTION_CALL_CAP": 5,
+      "shift_left.py:DEADLINE_DEFAULT_S": 120,
+      "shift_left.py:MAX_RUNS_LIMIT": 50,
+      "shift_left.py:MAX_WORKFLOWS": 5,
+      "shift_left.py:PAGE_CAP": 2
+    }
+  },
+  "history-drift-thresholds": {
+    "decision": "history-drift-thresholds",
+    "sources": {
+      "shift_left.py:BASELINE_RUNS": 20,
+      "shift_left.py:CREEP_MAX_JUMP_FRACTION": 0.5,
+      "shift_left.py:CREEP_MIN_NONDECREASING": 10,
+      "shift_left.py:CREEP_MIN_RUNS": 15,
+      "shift_left.py:CREEP_WINDOW": 5,
+      "shift_left.py:L2_MIN_BASELINE": 8,
+      "shift_left.py:L3_MIN_HISTORY": 15,
+      "shift_left.py:NOISE_FLOOR_S": 2.0,
+      "shift_left.py:NOISE_SIGMAS": 3.0,
+      "shift_left.py:RELATIVE_THRESHOLD": 0.1,
+      "shift_left.py:STEP_HOLD": 3,
+      "shift_left.py:STEP_PRE_MIN": 8
     }
   }
 }
