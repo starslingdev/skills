@@ -14541,6 +14541,9 @@ def check_cluster_lever_ceiling_escapes_sibling(report: str, findings_path: Path
 _HEADLINE_WIN_RE = re.compile(r"\*\*~\s*([0-9hms  ]+?)\*\*")
 _BIMODAL_HEADLINE_WIN_RE = re.compile(
     r"slow-mode win is about\s+\*\*([0-9hms  ]+?)\*\*", re.IGNORECASE)
+_CLUSTER_HEADLINE_WIN_RE = re.compile(
+    r"biggest single measured win is\s+\*\*~\s*([0-9hms  ]+?)\*\*",
+    re.IGNORECASE)
 _COMMIT_WORK_WIN_RE = re.compile(
     r"biggest credited code finding[^\n]{0,240}?removes\s+\*\*~\s*"
     r"([0-9hms  ]+?)\*\*", re.IGNORECASE)
@@ -14554,6 +14557,17 @@ def _headline_win_s(bottom_line: str) -> float | None:
     if match is None:
         match = _HEADLINE_WIN_RE.search(bottom_line)
     return _parse_clock_to_s(match.group(1)) if match else None
+
+
+def _cluster_headline_win_s(bottom_line: str) -> float | None:
+    """Parse only the shared-job cluster win, not a neighbouring pole win."""
+    match = _CLUSTER_HEADLINE_WIN_RE.search(bottom_line)
+    if match:
+        return _parse_clock_to_s(match.group(1))
+    # A buried cluster never emits the cluster crown sentence; retain the
+    # existing generic win parser so the burial guard can compare the smaller
+    # pole/chain win against the stamped cluster ceiling.
+    return _headline_win_s(bottom_line)
 
 
 def _cluster_leads_bottom_line(bl: str, rendered_s: float | None, f: dict, cluster_s: float) -> bool:
@@ -14624,7 +14638,7 @@ def check_headline_consumes_stamped_cluster_ceiling(report: str, findings_path: 
     # The rendered Bottom line names the merge wait in bold WITHOUT a tilde and the addressable win in
     # bold WITH a leading `~`. Parse that credited win rather than the queue/work clocks.
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
-    rendered_s = _headline_win_s(bl)
+    rendered_s = _cluster_headline_win_s(bl)
     if rendered_s is None:
         # The Bottom line renders NO addressable `~<clock>` win at all — a deliberate
         # no-single-win framing (competing-path chain / PR-floor / tiny-lever fallback),
@@ -14700,7 +14714,7 @@ def check_headline_lever_is_presence_eligible(report: str, findings_path: Path |
     # Confirm the Bottom line actually LEADS with this lever (a smaller rendered win means it was
     # buried — the sibling burial guard's target, not this one).
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
-    rendered_s = _headline_win_s(bl)
+    rendered_s = _cluster_headline_win_s(bl)
     if not _cluster_leads_bottom_line(bl, rendered_s, best_f, best_s):
         return Check(name, True,
                      f"the credited cluster lever (OPT73 `{wf}`, ~{_fmt_clock(best_s)}) does not lead "
@@ -14784,7 +14798,7 @@ def check_headline_cluster_lever_on_spine(report: str, findings_path: Path | Non
     best_f, best_s = max(credited, key=lambda t: t[1])
     wf = str(best_f.get("workflow_file", "") or "")
     bl = next((ln for ln in report.splitlines() if "**Bottom line.**" in ln), "")
-    rendered_s = _headline_win_s(bl)
+    rendered_s = _cluster_headline_win_s(bl)
     if not _cluster_leads_bottom_line(bl, rendered_s, best_f, best_s):
         # The max credited cluster does not LEAD the Bottom line (buried / demoted / outranked by a
         # chain or pole win the crown sentence names instead / no tilde-win) — the renderer's off-spine drop, or a genuine

@@ -192,6 +192,21 @@ def test_burial_guard_passes_when_the_headline_leads_with_the_ceiling(tmp_path):
     assert "10m 27s" in c.detail
 
 
+def test_burial_guard_reads_cluster_win_beside_a_bimodal_pole_win(tmp_path):
+    vr = _vr()
+    doc = _mastodon_shape()
+    report = bp.render(doc).replace(
+        "The biggest single measured win is",
+        "The slow-mode win is about **1m 40s** (median of the measured per-PR "
+        "ceilings). The biggest single measured win is",
+        1,
+    )
+    result = vr.check_headline_consumes_stamped_cluster_ceiling(
+        report, _write_findings(tmp_path, doc))
+    assert result.ok and not result.skipped, result.detail
+    assert "10m 27s" in result.detail
+
+
 def test_burial_guard_FAILS_when_the_headline_buries_the_stamped_ceiling(tmp_path):
     # The exact live defect: flag stamped (so it's a real credited cluster lever) but the report still
     # renders the sibling-capped ~36s. The invariant must FAIL.
