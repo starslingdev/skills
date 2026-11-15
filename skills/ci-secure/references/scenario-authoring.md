@@ -2,8 +2,12 @@
 
 Detailed guidance for [SKILL.md](../SKILL.md)'s Phase 2.5. For each finding
 **group** (one pattern) the orchestrator writes one `attacker_scenario`
-object and merges it onto **every member** of the group in the findings JSON.
-Under the critical-only contract EVERY group renders, so every group gets one.
+object per `(pattern, severity, fix_strategy)` profile and merges it onto
+that profile's members in the findings JSON. Most groups have one profile;
+P14.18 can also have the scanner's MEDIUM cosmetic profile, whose one-string
+scenario becomes that object's `attacker_could`. The report shows the
+group's most exposed profile. Under the critical-only contract EVERY group
+renders, so every group gets one.
 
 ## Contents
 
@@ -52,7 +56,8 @@ line).
   to take over a maintainer's account" are very different findings; the
   reader must tell them apart at a glance.
 - **The verdict is honest, and low is allowed.** `severity` rates the KIND of
-  setup and stays catalog-authored; the verdict rates THIS group's workflows.
+  setup (the catalog's, or a narrower one the scanner proved from evidence);
+  the verdict rates THIS group's workflows.
   One group can hold several workflows (a tightly guarded Dependabot workflow
   next to one that runs outsiders' code): assess every member, name the
   differences that matter, and base the opening sentence on the most exposed

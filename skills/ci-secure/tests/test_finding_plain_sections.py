@@ -276,3 +276,52 @@ def test_skill_md_names_the_fields_and_the_verdict_line() -> None:
                 "attacker_could", "verdict", "how_to_close"):
         assert f"`{key}`" in skill, key
     assert "one verdict line per finding" in skill.lower()
+
+
+# --- scanner-supplied scenarios (#336's P14.18 MEDIUM cosmetic profile) -------
+
+_COSMETIC_STRING = (
+    "A pull request author can influence cosmetic label or comment "
+    "automation, but this workflow does not execute PR content or call "
+    "review or merge APIs."
+)
+
+
+def _cosmetic(**extra) -> dict:
+    return _finding(severity="MEDIUM",
+                    fix_strategy="limit-cosmetic-pr-automation", **extra)
+
+
+def test_a_preserved_scanner_string_alone_is_not_repo_specific() -> None:
+    """Why Phase 2.5 must upgrade the scanner's string: kept as-is, a repo
+    whose only finding is the cosmetic profile fails verification."""
+    md = report.render({"findings": [_cosmetic(attacker_scenario=_COSMETIC_STRING)],
+                        "repo": "x/y", "scanned_workflows": 1})
+    assert not vr.check_scenarios_on_rendered_findings(md).ok
+    upgraded = dict(_STRUCTURED, attacker_could=_COSMETIC_STRING)
+    md = report.render({"findings": [_cosmetic(attacker_scenario=upgraded)],
+                        "repo": "x/y", "scanned_workflows": 1})
+    assert vr.check_scenarios_on_rendered_findings(md).ok
+
+
+def test_phase_25_contract_turns_a_scanner_string_into_attacker_could() -> None:
+    skill = (_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    phase = skill.split("## Phase 2.5", 1)[1].split("\n## ", 1)[0]
+    flat = " ".join(phase.split())
+    assert "`(pattern, severity, fix_strategy)` profile" in flat
+    assert "scanner-supplied string becomes that profile's `attacker_could`" in flat
+    refs = _SKILL_DIR / "references"
+    for name in ("scan-output.md", "scenario-authoring.md"):
+        text = " ".join((refs / name).read_text(encoding="utf-8").split())
+        assert "(pattern, severity, fix_strategy)` profile" in text, name
+        assert "`attacker_could`" in text, name
+        assert "merges it onto **every member** of the group" not in text, name
+
+
+def test_a_mixed_group_renders_its_most_exposed_profiles_sections() -> None:
+    high = _finding(id="f2", workflow_file=".github/workflows/merge.yml",
+                    attacker_scenario=dict(_STRUCTURED, verdict="High: reachable today."))
+    low = _cosmetic(attacker_scenario=dict(_STRUCTURED, verdict="Low in practice."))
+    for order in ([low, high], [high, low]):
+        members = [dict(m) for m in order]
+        assert report._group_attacker_scenario(members)["verdict"] == "High: reachable today."

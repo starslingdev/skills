@@ -23,7 +23,7 @@ entries are dated (UTC). Format loosely follows
 
 ### Added
 
-- **2026-11-12** — P14.18 findings carry GitHub's "Allow GitHub Actions to
+- **2026-11-12** (#346) — P14.18 findings carry GitHub's "Allow GitHub Actions to
   create and approve pull requests" repository setting as
   `actions_can_approve_prs` (`state` `true`, `false` or `unread`, with a
   `detail`), read once per scan from
@@ -245,7 +245,17 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
-- **2026-11-12** — Every finding now opens with six plain-English sections
+- **2026-11-15** (#346) — The plain sections now follow #336's per-profile
+  scenarios: a group's sections come from its most exposed (worst-severity)
+  member rather than whichever sorted first, Phase 2.5 writes one six-field
+  object per `(pattern, severity, fix_strategy)` profile, and the scanner's
+  one-line scenario for a MEDIUM cosmetic P14.18 job becomes that object's
+  "What an attacker could do then" text instead of being kept as a lone
+  string that `verify_report.py` counts as not repo-specific. The P14.18
+  TL;DR states the HIGH/MEDIUM split in plain words, and its catalog note no
+  longer says no check can see the "Allow GitHub Actions to create and
+  approve pull requests" setting.
+- **2026-11-12** (#346) — Every finding now opens with six plain-English sections
   written for a reader who is not an engineer: What this workflow does, Why
   ci-secure flagged it, What would have to go wrong first, What an attacker
   could do then, Verdict, and How to close it. The catalog material (pattern
@@ -263,7 +273,7 @@ entries are dated (UTC). Format loosely follows
   no finding has them fails. SKILL.md Phase 2.5 and
   `references/scenario-authoring.md` describe the fields, and Phase 3 prints
   one verdict line per finding.
-- **2026-11-12** — The P14.18 finding reads in plain English. Its title is now
+- **2026-11-12** (#346) — The P14.18 finding reads in plain English. Its title is now
   "Workflow That Outside Activity Can Start Has `pull-requests: write`" (the
   catalog anchor tail changes with it; the `P14.18` ID and the in-report
   `finding-N` anchors do not); its TL;DR no longer names an internal variable
