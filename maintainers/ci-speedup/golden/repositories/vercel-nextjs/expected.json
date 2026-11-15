@@ -1,10 +1,18 @@
 {
   "human_review": {
     "bottom_line_must_contain": "PR Stack CI Gate",
+    "minimum_last_finishes": 5,
     "findings_must_appear": [],
     "findings_must_not_appear": [],
     "report_must_contain": [],
     "report_must_not_contain": [],
+    "rendered_pole_order": [
+      "test prod (6/10) / build",
+      "test turbopack production (7/7) / build",
+      "test cargo unit / build",
+      "lint / build",
+      "test prod (1/10, 18.3.1) / build"
+    ],
     "review_notes": "Proposed from the independent month-wide oracle and public needs-chain workflow: lead with the longest check among gates observed on at least five completed PR commits, with its upstream chain. Awaiting owner review."
   },
   "oracle": {
