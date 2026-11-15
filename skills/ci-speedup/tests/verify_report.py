@@ -1789,9 +1789,10 @@ _VR_OPT84_WITHHOLD_PHRASES = {
         "the slow step's working directory could not be placed inside the "
         "checkout, so which package.json applies is unknown",
     "install_layout_unreadable":
-        "the repo root's package-manager files (package.json, .yarnrc.yml or "
-        "pnpm-workspace.yaml) were not read, so whether bun is already in use or "
-        "can replace the installer is unknown",
+        "the package-manager files (package.json, .yarnrc.yml, .npmrc or "
+        "pnpm-workspace.yaml) of the install's directory or one above it were not "
+        "read, so whether bun is already in use or can replace the installer is "
+        "unknown",
     "type_aware_lint_scan_missing":
         "the scan that wrote this findings file recorded no lint-tooling read, so "
         "the step's tools could not be checked",
@@ -11441,6 +11442,39 @@ def _vr_opt84_prettier_dual_run_reasons(block: dict, t: dict) -> list[str]:
     return why
 
 
+def _vr_opt84_runs_bun_install(leaf: Any) -> bool:
+    """Whether a resolved leaf command is `bun install` / `bun i` / `bun ci`."""
+    toks = str(leaf or "").split()
+    return (bool(toks) and toks[0].rsplit("/", 1)[-1] == "bun"
+            and toks[1:2] in (["install"], ["i"], ["ci"]))
+
+
+def _vr_opt84_install_reads(block: dict[str, Any],
+                            wd: str) -> "list[tuple[str, dict[str, Any]]] | None":
+    """The scan's package-manager reads governing an install run in `wd`, from
+    `wd` up to the repo root, nearest first (the root's is `package_manager`,
+    the others `package_manager_dirs`). None when the root read, or the read
+    of a directory whose package.json the scan found, is missing or lists an
+    unreadable file."""
+    dirs = block.get("package_manager_dirs")
+    dirs = dirs if isinstance(dirs, dict) else {}
+    scripts = block.get("package_scripts")
+    scripts = scripts if isinstance(scripts, dict) else {}
+    out: list[tuple[str, dict[str, Any]]] = []
+    d = wd.strip("/") if wd not in (".", "./") else ""
+    while True:
+        pmf = block.get("package_manager") if not d else dirs.get(d)
+        if d and pmf is None and d not in scripts:
+            pass                                    # no package.json there
+        elif not isinstance(pmf, dict) or pmf.get("unreadable"):
+            return None
+        else:
+            out.append((d, pmf))
+        if not d:
+            return out
+        d = d.rsplit("/", 1)[0] if "/" in d else ""
+
+
 def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
     """Every OPT84 finding sits on a drilled long pole, re-derives its step, share
     and ceiling from that pole's stamped step p50s, names only table rows with
@@ -11644,22 +11678,33 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             # The install row: always the side-by-side recipe, and never in a
             # repo the scan's root read shows already on bun or blocked.
             if row == "install":
-                pmf = block.get("package_manager")
                 if fit != "dual-run":
                     bad.append(f"{fid}: install row fit {fit!r}; the engine stamps "
                                "the install row a dual-run (the side-by-side run)")
-                if not isinstance(pmf, dict) or pmf.get("unreadable"):
+                if any(_vr_opt84_runs_bun_install(lf)
+                       for lf in _as_list(ts.get("resolved_leaves"))):
+                    bad.append(f"{fid}: install row on a step that already runs "
+                               "`bun install`")
+                reads = _vr_opt84_install_reads(block, str(t.get("install_dir") or ""))
+                if reads is None:
                     bad.append(f"{fid}: install row stamped without a readable "
-                               "package-manager read of the repo root")
+                               "package-manager read of its directory and those "
+                               "above it")
                 else:
-                    locks = [str(x) for x in _as_list(pmf.get("lockfiles"))]
+                    locks = [str(x) for _d, pmf in reads
+                             for x in _as_list(pmf.get("lockfiles"))]
+                    fields = [str(pmf.get("package_manager_field") or "")
+                              for _d, pmf in reads]
                     if (any(x in ("bun.lock", "bun.lockb") for x in locks)
-                            or str(pmf.get("package_manager_field") or "")
-                            .startswith("bun@")):
+                            or any(f.startswith("bun@") for f in fields)):
                         bad.append(f"{fid}: install row in a repo already on bun "
-                                   f"({locks}, packageManager "
-                                   f"{pmf.get('package_manager_field')!r})")
-                    if pmf.get("yarn_pnp") or _as_list(pmf.get("pnpmfile")):
+                                   f"({locks}, packageManager {fields!r})")
+                    linker = next((pmf["node_linker"] for _d, pmf in reads
+                                   if isinstance(pmf.get("node_linker"), str)), None)
+                    pnp = (any(pmf.get("pnp_files") for _d, pmf in reads)
+                           or (linker == "pnp") or (linker is None and any(
+                               pmf.get("yarn_pnp") for _d, pmf in reads)))
+                    if pnp or any(_as_list(pmf.get("pnpmfile")) for _d, pmf in reads):
                         bad.append(f"{fid}: install row in a repo whose Yarn "
                                    "Plug'n'Play or pnpm hook blocks the swap")
             # A drop-in is re-derived from the scan facts the engine read: any

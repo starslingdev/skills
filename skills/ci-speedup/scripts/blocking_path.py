@@ -8531,9 +8531,10 @@ _OPT84_WITHHOLD_PHRASES: dict[str, str] = {
         "the slow step's working directory could not be placed inside the "
         "checkout, so which package.json applies is unknown",
     "install_layout_unreadable":
-        "the repo root's package-manager files (package.json, .yarnrc.yml or "
-        "pnpm-workspace.yaml) were not read, so whether bun is already in use or "
-        "can replace the installer is unknown",
+        "the package-manager files (package.json, .yarnrc.yml, .npmrc or "
+        "pnpm-workspace.yaml) of the install's directory or one above it were not "
+        "read, so whether bun is already in use or can replace the installer is "
+        "unknown",
     # Pole-level: the findings file's own lint-tooling read is missing or failed,
     # so no candidate step on the pole could be checked.
     "type_aware_lint_scan_missing":

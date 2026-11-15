@@ -275,3 +275,177 @@ def test_install_floor_and_recipe_copies_are_pinned():
     assert vr._VR_OPT84_INSTALL_MIN_SHARE == cr._OPT84_INSTALL_MIN_SHARE
     assert vr._VR_OPT84_INSTALL_CATEGORY == cr._OPT84_INSTALL_CATEGORY == "install"
     assert vr._VR_OPT84_INSTALL_RECIPE == bp._OPT84_INSTALL_RECIPE
+
+
+# ---- review fixes: flags, nested projects, pnpm/Yarn settings -------------------
+
+def _run_in(run, wd, block):
+    doc = _doc(run)
+    doc["jobs"]["test"]["steps"][1]["working-directory"] = wd
+    withheld: dict[str, int] = {}
+    cands: list[dict] = []
+    out = cr._detect_opt84_tool_swap([_pole()], {_WF: doc}, block, [], 10,
+                                     withheld=withheld, withheld_candidates=cands)
+    return out, withheld, cands
+
+
+def _nested_block(web_pm, root_pm=None):
+    b = _block(root_pm or _pm(lockfiles=[]), scripts={"": {}, "web": {}})
+    b["package_manager_dirs"] = {} if web_pm is None else {"web": web_pm}
+    return b
+
+
+@pytest.mark.parametrize("run,bun", [
+    ("npm ci --omit=dev --ignore-scripts",
+     "bun install --production --ignore-scripts"),
+    ("pnpm install --prod --ignore-scripts",
+     "bun install --production --ignore-scripts"),
+    ("yarn install --production --frozen-lockfile", "bun install --production"),
+    ("npm ci --no-optional", "bun install --omit optional"),
+])
+def test_benchmark_installs_the_same_dependency_set(run, bun):
+    out, withheld, cands = _run(run)
+    assert len(out) == 1, (withheld, cands)
+    assert _install(out[0])["benchmark_commands"][1] == f"(time {bun})"
+
+
+@pytest.mark.parametrize("run", ["yarn --network-timeout 600000",
+                                 "yarn install --network-timeout 600000"])
+def test_yarn_flag_values_do_not_hide_the_install(run):
+    out, withheld, cands = _run(run, block=_block(_pm(lockfiles=["yarn.lock"])))
+    assert len(out) == 1, (withheld, cands)
+    assert _install(out[0])["leaf_command"] == run
+
+
+@pytest.mark.parametrize("tokens", [["yarn", "--version"], ["npm", "ci", "--help"],
+                                    ["pnpm", "install", "-v"]])
+def test_a_version_or_help_call_is_not_an_install(tokens):
+    assert cr._opt84_install_kind(tokens) is None
+
+
+def test_a_nested_install_already_on_bun_is_silent():
+    out, withheld, _c = _run_in("npm ci", "web",
+                                _nested_block(_pm(lockfiles=["bun.lock"])))
+    assert out == [] and withheld == {"target_already_in_use": 1}
+
+
+def test_a_nested_yarn_pnp_project_is_blocked():
+    out, withheld, _c = _run_in("yarn install --immutable", "web",
+                                _nested_block(_pm(lockfiles=["yarn.lock"],
+                                                  yarn_pnp=True)))
+    assert out == [] and withheld == {"install_swap_blocked": 1}
+
+
+def test_a_nested_install_whose_directory_was_not_read_holds_back():
+    out, withheld, _c = _run_in("npm ci", "web", _nested_block(None))
+    assert out == [] and withheld == {"install_layout_unreadable": 1}
+
+
+def test_a_nested_install_names_its_own_lockfile():
+    out, _w, _c = _run_in("npm ci", "web",
+                          _nested_block(_pm(lockfiles=["package-lock.json"])))
+    t = _install(out[0])
+    assert "web/package-lock.json" in " ".join(t["fit_reasons"])
+    assert t["install_dir"] == "web"
+
+
+def test_a_nearer_node_modules_linker_overrides_a_default_pnp():
+    # web pins Yarn 4 (default PnP) but the root `.yarnrc.yml` sets node-modules.
+    out, withheld, cands = _run_in(
+        "yarn install --immutable", "web",
+        _nested_block(_pm(lockfiles=["yarn.lock"], yarn_pnp=True,
+                          node_linker=None, pnp_files=False),
+                      root_pm=_pm(lockfiles=[], yarn_pnp=False,
+                                  node_linker="node-modules", pnp_files=False)))
+    assert len(out) == 1, (withheld, cands)
+
+
+def test_scan_reads_each_nested_project(tmp_path):
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    web = tmp_path / "web"
+    web.mkdir()
+    (web / "package.json").write_text("{}", encoding="utf-8")
+    (web / "bun.lock").write_text("", encoding="utf-8")
+    (web / ".yarnrc.yml").write_text("nodeLinker: pnp\n", encoding="utf-8")
+    dirs = scan._read_type_aware_lint(tmp_path)["package_manager_dirs"]
+    assert dirs["web"]["lockfiles"] == ["bun.lock"]
+    assert dirs["web"]["node_linker"] == "pnp" and dirs["web"]["yarn_pnp"] is True
+
+
+def test_scan_reads_a_pnpmfile_set_in_npmrc(tmp_path):
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / ".npmrc").write_text(
+        "# hooks\nregistry=https://registry.npmjs.org/\npnpmfile = ./scripts/hooks.cjs\n",
+        encoding="utf-8")
+    pm = scan._read_type_aware_lint(tmp_path)["package_manager"]
+    assert pm["pnpmfile"] == [".npmrc pnpmfile: ./scripts/hooks.cjs"]
+
+
+@pytest.mark.parametrize("run", ["npm install playwright", "pnpm add -D vite",
+                                 "yarn add left-pad"])
+def test_an_install_naming_packages_is_not_the_dependency_install(run):
+    out, withheld, _c = _run(run)
+    assert out == [] and "install_swap_blocked" not in withheld
+
+
+def _verify(f, pm=None, extra=None):
+    doc = _findings_doc(f, pm)
+    if extra:
+        doc["type_aware_lint"].update(extra)
+    report = "## 🧰 Tool swaps on other long poles\n\n" + "\n".join(
+        bp._opt84_card(f, "https://x/catalog.md"))
+    return doc, report
+
+
+def _check(tmp_path, doc, report):
+    p = tmp_path / "findings.json"
+    p.write_text(json.dumps(doc), encoding="utf-8")
+    return vr.check_opt84_tool_swap(report, p)
+
+
+@pytest.mark.parametrize("pm,word", [
+    (_pm(yarn_pnp=True), "Plug'n'Play"),
+    (_pm(pnpmfile=[".npmrc pnpmfile: ./h.cjs"]), "Plug'n'Play"),
+    (_pm(unreadable=["package.json"]), "readable"),
+])
+def test_verifier_fails_an_install_row_the_read_does_not_allow(tmp_path, pm, word):
+    f, _card = _rendered()
+    doc, report = _verify(f, pm)
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and word in c.detail
+
+
+def test_verifier_fails_an_install_row_not_stamped_dual_run(tmp_path):
+    f, _card = _rendered()
+    _install(f)["fit"] = "drop-in"
+    doc, report = _verify(f)
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "dual-run" in c.detail
+
+
+def test_verifier_fails_an_install_row_on_a_step_already_running_bun(tmp_path):
+    f, _card = _rendered()
+    f["tool_swap"]["resolved_leaves"].append("bun install")
+    doc, report = _verify(f)
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "already runs" in c.detail
+
+
+def test_verifier_walks_the_install_directory(tmp_path):
+    out, _w, _c = _run_in("npm ci", "web",
+                          _nested_block(_pm(lockfiles=["package-lock.json"])))
+    f = out[0]
+    doc, report = _verify(f, _pm(lockfiles=[]),
+                          {"package_scripts": {"": {}, "web": {}},
+                           "package_manager_dirs": {"web": _pm(lockfiles=["bun.lock"])}})
+    c = _check(tmp_path, doc, report)
+    assert not c.ok and "already on bun" in c.detail
+
+
+@pytest.mark.parametrize("field,pnp", [("yarn@4.5.0", True), ("yarn@2.4.3", True),
+                                       ("yarn@1.22.22", False), ("pnpm@9.0.0", False)])
+def test_scan_reads_yarn_berrys_default_linker_from_package_manager(tmp_path, field, pnp):
+    (tmp_path / "package.json").write_text(
+        json.dumps({"packageManager": field}), encoding="utf-8")
+    pm = scan._read_type_aware_lint(tmp_path)["package_manager"]
+    assert pm["yarn_pnp"] is pnp

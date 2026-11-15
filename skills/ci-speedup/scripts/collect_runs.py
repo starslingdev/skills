@@ -20944,6 +20944,8 @@ def _opt84_install_kind(tokens: list[str]) -> "str | None":
         rest = args[1:] if args[:1] == ["install"] else args
     else:
         return None
+    if any(a in ("-v", "--version", "-h", "--help") for a in rest):
+        return None                         # prints, installs nothing
     skip = False
     for a in rest:
         if skip:
@@ -20958,6 +20960,41 @@ def _opt84_install_kind(tokens: list[str]) -> "str | None":
         if not a.startswith("-"):
             return None                     # names a package, or is a script
     return "row"
+
+
+def _opt84_bun_install_flags(tokens: list[str]) -> list[str]:
+    """The `bun install` flags matching the npm / pnpm / Yarn install's flags
+    that change which dependencies are installed or whether their scripts run
+    (`--omit=dev` / `--production` / `--prod` -> `--production`; optional
+    dependencies omitted -> `--omit optional`; `--ignore-scripts`). Network,
+    cache, reporter and lockfile flags do not change the dependency set and are
+    not carried."""
+    out: list[str] = []
+    args = list(tokens[1:])
+    i = 0
+    while i < len(args):
+        a = args[i]
+        flag, eq, val = a.partition("=")
+        if flag == "--omit" and not eq and i + 1 < len(args):
+            val, eq = args[i + 1], "="
+            i += 1
+        if (a in ("--production", "--prod", "-P", "--production=true")
+                or (flag == "--omit" and val == "dev")
+                or (flag == "--only" and val in ("prod", "production"))):
+            want = ["--production"]
+        elif (a in ("--no-optional", "--ignore-optional")
+              or (flag == "--omit" and val == "optional")):
+            want = ["--omit", "optional"]
+        elif flag == "--omit" and val == "peer":
+            want = ["--omit", "peer"]
+        elif a == "--ignore-scripts":
+            want = ["--ignore-scripts"]
+        else:
+            want = []
+        if want and not any(out[j:j + len(want)] == want for j in range(len(out))):
+            out += want
+        i += 1
+    return out
 # `published_range` is the catalog's published range for the swap: OTHER repos'
 # numbers, rendered as such, never this repo's saving.
 # ESLint plugins whose rules oxlint may not carry one for one: any of these on
@@ -21639,8 +21676,11 @@ def _opt84_benchmark_commands(row: str, tokens: list[str], runner: str,
     pre = f"cd {shlex.quote(wd)} && " if wd else ""
     if row == "install":
         # Both from a fresh `node_modules`; the first `bun install` migrates the
-        # lockfile and leaves the old one in place (bun's lockfile docs).
-        return [f"({pre}time {shlex.join(tokens)})", f"({pre}time bun install)"]
+        # lockfile and leaves the old one in place (bun's lockfile docs). The
+        # bun side carries the flags that change WHAT is installed, so both
+        # install the same dependency set.
+        bun = shlex.join(["bun", "install", *_opt84_bun_install_flags(tokens)])
+        return [f"({pre}time {shlex.join(tokens)})", f"({pre}time {bun})"]
     t = _opt84_leaf_tokens(tokens)
     args = t[1:]
     if row == "eslint":
@@ -21878,7 +21918,7 @@ def _opt84_install_leaves(leaves: list[dict[str, Any]], run: str,
     have = {str(lf.get("command") or "") for lf in out}
     for seg in _OPT82_SEGMENT_SPLIT_RE.split(run or ""):
         toks = _opt82_tokens(seg.strip())
-        if (toks[:1] == ["yarn"] and all(a.startswith("-") for a in toks[1:])
+        if (toks[:1] == ["yarn"] and toks[1:2] != ["install"]
                 and _opt84_install_kind(toks) == "row"
                 and shlex.join(toks) not in have):
             out.append({"command": shlex.join(toks), "tokens": toks,
@@ -21887,21 +21927,69 @@ def _opt84_install_leaves(leaves: list[dict[str, Any]], run: str,
     return out
 
 
-def _opt84_install_fit(block: dict[str, Any],
-                       runs_on: Any) -> "tuple[str, list[str]]":
-    """The install row's verdict from the scan's root package-manager read:
-    ("held", []) when it was not read or a file it needs could not be;
-    ("in_use", []) when bun is already the repo's package manager (a
-    `bun.lock` / `bun.lockb`, or `packageManager: bun@...`); ("blocked",
-    reasons) when a caveat bun cannot carry is present; else ("dual-run",
-    reasons): the side-by-side run is always the recipe, and the reasons are
-    the caveats it must check, each from bun's own docs."""
-    pm = block.get("package_manager")
-    if not isinstance(pm, dict) or pm.get("unreadable"):
+def _opt84_install_layout(block: dict[str, Any],
+                          wd: str) -> "dict[str, Any] | None":
+    """The package-manager facts that govern an install run in `wd`: the
+    scan's reads of `wd` and every directory above it (`package_manager` for
+    the root, `package_manager_dirs` for the others), merged nearest first.
+    None when one of them is missing, unreadable, or ground the scan never
+    looked at. Lockfiles come from the nearest directory that has any (named
+    from the repo root); the `packageManager` field from the nearest that sets
+    it; Yarn's `nodeLinker` from the nearest `.yarnrc.yml` that sets it, as
+    Yarn's own nearer-wins config does; hooks, PnP loader files and a pnpm
+    workspace from any of them."""
+    dirs = block.get("package_manager_dirs")
+    reads: list[tuple[str, dict[str, Any]]] = []
+    for d, state in _opt84_walk_up(block, wd or ""):
+        if d == "":
+            pm = block.get("package_manager")
+        elif state == "read":
+            pm = dirs.get(d) if isinstance(dirs, dict) else None
+        elif state == "none":
+            continue
+        else:
+            return None
+        if not isinstance(pm, dict) or pm.get("unreadable"):
+            return None
+        reads.append((d, pm))
+    locks: list[str] = []
+    for d, pm in reads:
+        got = [str(x) for x in pm.get("lockfiles") or []]
+        if got:
+            locks = [f"{d}/{x}" if d else x for x in got]
+            break
+    field = next((str(pm["package_manager_field"]) for _d, pm in reads
+                  if pm.get("package_manager_field")), "")
+    linker = next((pm["node_linker"] for _d, pm in reads
+                   if isinstance(pm.get("node_linker"), str)), None)
+    if any(pm.get("pnp_files") for _d, pm in reads):
+        pnp = True
+    elif linker is not None:
+        pnp = linker == "pnp"
+    else:
+        pnp = any(pm.get("yarn_pnp") for _d, pm in reads)
+    return {"lockfiles": locks, "package_manager_field": field, "yarn_pnp": pnp,
+            "pnpmfile": [h for _d, pm in reads for h in pm.get("pnpmfile") or []],
+            "pnpm_workspace": any(pm.get("pnpm_workspace") for _d, pm in reads)}
+
+
+def _opt84_install_fit(block: dict[str, Any], runs_on: Any,
+                       wd: str = "") -> "tuple[str, list[str]]":
+    """The install row's verdict from the scan's package-manager reads of the
+    install's directory and those above it (`_opt84_install_layout`):
+    ("held", []) when one was not read or a file it needs could not be;
+    ("in_use", []) when bun is already the package manager (a `bun.lock` /
+    `bun.lockb`, or `packageManager: bun@...`); ("blocked", reasons) when a
+    caveat bun cannot carry is present; else ("dual-run", reasons): the
+    side-by-side run is always the recipe, and the reasons are the caveats it
+    must check, each from bun's own docs."""
+    pm = _opt84_install_layout(block, wd)
+    if pm is None:
         return "held", []
     locks = [str(x) for x in pm.get("lockfiles") or []]
     field = str(pm.get("package_manager_field") or "")
-    if any(x in ("bun.lock", "bun.lockb") for x in locks) or field.startswith("bun@"):
+    if (any(x.rsplit("/", 1)[-1] in ("bun.lock", "bun.lockb") for x in locks)
+            or field.startswith("bun@")):
         return "in_use", []
     blocked: list[str] = []
     if pm.get("yarn_pnp"):
@@ -21912,12 +22000,12 @@ def _opt84_install_fit(block: dict[str, Any],
                        "time, and bun's pnpm migration does not carry it")
     if blocked:
         return "blocked", blocked
-    old = [x for x in locks if x not in ("bun.lock", "bun.lockb")]
+    old = locks
     reasons = [
         (f"the first `bun install` migrates `{'`, `'.join(old)}` to `bun.lock` and "
          "keeps the old lockfile: delete it only after both installs pass the tests"
          if old else
-         "no lockfile was found at the repo root: commit the `bun.lock` the first "
+         "no lockfile was found for this install: commit the `bun.lock` the first "
          "install writes, so CI can install with `bun ci` (`--frozen-lockfile`)"),
         ("bun runs a dependency's install scripts (a native addon's node-gyp build, "
          "for example) only for packages on its default trusted list or in "
@@ -22246,7 +22334,7 @@ def _detect_opt84_tool_swap(
                     version = None              # informational here; tsc reads majors
                 fit, reasons = "drop-in", []
                 if row == "install":
-                    verdict, why = _opt84_install_fit(tal, spec.get("runs-on"))
+                    verdict, why = _opt84_install_fit(tal, spec.get("runs-on"), lwd)
                     if verdict == "held":
                         held = held or "install_layout_unreadable"
                         continue
@@ -22347,6 +22435,8 @@ def _detect_opt84_tool_swap(
                      "migration_docs_url": _OPT84_DOCS[row]["migration_docs_url"]}
                 if row == "tsc":
                     t["typescript6_alias_needed"] = alias_needed
+                if row == "install":
+                    t["install_dir"] = lwd      # the verifier walks up from here
                 if expanded:
                     t["packages"] = len(lwds)
                 tools.append(t)
