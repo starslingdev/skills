@@ -409,7 +409,7 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
                     max_runs: int, client: GhClient, max_workflows: int = 5):
     """Collect candidate-first L2 history or bounded per-workflow L3 history."""
     coverage: dict[str, Any] = {"partial_workflows": {}, "partial_identities": [],
-                                "omitted_workflows": [],
+                                "omitted_workflows": [], "absent_identities": [],
                                 "budget_limited_workflows": {}}
     main_records: list[dict[str, Any]] = []
     pr_records: list[dict[str, Any]] = []
@@ -456,13 +456,14 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
             key for key in candidate_keys if key[0] == workflow_id
         }
         jobs_partial: set[tuple[Any, ...]] = set()
+        absent: set[tuple[Any, ...]] = set()
+        fetched = 0
         try:
             runs, runs_truncated = _paginate(client,
                 f"repos/{repo}/actions/workflows/{workflow_id}/runs?"
                 f"branch={quote(branch, safe='')}&event=push&status=completed",
                 "workflow_runs", max_pages=2)
             selected = _successful_push_runs(runs, branch)
-            fetched = 0
             for run in selected:
                 jobs, jobs_truncated = _jobs_for_run(repo, run.get("id"), client)
                 records = _job_records(run, jobs)
@@ -479,8 +480,23 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
                 if jobs_truncated:
                     seen = {_key(record) for record in records if _eligible(record)}
                     jobs_partial.update(relevant - seen)
-                if relevant and all(counts[key] >= max_runs for key in relevant):
+                if fetched >= max_runs:
+                    # A candidate identity absent from max_runs consecutive
+                    # successful main runs is new to main, not partially
+                    # collected; chasing it would spend the budget other
+                    # workflows need while the analysis still says new_job.
+                    absent.update(key for key in relevant if counts[key] == 0)
+                if relevant and all(counts[key] >= max_runs
+                                    for key in relevant - absent):
                     break
+            if absent:
+                coverage["absent_identities"].extend(
+                    {"workflow_id": identity[0], "job": identity[1],
+                     "runner_labels": list(identity[2]),
+                     "step_signature": list(identity[3]),
+                     "searched_runs": fetched}
+                    for identity in sorted(absent))
+            relevant -= absent
             preferred_unfilled = sorted(
                 key[1] for key in relevant if counts[key] < max_runs)
             minimum = L2_MIN_BASELINE if pr_number is not None else L3_MIN_HISTORY
@@ -511,7 +527,7 @@ def collect_history(repo: str, branch: str, *, pr_number: int | None,
                 coverage["budget_limited_workflows"][workflow_id] = (
                     f"stopped after all selected identities reached {max_runs} observations")
         except CollectionError as exc:
-            incomplete = {key for key in relevant if counts[key] < max_runs}
+            incomplete = {key for key in relevant - absent if counts[key] < max_runs}
             if incomplete:
                 for identity in sorted(incomplete):
                     coverage["partial_identities"].append({
@@ -635,6 +651,10 @@ def render_markdown(result: dict[str, Any], *, max_bytes: int = 65536) -> str:
                     line += f" (commit {_md(str(attribution['sha'])[:12])})"
             lines.append(line)
         lines.append("")
+    provenance = result.get("provenance")
+    if isinstance(provenance, dict) and provenance.get("api_calls") is not None:
+        lines.extend([f"GitHub API calls: {_md(provenance['api_calls'])} of "
+                      f"{_md(provenance.get('api_budget', 'unknown'))} budgeted.", ""])
     coverage = result.get("coverage")
     if isinstance(coverage, dict) and any(coverage.values()):
         lines.extend(["### Coverage", "", "- " + _md(json.dumps(coverage, sort_keys=True)), ""])

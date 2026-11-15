@@ -434,3 +434,65 @@ def test_markdown_escapes_untrusted_html_and_markdown_names():
     assert "[click](https://evil)" not in rendered
     assert "**owned**" not in rendered
     assert "&lt;script&gt;" in rendered
+
+
+class _TwoWorkflowClient:
+    """Workflow 1's PR adds a job main has never run; workflow 2 is unchanged.
+
+    Main history is 200 successful pushes deep in each workflow, so a collector
+    that keeps chasing the new job spends its whole budget on workflow 1.
+    """
+
+    def __init__(self, budget=60):
+        self.calls, self.budget = 0, budget
+
+    def get(self, endpoint):
+        if self.calls >= self.budget:
+            raise SHIFT.CollectionError(f"GitHub API budget exhausted at {self.budget} calls")
+        self.calls += 1
+        if endpoint.endswith("/pulls/7"):
+            return {"head": {"sha": "head"}}
+        if "head_sha=head" in endpoint:
+            return {"total_count": 2, "workflow_runs": [
+                {"id": 1, "workflow_id": 1, "status": "completed",
+                 "event": "pull_request", "head_sha": "head"},
+                {"id": 2, "workflow_id": 2, "status": "completed",
+                 "event": "pull_request", "head_sha": "head"}]}
+        if "/actions/runs/1/jobs" in endpoint:
+            return {"total_count": 2, "jobs": [timed_job("test", 100),
+                                               timed_job("brand-new", 60)]}
+        if "/actions/runs/2/jobs" in endpoint:
+            return {"total_count": 1, "jobs": [timed_job("lint", 30)]}
+        if "/actions/workflows/" in endpoint and "/runs?" in endpoint:
+            workflow = int(endpoint.split("/actions/workflows/")[1].split("/")[0])
+            page = int(endpoint.rsplit("page=", 1)[1])
+            return {"total_count": 200, "workflow_runs": [
+                {"id": workflow * 10000 + page * 100 + index, "workflow_id": workflow,
+                 "status": "completed", "conclusion": "success", "event": "push",
+                 "head_branch": "main"} for index in range(100)]}
+        if "/actions/runs/" in endpoint and "/jobs" in endpoint:
+            run_id = int(endpoint.split("/actions/runs/")[1].split("/")[0])
+            return {"total_count": 1, "jobs": [
+                timed_job("test" if run_id < 20000 else "lint", 100 if run_id < 20000 else 30)]}
+        raise AssertionError(endpoint)
+
+
+def test_a_new_pr_job_does_not_spend_the_budget_other_workflows_need():
+    client = _TwoWorkflowClient()
+    main, current, coverage = SHIFT.collect_history(
+        "owner/repo", "main", pr_number=7, max_runs=20, client=client)
+    assert coverage["partial_workflows"] == {}, coverage
+    assert coverage["partial_identities"] == [], coverage
+    jobs = {job["job"]: job for job in SHIFT.analyze_l2(main, current)["jobs"]}
+    assert jobs["brand-new"]["evidence"] == "new_job"
+    assert jobs["lint"]["baseline_runs"] == 20
+    assert jobs["test"]["baseline_runs"] == 20
+    # pull + PR run list + two PR job lists, then per workflow two run-list
+    # pages and exactly max_runs job lists.
+    assert client.calls == 4 + 2 * (2 + 20), client.calls
+
+
+def test_markdown_discloses_the_github_api_calls_spent():
+    result = {"status": "measured", "l3": SHIFT.analyze_l3([]),
+              "provenance": {"api_calls": 37, "api_budget": 60}}
+    assert "GitHub API calls: 37 of 60" in SHIFT.render_markdown(result)
