@@ -1401,6 +1401,43 @@ def _pole_headline(pole: dict[str, Any]) -> tuple[float, str]:
     return p50, ""
 
 
+def _bimodal_slow_mode_story(pole: dict[str, Any]) -> str:
+    """Reader-facing mode shares and the measured slow-share ceiling.
+
+    The split itself comes from the collector's `_bimodal_split` stamp.  The
+    saving comes from the same per-PR sibling ceilings used by the ordinary
+    pole sizing, restricted to observations in the stamped slow cluster.
+    """
+    bi = pole.get("bimodal")
+    exact = pole.get("_per_pr_floor")
+    if not isinstance(bi, dict) or not isinstance(exact, dict):
+        return ""
+    low = _num(bi.get("low_p50_s"))
+    high = _num(bi.get("high_p50_s"))
+    frac = _num(bi.get("slow_frac"))
+    if not low or not high or not frac or high <= low:
+        return ""
+    midpoint = (low + high) / 2.0
+    slow_ceilings = [
+        float(saving)
+        for row in (exact.get("rows") or [])
+        if isinstance(row, dict)
+        and (_num(row.get("before_s")) or 0.0) >= midpoint
+        and (saving := _num(row.get("saving_s"))) is not None
+        and saving > 0.0
+    ]
+    if not slow_ceilings:
+        return ""
+    slow_pct = round(frac * 100)
+    fast_pct = 100 - slow_pct
+    slow_win = _median(slow_ceilings)
+    return (
+        f"{slow_pct}% of sampled PRs wait about **{_clock(high)}** on this check; "
+        f"the other {fast_pct}% wait about **{_clock(low)}**. The slow-mode win is "
+        f"about **{_clock(slow_win)}** (median of the measured per-PR ceilings)."
+    )
+
+
 def _tl_name(s: dict[str, Any]) -> str:
     """The display name of one step entry, from EITHER of the two step shapes the
     collision scan draws from — the captured representative-run TIMELINE (whose entries
@@ -7740,12 +7777,16 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
                 p["_pole_group"] = (
                     "holds-up" if (count >= _POLE_HOLDS_UP_MIN_COUNT
                                    or (n > 0 and count == n)) else "rare-last")
+        # A fast-median bimodal check is ordered by the slow mode its drill and
+        # executive summary disclose; otherwise a 30s/6m gate sits below a
+        # unimodal 58s check while Long pole 1 says the 58s check is the larger
+        # opportunity. Non-bimodal rows keep their P50 ordering byte-for-byte.
         holds_up = sorted((p for p in matrices if p["_pole_group"] == "holds-up"),
-                          key=lambda p: -(_num(p.get("p50_s")) or 0.0))
+                          key=lambda p: -_pole_headline(p)[0])
         rare_last = sorted((p for p in matrices if p["_pole_group"] == "rare-last"),
-                           key=lambda p: -(_num(p.get("p50_s")) or 0.0))
+                           key=lambda p: -_pole_headline(p)[0])
         unconfirmed = sorted((p for p in matrices if p["_pole_group"] == "unconfirmed"),
-                             key=lambda p: -(_num(p.get("p50_s")) or 0.0))
+                             key=lambda p: -_pole_headline(p)[0])
         selected = [*holds_up, *rare_last, *unconfirmed]
         return selected[:_TOP_WORKFLOWS], file_poles
     typical_rest = sorted((p for p in matrices[1:] if typical(p)), key=lambda p: -impact(p))
@@ -15259,6 +15300,7 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     if pole_wfs and pole_wfs[0].get("_pole_group") in {"holds-up", "rare-last"}:
         _pole_one = _lbl(_clean_label(str(pole_wfs[0].get("check", ""))))
         _pole_one_p50 = _clock(_num(pole_wfs[0].get("p50_s")) or 0.0)
+        _pole_one_bimodal = _bimodal_slow_mode_story(pole_wfs[0])
         _pole_one_group = (
             "Checks that hold up most PRs"
             if pole_wfs[0].get("_pole_group") == "holds-up"
@@ -15269,7 +15311,9 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                 out[_i] = (
                     f"> **Bottom line.** Long pole 1, `{_pole_one}`, has P50 "
                     f"**{_pole_one_p50}** and is the longest "
-                    f"check in **{_pole_one_group}**. {_rest}")
+                    f"check in **{_pole_one_group}**. "
+                    + (f"{_pole_one_bimodal} " if _pole_one_bimodal else "")
+                    + _rest)
                 break
     # Owner UX edit (2026-07-19): TOP MATTER = metadata table → ONE Bottom-line blockquote
     # → Contents, nothing else. Everything that used to render as its own blockquote between
@@ -16215,7 +16259,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # crowned leaf's category and asserts it agrees with the pole's dominant_category.
         if leaf is not None:
             out += [_LEAF_CROWN_MARKER.format(fk=str(leaf.get("fix_key", ""))), ""]
-        if bi_caveat:
+        _bimodal_story = _bimodal_slow_mode_story(p)
+        if _bimodal_story:
+            out += [f"_{_bimodal_story}_", ""]
+        elif bi_caveat:
             out += [bi_caveat, ""]
         # What the sampled runs actually DID - the observed min/median/max of this pole's
         # own retained observations. Sits with the other qualifiers of the header duration,

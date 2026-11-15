@@ -4235,6 +4235,13 @@ def _verify_per_pr_floor_split(
     stamp = str(cp.get("critical_path_check") or "")
     bottom = next((line for line in report.splitlines() if "**Bottom line.**" in line), "")
     bottom_s = _headline_win_s(bottom)
+    # A bimodal crown sizes the slow share of Long pole 1, not the blended-p50
+    # critical_path_check. Bind the split to that rendered pole before applying
+    # the ordinary critical-path fallback below.
+    if "slow-mode win is about" in bottom:
+        pole_sections = _pole_header_sections(report)
+        if pole_sections:
+            stamp = pole_sections[0][1]
     populations = _as_list(cp.get("populations"))
     completeness = _as_list(cp.get("population_check_runs_complete"))
     completion_aligned = len(completeness) == len(populations) and bool(populations)
@@ -13326,8 +13333,6 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
             first_group = group
         if seconds is None:
             failures.append(f"`{label}` has an unreadable P50 {p50_text!r}")
-        else:
-            groups[group].append(seconds)
         if group == "rare-last" and not (
                 "ran on few PRs" in tail
                 or "a slower check usually ran alongside" in tail
@@ -13359,7 +13364,10 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
         stamped = by_name.get(_cmp_name(full_label))
         if stamped is None:
             failures.append(f"`{label}` has no matching stamped check")
+            if seconds is not None:
+                groups[group].append(seconds)
         else:
+            groups[group].append(_vr_pole_headline_s(stamped))
             stamped_count = max(
                 int(_num(stamped.get("pole_n")) or 0),
                 inherited_counts.get(_cmp_name(full_label), 0))
@@ -13382,7 +13390,8 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
 
     for group, values in groups.items():
         if any(values[i] < values[i + 1] for i in range(len(values) - 1)):
-            failures.append(f"{group} P50 values are not non-increasing: {values}")
+            failures.append(
+                f"{group} headline durations are not non-increasing: {values}")
     if groups["holds-up"] and frequent_heading not in contents:
         failures.append("holds-up rows have no labelled group heading")
     if groups["rare-last"] and rare_heading not in contents:
@@ -13409,6 +13418,75 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
     return Check(name, not failures,
                  "; ".join(failures[:8]) if failures else
                  f"{len(rows)} poles grouped and duration-ordered; Bottom line names pole 1")
+
+
+def check_bimodal_pole_one_states_modes_and_slow_win(
+        report: str, findings_path: Path | None) -> Check:
+    """A fast-median Long pole 1 must not headline only its blended P50."""
+    name = "bimodal Long pole 1 states both modes and its slow-share win"
+    if not findings_path or _is_static_only(report):
+        return Check(name, True, "no findings / static-only", skipped=True)
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings unreadable", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    pole_sections = _pole_header_sections(report)
+    rows = list(_POLE_GROUP_ROW_RE.finditer(_section(report, "📋 Contents")))
+    if not pole_sections or not rows:
+        return Check(name, True, "no modern Long pole 1", skipped=True)
+    pole_name = pole_sections[0][1]
+    pole = next((
+        _as_dict(row) for row in _as_list(cp.get("checks"))
+        if _cmp_name(str(_as_dict(row).get("name") or "")) == _cmp_name(pole_name)
+    ), {})
+    p50 = _num(pole.get("p50_s")) or 0.0
+    bimodal = _as_dict(pole.get("bimodal"))
+    low = _num(bimodal.get("low_p50_s"))
+    high = _num(bimodal.get("high_p50_s"))
+    frac = _num(bimodal.get("slow_frac"))
+    if (low is None or high is None or frac is None or frac <= 0
+            or high <= p50 * 1.15 or p50 > (low + high) / 2):
+        return Check(name, True, "Long pole 1 is not a fast-median bimodal gate", skipped=True)
+
+    midpoint = (low + high) / 2.0
+    slow_ceilings: list[float] = []
+    target = _cmp_name(pole_name)
+    for entry in _as_list(cp.get("populations")):
+        try:
+            _share, raw_checks = entry
+            checks = [(str(check_name), float(duration))
+                      for check_name, duration in raw_checks if float(duration) > 0]
+        except (TypeError, ValueError):
+            continue
+        own = [duration for check_name, duration in checks
+               if _cmp_name(check_name) == target]
+        siblings = [duration for check_name, duration in checks
+                    if _cmp_name(check_name) != target]
+        if own and siblings and max(own) >= midpoint:
+            slow_ceilings.append(max(max(own) - max(siblings), 0.0))
+    positive = [value for value in slow_ceilings if value > 0]
+    if not positive:
+        return Check(name, False, "bimodal Long pole 1 has no measured slow-share ceiling")
+    slow_pct = round(frac * 100)
+    story = (
+        f"{slow_pct}% of sampled PRs wait about **{_fmt_clock(high)}** on this check; "
+        f"the other {100 - slow_pct}% wait about **{_fmt_clock(low)}**. The slow-mode "
+        f"win is about **{_fmt_clock(statistics.median(positive))}** (median of the "
+        "measured per-PR ceilings)."
+    )
+    bottom = next((line for line in report.splitlines()
+                   if line.startswith("> **Bottom line.**")), "")
+    failures = []
+    if story not in bottom:
+        failures.append("Bottom line omits the re-derived two-mode slow-share sentence")
+    if story not in pole_sections[0][2]:
+        failures.append("Long pole 1 omits the re-derived two-mode slow-share sentence")
+    return Check(name, not failures,
+                 "; ".join(failures) if failures else
+                 "Bottom line and Long pole 1 state both modes and the measured slow-share win")
+
+
 def check_spine_heavy_check_disclosed(report: str, findings_path: Path | None) -> Check:
     """**The spine-drop disclosure class (Phase 0, Class A #6).** Every drilled pole's BINDING floor
     — the slowest concurrent check that co-occurs with it on a MAJORITY of its own gating PRs,
@@ -14407,6 +14485,8 @@ def check_cluster_lever_ceiling_escapes_sibling(report: str, findings_path: Path
 
 
 _HEADLINE_WIN_RE = re.compile(r"\*\*~\s*([0-9hms  ]+?)\*\*")
+_BIMODAL_HEADLINE_WIN_RE = re.compile(
+    r"slow-mode win is about\s+\*\*([0-9hms  ]+?)\*\*", re.IGNORECASE)
 _COMMIT_WORK_WIN_RE = re.compile(
     r"biggest credited code finding[^\n]{0,240}?removes\s+\*\*~\s*"
     r"([0-9hms  ]+?)\*\*", re.IGNORECASE)
@@ -14415,6 +14495,8 @@ _COMMIT_WORK_WIN_RE = re.compile(
 def _headline_win_s(bottom_line: str) -> float | None:
     """Parse the credited win, skipping a commit Bottom line's queue clock."""
     match = _COMMIT_WORK_WIN_RE.search(bottom_line)
+    if match is None:
+        match = _BIMODAL_HEADLINE_WIN_RE.search(bottom_line)
     if match is None:
         match = _HEADLINE_WIN_RE.search(bottom_line)
     return _parse_clock_to_s(match.group(1)) if match else None
@@ -17261,6 +17343,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_workflow_gate_frequency_matches(report, findings_path),
         check_gate_frequency_confidence(report, findings_path),
         check_pole_groups_and_bottom_agree(report, findings_path),
+        check_bimodal_pole_one_states_modes_and_slow_win(report, findings_path),
         check_pole_not_reframed_as_hygiene(report, findings_path),
         check_toc_also_noticed_label_honest(report),
         check_cache_claim_backed_by_distribution(report, findings_path),
