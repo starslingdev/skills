@@ -293,6 +293,15 @@ def test_the_example_repository(tmp_path):
     # is unmeasured here, never a pass.
     assert _fact(out, SCOPED)["outcome"] == "unmeasured", _fact(out, SCOPED)
 
+    # `trunk`'s ruleset needs two approvals and dismisses stale ones, but
+    # its bypass list is not served to this reader and classic protection
+    # is hidden behind a plain 404: anyone short of an admin on either list
+    # would skip review, so the default-branch review check is unmeasured,
+    # never a pass.
+    review = _fact(out, "sec.default-branch.review-required")
+    assert review["outcome"] == "unmeasured", review
+    assert "bypass list is not readable" in review["evidence"], review
+
     # Admin bypass is an information line, never part of either verdict.
     assert envs["qa-east"]["admins_can_bypass"] is True
     assert envs["nightly"]["admins_can_bypass"] is False
@@ -1951,3 +1960,94 @@ def test_a_branch_policy_entry_without_a_type_is_a_branch(tmp_path):
         _dbp("prod"): {"total_count": 1, "branch_policies": [{"name": "v*"}]}}),
         tmp_path=tmp_path)
     assert _envs(out)["prod"]["branch_check"] == "pass", _envs(out)
+
+
+# --- what is at stake: a pushed workflow reaches these secrets ----------------
+#
+# Grounded in the November 2026 compromised-accounts campaign (Reference
+# incidents in security-patterns.md): a token with ordinary write access
+# pushed a workflow to a throwaway branch, and every repository and
+# organization secret reached it with no review and no merge. The evidence
+# says that consequence, not just a count.
+
+def test_a_secrets_fail_says_what_one_leaked_push_credential_reaches(
+        tmp_path):
+    out, _ = _run(_responses([_CLOSED_ENV],
+                             repo_secrets=["CODECOV_TOKEN", "PYPI_TOKEN"],
+                             org_secrets=["SHARED_KEY"]),
+                  tmp_path=tmp_path)
+    ev = _fact(out, SCOPED)["evidence"]
+    assert ("any workflow pushed to any branch of this repository can read "
+            "these 3 secret(s)") in ev, ev
+    assert "one leaked push credential exposes them all" in ev, ev
+    assert "no review and no merge" in ev, ev
+    assert "an environment that only protected branches can use" in ev, ev
+    for name in ("CODECOV_TOKEN", "PYPI_TOKEN", "SHARED_KEY"):
+        assert f"`{name}`" in ev, ev
+
+
+def test_a_secrets_fail_names_at_most_ten_per_list_and_counts_the_rest(
+        tmp_path):
+    names = [f"S{i:02d}" for i in range(1, 14)]
+    out, _ = _run(_responses([_CLOSED_ENV], repo_secrets=names),
+                  tmp_path=tmp_path)
+    ev = _fact(out, SCOPED)["evidence"]
+    assert "can read these 13 secret(s)" in ev, ev
+    for shown in names[:10]:
+        assert f"`{shown}`" in ev, ev
+    for hidden in names[10:]:
+        assert f"`{hidden}`" not in ev, ev
+    assert "and 3 more" in ev, ev
+
+
+def test_a_branch_fail_says_an_open_environment_protects_nothing(tmp_path):
+    out, _ = _run(_responses([_env("prod", _ANY)]), tmp_path=tmp_path)
+    ev = _fact(out, BRANCH)["evidence"]
+    assert _fact(out, BRANCH)["outcome"] == "fail"
+    assert ("an environment any branch can use protects nothing from a "
+            "pushed workflow") in ev, ev
+    assert "no review and no merge" in ev, ev
+
+
+def _render(out):
+    return _load_report().render({"findings": [], "repo": "owner/repo",
+                                  "scanned_workflows": 1,
+                                  "security_score": out})
+
+
+def test_secrets_reachable_from_any_branch_are_called_out_under_the_headline(
+        tmp_path):
+    out, _ = _run(_responses([_CLOSED_ENV],
+                             repo_secrets=["CODECOV_TOKEN", "PYPI_TOKEN"],
+                             org_secrets=["SHARED_KEY"]),
+                  tmp_path=tmp_path)
+    md = _render(out)
+    top = md.split("## Critical findings", 1)[1].split("## 🔗 Vector map", 1)[0]
+    assert "Secrets reachable from any branch" in top, top
+    assert "3 secret(s)" in top, top
+    assert "any branch of this repository can read them" in top, top
+    # The fix only works once that environment passes its own check.
+    assert "sec.environments.branch-restricted" in top, top
+    assert "one leaked push credential exposes them all" in top, top
+    assert "(#if-a-push-credential-leaks)" in top, top
+    # A callout, not a heading: the vector headline stays the only `## `.
+    assert not any(line.startswith("#") for line in top.splitlines()[1:]), top
+
+
+def test_a_partial_secret_inventory_makes_the_callout_a_lower_bound(tmp_path):
+    responses = _responses([_CLOSED_ENV], repo_secrets=["RELEASE_TOKEN"])
+    responses[f"{R}/actions/organization-secrets?per_page=100"] = _SECRETS_403
+    out, _ = _run(responses, tmp_path=tmp_path)
+    md = _render(out)
+    assert "1 secret(s) (at least; one secret list could not be read)" in md, md
+
+
+@pytest.mark.parametrize("secrets", ["none", "unreadable"])
+def test_no_callout_when_the_secrets_check_does_not_fail(tmp_path, secrets):
+    responses = _responses([_CLOSED_ENV])
+    if secrets == "unreadable":
+        responses[f"{R}/actions/secrets?per_page=100"] = _SECRETS_403
+        responses[f"{R}/actions/organization-secrets?per_page=100"] = \
+            _SECRETS_403
+    out, _ = _run(responses, tmp_path=tmp_path)
+    assert "Secrets reachable from any branch" not in _render(out)

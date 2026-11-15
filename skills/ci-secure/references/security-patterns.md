@@ -20,7 +20,7 @@ fix recipe consumed by per-finding fix subagents.
 - [P14.11 — Impostor / Unreachable SHA on Action Reference](#p1411--impostor--unreachable-sha-on-action-reference)
 - [P14.14 — Whole-Context Dump via `toJSON(secrets|github|env)`](#p1414--whole-context-dump-via-tojsonsecretsgithubenv)
 - [P14.15 — Attacker-Controlled Write to `$GITHUB_ENV` or `$GITHUB_PATH`](#p1415--attacker-controlled-write-to-github_env-or-github_path)
-- [P14.18 — `pull-requests: write` Granted to Workflow With Untrusted Trigger](#p1418--pull-requests-write-granted-to-workflow-with-untrusted-trigger)
+- [P14.18 — Workflow That Outside Activity Can Start Has `pull-requests: write`](#p1418--workflow-that-outside-activity-can-start-has-pull-requests-write)
 - [P14.19 — Cache or Artifact `path:` Includes Known Credential Files](#p1419--cache-or-artifact-path-includes-known-credential-files)
 - [P14.24 — Unverified Remote Code Execution (`curl | bash` and mutable fetch-and-run)](#p1424--unverified-remote-code-execution-curl--bash-and-mutable-fetch-and-run)
 - [P14.25 — Dependency Install Scripts Executed in a Privileged Job](#p1425--dependency-install-scripts-executed-in-a-privileged-job)
@@ -70,7 +70,7 @@ Detector semantics (only the types this catalog uses):
 - `regex` — applied to each file's content with `re.MULTILINE`. One finding per match.
 - `yaml-run-injection` — a regex applied to `jobs.*.steps.*.run` scalars only, so template expressions that are harmless in `with:`/`env:` blocks don't false-positive.
 - `yaml-job-correlated` / `yaml-workflow-correlated` — named correlation functions in `scan.py` that fire only when multiple predicates hold on the same job / workflow. The chain detectors.
-- `gh-impostor-sha` — the one network-gated detector (see P14.11): runs when `gh` is authenticated, is explicitly recorded as skipped otherwise.
+- `gh-impostor-sha` — the one network-gated detector (see P14.11): runs when `gh` is authenticated, is explicitly recorded as skipped otherwise. The same `--gh-impostor` switch also gates P14.24's release-immutability lookup, which can only remove a finding (see P14.24's GitHub CLI extension bullet).
 
 `fix-surface` is `yaml` when the fix is an edit to workflow YAML and
 `non-yaml` when it is an org setting, registry configuration, or manual
@@ -95,7 +95,7 @@ to the fix agent as a constraint.
 pattern: P14.10
 severity: HIGH
 detector: yaml-run-injection
-match: "\$\{\{\s*(github\.event\.(issue|comment|pull_request|discussion|workflow_run|head_commit|inputs|client_payload)\.[a-zA-Z_.]+|github\.event\.inputs\.[a-zA-Z_0-9]+|github\.head_ref)(\s*\|\|[^}]*?)?\s*\}\}"
+match: "\$\{\{\s*(github\.event\.(issue|comment|pull_request|discussion|workflow_run|head_commit|inputs|client_payload)\.[a-zA-Z_0-9.]+|github\.event\.inputs\.[a-zA-Z_0-9]+|inputs\.[a-zA-Z_0-9]+|github\.head_ref)(\s*\|\|[^}]*?)?\s*\}\}"
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
 fix_strategy: env-var-indirection
 fix-surface: yaml
@@ -116,18 +116,19 @@ Attacker-controllable expression sources:
 - `github.event.head_commit.message` and any other commit metadata on `push` triggers
 - `github.head_ref` (PR source branch name)
 - `github.event.workflow_run.head_branch`, `.display_title`
-- `workflow_dispatch` inputs that accept free-form strings, in their `github.event.inputs.*` spelling
+- `workflow_dispatch` and reusable-workflow inputs that accept free-form
+  strings, in either their `github.event.inputs.*` or `inputs.*` spelling
 - Anything from `repository_dispatch.client_payload`
 - Output of an earlier step derived from any of the above
 
 A **`||` fallback does not sanitize anything.** `${{ github.head_ref || github.ref_name }}` is matched, because `||` returns the FIRST operand whenever it is truthy — so on a pull request the branch name an attacker chose is exactly what lands in the shell, and the safe-looking right-hand side never evaluates. The match therefore tolerates ` || <anything>` after the context path, and the value-shape exclusion above is judged on the first operand only: `${{ github.event.pull_request.title || '' }}` stays a finding, while `${{ github.event.pull_request.number || 0 }}` remains excluded. (cal.com's `production-build-without-database.yml:72` interpolated `${{ github.head_ref || github.ref_name }}` into a `run:` block holding roughly a dozen secrets and went unreported for exactly this reason.)
 
-The bare `inputs.*` context is deliberately **not** matched. It resolves to a
-`workflow_call` input on a reusable workflow, and a caller who can set that
-input already has write access to a workflow file in the repo — an insider,
-not the outsider the catalog's admission test requires. (`workflow_dispatch`
-inputs remain in scope via their `github.event.inputs.*` spelling, which is
-what the trigger actually populates.)
+Quoted bracket indexing is normalized to the same dotted source paths before
+matching. This includes `inputs['max-items']`, `github.event.inputs["name"]`
+and chained forms such as `github.event['client_payload']['command']`; bracket
+indexing is required for input names containing a hyphen. The same
+normalization is used by P14.15. Other contexts such as `matrix['os']` remain
+outside this source list.
 
 The `yaml-run-injection` detector walks `jobs.*.steps.*.run` and only fires when the regex matches inside a `run:` scalar — the actual shell context. Expressions in `env:`, `with:`, or `name:` blocks are structurally excluded: those are not shell contexts for this sink. That is a statement about *this* sink only — an action that shells out its own inputs turns a `with:` value into shell code inside the action's body, which is a different, undetected class.
 
@@ -351,7 +352,10 @@ miss flags every occurrence. When `gh` is unavailable the check is SKIPPED
 and the scan output + report say so explicitly — silence is never treated as
 a pass. False-positive note: a commit reachable only from a tag (a release
 commit) still exists in the repo and passes the API check; this detector
-flags only commits the canonical repo does not contain at all.
+flags only commits the canonical repo does not contain at all. The same
+`--gh-impostor` switch also runs P14.24's release-immutability lookup for a
+GitHub CLI extension pinned to a tag; that lookup can only remove a finding,
+and its own status is `gh_checks["P14.24"]`.
 
 **Detector limitation — the fork gap, stated because this pattern's own
 attacker story is the part it does not fully cover.** Both endpoints the
@@ -367,13 +371,24 @@ reason the check earns its place. Closing the fork gap needs a
 ref-reachability test the REST API does not offer; until then, read a clean
 P14.11 as "not dangling", not as "provably the maintainer's commit".
 
+**Workflow lockfiles.** A repository that adopts GitHub's workflow lockfile
+(`.github/workflows/actions.lock`, written by `gh actions-lock`) keeps a tag in
+the `uses:` line and records the commit only in the lockfile. This check reads
+commit pins written in `uses:` and does not check locked commits; for a
+workflow the lockfile lists, GitHub verifies the locked commit at run time
+(reachable from its recorded ref, same repository). The scan counts those
+references in `action_lockfile` and the report states them on its **Action
+lockfile** row, so a locked repository never reads as a silent pass. A
+lockfile that is not readable and well-formed is named and credited with
+nothing.
+
 **Fix recipe**: Re-pin to a SHA from the upstream's own history — typically
 the commit the latest release tag points at:
 
 ```bash
-gh api repos/OWNER/REPO/commits/BAD_SHA          # 404 → not in the canonical repo
-gh api repos/OWNER/REPO/releases/latest --jq .tag_name
-gh api repos/OWNER/REPO/git/ref/tags/TAG --jq .object.sha   # pin this instead
+gh api repos/OWNER/REPO/commits/BAD_SHA --hostname github.com          # 404 → not in the canonical repo
+gh api repos/OWNER/REPO/releases/latest --hostname github.com --jq .tag_name
+gh api repos/OWNER/REPO/git/ref/tags/TAG --hostname github.com --jq .object.sha   # pin this instead
 ```
 
 Verify the new pin the same way before committing it.
@@ -501,7 +516,7 @@ P14.10 catches the *direct* template-injection sink (the substituted value becom
 
 ---
 
-### P14.18 — `pull-requests: write` Granted to Workflow With Untrusted Trigger
+### P14.18 — Workflow That Outside Activity Can Start Has `pull-requests: write`
 
 <!-- METADATA
 pattern: P14.18
@@ -510,28 +525,28 @@ detector: yaml-workflow-correlated
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
 fix_strategy: split-trusted-untrusted-workflows
 fix-surface: yaml
-title_template: "pull-requests: write on an untrusted trigger in {basename}"
+title_template: "pull-requests: write on a workflow outside activity can start in {basename}"
 correlation: pr-write-and-untrusted-trigger
 -->
 
-**TL;DR.** A workflow declares `pull-requests: write` anywhere in the document **and** is triggered by a member of the untrusted-event family — commonly `pull_request_target`, `issue_comment`, `workflow_run`, `pull_request_review`, or `pull_request_review_comment` (the full 11-trigger set is `_UNTRUSTED_TRIGGERS` in `scan.py`).
+**TL;DR.** A workflow that people outside your team can start — for example by opening a pull request, commenting on an issue, or finishing another workflow (`pull_request_target`, `issue_comment`, `workflow_run`, and a few similar events) — has a job that is allowed to change pull requests (`pull-requests: write`: comment, label, approve, merge). It is HIGH when a job holding that permission checks out the pull request's code, runs text the pull request author controls, calls the review or merge API, or does anything the scanner cannot prove harmless; it is MEDIUM only when every such job does nothing but add one label or post one comment.
 
 **What an attacker can do.** A workflow compromise (injection, poisoned dependency, compromised action) self-approves and merges the malicious PR, bypassing branch protection's human-review requirement — elementary-data Apr 2026 chained this to PyPI + GHCR in 10 minutes.
 
-**Anti-pattern**: a workflow declares `pull-requests: write` **and** is triggered by any member of the untrusted-event family — `pull_request_target`, `issue_comment`, `workflow_run`, `issues`, `pull_request_review`, `pull_request_review_comment`, `discussion`, `discussion_comment`, `fork`, `watch`, `repository_dispatch` (this is the whole set; `scan.py`'s `_UNTRUSTED_TRIGGERS` is its source of truth). A compromise of any step in that workflow can self-approve or merge the PR, bypassing branch protection that requires reviewer approval. The elementary-data 2026 incident chained this exact pivot (default-write token + injection → forged `github-actions[bot]` commit → dispatched release workflow → PyPI publish in 10 minutes).
+**Anti-pattern**: a workflow declares `pull-requests: write` **and** can be started by outside activity — `pull_request_target`, `issue_comment`, `workflow_run`, `issues`, `pull_request_review`, `pull_request_review_comment`, `discussion`, `discussion_comment`, `fork`, `watch`, `repository_dispatch` (that is the full list the check looks for). A compromise of any step in that workflow can self-approve or merge the PR, bypassing branch protection that requires reviewer approval. The elementary-data 2026 incident chained this exact pivot (default-write token + injection → forged `github-actions[bot]` commit → dispatched release workflow → PyPI publish in 10 minutes).
 
-**Prioritization**: every occurrence is a HIGH finding — a direct bypass of branch protection's human-review requirement. Attack first the workflows that also run attacker-supplied content (a template-injection sink, a fork checkout), since those hand the write scope to a stranger rather than requiring a separate compromise.
+**Prioritization**: an occurrence with an attacker-head checkout, PR-controlled execution, or review/merge API call is HIGH because it exposes a direct path to branch-protection bypass. An occurrence with none of those paths is MEDIUM: keep the automation cosmetic and review changes for any newly introduced execution or review/merge operation.
 
-**Fix recipe**: Two structural options:
+**Fix recipe**: For a MEDIUM label/comment-only occurrence, keep the job limited to those cosmetic operations, remove `pull-requests: write` if it is unused, and do not add PR-head checkout, PR-controlled execution, or review/merge API calls. For a HIGH occurrence, use one of these structural options:
 
 1. **Move `pull-requests: write` to a job that does NOT run on the untrusted trigger** — typically by splitting into two workflows (one on `pull_request_target` that uploads an artifact, one on `workflow_run` that consumes the artifact and posts the comment). Same shape as P14.9 fix.
 2. **Use a GitHub App** for the comment / approve operation. Astral's `astral-sh-bot` pattern: credentials live outside the repo, the App listens on the same webhook events, and a workflow file compromise doesn't expose the App's installation token.
 
-**Platform change, June 18 2026:** enterprise/org/repo policies for *who and what can trigger workflows* shipped, but they are **opt-in and evaluate-mode** — nothing changes on default configuration, so this vector is intact by default.
+**Platform change, June 18 2026:** GitHub added settings that let an enterprise, organization or repository limit who can start workflows. They are off by default, so they do not protect you unless you turned them on, and this risk remains live by default.
 
-The org-level setting *"Allow GitHub Actions to create and approve pull requests"* should be **disabled** regardless; it is an org/repo setting, not a workflow fact, so no detector in this catalog can see it — verify it by hand. P14.18 catches the per-workflow opt-in even when the org-level setting allows it.
+The setting *"Allow GitHub Actions to create and approve pull requests"* should be **disabled** regardless. It is an org/repo setting, not a workflow fact, so the YAML cannot show it; when a P14.18 finding exists and `gh` can reach the repository, the scan reads the repository's effective value and records it on the finding (`actions_can_approve_prs`), and otherwise records it as not checked — verify it by hand then. P14.18 fires on the per-workflow opt-in whatever the setting says.
 
-`detector: yaml-workflow-correlated` with `correlation: pr-write-and-untrusted-trigger` — fires once per workflow whose `on:` keys include any untrusted-event family member AND that declares `pull-requests: write` **at any scope in the document**. The detector walks the whole parsed document for the declaration rather than tying it to a particular job, because a write granted anywhere in a workflow that an outsider's event can start is reachable; it does not attempt to prove which job would use it.
+`detector: yaml-workflow-correlated` with `correlation: pr-write-and-untrusted-trigger` — fires once per workflow whose `on:` keys include any untrusted-event family member AND whose effective workflow/job permissions grant `pull-requests: write` (including `write-all`). A job-level permissions block replaces the workflow-level block, so a job that narrows `write-all` to read-only does not inherit the write grant.
 
 **Sources**: StepSecurity "Prevent actions creating/approving PRs"; Wiz "Automated pull request creation/approval".
 
@@ -593,7 +608,7 @@ fix-surface: yaml
 title_template: "Unverified remote code execution in {basename}"
 -->
 
-**TL;DR.** A job executes remotely-fetched code that nothing pins — a script piped straight into a shell, or another repository fetched at a mutable ref (by `git clone`, `git fetch`, or `actions/checkout`) and then run out of. **The piped installer**: a `run:` step pipes a remotely-fetched script straight into a shell — `curl … | bash`, `wget … | sh`, `bash <(curl …)`, or `deno run <url>`. **The mutable fetch**: a job clones or fetches a git tree at a BRANCH, TAG, `HEAD`, or an abbreviated commit id — anything but a full 40-hex commit — and then executes a file out of that tree. Both run whatever the other side serves *at that moment*, with no integrity check, at full job privilege. A fetch pinned to a full 40-character commit id is immutable and is NOT a finding: that is the same trust model this catalog recommends for action pins.
+**TL;DR.** A job executes remotely-fetched code that nothing pins — a script piped straight into a shell, or another repository fetched at a mutable ref (by `git clone`, `git fetch`, `actions/checkout`, or `gh extension install`) and then run out of. **The piped installer**: a `run:` step pipes a remotely-fetched script straight into a shell — `curl … | bash`, `wget … | sh`, `bash <(curl …)`, or `deno run <url>`. **The mutable fetch**: a job clones or fetches a git tree at a BRANCH, TAG, `HEAD`, or an abbreviated commit id — anything but a full 40-hex commit — and then executes a file out of that tree. Both run whatever the other side serves *at that moment*, with no integrity check, at full job privilege. A fetch pinned to a full 40-character commit id is immutable and is NOT a finding: that is the same trust model this catalog recommends for action pins.
 
 **What an attacker can do.** Whoever controls the fetched code — the upstream host, a hijacked CDN, a maintainer account on the cloned repository — runs arbitrary code on your runner with the job's secrets and `GITHUB_TOKEN`. The mutable-fetch shape needs no host compromise at all: a branch or tag is *designed* to move, so anyone who can push to (or re-point a tag on) that repository changes what your next CI run executes, and nothing in your repo has to change for it to happen. Unlike a SHA-pinned action, both shapes re-resolve live on every run, so a one-time compromise hits every subsequent run until someone notices.
 
@@ -617,7 +632,7 @@ what makes those unsafe is the pipe into a shell, not the address being
 fetched; the `deno run` form is the exception — it has no pipe, so that arm
 does key on a literal URL.)
 
-*Shape 2 — the mutable fetch*: within ONE job, a `git clone` / `git fetch` / `actions/checkout` of another repository at a mutable reference, followed by a command that executes out of the directory it landed in.
+*Shape 2 — the mutable fetch*: within ONE job, a `git clone` / `git fetch` / `actions/checkout` of another repository, or a `gh extension install`, at a mutable reference, followed by a command that executes out of the directory it landed in.
 
 ```yaml
 # WRONG — `main` is whatever that branch points at when the job runs
@@ -632,7 +647,7 @@ Execution shapes matched: an interpreter running a fetched file (`python3`/`node
 - **A full 40-hex pin silences it — a short sha does not, and neither does a late one.** `git clone … && git -C dir checkout <40-hex>` is immutable and never reported, and the pin has to land BETWEEN the fetch and the execution: pinning is a claim about the code that ran, so a pin before the fetch pinned the tree as it stood and a pin after the execution pinned nothing that had already run. Every suppression is recorded — in the scan's `suppressed_findings`, which is informational and never counts against coverage. An abbreviated id (`a1b2c3d`) is re-resolved by git at fetch time and is treated as mutable.
 - **A destination the scanner cannot see is not reported.** `git clone "$TOOLS_URL"` with no explicit target directory leaves the destination unknowable, so no connection is claimed and no finding is raised — a deliberate false negative in favour of never inventing a chain. It is recorded as a coverage note, so "no finding" is distinguishable from "nothing here". Shell the scanner cannot parse (an unbalanced quote) contributes nothing; it is recorded as a coverage note when the text it could not read mentions a fetch or an execution, and only an unreadable `cd` abandons the rest of the step, since that is the case that leaves the working directory stale.
 - **`git fetch` fires only for a third-party remote** — a URL, a variable holding one, or a name this job just added with `git remote add <name> <url>` — that something then brings into the tree (`git checkout FETCH_HEAD`, or `reset` / `switch` / `merge` / `rebase` on it). `git fetch origin main` pulls the repository's own history and is not this vector. Unlike the clone arm, a `git fetch` lands in the job's working directory, so the destination is that directory and the finding renders it as `.`.
-- **The shell arm reads `git clone`, `git fetch` and `git remote add`, and nothing else.** Everything below is the same trust model and is NOT reported — a clean P14.24 is not a statement that the repo has no mutable fetch-and-run, only that no `git`-spelled one is visible:
+- **The shell arm reads `git clone`, `git fetch`, `git remote add` and `gh extension install`, and nothing else.** Everything below is the same trust model and is NOT reported — a clean P14.24 is not a statement that the repo has no mutable fetch-and-run, only that no `git`- or `gh extension`-spelled one is visible:
   - other fetchers: `gh repo clone`, `svn checkout`, `git submodule update --remote`, and package managers pointed at a git ref (`pip install "git+…@main"`, `go install …@latest`, an npm/cargo git dependency);
   - a tarball fetched with `curl`/`wget`, unpacked, and then run;
   - a fetch and its execution separated by a rename (`mv tools built && python3 built/setup.py`);
@@ -647,6 +662,13 @@ Execution shapes matched: an interpreter running a fetched file (`python3`/`node
 - **A clone of your OWN repository is not reported.** `${{ github.repository }}` is the scanned repo by definition, and a literal `github.com/<owner>/<repo>` is compared against the checkout's `origin` remote — including the authenticated spelling that carries a token in the URL's userinfo. No third party is involved in re-cloning yourself, and the fix this entry recommends (pin to a full commit id) is unactionable for a release workflow that must run at the branch head. In an exported tree with no `.git`, `origin` is unknown and the literal form is reported like any other clone.
 - **`working-directory:` is followed** — on the step, and through `defaults.run.working-directory` on the job and on the workflow. A `working-directory:` computed at run time (`apps/${{ matrix.app }}`) is not knowable, so it becomes an opaque directory: a fetch and an execution both inside it still connect to each other, and nothing inside it can match a directory anywhere else.
 - **`actions/checkout` of another `repository:` is covered too**, since it is how most workflows fetch a second repository. The same rules apply: a full 40-hex `ref:` is silent, your own repository is silent, and something in a LATER step of the same job has to execute out of the `path:` it landed in. With NO `path:` the checkout replaces the workspace, so anything the job runs afterwards counts. A `repository:`, `ref:` or `path:` computed at run time is recorded as a coverage gap rather than guessed at.
+- **A GitHub CLI extension installed at a mutable ref is covered too.** `gh extension install OWNER/REPO` (or `gh ext install`, a `HOST/OWNER/REPO`, or an `https://` URL) downloads the extension at its LATEST release, or at the ref `--pin` names. For a binary extension (gh decides from whether the LATEST release carries platform assets) `--pin` names a release TAG; for a script extension it names a tag, branch or commit. Anything but a full commit id can be moved by the extension's owner, so the next run executes different code with the job's token. The one exception is a tag on a release published as IMMUTABLE: GitHub locks that tag and its assets, so the pin cannot change. That setting is not in the workflow, so when the GitHub API lookups are on (`--gh-impostor`, the same switch as P14.11; `auto` runs them when `gh` is authenticated) the scan asks `GET /repos/{owner}/{repo}/releases/tags/{tag}` once per repository and tag and reads the release's `immutable` field. `immutable: true` is NOT a finding and is recorded as a suppression naming the release. `immutable: false` or a 404 (no published release at that tag: a branch, a bare tag, or a repository the scan cannot see) is reported, and the finding says which. When the lookup is off, `gh` is unavailable, or a lookup fails (a timeout or server error is tried up to three times in all; a rate limit or an authentication failure is not), the finding is kept exactly as the offline scan words it, and `gh_checks["P14.24"]` records the lookup as `skipped` or `partial` with the reason; signing in to gh and re-running lets the lookup check them. No `--pin` and an abbreviated commit id are reported without a lookup. It follows the clone rule: the finding needs the install AND a later run of the extension in the same job — `gh <name> …`, where `<name>` is the repository name without its `gh-` prefix, or `gh extension exec <name>`. No `--pin` (or an empty `--pin=`), a tag (unless its release is immutable, above), a branch or an abbreviated commit id is reported; `--pin <full-40-hex-commit>` (either spelling, `--pin X` or `--pin=X`) is immutable and is NOT a finding, and is recorded as a suppression. A local install (`gh extension install .`) and an install of your own repository are not reported. An install with no visible run of the extension in that job — it may run from a script or a build driver this scan cannot read — is recorded as a coverage note, not a finding.
+
+  ```yaml
+  # WRONG — no --pin: whatever the latest release is next run is what runs
+  - run: gh extension install <owner>/gh-<name>
+  - run: gh <name> --verify
+  ```
 
 PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same class on Windows runners but is not matched here (casing / Windows-runner rarity); flag it in manual review if you run Windows jobs.
 
@@ -667,6 +689,8 @@ PowerShell `iex (New-Object Net.WebClient).DownloadString(...)` is the same clas
     echo "<known-sha256>  install.sh" | sha256sum -c -
     bash install.sh
 ```
+
+A GitHub CLI SCRIPT extension is pinned the same way: `gh extension install <owner>/gh-<name> --pin <full-40-hex-commit>`. A BINARY extension's `--pin` accepts only a release tag, so a commit id fails the install: pin it to a tag whose release is marked immutable, or download the release asset, verify a known digest, and run the local copy — or vendor it.
 
 Prefer a package manager or a SHA-pinned action over an ad-hoc installer where one exists. For tools distributed only as a piped installer, or a repository you must build from source, vendor the code into the repo (so it is reviewed and pinned by git) and run the local copy.
 
@@ -761,6 +785,7 @@ The catalog draws on these public postmortems. Every vector in
 "Source for" names only patterns that are still in the catalog; incidents that
 motivated removed patterns are not cited here.
 
+- **Compromised GitHub accounts CI secret stealer (2026-11-10)** — [Aikido writeup, "Compromised GitHub accounts push CI secret stealer to tens of thousands of repositories", Nov 12 2026](https://www.aikido.dev/blog/compromised-github-accounts-push-ci-secret-stealer-to-tens-of-thousands-of-repositories). Chain: a developer's GitHub token is stolen → the attacker pushes a secrets-stealing payload into every repository the stolen token can write to, including organization and collaborator repositories → CI runs it with the repository's secrets → the credentials are exfiltrated; at least 1,806 repositories ran the payload. No victim workflow had a bug: the entry point was the credential, and each push was reverted within at most a minute and its workflow run and logs deleted, so a scan of the current branches finds nothing afterwards. What limits the damage, in this catalog's reading, is configuration: secrets kept in protected environments (`sec.secrets.environment-scoped`) and a default branch that takes no code without someone else's review (`sec.default-branch.review-required`), which keeps a payload off the default branch but does not stop one run from a branch the token creates; only the first stops that. Source for those two config facts, not for a vector: the attacker already held a push credential.
 - **TanStack npm supply-chain compromise (2026-05-11)** — [postmortem](https://tanstack.com/blog/npm-supply-chain-compromise-postmortem). Three-leg chain: untrusted trigger → cache poisoning via composite action → over-broad OIDC mint. Source for P14.7 and P14.9.
 - **Nesbitt 2026-04-28 systemic incident survey** — ["GitHub Actions is the weakest link"](https://nesbitt.io/2026/04/28/github-actions-is-the-weakest-link.html). Traces eighteen months of public Actions supply-chain incidents to a small set of platform features. Source for P14.10 and P14.11.
 - **tj-actions/changed-files (Mar 2025)** — [Wiz writeup](https://www.wiz.io/blog/github-action-tj-actions-changed-files-supply-chain-attack-cve-2025-30066), [CISA advisory](https://www.cisa.gov/news-events/alerts/2025/03/18/supply-chain-compromise-third-party-tj-actionschanged-files-cve-2025-30066-and-reviewdogaction). A tag was remapped to a malicious dangling commit; the poisoned action ran a memory scraper that dumped runner context — secrets, tokens, keys — into build logs. The action was in use across ~23,000 repositories; how many ran the poisoned tag during the exposure window is not quantified by the cited sources. Source for P14.11 and P14.14.

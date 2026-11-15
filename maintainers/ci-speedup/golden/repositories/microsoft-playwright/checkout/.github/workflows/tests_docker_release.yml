@@ -1,0 +1,13 @@
+name: tests docker (release)
+
+on:
+  push:
+    branches:
+      - release-*
+
+jobs:
+  test_linux_docker:
+    uses: ./.github/workflows/tests_docker.yml
+    permissions:
+      contents: read
+    secrets: inherit

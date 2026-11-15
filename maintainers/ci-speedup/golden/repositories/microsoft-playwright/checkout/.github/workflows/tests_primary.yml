@@ -1,0 +1,200 @@
+name: "tests 1"
+
+on:
+  push:
+    branches:
+      - main
+      - release-*
+  pull_request:
+    paths-ignore:
+      - 'browser_patches/**'
+      - 'docs/**'
+      - 'packages/extension/**'
+      - 'packages/playwright-core/src/server/bidi/**'
+      - 'packages/playwright-core/src/tools/**'
+      - 'tests/bidi/**'
+      - 'tests/extension/**'
+      - 'tests/mcp/**'
+    branches:
+      - main
+      - release-*
+
+concurrency:
+  # For pull requests, cancel all currently-running jobs for this workflow
+  # https://docs.<external-public-repository>/using-workflows/workflow-syntax-for-github-actions#concurrency
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  # Force terminal colors. @see https://www.npmjs.com/package/colors
+  FORCE_COLOR: 1
+
+jobs:
+  test_linux:
+    name: ubuntu-large - ${{ matrix.browser }}
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+        os: [playwright-x64-ubuntu24-64-core]
+        node-version: [22]
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read    # This is required for actions/checkout to succeed
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/run-test
+      with:
+        node-version: ${{ matrix.node-version }}
+        browsers-to-install: ${{ matrix.browser }} chromium
+        command: npm run test -- --project=${{ matrix.browser }}-*
+        bot-name: "${{ matrix.browser }}-${{ matrix.os }}-node${{ matrix.node-version }}"
+
+  test_test_runner:
+    name: Test Runner - ${{ matrix.os-name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [playwright-x64-ubuntu24-64-core, playwright-x64-server2025-64-core]
+        node-version: [22]
+        include:
+          - os: playwright-x64-ubuntu24-64-core
+            os-name: ubuntu-large
+          - os: playwright-x64-server2025-64-core
+            os-name: windows-large
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read    # This is required for actions/checkout to succeed
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/run-test
+      with:
+        node-version: ${{matrix.node-version}}
+        command: npm run ttest -- ${{ matrix.os == 'playwright-x64-server2025-64-core' && '--workers 16' || '' }}
+        bot-name: "${{ matrix.os }}-node${{ matrix.node-version }}"
+
+  test_test_runner_bun:
+    name: Test Runner - ubuntu-large - bun
+    runs-on: playwright-x64-ubuntu24-64-core
+    permissions:
+      contents: read    # This is required for actions/checkout to succeed
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: oven-sh/setup-bun@0c5077ea1a1a1a1a1aaeaa5fe8019c62421857d6 # v2.2.0
+      with:
+        bun-version: latest
+    - uses: ./.github/actions/run-test
+      with:
+        command: npm run ttest
+        bot-name: "playwright-x64-ubuntu24-64-core-bun"
+      env:
+        PW_BUN: 1
+
+  test_test_runner_mac:
+    name: Test Runner - ${{ matrix.os }} (${{ matrix.shardIndex }}/${{ matrix.shardTotal }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest]
+        node-version: [22]
+        shardIndex: [1, 2]
+        shardTotal: [2]
+        shardWeights: ['58:42']
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read    # This is required for actions/checkout to succeed
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/run-test
+      with:
+        node-version: ${{matrix.node-version}}
+        command: npm run ttest -- --shard ${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
+        bot-name: "${{ matrix.os }}-node${{ matrix.node-version }}"
+        shard-index: ${{ matrix.shardIndex }}
+      env:
+        PWTEST_SHARD_WEIGHTS: ${{ matrix.shardWeights }}
+
+  test_web_components:
+    name: Web Components - ${{ matrix.package }}
+    permissions:
+      contents: read    # This is required for actions/checkout to succeed
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [html-reporter, web]
+    runs-on: playwright-x64-ubuntu24-64-core
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/run-test
+      with:
+        node-version: 22
+        browsers-to-install: chromium
+        command: npm run test-${{ matrix.package }} -- --workers 16
+        bot-name: "web-components-${{ matrix.package }}"
+
+  test_vscode_extension:
+    name: VSCode Extension
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 22
+    - run: npm ci
+      env:
+        DEBUG: pw:install
+    - run: npm run build
+    - run: npx playwright install chromium
+    - name: Checkout extension
+      run: git clone <external-public-repository>
+    - name: Print extension revision
+      run: git rev-parse HEAD
+      working-directory: ./playwright-vscode
+    - name: Remove @playwright/test from extension dependencies
+      run: node -e "const p = require('./package.json'); delete p.devDependencies['@playwright/test']; fs.writeFileSync('./package.json', JSON.stringify(p, null, 2));"
+      working-directory: ./playwright-vscode
+    - name: Build extension
+      run: npm ci && npm run build
+      working-directory: ./playwright-vscode
+    - name: Run extension tests
+      run: npm run test
+      working-directory: ./playwright-vscode
+      env:
+        PW_TAG: "@vscode-extension"
+    - name: Upload blob report
+      if: ${{ !cancelled() && (github.event_name == 'pull_request' || failure()) }}
+      uses: ./.github/actions/upload-blob-report
+      with:
+        report_dir: playwright-vscode/blob-report
+        job_name: vscode-extension
+
+  test_package_installations:
+    name: "Installation Test ${{ matrix.os }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+        - ubuntu-latest
+        - macos-latest
+        - windows-latest
+    runs-on: ${{ matrix.os  }}
+    timeout-minutes: 45
+    permissions:
+      contents: read    # This is required for actions/checkout to succeed
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - run: npm install -g yarn@1
+    - run: npm install -g pnpm@8
+    - name: Setup Ubuntu Binary Installation # TODO: Remove when <external-public-repository>/issues/42510 is fixed
+      if: ${{ runner.os == 'Linux' }}
+      run: |
+        if grep -q "Ubuntu 24" /etc/os-release; then
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+        fi
+      shell: bash
+    - uses: ./.github/actions/run-test
+      with:
+        command: npm run itest
+        node-version: 22
+        bot-name: "package-installations-${{ matrix.os }}"
+        shell: ${{ matrix.os == 'windows-latest' && 'pwsh' || 'bash' }}

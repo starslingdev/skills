@@ -302,8 +302,8 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    slowest check gating your merge* (or just say "check"); "runner-minutes" →
    *cloud CI billing minutes*. Avoid "lever" and "critical path" in the chat
    entirely — the whole close reads like a plain sentence to a PM.
-   **Open with the measured result** — lead with the slowest check gating the merge
-   and its developer-wait cost; never call a bill finding the largest saving.
+   **Open with the report's Long pole 1** and its developer-wait cost. Preserve **Checks that hold up most PRs**, then
+   **Long but rarely the last to finish** with its report reason; do not call a rare-last row a gating check or a bill finding the largest saving.
    **Era disclosures lead even earlier**: when the report's top matter shows a
    config-era ⚠️, say it before any number — narrowed ("measures only the N runs
    since <workflow> changed <when>"); disclosed_pre (headline measures the PREVIOUS
@@ -442,8 +442,8 @@ Reference docs (read on demand — each links one level deep from here; outside 
   two-axis sizing: Δ wall-clock ranks; measured runner-minute findings promote; modeled residuals stay in "Also noticed".
   Measured compute counts completed job runs (timed-out, cancelled, and failed runs at or past the 6-hour timeout excluded, named in the spine footnote): modeled savings are capped at it; measured and failure-waste savings are checked against every sampled run.
 - [references/patterns/INDEX.md](references/patterns/INDEX.md) — the pattern index (every OPT-id; one file per pattern).
-- [references/spine-scoping.md](references/spine-scoping.md) — which checks
-  form the spine (required-scoping, PR-floor fallback, one-path demotion).
+- [references/spine-scoping.md](references/spine-scoping.md) — spine rules;
+  [references/report-defaults.md](references/report-defaults.md) — proposed report defaults awaiting owner review.
 - [references/structural-track.md](references/structural-track.md) — the
   OPT70–75, OPT78, OPT83–85, OPT87 risk model + intent interrogation for structural prompts.
 - [references/gap-fill.md](references/gap-fill.md) — the coverage-gap

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import collect_runs
 import scan
 
 
@@ -35,14 +36,103 @@ def _scan_workflow(tmp_path: Path, workflow: str) -> list[dict]:
 def test_opt61_flags_restore_prefix_that_cannot_match_saved_key(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:
-          path: .cache/tool
-          key: tool-${{ runner.os }}-${{ github.sha }}
+          path: .cache/pnpm
+          key: pnpm-${{ runner.os }}-${{ github.sha }}
           restore-keys: other-${{ runner.os }}-
-      - run: tool build
+      - uses: actions/cache@v4
+        with:
+          path: .cache/ccache
+          key: ccache-${{ runner.os }}
+      - run: pnpm build
 """)
     assert "OPT61" in _patterns(rows)
-    assert any("restore" in row["evidence"].lower() for row in rows
-               if row["pattern"] == "OPT61")
+    restore_row = next(row for row in rows if row["pattern"] == "OPT61"
+                       and "restore" in row["evidence"].lower())
+    assert restore_row["cache_family"] == "pnpm"
+    for index, prefix in enumerate(("v1", "cache-v2", "shared", "build", "deps", "linux")):
+        prefixed = _scan(tmp_path / f"prefixed-{index}", f"""      - uses: actions/cache@v4
+        with:
+          path: .cache/tool
+          key: {prefix}-${{{{ runner.os }}}}-tool-${{{{ github.sha }}}}
+          restore-keys: other-${{{{ runner.os }}}}-
+      - run: tool build
+""")
+        prefixed_row = next(row for row in prefixed if row["pattern"] == "OPT61"
+                            and "restore" in row["evidence"].lower())
+        status, _line = collect_runs._cache_status_from_log(
+            f"Cache not found for input keys: {prefix}-Linux-pnpm-other",
+            collect_runs._cache_keywords_for_finding(prefixed_row),
+        )
+        assert status != "miss"
+
+
+def test_opt61_scopes_confirmation_to_the_saved_key_family(tmp_path) -> None:
+    cases = (
+        ("target", "cargo"),
+        ("node_modules", "npm"),
+        ("~/.m2/repository", "maven"),
+    )
+    for index, (path, family) in enumerate(cases):
+        rows = _scan(tmp_path / f"key-family-{index}", f"""      - uses: actions/cache@v4
+        with:
+          path: {path}
+          key: {family}-${{{{ runner.os }}}}-${{{{ github.sha }}}}
+          restore-keys: other-${{{{ runner.os }}}}-
+      - run: {family} build
+""")
+        row = next(item for item in rows if item["pattern"] == "OPT61"
+                   and "restore" in item["evidence"].lower())
+        status, _line = collect_runs._cache_status_from_log(
+            f"Cache not found for input keys: {family}-Linux-deadbeef",
+            collect_runs._cache_keywords_for_finding(row),
+        )
+        assert status == "miss"
+
+
+def test_opt61_uses_the_specific_key_word_after_an_unlisted_prefix(tmp_path) -> None:
+    for index, prefix in enumerate(("ubuntu", "ci")):
+        rows = _scan(tmp_path / f"generic-prefix-{index}", f"""      - uses: actions/cache@v4
+        with:
+          path: ~/.cache
+          key: {prefix}-${{{{ runner.os }}}}-tool-${{{{ github.sha }}}}
+          restore-keys: other-${{{{ runner.os }}}}-
+      - run: tool build
+""")
+        row = next(item for item in rows if item["pattern"] == "OPT61"
+                   and "restore" in item["evidence"].lower())
+        own_status, _line = collect_runs._cache_status_from_log(
+            f"Cache not found for input keys: {prefix}-Linux-tool-deadbeef",
+            collect_runs._cache_keywords_for_finding(row),
+        )
+        unrelated_status, _line = collect_runs._cache_status_from_log(
+            f"Cache not found for input keys: {prefix}-Linux-pnpm-deadbeef",
+            collect_runs._cache_keywords_for_finding(row),
+        )
+        assert own_status == "miss"
+        assert unrelated_status == "unknown"
+
+
+def test_opt61_restore_key_cannot_relabel_the_saved_key_family(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/tool
+          key: tool-${{ runner.os }}-${{ github.sha }}
+          restore-keys: pnpm-${{ runner.os }}-
+      - run: tool build
+""")
+    row = next(item for item in rows if item["pattern"] == "OPT61"
+               and "restore" in item["evidence"].lower())
+    own_status, _line = collect_runs._cache_status_from_log(
+        "Cache not found for input keys: tool-Linux-deadbeef",
+        collect_runs._cache_keywords_for_finding(row),
+    )
+    unrelated_status, _line = collect_runs._cache_status_from_log(
+        "Cache not found for input keys: pnpm-Linux-deadbeef",
+        collect_runs._cache_keywords_for_finding(row),
+    )
+    assert row["cache_family"] == "tool"
+    assert own_status == "miss"
+    assert unrelated_status == "unknown"
 
 
 def test_opt61_accepts_a_matching_rolling_restore_prefix(tmp_path) -> None:
@@ -159,6 +249,15 @@ def test_opt61_flags_unpersisted_compiler_and_analysis_caches(tmp_path) -> None:
     )):
         rows = _scan(tmp_path / str(index), f"      - run: {command}\n")
         assert "OPT61" in _patterns(rows), command
+    mixed = _scan(tmp_path / "mixed", """      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ runner.os }}
+      - run: STATICCHECK_CACHE=/tmp/staticcheck staticcheck ./...
+""")
+    temp_row = next(row for row in mixed if row["pattern"] == "OPT61"
+                    and "temporary storage" in row["evidence"])
+    assert temp_row["cache_family"] == "staticcheck"
 
 
 def test_opt61_accepts_a_persisted_sccache_directory(tmp_path) -> None:
@@ -171,6 +270,297 @@ def test_opt61_accepts_a_persisted_sccache_directory(tmp_path) -> None:
       - run: cargo build
 """)
     assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_checks_declared_sccache_directory_for_all_compiler_consumers(
+        tmp_path) -> None:
+    for index, command in enumerate((
+            "cargo clippy --all-targets",
+            "cargo nextest run",
+            "cargo +nightly clippy --all-targets",
+            "cargo +stable nextest run",
+    )):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: {command}
+""")
+
+        assert "OPT61" in _patterns(rows), command
+
+        matching = _scan_workflow(tmp_path / f"matching-{index}", f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /var/cache/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: {command}
+""")
+
+        assert "OPT61" not in _patterns(matching), command
+
+
+def test_opt61_ignores_nextest_version_before_a_correctly_persisted_run(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo nextest --version
+      - run: cargo nextest run
+        env:
+          SCCACHE_DIR: /build/sccache
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_ignores_an_unused_job_sccache_dir_when_builds_override_it(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: cargo test
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: git diff --exit-code
+      - run: ls -la target
+      - run: cat Cargo.lock
+      - run: rustup component add clippy
+""")
+
+    assert "OPT61" not in _patterns(rows)
+
+
+def test_opt61_checks_job_sccache_dir_used_by_cargo_doc_after_an_override(
+        tmp_path) -> None:
+    rows = _scan_workflow(tmp_path, """name: CI
+on: pull_request
+jobs:
+  mismatched-sccache-doc:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: cargo doc --no-deps
+""")
+
+    findings = [row for row in rows if row.get("pattern") == "OPT61"]
+    assert findings
+    assert "mismatched-sccache-doc" in findings[0]["affected_jobs"]
+
+
+def test_opt61_checks_inherited_sccache_dir_after_a_saved_build_override(
+        tmp_path) -> None:
+    commands = (
+        "cargo check --all-targets",
+        "cargo bench --no-run",
+        "cargo hack check",
+        "cargo llvm-cov nextest",
+        "cross build --target aarch64-unknown-linux-gnu",
+        "just build",
+        "./scripts/build.sh",
+        "python scripts/build.py",
+        "bash ci/compile.sh",
+        "task build",
+        "echo $(./scripts/build.sh)",
+    )
+    undetected: list[str] = []
+    for index, command in enumerate(commands):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: {command}
+""")
+
+        if "OPT61" not in _patterns(rows):
+            undetected.append(command)
+
+    assert undetected == []
+
+
+def test_opt61_ignores_non_build_steps_after_a_saved_build_override(
+        tmp_path) -> None:
+    commands = (
+        "mkdir -p dist",
+        "cp Cargo.lock dist/",
+        "tar -cf dist.tar dist",
+        "du -sh target",
+        "find target -maxdepth 1 -type f",
+        "grep -R TODO src",
+        "head -n 5 Cargo.lock",
+        "rustc --version",
+        "cargo --version",
+        "cargo fmt --check",
+        "rustup show",
+        "df -h",
+        "test -f Cargo.lock",
+        "ls -la $HOME",
+        "echo ok | tee log.txt",
+        "git diff --exit-code",
+        "cat Cargo.lock",
+        "npm --version",
+        "pnpm --version",
+        "yarn --version",
+        "bun --version",
+        "just --list",
+        "task --version",
+        "task --list",
+        "cargo clippy --version",
+        "cargo +nightly clippy --version",
+        "rustc   --version",
+        "rustc -Vv",
+        "rustc --print target-list",
+    )
+    false_positives: list[str] = []
+    for index, command in enumerate(commands):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /build/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: cargo build
+        env:
+          SCCACHE_DIR: /build/sccache
+      - run: {command}
+""")
+
+        if "OPT61" in _patterns(rows):
+            false_positives.append(command)
+
+    assert false_positives == []
+
+
+def test_opt61_checks_declared_sccache_directory_for_unlisted_consumers(
+        tmp_path) -> None:
+    commands = (
+        "cargo doc --no-deps",
+        "cargo bench --no-run",
+        "cargo check --all-targets",
+        "cargo hack check",
+        "cargo llvm-cov nextest",
+        "cross build --target aarch64-unknown-linux-gnu",
+        "just build",
+        "./scripts/build.sh",
+        "python scripts/build.py",
+        "bash ci/compile.sh",
+        "python build.py",
+        "python3.12 -I build.py",
+        "bash build.sh",
+        "sh compile.sh",
+        "cargo xtask build",
+        "cargo run --bin xtask -- build",
+        "$GITHUB_WORKSPACE/scripts/build.sh",
+        "task build",
+    )
+    undetected: list[str] = []
+    for index, command in enumerate(commands):
+        rows = _scan_workflow(tmp_path / str(index), f"""name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/sccache
+          key: sccache-${{{{ github.sha }}}}
+      - run: {command}
+""")
+
+        if "OPT61" not in _patterns(rows):
+            undetected.append(command)
+
+    assert undetected == []
+
+    matching = _scan_workflow(tmp_path / "matching", """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      SCCACHE_DIR: /var/cache/sccache
+      RUSTC_WRAPPER: sccache
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: /var/cache/sccache
+          key: sccache-${{ github.sha }}
+      - run: cargo doc --no-deps
+""")
+
+    assert "OPT61" not in _patterns(matching)
 
 
 def test_opt61_accepts_a_persisted_temporary_analysis_cache(tmp_path) -> None:

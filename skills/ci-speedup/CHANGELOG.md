@@ -1,5 +1,8 @@
 # Changelog
 
+- Keep schedule-, release-, and workflow-dispatch-only findings visible with their lane disclosure when their job also appears as a pull-request long pole.
+- Render a supplied gap-fill analysis when a generic structural pole also has a secondary finding or off-category log match. Every supplied analysis key now reports its rendered or declined disposition on stderr without rewriting the findings input, including invalid, unbound, below-cap and aggregation-gate inputs. (#323)
+- **2026-11-12** — Build gate rankings from the run/job lists of at least 100 completed pull-request commits spanning five days when history permits, page past a push-only front page on PR-enabled workflows, stop once the required population is available, and read job lists only for the newest population needed to meet those goals (extending when path-conditional jobs remove candidates). Fold every completed candidate from a cached first page, continue through a full sibling workflow page — including one whose visible page is push-only — before treating older commits as complete, and avoid scheduling job-list prefetches already held by the collection memo. Keep the readable population scoped to commits that ran every observable required check, so docs-only or skipped required jobs do not enter its ordering; retain failed job-list reads only as explicit partial, unverified rows. Preserve an empty scoped population when no commit ran the full observable suite, keep repo-published aggregate statuses unscoped rather than calling them absent, give an entirely unobservable required suite a distinct stop reason, and name required checks outside Actions without claiming their per-commit presence was measured. Keep agent summaries consistent with those diagnoses. Render per-commit wait within the verifier's physical bound, bind the verifier to the shared sample and page-cap contract, keep workflow-configuration boundaries local to their workflow, show the sampled date span, and label mostly partial populations as unreliable. Cap representative-sample job-list reads at 1,200 per audit and disclose that budget in the report. Golden replay now preserves each run's timestamp, job-list availability and commit identity without merging same-second commits or repeated runs, compares an oracle-derived population and gates over the same timestamp span, keeps the reviewed 120-second P50 tolerance and compares the order of the lead and recorded gates present on at least five percent of eligible commits, and bounds future month recordings to 400 attempted job-list reads. A long pole that is rarely the slowest check no longer takes the typical-gate wording in its drill and agent hand-off because it is ordered first. (#333)
 - Recognize replayed Go, Bazel, Gradle, and Turbo test results in fetched logs, exclude replay-heavy samples from pole drills and cross-run magnitude baselines, and disclose the exclusion in the report.
 - Keep literal compile targets visible beside unknown Make targets, and preserve the environment boundary of single-quoted Docker payloads when detecting emulated builds.
 - Credit static cache findings only after sampled job logs confirm the predicted miss and the existing budget, invalidation, and transfer-cost guards all pass.
@@ -30,7 +33,9 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-12** — Cap baseline job-log reads across an entire post-fix verification, persist the sampled baseline and any in-flight sample or rerun state for later polls even when the branch-head lookup is temporarily unavailable, and disclose the calls used against the budget.
 - **2026-11-11** — Show Wilson intervals and sample spans beside gate frequencies, withhold unsupported pole order from the chat close, and disclose while excluding sub-60-second bookkeeping jobs from developer-wait poles (#317).
+- **2026-11-11** — Split long poles into frequent and rarely-last groups, sort each group by P50, show the finish-last count on every row using the renderer's sampled-population denominator, open the Bottom line with Long pole 1, and carry each pole's frequency group and `needs:`-upstream reason into the report and chat hand-off (#318).
 - **2026-11-11** — Exclude matrix legs whose dominant test step was skipped when their only remaining steps ran on every leg, while preserving platform-specific legs as real work.
 
 ### Added
@@ -1297,6 +1302,16 @@ unversioned and updates by reinstall from `main`.
   run improvised).
 
 ### Fixed
+
+- **2026-11-11** — Scope serial Vitest test counts and measured spans to the candidate file, so a long isolated file is still detected when another test file runs in the same invocation or before it.
+- **2026-11-11** — Check the declared compiler-cache directory used by any build command before accepting a similarly named persisted path, while ignoring steps that only inspect files or install toolchain components.
+- **2026-11-11** — Keep shard-growth warnings visible when matrix legs upload reports or download report-only artifacts, even from a job that also builds; preserve ordinary artifact-handoff exemptions and recognise an `index` matrix axis when it feeds the runner's `--shard` argument.
+- **2026-11-11** — Bind static cache-lint confirmation to the cache family named by its saved key, so an unrelated path or package-cache miss cannot confirm or size a BuildKit, compiler, analysis, Go, or Jest cache finding.
+- **2026-11-11** — Keep only cache-state evidence from verification job logs, so markers beyond long unrelated output remain visible, and use run position for cache-less cohorts instead of withholding an otherwise clean comparison.
+- **2026-11-11** — Keep path-filter findings visible when sampled pull-request runs have no PR number, and disclose the measured share when only part of the run sample can be mapped to pull requests.
+- **2026-11-11** — Bound Buildx node parsing to complete inspect blocks, so later `docker info` output cannot invent builder nodes and a bootstrapped inspect supersedes an earlier inactive snapshot.
+- **2026-11-11** — Report a newly introduced aggregate finding once instead of also describing all of its jobs as scope growth; existing aggregate findings still warn when their job scope expands.
+- **2026-11-11** — Keep a lone sharded test job out of OPT14 handoff findings while retaining its effective shard count as guard-only evidence, so growing the shard matrix still produces one differential warning.
 
 - **2026-11-10** — Treat `go run <source-file> lint` and `go run <source-file> check...` as check-only gates while keeping runnable `./cmd` applications and mixed work steps out of that classification.
 - **2026-11-10** — Warn when a shard-like matrix grows while each leg repeats checkout and dependency setup, naming the job and effective before/after shard counts while honoring matrix include/exclude rules and ignoring diagnostic dimensions.

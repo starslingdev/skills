@@ -2658,11 +2658,12 @@ def test_provenance_omits_deep_scan_note_for_a_shallow_walk():
     block = "\n".join(bp._provenance_block(
         _prov_doc(sampled_pr_count=20, sample_fetched=50), "o/r", "2026-06-08"))
     assert "recent PRs**" not in block
-    assert "20/20 sampled PRs" in block          # the plain honest baseline
+    assert "20 of 20 PRs sampled" in block       # the plain honest baseline
 
 
 def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():
-    # P2 regression: an external required suite that was READ but ran on no sampled PR
+    # P2 regression: an external required suite that was READ but was not observable
+    # in the sampled Actions job lists
     # sets required_suite_scoped=False AND required_suite_unsatisfiable=True. The
     # provenance must report the PR-floor cause, NOT the "unreadable (no admin / 404)"
     # cause — the two share the scoped=False flag but are different failures.
@@ -2670,7 +2671,8 @@ def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():
         _prov_doc(required_suite_scoped=False, required_suite_unsatisfiable=True),
         "o/r", "2026-06-08"))
     assert "No file-backed required gate" in block
-    assert "ran on **none** of the sampled PRs" in block
+    assert "per-commit presence and timing could not be established" in block
+    assert "ran on **none** of the sampled PRs" not in block
     assert "Required checks were unreadable" not in block      # the wrong cause
 
 
@@ -2882,6 +2884,23 @@ def test_demoted_frequency_pole_prompt_and_toc_drop_typical_gate_framing():
     # The demoted row must not carry a "gates N/NN PRs" tail (the sibling `test`'s frequency).
     gore_row = next(l for l in toc.splitlines() if "goreleaser-check](#pole-2)" in l)
     assert "gates" not in gore_row
+
+
+def test_rarely_slowest_first_pole_is_not_framed_as_the_typical_gate():
+    # The first ordered pole is the frequency `blocker`, but under the `pole_n` schema that
+    # identity must not reclaim the typical-gate wording: `test` is the slowest check on only
+    # 1/20 sampled PRs (below the recurring floor), so its drill says "Rarely the merge pole",
+    # matching the verifier's spine-demoted rule (Next.js `Wait for preview tarball` shape).
+    doc = _doc_demoted_frequency_pole()
+    cp = doc["pr_critical_path"]
+    cp["checks"][0]["pole_n"] = 1
+    cp["checks"][1]["pole_n"] = 0
+    md = bp.render(doc, {"ci": _IMPORT_BOUND_LOG}, {},
+                   {"ci": "https://example.invalid/actions/runs/1"}, "2026-06-08")
+    start = md.index("Long pole 1:")
+    first = md[start:md.index("Long pole 2:", start)]
+    assert "Slowest check a typical PR waits on" not in first
+    assert "Rarely the merge pole" in first
 
 
 def test_bimodal_note_surfaces_a_fast_median_check_but_not_a_slow_median_one():
@@ -7332,6 +7351,290 @@ def test_render_minority_slow_genuine_minority_keeps_opt_in_wording():
     assert "ran on a minority of sampled PRs (label-gated or path-filtered" in out
 
 
+def _pole_order_agreement_doc() -> dict:
+    """Four public-facing poles shaped like issue #305's example.
+
+    A is the longest frequent gate.  B is a shorter member of the saved modal
+    ``needs:`` chain.  D is longer than all of them but finished last only once.
+    """
+    npop = 20
+    checks = [
+        {"name": "A", "p50_s": 250.0, "present_on": npop,
+         "workflow_file": "a.yml", "pole_n": 9},
+        {"name": "B setup", "p50_s": 30.0, "present_on": npop,
+         "workflow_file": "b.yml", "pole_n": 0},
+        {"name": "B", "p50_s": 230.0, "present_on": npop,
+         "workflow_file": "b.yml", "pole_n": 6},
+        {"name": "C", "p50_s": 125.0, "present_on": npop,
+         "workflow_file": "c.yml", "pole_n": 3},
+        {"name": "D", "p50_s": 280.0, "present_on": npop,
+         "workflow_file": "d.yml", "pole_n": 1},
+    ]
+    winners = ["A"] * 9 + ["B"] * 6 + ["C"] * 3 + ["D"] + ["external"]
+    populations = []
+    for winner in winners:
+        rows = [[c["name"], 1000.0 if c["name"] == winner else c["p50_s"]]
+                for c in checks]
+        if winner == "external":
+            rows.append(["external", 1100.0])
+        populations.append([0.1, rows])
+    poles = [
+        {"check": c["name"], "p50_s": c["p50_s"],
+         "workflow_file": c["workflow_file"], "job": c["name"]}
+        for c in checks if c["name"] != "B setup"
+    ]
+    return {
+        "repo": "example/repo",
+        "required_checks": ["A"],
+        "data_sources": {},
+        "pr_critical_path": {
+            "critical_path_check": "A",
+            "critical_path_s": 250.0,
+            "check_present_n_pr": npop,
+            "checks": checks,
+            "populations": populations,
+            "poles": poles,
+            "chain_summary": {
+                "modal_chain": ["B setup", "B"],
+                "chain_p50_s": 230.0,
+                "chain_win_p50_s": 0.0,
+                "runner_up_p50_s": 250.0,
+                "makespan_p50_s": 280.0,
+                "divergence_pct": 0.0,
+            },
+        },
+    }
+
+
+def test_poles_render_in_two_duration_ordered_groups_and_bottom_names_pole_one():
+    report = bp.render(_pole_order_agreement_doc())
+    contents = report.split("## 📋 Contents", 1)[1].split("<a id=\"long-pole-map\"", 1)[0]
+
+    assert "Checks that hold up most PRs" in contents
+    assert "Long but rarely the last to finish" in contents
+    frequent = contents.index("Checks that hold up most PRs")
+    rare = contents.index("Long but rarely the last to finish")
+    assert frequent < contents.index("[A]") < contents.index("[B]") < contents.index("[C]") < rare
+    assert rare < contents.index("[D]")
+    for check, p50, gates in (("A", "4m 10s", "9/20"), ("B", "3m 50s", "6/20"),
+                              ("C", "2m 05s", "3/20"), ("D", "4m 40s", "1/20")):
+        row = next(line for line in contents.splitlines() if f"[{check}]" in line)
+        assert f"P50 {p50}" in row and f"finishes last on {gates} PRs" in row
+    d_row = next(line for line in contents.splitlines() if "[D]" in line)
+    assert "a slower check usually ran alongside" in d_row
+    assert "**Frequency group:** Checks that hold up most PRs." in _pole_section(report, "A")
+    assert "**Frequency group:** Long but rarely the last to finish." in _pole_section(
+        report, "D")
+    bottom = next(line for line in report.splitlines() if line.startswith("> **Bottom line.**"))
+    assert bottom.startswith(
+        "> **Bottom line.** Long pole 1, `A`, has P50 **4m 10s** and is the longest "
+        "check in **Checks that hold up most PRs**."
+    )
+
+
+def test_bottom_line_long_pole_one_cost_and_group_are_verified(tmp_path):
+    doc = _pole_order_agreement_doc()
+    clean = bp.render(doc)
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+
+    variants = [
+        clean.replace("has P50 **4m 10s**", "has P50 **9m 10s**", 1),
+        clean.replace(
+            "is the longest check in **Checks that hold up most PRs**",
+            "is the longest check in **Long but rarely the last to finish**",
+            1,
+        ),
+    ]
+    for report in variants:
+        check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+        assert not check.ok, check.detail
+
+
+def test_all_rare_poles_are_not_introduced_as_checks_that_gate_your_merge():
+    doc = _pole_order_agreement_doc()
+    for row in doc["pr_critical_path"]["checks"]:
+        row["pole_n"] = 1 if row["name"] in {"A", "B", "C", "D"} else 0
+
+    report = bp.render(doc)
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+
+    assert "the checks that gate your merge" not in contents
+    assert "measured conditional last-finishers" in contents
+
+
+def test_needs_chain_member_is_not_said_to_run_alongside_a_slower_check(tmp_path):
+    doc = _pole_order_agreement_doc()
+    for row in doc["pr_critical_path"]["checks"]:
+        if row["name"] == "B":
+            row["pole_n"] = 1
+
+    report = bp.render(doc)
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+    b_row = next(line for line in contents.splitlines() if "[B]" in line)
+    assert "runs in the measured `needs:` chain" in b_row
+    assert "a slower check usually ran alongside" not in b_row
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+    assert check.ok, check.detail
+
+
+def test_phase_six_handoff_uses_the_report_frequency_groups():
+    text = (_SCRIPTS.parent / "SKILL.md").read_text(encoding="utf-8")
+    assert "Open with the report's Long pole 1" in text
+    assert "Checks that hold up most PRs" in text
+    assert "Long but rarely the last to finish" in text
+    assert re.search(r"do not call a\s+rare-last row a gating check", text, re.I)
+
+
+def test_pole_group_renderer_and_verifier_use_the_population_denominator(tmp_path):
+    doc = _pole_order_agreement_doc()
+    doc["pr_critical_path"]["populations"] = doc["pr_critical_path"]["populations"][:-1]
+
+    report = bp.render(doc)
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+    assert "finishes last on 9/19 PRs" in contents
+
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+    assert check.ok, check.detail
+
+
+def test_pole_group_verifier_excludes_an_unconfirmed_only_population(tmp_path):
+    doc = _pole_order_agreement_doc()
+    d_check = next(row for row in doc["pr_critical_path"]["checks"]
+                   if row["name"] == "D")
+    d_check["required_reachable"] = False
+    doc["pr_critical_path"]["populations"].append([0.1, [["D", 900.0]]])
+
+    report = bp.render(doc)
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+
+    assert check.ok, check.detail
+
+
+def test_pole_groups_sort_by_the_p50_the_rows_display():
+    doc = _pole_order_agreement_doc()
+    a_check = next(row for row in doc["pr_critical_path"]["checks"]
+                   if row["name"] == "A")
+    a_pole = next(row for row in doc["pr_critical_path"]["poles"]
+                  if row["check"] == "A")
+    a_check["p50_s"] = a_pole["p50_s"] = 100.0
+    a_check["bimodal"] = a_pole["bimodal"] = {"high_p50_s": 500.0}
+
+    report = bp.render(doc)
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        "<a id=\"long-pole-map\"", 1)[0]
+    assert contents.index("[B]") < contents.index("[C]") < contents.index("[A]")
+
+
+def test_one_of_one_last_finisher_is_not_called_rare():
+    doc = _pole_order_agreement_doc()
+    doc["pr_critical_path"]["check_present_n_pr"] = 1
+    doc["pr_critical_path"]["populations"] = doc["pr_critical_path"]["populations"][:1]
+    for row in doc["pr_critical_path"]["checks"]:
+        row["present_on"] = 1
+        row["pole_n"] = 1 if row["name"] == "A" else 0
+
+    report = bp.render(doc)
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        "<a id=\"long-pole-map\"", 1)[0]
+    a_row = next(line for line in contents.splitlines() if "[A]" in line)
+    assert contents.index("Checks that hold up most PRs") < contents.index(a_row)
+    assert "rarely" not in a_row and "slower check usually ran alongside" not in a_row
+
+
+def test_unconfirmed_check_cannot_become_long_pole_one():
+    doc = _pole_order_agreement_doc()
+    counts = {"A": 1, "B": 1, "C": 1, "D": 0, "B setup": 0}
+    for row in doc["pr_critical_path"]["checks"]:
+        row["pole_n"] = counts[row["name"]]
+        if row["name"] == "D":
+            row["required_reachable"] = False
+            row["p50_s"] = 600.0
+    next(row for row in doc["pr_critical_path"]["poles"]
+         if row["check"] == "D")["p50_s"] = 600.0
+
+    report = bp.render(doc)
+    bottom = next(line for line in report.splitlines()
+                  if line.startswith("> **Bottom line.**"))
+    assert "Long pole 1, `A`," in bottom
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        "<a id=\"long-pole-map\"", 1)[0]
+    assert contents.index("[D]") > contents.index("[C]")
+
+
+def test_verifier_rejects_pole_group_order_bottom_disagreement_and_missing_rare_reason(tmp_path):
+    doc = _pole_order_agreement_doc()
+    clean = bp.render(doc)
+    contents = clean.split("## 📋 Contents", 1)[1].split("<a id=\"long-pole-map\"", 1)[0]
+    a_row = next(line for line in contents.splitlines() if "[A]" in line)
+    b_row = next(line for line in contents.splitlines() if "[B]" in line)
+    d_row = next(line for line in contents.splitlines() if "[D]" in line)
+    variants = [
+        clean.replace(a_row + "\n" + b_row, b_row + "\n" + a_row),
+        clean.replace("Long pole 1, `A`", "Long pole 1, `B`"),
+        clean.replace(" · a slower check usually ran alongside", ""),
+        clean.replace("[A](#pole-1)", "[Z](#pole-1)").replace(
+            "Long pole 1, `A`", "Long pole 1, `Z`"),
+        clean.replace("at least 2 sampled PRs", "at least 3 sampled PRs").replace(
+            "fewer than 2 sampled PRs", "fewer than 3 sampled PRs"),
+        clean.replace("at least 2 sampled PRs", "at least 9 sampled PRs"),
+        clean.replace("fewer than 2 sampled PRs", "fewer than 9 sampled PRs"),
+    ]
+    vr = _load_verify_report()
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    for i, report in enumerate(variants):
+        report_path = tmp_path / f"report-{i}.md"
+        report_path.write_text(report, encoding="utf-8")
+        failures = [
+            c for c in vr.run_checks(report, report_path, findings, skill_repo=None)
+            if c.name == "pole groups are duration-ordered and Bottom line agrees with Long pole 1"
+            and not c.skipped and not c.ok
+        ]
+        assert failures, f"pole-order verifier accepted tampered variant {i}"
+
+
+def test_verifier_rejects_a_drill_frequency_group_that_disagrees_with_contents(tmp_path):
+    doc = _pole_order_agreement_doc()
+    clean = bp.render(doc)
+    tampered = clean.replace(
+        "**Frequency group:** Checks that hold up most PRs.",
+        "**Frequency group:** Long but rarely the last to finish.",
+        1,
+    )
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+
+    check = _load_vr().check_pole_groups_and_bottom_agree(tampered, findings)
+
+    assert not check.ok, check.detail
+
+
+def test_verifier_rejects_a_forged_terminal_needs_reason(tmp_path):
+    doc = _pole_order_agreement_doc()
+    clean = bp.render(doc)
+    tampered = clean.replace(
+        "a slower check usually ran alongside",
+        "feeds the terminal `needs:` gate",
+        1,
+    )
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+
+    check = _load_vr().check_pole_groups_and_bottom_agree(tampered, findings)
+
+    assert not check.ok, check.detail
+
+
 def test_render_legacy_no_pole_n_keeps_presence_wording():
     # Backward compat: a pre-`pole_n` doc (no `pole_n` on any check) still falls back to the legacy
     # PRESENCE demotion + its original "Opt-in / rare — ran on only N/npop" wording, unchanged.
@@ -8221,6 +8524,92 @@ def test_aggregation_gate_pole_tells_the_upstream_story_not_a_prompt():
     assert "before optimizing" not in sec
     # The OTHER poles are untouched — each still drills and hands off.
     assert "🤖 Prompt for your coding agent" in _pole_section(md, "unit")
+
+
+def test_aggregation_upstream_inherits_the_terminal_verdict_frequency(tmp_path):
+    doc = _agg_gate_doc()
+    for check in doc["pr_critical_path"]["checks"]:
+        check["pole_n"] = 20 if check["name"] == "thank you, build" else 0
+    doc["pr_critical_path"]["poles"].append({
+        "check": "stable - x86_64-linux", "p50_s": 355.0,
+        "workflow_file": _AGG_DEPLOY, "job": "native",
+        "dominant_step": "Build native", "dominant_p50_s": 350.0,
+        "steps": [{"step": "Build native", "category": "build", "p50_s": 350.0}],
+    })
+
+    report = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+    upstream = contents.index("[stable - x86_64-linux]")
+    sink = contents.index("[thank you, build]")
+    assert upstream < sink
+    upstream_row = next(line for line in contents.splitlines()
+                        if "[stable - x86_64-linux]" in line)
+    assert "finishes last on 20/20 PRs" in upstream_row
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+    assert check.ok, check.detail
+
+
+def test_aggregation_upstream_names_its_terminal_gate_reason():
+    doc = _agg_gate_doc()
+    for check in doc["pr_critical_path"]["checks"]:
+        check["pole_n"] = 1 if check["name"] == "thank you, build" else 0
+    doc["pr_critical_path"]["poles"].append({
+        "check": "stable - x86_64-linux", "p50_s": 355.0,
+        "workflow_file": _AGG_DEPLOY, "job": "native",
+        "dominant_step": "Build native", "dominant_p50_s": 350.0,
+        "steps": [{"step": "Build native", "category": "build", "p50_s": 350.0}],
+    })
+
+    report = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+    upstream_row = next(line for line in contents.splitlines()
+                        if "[stable - x86_64-linux]" in line)
+    assert "feeds the terminal `needs:` gate" in upstream_row
+    assert "a slower check usually ran alongside" not in upstream_row
+
+
+def test_aggregation_frequency_and_reason_follow_the_retained_matrix_representative(tmp_path):
+    doc = _agg_gate_doc()
+    for check in doc["pr_critical_path"]["checks"]:
+        check["pole_n"] = 1 if check["name"] == "thank you, build" else 0
+    slow_median = {
+        "low_p50_s": 300.0, "high_p50_s": 560.0, "slow_frac": 0.6,
+    }
+    fast_median = {
+        "low_p50_s": 180.0, "high_p50_s": 900.0, "slow_frac": 0.4,
+    }
+    x86 = next(row for row in doc["pr_critical_path"]["checks"]
+               if row["name"] == "stable - x86_64-linux")
+    x86.update(name="stable - linux-x86", p50_s=500.0, pole_n=0,
+               bimodal=slow_median)
+    doc["pr_critical_path"]["checks"].append({
+        "name": "stable - linux-arm", "p50_s": 300.0, "present_on": 20,
+        "pole_n": 0, "workflow_file": _AGG_DEPLOY, "bimodal": fast_median,
+    })
+    doc["pr_critical_path"]["poles"].extend([
+        {"check": "stable - linux-x86", "p50_s": 500.0,
+         "workflow_file": _AGG_DEPLOY, "job": "native", "bimodal": slow_median,
+         "steps": [{"step": "Build", "p50_s": 400.0}]},
+        {"check": "stable - linux-arm", "p50_s": 300.0,
+         "workflow_file": _AGG_DEPLOY, "job": "native", "bimodal": fast_median,
+         "steps": [{"step": "Build", "p50_s": 250.0}]},
+    ])
+
+    report = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+    representative = next(line for line in contents.splitlines()
+                          if "[stable - linux-x86]" in line)
+    assert "finishes last on 1/20 PRs" in representative
+    assert "feeds the terminal `needs:` gate" in representative
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+    assert check.ok, check.detail
 
 
 def test_aggregation_gate_pole_role_line_is_a_registered_claim():

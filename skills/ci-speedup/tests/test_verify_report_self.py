@@ -322,6 +322,8 @@ def test_measured_opt32_is_the_only_new_pole_hygiene_exception(tmp_path: Path):
             "workflow_file": ".github/workflows/ci.yml",
             "path_filter_measurement": {
                 "sampled_prs": 60,
+                "sampled_runs": 60,
+                "runs_with_pr_number": 60,
                 "would_skip_prs": skipped,
                 "hit_rate": rate,
             },
@@ -336,12 +338,47 @@ def test_measured_opt32_is_the_only_new_pole_hygiene_exception(tmp_path: Path):
                     findings=finding(skipped=0, rate=0.0)) == "PASS"
     assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
                     findings=finding(skipped=3, rate=0.05, modeled=49.3)) == "PASS"
+    partial = finding(skipped=0, rate=0.0)
+    stamp = partial["findings"][0]["path_filter_measurement"]
+    stamp["runs_with_pr_number"] = 30
+    partial["findings"][0]["evidence"] = "Measured on 30 of 60 sampled runs"
+    assert _tag_for(rep + sect + "\nMeasured on 30 of 60 sampled runs", _DOUBLE_FRAME, tmp_path,
+                    findings=partial) == "FAIL"
     # FAIL: an inconsistent stamp or positive result without its modeled value
     # cannot use the exception. Other patterns remain covered by the discriminator above.
     assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
                     findings=finding(skipped=3, rate=0.5, modeled=49.3)) == "FAIL"
     assert _tag_for(rep + sect, _DOUBLE_FRAME, tmp_path,
                     findings=finding(skipped=3, rate=0.05)) == "FAIL"
+
+
+def test_opt32_coverage_check_respects_the_rendered_member_cap(tmp_path: Path):
+    disclosures = [f"Measured on {30 + i} of {60 + i} sampled runs" for i in range(9)]
+    findings = []
+    for i, disclosure in enumerate(disclosures):
+        numbered = 30 + i
+        findings.append({
+            "pattern": "OPT32",
+            "runner_min_saving": None,
+            "wall_clock_p50_s": 0.0,
+            "job": f"test-{i}",
+            "affected_jobs": [f"test-{i}"],
+            "workflow_file": f".github/workflows/ci-{i}.yml",
+            "evidence": disclosure,
+            "path_filter_measurement": {
+                "sampled_prs": numbered,
+                "sampled_runs": 60 + i,
+                "runs_with_pr_number": numbered,
+                "would_skip_prs": 0,
+                "hit_rate": 0.0,
+            },
+        })
+    report = (_good() + _also_noticed_section("ci-0.yml", "test-0",
+                                              "OPT32 - Add path filters")
+              + "\n" + "\n".join(disclosures[:8]))
+
+    assert _tag_for(report, _DOUBLE_FRAME, tmp_path,
+                    findings={"findings": findings}) == "PASS"
 
 
 def _struct_findings(*findings: dict) -> dict:
@@ -1930,6 +1967,8 @@ def test_same_matrix_stays_coupled_to_the_engine():
         ("Python 3.9", "Python 3.13", wf, wf),               # space-variant, shared job
         ("test (22.x)", "test (24.x)", wf, wf),              # paren matrix base
         ("integration-test (3.1.1, 3.12)", "integration-test (3.1.1, 3.13)", wf, wf),
+        ("test prod (6/10) / build", "test dev (8/10) / build", wf, wf),
+        ("test prod (6/10) / build", "test prod (1/10, 18.3.1) / build", wf, wf),
         ("prisma-adapter Integration Test", "drizzle-adapter Integration Test", wf, wf),  # prefix/suffix
         ("build", "test", wf, wf),                            # distinct, never a matrix
         ("build", "build", wf, wf),                           # identical
@@ -7180,6 +7219,8 @@ def test_unmeasured_path_filter_must_render_even_without_a_drilled_pole(tmp_path
             "status": "unmeasured",
             "reason": "changed-file list unavailable or incomplete",
             "sampled_prs": 60,
+            "sampled_runs": 60,
+            "runs_with_pr_number": 60,
         },
     }]}), encoding="utf-8")
 
@@ -10154,7 +10195,7 @@ def test_opt80_tail_line_renders_at_the_pole_and_pairs_with_its_block(tmp_path: 
     doc = _opt80_tail_doc()
     report, report_path, findings_path = _tier2_artifacts(tmp_path, doc)
     line = "one run in 5 spends about 110s longer on checkout, and that run's log shows the fetch stalling"
-    pole = report.split("Long pole 1", 1)[1].split("\n## ", 1)[0]
+    pole = re.split(r"\n## [^\n]*Long pole 1:", report, maxsplit=1)[1].split("\n## ", 1)[0]
     assert "<!-- opt80-tail:f-promoted -->" in pole and line in pole, pole[:1500]
     assert vr.check_opt80_tail_lines(report, findings_path).ok
     assert vr.check_tier2_neutrality_derived(report, findings_path, report_path).ok
@@ -10612,7 +10653,7 @@ def test_opt80_tail_marker_inside_a_pole_section_is_not_off_pole(tmp_path: Path)
     doc = _opt80_tail_doc()
     report, _rp, _fp = _tier2_artifacts(tmp_path, doc)
     marker = "<!-- opt80-tail:f-promoted -->"
-    assert marker in report.split("Long pole 1", 1)[1]
+    assert marker in re.split(r"\n## [^\n]*Long pole 1:", report, maxsplit=1)[1]
     f = doc["findings"][0]
     assert vr._vr_opt80_tail_rendered_off_pole(f, report) is False
     # Off-pole render: the same helper says True, and the check accepts it.
@@ -10632,7 +10673,8 @@ def test_opt80_tail_marker_inside_a_pole_section_is_not_off_pole(tmp_path: Path)
     assert moved.count(pole_hdr) == 1
     moved = moved.replace(pole_hdr, pole_hdr + "\n\n" + marker + "\n" + marked_line, 1)
     assert moved.count(marker) == 1
-    assert marker in moved.split("Long pole 1", 1)[1].split("\n## ", 1)[0]
+    pole = re.split(r"\n## [^\n]*Long pole 1:", moved, maxsplit=1)[1].split("\n## ", 1)[0]
+    assert marker in pole
     assert vr._vr_opt80_tail_rendered_off_pole(f, moved) is False
     report_path.write_text(moved, encoding="utf-8")
     chk = vr.check_tier2_neutrality_derived(moved, findings_path, report_path)

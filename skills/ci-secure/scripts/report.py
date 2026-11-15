@@ -94,7 +94,14 @@ _SCOPE_HONESTY_LINE = (
 # `gh_checks` map. Falls back to the bare pattern id when unmapped.
 _GH_CHECK_LABELS = {
     "P14.11": "impostor-SHA",
+    "P14.24": "release-immutability lookup",
 }
+
+# Network lookups that can only REMOVE a finding (P14.24 asks GitHub whether a
+# tag-pinned extension's release is immutable). When one does not fully run,
+# nothing is missing from the findings, so it is disclosed as a NOTE rather
+# than under the WARNING that says an absent finding is NOT a pass.
+_GH_LOOKUPS_THAT_ONLY_SUPPRESS = frozenset({"P14.24"})
 
 # Every finding comes from one source now (the ci-secure catalog). The
 # constant survives as the group key's first slot, which keeps the grouping
@@ -480,6 +487,21 @@ def _group_severity(members: list[dict[str, Any]]) -> str:
     )
 
 
+def _group_representative(members: list[dict[str, Any]]) -> dict[str, Any]:
+    """Member whose evidence profile governs shared group prose and fixes.
+
+    A producer may assign per-occurrence severity within one catalog pattern.
+    In that case the group headline already uses the worst severity, so its
+    scenario and remediation must come from a member at that same severity —
+    never from whichever workflow happened to sort first.
+    """
+    severity = _group_severity(members)
+    return next(
+        (member for member in members if member.get("severity", "MANUAL") == severity),
+        members[0] if members else {},
+    )
+
+
 def _occurrence_severity_breakdown(members: list[dict[str, Any]]) -> str:
     """Per-severity occurrence split, e.g. ``3 HIGH · 100 MEDIUM · 102 LOW``.
 
@@ -499,8 +521,107 @@ def _occurrence_severity_breakdown(members: list[dict[str, Any]]) -> str:
     )
 
 
-def _group_attacker_scenario(members: list[dict[str, Any]]) -> str:
-    return members[0].get("attacker_scenario") or ""
+# The plain sections every finding leads with, in reading order, as
+# (findings-JSON field inside `attacker_scenario`, rendered heading). Written
+# for a reader who is not an engineer; the catalog material renders below them
+# as a compact reference block. verify_report.py keeps its own copy of the
+# headings, so a renamed heading here goes red there.
+SCENARIO_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("what_it_does", "What this workflow does"),
+    ("why_flagged", "Why ci-secure flagged it"),
+    ("what_must_go_wrong", "What would have to go wrong first"),
+    ("attacker_could", "What an attacker could do then"),
+    ("verdict", "Verdict"),
+    ("how_to_close", "How to close it"),
+)
+_ATTACKER_FIELD = "attacker_could"
+
+
+def normalize_scenario(raw: Any) -> dict[str, str]:
+    """`attacker_scenario` as {field: text}, empty fields dropped.
+
+    The current contract is an object with one field per section; a field may
+    be a string or a list of strings (joined one per line). An older run wrote
+    one paragraph, which maps onto the attacker field so it still renders.
+    Anything else is treated as absent, never rendered as `str(obj)`.
+    """
+    if isinstance(raw, str):
+        return {_ATTACKER_FIELD: raw} if raw.strip() else {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, _heading in SCENARIO_SECTIONS:
+        value = raw.get(key)
+        if isinstance(value, list):
+            value = "\n".join(str(v) for v in value if str(v).strip())
+        if isinstance(value, str) and value.strip():
+            out[key] = value
+    return out
+
+
+def _group_attacker_scenario(members: list[dict[str, Any]]) -> dict[str, str]:
+    return normalize_scenario(
+        _group_representative(members).get("attacker_scenario"))
+
+
+_SCENARIO_LIST_ITEM_RE = re.compile(r"^(?:[-*•]\s+|(\d{1,2})[.)]\s+)")
+# A line that would turn into block markup (a heading, a quote, a table row, a
+# fence, raw HTML, a setext underline or a rule) if it started a paragraph.
+_BLOCK_MARKUP_START_RE = re.compile(r"^(?:#|>|\||`{3}|~{3}|<|=+$|[-*_]{3,}$)")
+
+
+def _md_safe_line(text: str) -> str:
+    """One line of agent prose made inert as block markup.
+
+    The scenario is written by the agent, which may quote the audited repo. A
+    line starting `## ` would forge a report heading (a fake `FIXED — Finding
+    1`), a fence would swallow the rest of the report, and a raw `<a id>` would
+    plant a second anchor. Escaping the first character keeps the words.
+    """
+    if text.startswith("<"):
+        return "&lt;" + text[1:]
+    if _BLOCK_MARKUP_START_RE.match(text):
+        return "\\" + text
+    return text
+
+
+def _render_scenario_field(text: str) -> list[str]:
+    """Markdown lines for one scenario field.
+
+    Each non-blank line becomes a paragraph, a `- ` bullet, or a numbered item,
+    with whitespace inside it collapsed. Lists stay tight; anything else is
+    separated by a blank line.
+    """
+    lines: list[str] = []
+    prev_kind = ""
+    for raw in text.splitlines():
+        line = " ".join(raw.split())
+        if not line:
+            continue
+        m = _SCENARIO_LIST_ITEM_RE.match(line)
+        if m:
+            body = _md_safe_line(line[m.end():])
+            kind = "ol" if m.group(1) else "ul"
+            rendered = f"{m.group(1)}. {body}" if m.group(1) else f"- {body}"
+        else:
+            kind = "p"
+            rendered = _md_safe_line(line)
+        if lines and (kind != prev_kind or kind == "p"):
+            lines.append("")
+        lines.append(rendered)
+        prev_kind = kind
+    return lines
+
+
+_APPROVAL_ROW_WORD = {"true": "yes", "false": "no", "unread": "not checked"}
+
+
+def _approval_setting(members: list[dict[str, Any]]) -> dict[str, str] | None:
+    """P14.18's `actions_can_approve_prs` fact, when the scan recorded one."""
+    value = members[0].get("actions_can_approve_prs")
+    if isinstance(value, dict) and value.get("state") in _APPROVAL_ROW_WORD:
+        return value
+    return None
 
 
 def _group_is_all_dormant(members: list[dict[str, Any]]) -> bool:
@@ -519,7 +640,7 @@ def _group_short_title(
 ) -> str:
     """The h4 title for a group — a single descriptive sentence-case
     phrase, with no per-file specifics."""
-    first = members[0]
+    first = _group_representative(members)
     pattern = first.get("pattern", "")
     cat = catalog_sections.get(pattern, _ExtractedSection())
     heading = cat.heading_text or pattern
@@ -683,28 +804,6 @@ _FALLBACK_SCENARIO_SUFFIX = (
 )
 
 
-def _stakes_line(attacker_text: str) -> str:
-    """The bold stakes-first one-liner that opens a finding section.
-
-    Derived from the finding's own attacker text (the orchestrator's
-    repo-grounded scenario when present, the catalog's capability line
-    otherwise) by taking its opening sentence — the part that states who the
-    attacker is and what they get. A second sentence is pulled in only when
-    the first is too short to stand alone. Nothing is invented: if there is
-    no attacker text, there is no stakes line.
-    """
-    text = " ".join((attacker_text or "").split())
-    if not text or text.startswith("_(catalog section"):
-        return ""
-    parts = [p for p in _SENTENCE_SPLIT_RE.split(text) if p]
-    if not parts:
-        return ""
-    stakes = parts[0]
-    if len(stakes) < 60 and len(parts) > 1:
-        stakes = f"{stakes} {parts[1]}"
-    return stakes
-
-
 def _risk_of_change(pattern: str, cat: _ExtractedSection) -> str:
     """The catalog's authored 'what this fix could break' sentence.
 
@@ -736,6 +835,8 @@ def _build_fix_prompt(
     changes in working tree).
     """
     n = len(members)
+    representative = _group_representative(members)
+    occurrence_guidance = str(representative.get("fix_guidance", "")).strip()
     occurrences_block = "\n".join(_occurrence_bullet_for_prompt(m) for m in members)
     # Full path, not `<findings.json>`: the file lives under `$TMPDIR` and a
     # dispatched subagent cannot guess the directory from a placeholder. Shell-
@@ -768,13 +869,37 @@ def _build_fix_prompt(
         "authenticated)."
         if is_impostor else ""
     )
+    is_cosmetic_pr_automation = (
+        pattern == "P14.18"
+        and representative.get("severity") == "MEDIUM"
+        and representative.get("fix_strategy") == "limit-cosmetic-pr-automation"
+    )
+    if is_cosmetic_pr_automation:
+        completion_oracle = (
+            "confirm the cosmetic boundary still holds. A P14.18 finding may "
+            "remain only when every listed occurrence is MEDIUM and its "
+            "evidence still says `no checkout`, `no PR-code execution`, and "
+            "`no review/merge API`; a HIGH occurrence or a missing boundary "
+            "marker means the fix is not complete"
+        )
+    else:
+        completion_oracle = (
+            "confirm the chain no longer fires: no finding with "
+            f"`\"pattern\": \"{pattern}\"` may remain in that JSON"
+        )
     risk = _risk_of_change(pattern, cat)
     risk_constraint = f"- Risk of the change: {risk}\n" if risk else ""
 
     tldr = (cat.tldr or "").strip()
     context_line = tldr if tldr else f"Pattern `{pattern}` from the ci-secure catalog."
     recipe_yaml = (cat.fix_recipe_yaml or "").strip()
-    if recipe_yaml:
+    if occurrence_guidance:
+        recipe_section = (
+            f"Catalog reference: {catalog_url}\n\n"
+            "Evidence-specific guidance for this finding:\n\n"
+            f"{occurrence_guidance}"
+        )
+    elif recipe_yaml:
         recipe_section = (
             f"Catalog reference: {catalog_url}\n\n"
             "Recipe (from the catalog):\n\n"
@@ -835,9 +960,8 @@ def _build_fix_prompt(
         "Verify (the oracle — you are done only when it passes): re-run "
         "the ci-secure scan over this repo — `python3 "
         f"<ci-secure>/scripts/run.py --root .{gh_flag} --out "
-        f"{recheck_ref}` — and confirm the chain no longer "
-        f"fires: no finding with `\"pattern\": \"{pattern}\"` may remain "
-        f"in that JSON.{impostor_guard} If one does, occurrences are left — "
+        f"{recheck_ref}` — and {completion_oracle}.{impostor_guard} If the "
+        "completion check fails, occurrences are left — "
         "fix them and re-run. If you also edited the rendered ci-secure "
         "report, `python3 <ci-secure>/tests/verify_report.py --report "
         "<report.md> --findings <the ci-secure findings JSON from your run "
@@ -862,15 +986,18 @@ def _finding_group_section(
       ci-speedup, so a jump lands ON the heading rather than under it),
       ``## {sev emoji} Finding N: {short_title} — {n} sites / {m} workflows``
       (a top-level section, like the siblings' recommendation / long-pole
-      entries; no checkbox), a bold stakes-first one-liner derived from the
-      finding's attacker text, the sibling **bulleted definition list**
-      (``- **Pattern:** …``, ``- **TL;DR:** …``, ``- **What an attacker
-      could do:** …``, Severity, Workflow activity, Occurrences, Fix
-      strategy), an optional all-dormant note, an ``#### Evidence`` h4 with
-      sampled occurrence bullets, an ``#### Fix`` h4 carrying the recipe
-      summary, the catalog's ``Risk of the change`` sentence and a
-      collapsible copy-prompt, an optional ``#### References`` h4, and a
-      ``---`` divider.
+      entries; no checkbox), then the plain sections in ``SCENARIO_SECTIONS``
+      order (each an h4 over the agent's text for that field: what the
+      workflow does, why it was flagged, what would have to go wrong first,
+      what an attacker could do then, the verdict, how to close it), then a
+      ``#### 📋 Catalog reference`` h4 holding the sibling **bulleted
+      definition list** (Pattern, Severity of this kind of setup,
+      Occurrences, Workflow activity, Fix strategy, P14.18's approval
+      setting, Platform mitigation, TL;DR), an optional all-dormant note, an
+      ``#### Evidence`` h4 with sampled occurrence bullets, an ``#### Fix
+      recipe (catalog)`` h4 carrying the recipe summary, the catalog's ``Risk
+      of the change`` sentence and a collapsible copy-prompt, an optional
+      ``#### References`` h4, and a ``---`` divider.
 
     The detail body is a definition list, not a ``| Field | Value |``
     table, for the reason both siblings are: a table cell cannot hold a
@@ -883,7 +1010,7 @@ def _finding_group_section(
     the group has been dispatched, producing
     ``## FIXED — Finding N: {short_title} — …``.
     """
-    first = members[0]
+    first = _group_representative(members)
     pattern = first.get("pattern", "")
     severity = _group_severity(members)
     cat = catalog_sections.get(pattern, _ExtractedSection())
@@ -1013,7 +1140,8 @@ def _finding_group_section(
     # maintainer token"). When the orchestrator hasn't supplied one, we
     # fall back to the catalog's static capability line; when the catalog
     # has none either the row is omitted, never faked.
-    attacker_value = _group_attacker_scenario(members)
+    scenario = _group_attacker_scenario(members)
+    attacker_value = scenario.get(_ATTACKER_FIELD, "")
     attacker_is_fallback = not attacker_value
     if not attacker_value:
         attacker_value = cat.attacker_capability
@@ -1021,7 +1149,6 @@ def _finding_group_section(
             attacker_value = unparsed_section_note(
                 pattern, "What an attacker can do"
             )
-    attacker_base = attacker_value
     if attacker_is_fallback and attacker_value and not attacker_value.startswith(
         "_(catalog section"
     ):
@@ -1029,21 +1156,41 @@ def _finding_group_section(
         # not a scenario written against THIS repo. Rendered bare, a reader
         # (and verify_report) could not tell the two apart, so a run that
         # skipped Phase 2.5 looked like one that had done the work.
-        attacker_value = f"{attacker_value} {_FALLBACK_SCENARIO_SUFFIX}"
+        attacker_value = (
+            f"{' '.join(attacker_value.split())} {_FALLBACK_SCENARIO_SUFFIX}"
+        )
+    if attacker_value:
+        scenario = {**scenario, _ATTACKER_FIELD: attacker_value}
 
-    # --- Stakes-first one-liner (sibling recommendation shape) ---
-    # ci-score opens every recommendation with one bold plain-English line
-    # saying what is at stake; the field table is the detail underneath it.
-    # Here that line is derived from this finding's own attacker text, so it
-    # is repo-grounded rather than a generic restatement of the pattern.
-    stakes = _stakes_line(attacker_base)
-    # A one-sentence capability line becomes its own stakes lead, printing the
-    # identical sentence twice in a row. Say it once.
-    if stakes and stakes.strip() != " ".join(attacker_base.split()).strip():
-        out.append(f"**{stakes}**")
+    # --- The plain sections, first (SCENARIO_SECTIONS order) ---
+    # A reader who is not an engineer gets six short answers before any
+    # catalog material: what the workflow does, why it was flagged, what would
+    # have to go wrong first, what an attacker could then do, how worried to
+    # be, and how to close it. The agent writes them against THIS repo (SKILL.md
+    # Phase 2.5). A field the agent did not write is left out rather than
+    # filled with catalog text; verify_report counts such a finding as not
+    # repo-specific, exactly as it counts the catalog stand-in.
+    approval = _approval_setting(members)
+    for key, heading in SCENARIO_SECTIONS:
+        text = scenario.get(key, "")
+        if not text:
+            continue
+        out.append(f"#### {heading}")
+        out.append("")
+        out.extend(_render_scenario_field(text))
+        if key == _ATTACKER_FIELD and approval and approval["state"] == "unread":
+            # Never let the scenario read as if the setting were known. The
+            # agent is told to say this too; the renderer guarantees it.
+            out.append("")
+            out.append(
+                "_ci-secure could not check whether GitHub lets workflows "
+                "approve pull requests in this repository "
+                f"({' '.join(str(approval.get('detail', '')).split())}), so "
+                "whether a hijacked job could approve one is unknown._"
+            )
         out.append("")
 
-    # --- Build the definition list (the siblings' `- **Label:** value`) ---
+    # --- Compact catalog reference (the siblings' `- **Label:** value`) ---
     rows: list[tuple[str, str]] = []
     anchor = first.get("fix_recipe_anchor", "")
     rows.append(
@@ -1052,20 +1199,10 @@ def _finding_group_section(
             f"[{cat.heading_text or pattern}]({_catalog_anchor_url(catalog_url, anchor)})",
         )
     )
-    # TL;DR + attacker capability sit right under Pattern — the reader
-    # gets context before the operational metadata (Severity / Affected
-    # workflows / Activity / etc.).
-    rows.append(("TL;DR", tldr_value))
-    if attacker_value:
-        rows.append(("What an attacker could do", attacker_value))
-    if cat.platform_note:
-        # Dated, and directly under the attacker line it qualifies: a reader
-        # on github.com defaults must not finish the attacker scenario without
-        # learning that the platform narrowed this vector — and which
-        # residuals still leave it live for them.
-        rows.append(("Platform mitigation", cat.platform_note))
-    rows.append(("Severity", f"**{severity}**"))
-    rows.append(("Workflow activity", activity_value))
+    # The label says what the rating is OF: the kind of setup in general. The
+    # verdict above (written by the agent) is what assesses THIS workflow, and
+    # the two can disagree without either being wrong.
+    rows.append(("Severity of this kind of setup", f"**{severity}**"))
     n = len(members)
     sev_split = _occurrence_severity_breakdown(members)
     occurrences_summary = (
@@ -1075,10 +1212,24 @@ def _finding_group_section(
         f"{f' ({sev_split})' if sev_split else ''}"
     )
     rows.append(("Occurrences", occurrences_summary))
+    rows.append(("Workflow activity", activity_value))
     fix_strategy = first.get("fix_strategy", "")
     if fix_strategy:
         rows.append(("Fix strategy", f"`{fix_strategy}`"))
+    if approval:
+        # The one fact the P14.18 payoff turns on, read from the repository's
+        # settings by the scan, never inferred from the YAML.
+        rows.append((
+            "Workflows may approve pull requests here",
+            f"{_APPROVAL_ROW_WORD[approval['state']]} — "
+            f"{approval.get('detail', '')}",
+        ))
+    if cat.platform_note:
+        rows.append(("Platform mitigation", cat.platform_note))
+    rows.append(("TL;DR", tldr_value))
 
+    out.append("#### 📋 Catalog reference")
+    out.append("")
     for k, v in rows:
         # Flatten to a single line: several catalog TL;DRs are authored as
         # wrapped multi-line paragraphs, and a bullet whose value carries a
@@ -1217,7 +1368,9 @@ def _finding_group_section(
     )
     # 🛠️, not 🟢: in ci-speedup 🟢 means "runner-minute saving", and a reader
     # who reads both reports must not see the same glyph mean two things.
-    out.append("#### 🛠️ Fix")
+    # "recipe (catalog)": the plain "How to close it" section above is the
+    # reader's answer for THIS repo; this is the catalog's generic recipe.
+    out.append("#### 🛠️ Fix recipe (catalog)")
     out.append("")
     # The curated imperative first — the one line a reader acts on. (This is
     # what the deleted action-plan section used to carry; it belongs with the
@@ -1229,7 +1382,8 @@ def _finding_group_section(
     # Summary next, then the copy-prompt collapsible. The summary is
     # what a skimmer reads; the collapsible expands when they want to
     # dispatch the fix. Verbose recipe YAML lives behind the catalog link.
-    summary = (cat.fix_recipe_summary or "").strip()
+    occurrence_guidance = str(first.get("fix_guidance", "")).strip()
+    summary = occurrence_guidance or (cat.fix_recipe_summary or "").strip()
     catalog_ref = f"[catalog §{pattern}]({catalog_link})"
     if summary:
         # Block form (a lead-in plus its numbered options) keeps the catalog
@@ -1319,6 +1473,40 @@ def _parallel_steps_cell(parallel_steps: dict[str, Any] | None) -> str:
     return "; ".join(parts)
 
 
+def _action_lockfile_cell(action_lockfile: dict[str, Any] | None) -> str:
+    """The provenance line for a GitHub Actions workflow lockfile, or "".
+
+    A lockfile moves an action's commit out of the `uses:` line, where the
+    impostor-SHA check (P14.11) reads pins, into `actions.lock`, where GitHub
+    verifies it at run time. Without this row a locked repository's impostor
+    check would report nothing to check and give no sign why. Informational,
+    never a coverage gap. A lockfile that is present but not well-formed is
+    named and credited with nothing.
+    """
+    entry = action_lockfile if isinstance(action_lockfile, dict) else {}
+    state = entry.get("state")
+    path = str(entry.get("path") or ".github/workflows/actions.lock")
+    if state == "invalid":
+        return (f"`{path}` is present but not a lockfile this scan can read "
+                "(misnamed, malformed, or a format version it does not "
+                "recognize), so none of its action references is counted as "
+                "locked; the impostor-SHA check (P14.11) checks only commit "
+                "pins written in `uses:`, so tag references here are checked "
+                "by neither")
+    n_refs = int(entry.get("covered_references") or 0)
+    workflows = entry.get("covered_workflows") or []
+    if state != "valid" or not n_refs:
+        return ""
+    return (
+        f"{n_refs} action reference(s) in {len(workflows)} workflow(s) are "
+        f"locked to a commit by `{path}`, not pinned in the `uses:` line. "
+        "GitHub verifies each locked commit at run time (it must be "
+        "reachable from its recorded ref, from the same repository); the "
+        "impostor-SHA check (P14.11) reads only commit pins written in "
+        "`uses:` and does not check these"
+    )
+
+
 def _header_table(
     findings: list[dict[str, Any]],
     scanned_workflows: int,
@@ -1331,6 +1519,7 @@ def _header_table(
     repo_root: str | None = None,
     repo_tree_dirty: bool = False,
     parallel_steps: dict[str, Any] | None = None,
+    action_lockfile: dict[str, Any] | None = None,
 ) -> str:
     """H1-adjacent provenance table — first thing after the title.
 
@@ -1418,6 +1607,9 @@ def _header_table(
     parallel_row = _parallel_steps_cell(parallel_steps)
     if parallel_row:
         rows.append(("Parallel steps", parallel_row))
+    lockfile_row = _action_lockfile_cell(action_lockfile)
+    if lockfile_row:
+        rows.append(("Action lockfile", lockfile_row))
     if dormant_count:
         rows.append(
             (
@@ -1835,6 +2027,41 @@ _PUSH_ACCESS_PREFIX = "sec.environments."
 _PUSH_ACCESS_IDS = frozenset({"sec.secrets.environment-scoped"})
 
 
+def _exposed_secrets_callout(security_score: Any) -> str:
+    """A short callout under the headline when `sec.secrets.environment-scoped`
+    FAILS: how many secrets any workflow pushed to any branch can read, and a
+    link to the sub-section that names them. Nothing on a pass, an unmeasured
+    or a missing row: the callout never stands in for an unread list. It is
+    a blockquote, not a heading, and adds no count to the vector headline."""
+    if not isinstance(security_score, dict):
+        return ""
+    facts = security_score.get("facts")
+    row = next((f for f in facts if isinstance(f, dict)
+                and f.get("fact_id") == "sec.secrets.environment-scoped"),
+               None) if isinstance(facts, list) else None
+    if not row or row.get("outcome") != "fail":
+        return ""
+    block = security_score.get("push_access")
+    inv = block.get("inventory") if isinstance(block, dict) else None
+    inv = inv if isinstance(inv, dict) else {}
+    lists = [inv.get(k) for k in ("repo_secrets", "org_secrets")]
+    total = sum(len(x) for x in lists if isinstance(x, list))
+    count = (f"{total} secret(s)" if total else "Repository or organization "
+             "secrets")
+    partial = (" (at least; one secret list could not be read)"
+               if inv.get("status") == "partial" else "")
+    return (
+        f"> [!CAUTION]\n> **Secrets reachable from any branch.** {count}"
+        f"{partial} sit outside every environment, so any workflow pushed to "
+        "any branch of this repository can read them: one leaked push "
+        "credential exposes them all, with no review and no merge. This is a "
+        "configuration gap, not one of the attack vectors counted above. "
+        "Move them into an environment that only protected branches can use "
+        "(one that passes `sec.environments.branch-restricted`); "
+        "the names and steps are under "
+        "[If a push credential leaks](#if-a-push-credential-leaks).")
+
+
 def _fact_row(f: dict[str, Any]) -> str:
     mark = _OUTCOME_MARKS.get(str(f.get("outcome")), str(f.get("outcome")))
     return f"| {mark} | {_cell(f.get('fact'))} | {_cell(f.get('evidence'))} |"
@@ -2002,26 +2229,55 @@ def _gh_checks_block(
 
     def _label(pid: str) -> str:
         name = _GH_CHECK_LABELS.get(pid)
+        if name and name.endswith("lookup"):
+            return f"{pid} {name}"
         return f"{pid} {name} check" if name else f"{pid} network-gated check"
 
     def _unverified(pid: str) -> list[str]:
         entry = details.get(pid) or {}
         pins = entry.get("unverified") if isinstance(entry, dict) else None
-        return [str(p) for p in pins] if isinstance(pins, list) else []
+        # Each label names the scanned workflow path and the pin as written,
+        # both controlled by the repository under audit, and lands in an
+        # inline code span below.
+        return ([_flatten_scanned(p) for p in pins]
+                if isinstance(pins, list) else [])
 
     skipped: list[tuple[str, str]] = []
     partial: list[tuple[str, str]] = []
     ran: list[tuple[str, str]] = []
+    lookup_notes: list[tuple[str, str, str]] = []
     for pid in sorted(gh_checks):
         status = str(gh_checks[pid] or "").strip()
         detail = status.split(":", 1)[-1].strip() or status
-        if status.lower().startswith("skipped"):
+        state = status.lower().split(":", 1)[0]
+        if pid in _GH_LOOKUPS_THAT_ONLY_SUPPRESS and state in ("skipped", "partial"):
+            # Its findings are all still listed below, so the WARNING's
+            # "absence from the findings is NOT a pass" would be false.
+            lookup_notes.append((pid, state, detail or "reason not recorded"))
+        elif state == "skipped":
             skipped.append((pid, detail or "reason not recorded"))
-        elif status.lower().startswith("partial"):
+        elif state == "partial":
             partial.append((pid, detail))
         else:
             ran.append((pid, detail))
 
+    note: list[str] = []
+    if lookup_notes:
+        note.append("> [!NOTE]")
+        for pid, state, reason in lookup_notes:
+            word = "SKIPPED" if state == "skipped" else "PARTIAL"
+            note.append(f"> **{_label(pid)}: {word} — {reason}.**")
+            for pin in _unverified(pid):
+                note.append(f">   - `{pin}`")
+        note.append(">")
+        note.append(
+            "> Every tag-pinned GitHub CLI extension finding is still listed "
+            "below. The lookup only removes one whose release GitHub has "
+            "locked as immutable. To have it check these, sign in to gh "
+            "(`gh auth login`) and re-run; a pin set at run time can never "
+            "be checked."
+        )
+        note.append("")
     out: list[str] = []
     if skipped or partial:
         out.append("> [!WARNING]")
@@ -2053,6 +2309,7 @@ def _gh_checks_block(
         else:
             out.append("> Re-run once the check can complete to close this gap.")
         out.append("")
+    out.extend(note)
     # Only the checks that RAN get a plain bullet list. Repeating the
     # skipped/partial bullets here reprinted the `[!WARNING]` callout's own
     # lines byte-for-byte one blank line below it.
@@ -2104,8 +2361,9 @@ def _methodology_block(n_vectors: int) -> str:
         "| **Severity** | Criticality is membership in the ten-vector "
         "catalog: every finding here is a complete outsider → compromise "
         "chain, and every one renders. The HIGH / MEDIUM label records the "
-        "unfixed attack's potency — it never tiers, truncates, or reorders "
-        "what you see. |\n"
+        "unfixed attack's potency for that kind of setup in general — it "
+        "never tiers, truncates, or reorders what you see. The attacker "
+        "scenario in each finding is what assesses your specific workflow. |\n"
         "| **Finding grouping** | Every occurrence of the same underlying "
         "rule (same catalog pattern) collapses into one "
         "`## Finding N` entry — and every group renders, always. The "
@@ -2321,8 +2579,13 @@ def render_plan_keys(findings_json: dict[str, Any]) -> list[dict[str, Any]]:
     findings, _n_dupes = _dedupe_findings(findings)
     findings.sort(key=_sort_key)
     groups = _report_groups(findings)
+    # `verdict` is the agent's one-line judgment of the group (Phase 2.5),
+    # flattened, or "" when none was written: the terminal summary prints one
+    # verdict line per finding from this, in the report's own order.
     return [
-        {"pattern": pattern, "dormant": _group_is_all_dormant(members)}
+        {"pattern": pattern, "dormant": _group_is_all_dormant(members),
+         "verdict": " ".join(
+             _group_attacker_scenario(members).get("verdict", "").split())}
         for _ordinal, (_source, pattern), members in groups
     ]
 
@@ -2389,7 +2652,13 @@ _ACTION_BY_FIX_STRATEGY = {
 def _group_action_summary(members: list[dict[str, Any]]) -> str:
     """Curated one-line action verb for a group, or "" to fall back to the
     short title. Keyed off the catalog's `fix_strategy` slug."""
-    return _ACTION_BY_FIX_STRATEGY.get(members[0].get("fix_strategy", ""), "")
+    representative = _group_representative(members)
+    supplied = representative.get("fix_guidance", "")
+    if supplied:
+        # The occurrence-specific guidance is the full visible summary below;
+        # repeating it here as an imperative prints the same paragraph twice.
+        return ""
+    return _ACTION_BY_FIX_STRATEGY.get(representative.get("fix_strategy", ""), "")
 
 
 def _validate_findings(
@@ -2729,6 +2998,7 @@ def render(
         repo_root=findings_json.get("repo_root"),
         repo_tree_dirty=bool(findings_json.get("repo_tree_dirty")),
         parallel_steps=findings_json.get("parallel_steps"),
+        action_lockfile=findings_json.get("action_lockfile"),
     ))
     out.append("")
 
@@ -2785,6 +3055,14 @@ def render(
     out.append(_headline_block(groups, scanned_workflows, n_vectors,
                                coverage_complete))
     out.append("")
+
+    # Secrets any pushed workflow receives: a hygiene row, not a vector, but
+    # the one whose failure decides what a single leaked push credential
+    # takes, so it is named here and not only in the table further down.
+    exposed = _exposed_secrets_callout(findings_json.get("security_score"))
+    if exposed:
+        out.append(exposed)
+        out.append("")
 
     # The vector map — the analog of ci-score's check table and ci-speedup's
     # long-pole map. It renders in BOTH cases: on a clean report the ten ✅
@@ -2965,7 +3243,7 @@ def main(argv: list[str] | None = None) -> int:
         # billed idle wall-clock — an operator reading the report, a crashed
         # session — as time spent on prose that never ran.
         scenario_ran = any(
-            (f.get("attacker_scenario") or "").strip()
+            normalize_scenario(f.get("attacker_scenario"))
             for f in (findings_json.get("findings") or [])
             if isinstance(f, dict)
         )

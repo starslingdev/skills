@@ -1,0 +1,55 @@
+name: MCP
+
+on:
+  push:
+    branches:
+      - main
+      - release-*
+  pull_request:
+    paths-ignore:
+      - 'browser_patches/**'
+      - 'docs/**'
+      - 'packages/extension/**'
+      - 'packages/playwright-core/src/server/bidi/**'
+      - 'tests/bidi/**'
+      - 'tests/extension/**'
+    branches:
+      - main
+      - release-*
+
+concurrency:
+  # For pull requests, cancel all currently-running jobs for this workflow
+  # https://docs.<external-public-repository>/using-workflows/workflow-syntax-for-github-actions#concurrency
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  # Force terminal colors. @see https://www.npmjs.com/package/colors
+  FORCE_COLOR: 1
+  DEBUG: pw:mcp:error
+
+jobs:
+  test_mcp:
+    name: ${{ matrix.os }} - ${{ matrix.project }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+        project: [chrome, chromium, firefox, webkit]
+        include:
+          - os: macos-latest
+            project: chrome
+          - os: windows-latest
+            project: chrome
+          - os: windows-latest
+            project: msedge
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read    # This is required for actions/checkout to succeed
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: ./.github/actions/run-test
+      with:
+        node-version: "22"
+        command: npm run test-mcp -- --project=${{ matrix.project }}
+        bot-name: "mcp-${{ matrix.os }}-${{ matrix.project }}"

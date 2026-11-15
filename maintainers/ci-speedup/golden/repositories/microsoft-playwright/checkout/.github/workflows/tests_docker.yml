@@ -1,0 +1,115 @@
+name: tests docker
+
+on:
+  workflow_call:
+
+env:
+  FORCE_COLOR: 1
+
+jobs:
+  test_linux_docker:
+    name: "Docker ${{ matrix.docker_tag }} ${{ matrix.docker_arch }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - docker_tag: jammy
+          docker_arch: amd64
+          host_os: ubuntu-22.04
+        - docker_tag: jammy
+          docker_arch: arm64
+          host_os: ubuntu-22.04-arm
+        - docker_tag: noble
+          docker_arch: amd64
+          host_os: ubuntu-22.04
+        - docker_tag: noble
+          docker_arch: arm64
+          host_os: ubuntu-22.04-arm
+        - docker_tag: resolute
+          docker_arch: amd64
+          host_os: ubuntu-22.04
+        - docker_tag: resolute
+          docker_arch: arm64
+          host_os: ubuntu-22.04-arm
+    runs-on: ${{ matrix.host_os }}
+    permissions:
+      contents: read    # This is required for actions/checkout to succeed
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+      with:
+        node-version: 22
+      env:
+        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: 1
+    - run: npm ci
+    - run: npm run build
+    - run: ./utils/docker/build.sh --${{ matrix.docker_arch }} ${{ matrix.docker_tag }} playwright:localbuild
+      shell: bash
+    - name: Launch container
+      run: |
+        docker run \
+          --rm \
+          --name docker-tests \
+          --platform linux/${{ matrix.docker_arch }} \
+          --user=pwuser \
+          --workdir /workspace/pwuser \
+          --env CI \
+          --env INSIDE_DOCKER=1 \
+          -d \
+          -t \
+          playwright:localbuild /bin/bash
+    - name: Copy repository inside docker container
+      run: |
+        # Note: we cannot do explicit `git clone` inside container because it requires some smarts to decide if github.sha or
+        # github.ref should be used for checkout.
+        # The actions/checkout action already handled this complexity for us, so we'll just copy checkout.
+        docker cp . docker-tests:/workspace/pwuser/playwright
+        docker exec --user root docker-tests chown -R pwuser /workspace/pwuser/playwright
+
+        # GIT is now picky on directory ownership
+        # See https://github.blog/2022-04-12-git-security-vulnerability-announced/
+        docker exec \
+          --user root \
+          --workdir /workspace/pwuser/playwright docker-tests /bin/bash -c '
+            git config --global --add safe.directory /workspace/pwuser/playwright
+          '
+    - name: Run "npm ci" inside docker
+      run: docker exec --workdir /workspace/pwuser/playwright docker-tests npm ci
+
+    - name: Run "npm run build" inside docker
+      run: docker exec --workdir /workspace/pwuser/playwright docker-tests npm run build
+
+    - name: "Run @smoke tests inside docker"
+      run: |
+        docker exec \
+          --env GITHUB_RUN_ID \
+          --env GITHUB_RUN_ATTEMPT \
+          --env GITHUB_WORKFLOW \
+          --env GITHUB_EVENT_NAME \
+          --env GITHUB_REF \
+          --env GITHUB_REF_NAME \
+          --env GITHUB_HEAD_REF \
+          --env GITHUB_SHA \
+          --workdir /workspace/pwuser/playwright docker-tests xvfb-run --auto-servernum --server-args="-screen 0 1280x960x24" npm run test -- --grep "@smoke"
+
+    - name: Copy blob report from container
+      if: ${{ !cancelled() && (github.event_name == 'pull_request' || failure()) }}
+      run: docker cp "docker-tests:/workspace/pwuser/playwright/blob-report" "./blob-report"
+
+    - name: Upload blob report
+      if: ${{ !cancelled() && (github.event_name == 'pull_request' || failure()) }}
+      uses: ./.github/actions/upload-blob-report
+      with:
+        report_dir: blob-report
+        job_name: docker-${{ matrix.docker_tag }}-${{ matrix.docker_arch }}
+
+    - name: Copy parquet report from container
+      if: ${{ !cancelled() }}
+      run: docker cp "docker-tests:/workspace/pwuser/playwright/test-results/test-results.parquet" "./test-results.parquet" || true
+
+    - name: Upload parquet report
+      if: ${{ !cancelled() }}
+      uses: ./.github/actions/upload-parquet-report
+      with:
+        report_file: test-results.parquet
+        job_name: docker-${{ matrix.docker_tag }}-${{ matrix.docker_arch }}

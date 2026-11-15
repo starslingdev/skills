@@ -1,0 +1,1925 @@
+{
+  "bookkeeping_cutoff_s": 60,
+  "bookkeeping_jobs": [
+    {
+      "check": "build-and-test / thank you, next",
+      "excluded_on": 3241
+    },
+    {
+      "check": "build-and-test / Determine changes",
+      "excluded_on": 3220
+    },
+    {
+      "check": "build-and-test / validate-docs-links",
+      "excluded_on": 3205
+    },
+    {
+      "check": "build-and-test / ast-grep lint",
+      "excluded_on": 3189
+    },
+    {
+      "check": "build-and-test / optimize-ci / PR Stack CI Gate",
+      "excluded_on": 3120
+    },
+    {
+      "check": "build-and-test / fetch test timings",
+      "excluded_on": 2703
+    },
+    {
+      "check": "build-and-test / Upload PR CI metadata",
+      "excluded_on": 2585
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (dev) (5/5) / build",
+      "excluded_on": 2254
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (prod) (5/5) / build",
+      "excluded_on": 2245
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (dev) (4/5) / build",
+      "excluded_on": 2230
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (prod) (4/5) / build",
+      "excluded_on": 2201
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (dev) (3/5) / build",
+      "excluded_on": 2179
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (prod) (3/5) / build",
+      "excluded_on": 2140
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (dev) (2/5) / build",
+      "excluded_on": 2009
+    },
+    {
+      "check": "build-and-test / test rspack dev",
+      "excluded_on": 1951
+    },
+    {
+      "check": "build-and-test / Run devlow benchmarks",
+      "excluded_on": 1935
+    },
+    {
+      "check": "build-and-test / test rspack production",
+      "excluded_on": 1912
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (prod) (2/5) / build",
+      "excluded_on": 1909
+    },
+    {
+      "check": "build-and-test / build-next / build",
+      "excluded_on": 1735
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (dev) (1/5) / build",
+      "excluded_on": 1577
+    },
+    {
+      "check": "build-and-test / test devlow package / build",
+      "excluded_on": 1568
+    },
+    {
+      "check": "build-and-test / build-native / build",
+      "excluded_on": 1470
+    },
+    {
+      "check": "build-and-test / rust check / build",
+      "excluded_on": 1426
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (prod) (1/5) / build",
+      "excluded_on": 1388
+    },
+    {
+      "check": "build-and-test / test cargo unit (miri) / build",
+      "excluded_on": 1109
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (adapter, 5/5) / build",
+      "excluded_on": 1100
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (non-adapter, 4/5) / build",
+      "excluded_on": 1091
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, adapter, 5/5) / build",
+      "excluded_on": 1090
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (non-adapter, 5/5) / build",
+      "excluded_on": 1089
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (adapter, 4/5) / build",
+      "excluded_on": 1083
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, adapter, 3/5) / build",
+      "excluded_on": 1080
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (non-adapter, 3/5) / build",
+      "excluded_on": 1074
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (adapter, 3/5) / build",
+      "excluded_on": 1072
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, adapter, 4/5) / build",
+      "excluded_on": 1072
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components) (5/5) / build",
+      "excluded_on": 1064
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components) (4/5) / build",
+      "excluded_on": 1042
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, adapter, 2/5) / build",
+      "excluded_on": 1040
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components) (3/5) / build",
+      "excluded_on": 1039
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (4/5) / build",
+      "excluded_on": 1031
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (adapter, 2/5) / build",
+      "excluded_on": 1026
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (3/5) / build",
+      "excluded_on": 1025
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (5/5) / build",
+      "excluded_on": 1021
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (non-adapter, 2/5) / build",
+      "excluded_on": 1021
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components) (2/5) / build",
+      "excluded_on": 1009
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (2/5) / build",
+      "excluded_on": 970
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, adapter, 1/5) / build",
+      "excluded_on": 928
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (adapter, 1/5) / build",
+      "excluded_on": 895
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components) (1/5) / build",
+      "excluded_on": 892
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (non-adapter, 1/5) / build",
+      "excluded_on": 890
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (1/5) / build",
+      "excluded_on": 834
+    },
+    {
+      "check": "build-and-test / test dev",
+      "excluded_on": 484
+    },
+    {
+      "check": "build-and-test / test prod",
+      "excluded_on": 474
+    },
+    {
+      "check": "build-and-test / test unit windows",
+      "excluded_on": 310
+    },
+    {
+      "check": "build-and-test / test integration windows",
+      "excluded_on": 304
+    },
+    {
+      "check": "build-and-test / Wait for preview tarball",
+      "excluded_on": 299
+    },
+    {
+      "check": "build-and-test / test dev windows",
+      "excluded_on": 298
+    },
+    {
+      "check": "build-and-test / test prod windows",
+      "excluded_on": 298
+    },
+    {
+      "check": "build-and-test / types and precompiled",
+      "excluded_on": 273
+    },
+    {
+      "check": "build-and-test / test next-config-ts-native-ts dev",
+      "excluded_on": 265
+    },
+    {
+      "check": "build-and-test / test turbopack production",
+      "excluded_on": 264
+    },
+    {
+      "check": "build-and-test / test turbopack dev",
+      "excluded_on": 263
+    },
+    {
+      "check": "build-and-test / test unit",
+      "excluded_on": 260
+    },
+    {
+      "check": "build-and-test / test next-config-ts-native-ts prod",
+      "excluded_on": 259
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (dev)",
+      "excluded_on": 256
+    },
+    {
+      "check": "build-and-test / test cache components prod",
+      "excluded_on": 256
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (prod)",
+      "excluded_on": 255
+    },
+    {
+      "check": "build-and-test / test firefox and safari",
+      "excluded_on": 254
+    },
+    {
+      "check": "build-and-test / test cache components dev",
+      "excluded_on": 251
+    },
+    {
+      "check": "build-and-test / test cargo unit (miri)",
+      "excluded_on": 242
+    },
+    {
+      "check": "build-and-test / rustdoc check",
+      "excluded_on": 237
+    },
+    {
+      "check": "build-and-test / test cargo unit",
+      "excluded_on": 236
+    },
+    {
+      "check": "build-and-test / rust check",
+      "excluded_on": 233
+    },
+    {
+      "check": "build-and-test / test next-swc wasm",
+      "excluded_on": 231
+    },
+    {
+      "check": "build-and-test / test next-swc wasi",
+      "excluded_on": 230
+    },
+    {
+      "check": "build-and-test / test cargo benches",
+      "excluded_on": 225
+    },
+    {
+      "check": "build-and-test / build-native-windows",
+      "excluded_on": 204
+    },
+    {
+      "check": "build-and-test / test devlow package",
+      "excluded_on": 197
+    },
+    {
+      "check": "build-and-test / build-native",
+      "excluded_on": 193
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (${{ ((matrix.cache-components && 'cache components, ') || '') }}${{ matrix.builder }}, ${{ matrix.group }})",
+      "excluded_on": 168
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed",
+      "excluded_on": 147
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components)",
+      "excluded_on": 147
+    },
+    {
+      "check": "build-and-test / Docs Link Validation",
+      "excluded_on": 125
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 5/5) / build",
+      "excluded_on": 102
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 3/5) / build",
+      "excluded_on": 101
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 2/5) / build",
+      "excluded_on": 99
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 4/5) / build",
+      "excluded_on": 99
+    },
+    {
+      "check": "build-and-test / lint / build",
+      "excluded_on": 88
+    },
+    {
+      "check": "build-and-test / build-native-windows / build",
+      "excluded_on": 84
+    },
+    {
+      "check": "build-and-deploy / thank you, build",
+      "excluded_on": 78
+    },
+    {
+      "check": "build-and-test / lint",
+      "excluded_on": 78
+    },
+    {
+      "check": "build-and-deploy / deploy-target",
+      "excluded_on": 77
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 1/5) / build",
+      "excluded_on": 74
+    },
+    {
+      "check": "build-and-deploy / generate-native-matrix",
+      "excluded_on": 67
+    },
+    {
+      "check": "build-and-deploy / Potentially publish release",
+      "excluded_on": 45
+    },
+    {
+      "check": "build-and-deploy / Upload Turbopack Bytesize metrics to Datadog",
+      "excluded_on": 43
+    },
+    {
+      "check": "build-and-deploy / report publish failure to slack",
+      "excluded_on": 40
+    },
+    {
+      "check": "build-and-deploy / Prepare preview tarball",
+      "excluded_on": 37
+    },
+    {
+      "check": "build-and-deploy / Un-draft GitHub release",
+      "excluded_on": 31
+    },
+    {
+      "check": "build-and-test / test next-config-ts-native-ts dev (22) / build",
+      "excluded_on": 29
+    },
+    {
+      "check": "build-and-deploy / build-wasm",
+      "excluded_on": 28
+    },
+    {
+      "check": "build-and-deploy / build",
+      "excluded_on": 27
+    },
+    {
+      "check": "build-and-deploy / build-wasm (nodejs)",
+      "excluded_on": 27
+    },
+    {
+      "check": "build-and-test / test cache components dev (1/6) / build",
+      "excluded_on": 26
+    },
+    {
+      "check": "build-and-deploy / build-wasm (web)",
+      "excluded_on": 25
+    },
+    {
+      "check": "build-and-deploy / stable - ${{ matrix.target }} - node@20",
+      "excluded_on": 25
+    },
+    {
+      "check": "build-and-test / test cache components prod (4/7) / build",
+      "excluded_on": 25
+    },
+    {
+      "check": "build-and-test / test next-config-ts-native-ts prod (22) / build",
+      "excluded_on": 25
+    },
+    {
+      "check": "build-and-test / build-next",
+      "excluded_on": 24
+    },
+    {
+      "check": "build-and-test / test cache components dev (5/6) / build",
+      "excluded_on": 24
+    },
+    {
+      "check": "build-and-test / test cache components prod (1/7) / build",
+      "excluded_on": 24
+    },
+    {
+      "check": "build-and-test / test cache components prod (3/7) / build",
+      "excluded_on": 24
+    },
+    {
+      "check": "build-and-test / test cache components dev (4/6) / build",
+      "excluded_on": 23
+    },
+    {
+      "check": "build-and-test / test cache components prod (2/7) / build",
+      "excluded_on": 23
+    },
+    {
+      "check": "build-and-test / test cache components prod (6/7) / build",
+      "excluded_on": 23
+    },
+    {
+      "check": "build-and-test / test cache components prod (7/7) / build",
+      "excluded_on": 23
+    },
+    {
+      "check": "build-and-test / test next-config-ts-native-ts dev (24.15.0) / build",
+      "excluded_on": 23
+    },
+    {
+      "check": "build-and-test / test prod (1/10) / build",
+      "excluded_on": 23
+    },
+    {
+      "check": "build-and-test / test prod (10/10) / build",
+      "excluded_on": 23
+    },
+    {
+      "check": "build-and-test / test prod (5/10) / build",
+      "excluded_on": 23
+    },
+    {
+      "check": "build-and-test / test turbopack dev (1/7) / build",
+      "excluded_on": 23
+    },
+    {
+      "check": "build-and-test / test unit (20) / build",
+      "excluded_on": 23
+    },
+    {
+      "check": "build-and-test / test cache components dev (3/6) / build",
+      "excluded_on": 22
+    },
+    {
+      "check": "build-and-test / test dev (9/10) / build",
+      "excluded_on": 22
+    },
+    {
+      "check": "build-and-test / test next-swc wasm / build",
+      "excluded_on": 22
+    },
+    {
+      "check": "build-and-test / test turbopack dev (5/7) / build",
+      "excluded_on": 22
+    },
+    {
+      "check": "build-and-test / test turbopack dev (7/7) / build",
+      "excluded_on": 22
+    },
+    {
+      "check": "build-and-test / test turbopack production (6/7) / build",
+      "excluded_on": 22
+    },
+    {
+      "check": "build-and-test / test cache components dev (6/6) / build",
+      "excluded_on": 21
+    },
+    {
+      "check": "build-and-test / test cargo unit / build",
+      "excluded_on": 21
+    },
+    {
+      "check": "build-and-test / test dev (3/10) / build",
+      "excluded_on": 21
+    },
+    {
+      "check": "build-and-test / test turbopack production (2/7) / build",
+      "excluded_on": 21
+    },
+    {
+      "check": "build-and-test / test turbopack production (3/7) / build",
+      "excluded_on": 21
+    },
+    {
+      "check": "build-and-test / test unit (22) / build",
+      "excluded_on": 21
+    },
+    {
+      "check": "build-and-test / types and precompiled / build",
+      "excluded_on": 21
+    },
+    {
+      "check": "build-and-test / rustdoc check / build",
+      "excluded_on": 20
+    },
+    {
+      "check": "build-and-test / test cache components prod (5/7) / build",
+      "excluded_on": 20
+    },
+    {
+      "check": "build-and-test / test next-swc wasi / build",
+      "excluded_on": 20
+    },
+    {
+      "check": "build-and-test / test prod (2/10) / build",
+      "excluded_on": 20
+    },
+    {
+      "check": "build-and-test / test prod (6/10) / build",
+      "excluded_on": 20
+    },
+    {
+      "check": "build-and-test / test prod (8/10) / build",
+      "excluded_on": 20
+    },
+    {
+      "check": "build-and-test / test turbopack dev (3/7) / build",
+      "excluded_on": 20
+    },
+    {
+      "check": "build-and-test / test turbopack dev (4/7) / build",
+      "excluded_on": 20
+    },
+    {
+      "check": "build-and-test / test turbopack production (1/7) / build",
+      "excluded_on": 20
+    },
+    {
+      "check": "build-and-test / test turbopack production (7/7) / build",
+      "excluded_on": 20
+    },
+    {
+      "check": "build-and-test / test cache components dev (2/6) / build",
+      "excluded_on": 19
+    },
+    {
+      "check": "build-and-test / test dev (1/10) / build",
+      "excluded_on": 19
+    },
+    {
+      "check": "build-and-test / test dev (2/10) / build",
+      "excluded_on": 19
+    },
+    {
+      "check": "build-and-test / test dev (5/10) / build",
+      "excluded_on": 19
+    },
+    {
+      "check": "build-and-test / test next-config-ts-native-ts prod (24.15.0) / build",
+      "excluded_on": 19
+    },
+    {
+      "check": "build-and-test / test prod (3/10) / build",
+      "excluded_on": 19
+    },
+    {
+      "check": "build-and-test / test prod (9/10) / build",
+      "excluded_on": 19
+    },
+    {
+      "check": "build-and-test / test prod windows / build",
+      "excluded_on": 19
+    },
+    {
+      "check": "build-and-test / test turbopack dev (6/7) / build",
+      "excluded_on": 19
+    },
+    {
+      "check": "build-and-test / test cargo benches / Test",
+      "excluded_on": 18
+    },
+    {
+      "check": "build-and-test / test dev (10/10) / build",
+      "excluded_on": 18
+    },
+    {
+      "check": "build-and-test / test dev windows / build",
+      "excluded_on": 18
+    },
+    {
+      "check": "build-and-test / test prod (4/10) / build",
+      "excluded_on": 18
+    },
+    {
+      "check": "build-and-test / test turbopack dev (2/7) / build",
+      "excluded_on": 18
+    },
+    {
+      "check": "build-and-test / test firefox and safari / build",
+      "excluded_on": 17
+    },
+    {
+      "check": "build-and-test / test turbopack production (4/7) / build",
+      "excluded_on": 17
+    },
+    {
+      "check": "build-and-test / test turbopack production (5/7) / build",
+      "excluded_on": 17
+    },
+    {
+      "check": "build-and-test / test unit windows (22) / build",
+      "excluded_on": 17
+    },
+    {
+      "check": "build-and-test / test dev (4/10) / build",
+      "excluded_on": 16
+    },
+    {
+      "check": "build-and-test / test dev (6/10) / build",
+      "excluded_on": 16
+    },
+    {
+      "check": "build-and-test / test integration windows / build",
+      "excluded_on": 16
+    },
+    {
+      "check": "build-and-deploy / stable - x86_64-unknown-linux-gnu - node@20",
+      "excluded_on": 15
+    },
+    {
+      "check": "build-and-test / test dev (8/10) / build",
+      "excluded_on": 15
+    },
+    {
+      "check": "build-and-test / test prod (7/10) / build",
+      "excluded_on": 15
+    },
+    {
+      "check": "build-and-test / test unit windows (20) / build",
+      "excluded_on": 13
+    },
+    {
+      "check": "build-and-test / test dev (7/10) / build",
+      "excluded_on": 12
+    },
+    {
+      "check": "build-and-test / optimize-ci / Graphite CI Optimizer",
+      "excluded_on": 8
+    },
+    {
+      "check": "build-and-deploy / Docs Link Validation",
+      "excluded_on": 7
+    },
+    {
+      "check": "build-and-test / test rspack development integration",
+      "excluded_on": 3
+    },
+    {
+      "check": "build-and-test / test rspack production integration",
+      "excluded_on": 3
+    },
+    {
+      "check": "build-and-test / Test new tests when deployed",
+      "excluded_on": 2
+    },
+    {
+      "check": "build-and-deploy / stable - x86_64-unknown-linux-gnu - node@22",
+      "excluded_on": 1
+    },
+    {
+      "check": "build-and-test / test unit windows (24) / build",
+      "excluded_on": 1
+    }
+  ],
+  "gate_order": [
+    "build-and-test / lint / build",
+    "build-and-test / test unit windows (22) / build",
+    "build-and-test / test unit windows (20) / build",
+    "build-and-test / Wait for preview tarball",
+    "build-and-test / test prod (9/10) / build",
+    "build-and-test / test prod (7/10) / build",
+    "build-and-test / test prod (2/10) / build",
+    "build-and-test / test prod (5/10) / build",
+    "build-and-test / test prod (3/10) / build",
+    "build-and-test / test prod (8/10) / build",
+    "build-and-test / test prod (1/10) / build",
+    "build-and-test / test prod (10/10) / build",
+    "build-and-test / test prod (6/10) / build",
+    "build-and-test / test prod (4/10) / build",
+    "build-and-test / test dev (4/10) / build",
+    "build-and-test / test turbopack production (2/7) / build",
+    "build-and-test / test dev (10/10) / build",
+    "build-and-test / test dev (7/10) / build",
+    "build-and-test / test turbopack production (4/7) / build",
+    "build-and-test / test dev (5/10) / build",
+    "build-and-test / test integration windows / build",
+    "build-and-test / test cargo unit / build",
+    "build-and-test / test dev (1/10) / build",
+    "build-and-test / test dev (6/10) / build",
+    "build-and-test / test dev (9/10) / build",
+    "build-and-test / test turbopack production (6/7) / build",
+    "build-and-test / test turbopack production (7/7) / build",
+    "build-and-test / test turbopack production (3/7) / build",
+    "build-and-test / test prod windows / build",
+    "build-and-test / test turbopack production (1/7) / build",
+    "build-and-test / test turbopack production (5/7) / build",
+    "build-and-test / optimize-ci / PR Stack CI Gate",
+    "build-and-test / test dev (8/10) / build",
+    "build-and-test / test dev (2/10) / build",
+    "build-and-test / test dev windows / build",
+    "build-and-test / test dev (3/10) / build",
+    "build-and-test / test firefox and safari / build",
+    "build-and-deploy / Prepare preview tarball",
+    "build-and-test / test turbopack dev (6/7) / build",
+    "build-and-test / test turbopack dev (7/7) / build",
+    "build-and-test / test turbopack dev (2/7) / build",
+    "build-and-test / test turbopack dev (4/7) / build",
+    "build-and-test / test turbopack dev (5/7) / build",
+    "build-and-test / test turbopack dev (3/7) / build",
+    "build-and-deploy / build",
+    "build-and-test / Test new and changed tests for flakes (prod) (2/5) / build",
+    "build-and-test / Test new and changed tests when deployed (cache components) (1/5) / build",
+    "build-and-test / test cache components dev (1/6) / build",
+    "build-and-test / test next-swc wasi / build",
+    "build-and-test / build-native / build",
+    "build-and-test / build-native-windows / build",
+    "build-and-test / test cargo unit (miri) / build",
+    "build-and-test / Test new and changed tests when deployed (cache components, adapter, 4/5) / build",
+    "build-and-test / test cache components prod (6/7) / build",
+    "build-and-test / Test new and changed tests when deployed (non-adapter, 1/5) / build",
+    "build-and-test / Test new and changed tests when deployed (cache components, adapter, 3/5) / build",
+    "build-and-test / Test new and changed tests when deployed (cache components, adapter, 5/5) / build",
+    "build-and-test / Test new and changed tests when deployed (adapter, 5/5) / build",
+    "build-and-test / test turbopack dev (1/7) / build",
+    "build-and-test / test cache components prod (3/7) / build",
+    "build-and-test / test cache components dev (2/6) / build",
+    "build-and-test / build-next / build",
+    "build-and-test / test cache components dev (5/6) / build",
+    "build-and-test / Test new and changed tests when deployed (adapter, 1/5) / build",
+    "build-and-test / test cache components prod (7/7) / build",
+    "build-and-test / Test new and changed tests when deployed (non-adapter, 4/5) / build",
+    "build-and-test / test cache components dev (6/6) / build",
+    "build-and-test / test cache components prod (1/7) / build",
+    "build-and-test / Test new and changed tests when deployed (non-adapter, 5/5) / build",
+    "build-and-test / Test new and changed tests when deployed (adapter, 4/5) / build",
+    "build-and-test / Test new and changed tests when deployed (non-adapter, 3/5) / build",
+    "build-and-test / Test new and changed tests when deployed (non-adapter, 2/5) / build",
+    "build-and-test / test unit (22) / build",
+    "build-and-test / test prod (7/10, 18.3.1) / build",
+    "build-and-test / test prod (10/10, 18.3.1) / build",
+    "build-and-test / test prod (9/10, 18.3.1) / build",
+    "build-and-test / test prod (2/10, 18.3.1) / build",
+    "next-upgrade-evals / Run upgrade evals",
+    "build-and-test / test cache components dev (4/6) / build",
+    "build-and-test / Test new and changed tests when deployed (cache components, adapter, 2/5) / build",
+    "build-and-test / test cache components dev (3/6) / build",
+    "build-and-deploy / stable - x86_64-unknown-linux-gnu - node@20",
+    "build-and-test / Test new and changed tests when deployed (cache components, adapter, 1/5) / build",
+    "build-and-test / test unit (20) / build",
+    "build-and-test / Test new and changed tests when deployed (2/5) / build",
+    "build-and-test / Test new and changed tests when deployed (5/5) / build",
+    "build-and-test / test dev (4/10, 18.3.1) / build",
+    "build-and-test / test dev (9/10, 18.3.1) / build",
+    "build-and-test / test dev (5/10, 18.3.1) / build",
+    "build-and-test / test prod (3/10, 18.3.1) / build",
+    "build-and-test / test cache components prod (4/7) / build",
+    "build-and-test / test cache components prod (2/7) / build",
+    "build-and-test / Test new and changed tests when deployed (adapter, 3/5) / build",
+    "build-and-test / thank you, next",
+    "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 1/5) / build",
+    "build-and-test / Test new and changed tests when deployed (1/5) / build",
+    "build-and-test / Test new and changed tests for flakes (dev) (1/5) / build",
+    "Embedded Go toolchain qualification / native (macos-15-intel, x86_64-apple-darwin)",
+    "build-and-test / test dev (6/10, 18.3.1) / build",
+    "build-and-test / test prod (1/10, 18.3.1) / build",
+    "build-and-test / test prod (6/10, 18.3.1) / build",
+    "build-and-test / test cache components prod (5/7) / build",
+    "build-and-test / Test new and changed tests when deployed (adapter, 2/5) / build",
+    "build-and-test / rust check / build",
+    "build-and-test / Test new and changed tests when deployed (4/5) / build",
+    "build-and-test / rustdoc check / build",
+    "build-and-test / test devlow package / build",
+    "build-and-test / Test new and changed tests when deployed (cache components) (2/5) / build",
+    "build-and-test / Test new and changed tests when deployed (cache components) (4/5) / build",
+    "build-and-test / test prod (8/10, 18.3.1) / build",
+    "build-and-test / test turbopack production (2/7, 18.3.1) / build",
+    "build-and-test / test dev (7/10, 18.3.1) / build",
+    "build-and-test / test dev (3/10, 18.3.1) / build",
+    "build-and-test / Test new and changed tests for flakes (prod) (1/5) / build",
+    "build-and-test / test dev (1/10, 18.3.1) / build",
+    "build-and-test / Test new and changed tests when deployed (3/5) / build",
+    "build-and-test / test next-swc wasm / build",
+    "build-and-test / Test new and changed tests when deployed (cache components) (5/5) / build",
+    "build-and-test / test cargo benches / Test",
+    "build-and-test / types and precompiled / build",
+    "build-and-deploy / deploy-target",
+    "build-and-deploy / build-wasm (nodejs)",
+    "build-and-test / test turbopack production (4/7, 18.3.1) / build",
+    "build-and-test / test turbopack production (7/7, 18.3.1) / build",
+    "build-and-test / test turbopack production (1/7, 18.3.1) / build",
+    "build-and-test / test prod (5/7) / build",
+    "build-and-test / test rspack dev (1/5) / build",
+    "build-and-deploy / stable - x86_64-apple-darwin - node@20",
+    "build-and-test / test dev (4/6) / build",
+    "build-and-test / test dev (2/6) / build",
+    "build-and-test / test turbopack production (6/7, 18.3.1) / build",
+    "build-and-test / test prod (4/10, 18.3.1) / build",
+    "build-and-test / test integration (1/13) / build",
+    "build-and-test / Test new tests when deployed (3/5) / build",
+    "build-and-test / test unit windows (24) / build",
+    "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 2/5) / build",
+    "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 3/5) / build",
+    "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 4/5) / build",
+    "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 5/5) / build",
+    "build-and-test / Test new and changed tests for flakes (prod) (3/5) / build",
+    "build-and-test / Test new tests when deployed (1/5) / build",
+    "Turbopack Go files / native-go (ubuntu-latest, 1.24.x)",
+    "Turbopack Go files / native-go (ubuntu-latest, 1.27.x)",
+    "build-and-deploy / build-wasm (web)",
+    "build-and-test / Test new and changed tests when deployed (cache components) (3/5) / build",
+    "build-and-test / test next-config-ts-native-ts dev (24.15.0) / build",
+    "build-and-test / Test new and changed tests for flakes (dev) (3/5) / build",
+    "build-and-test / Test new and changed tests for flakes (prod) (5/5) / build",
+    "build-and-test / test next-config-ts-native-ts prod (24.15.0) / build"
+  ],
+  "gates": [
+    {
+      "check": "build-and-test / lint / build",
+      "last_on": 245,
+      "out_of": 3264,
+      "p50_s": 327.0,
+      "share": 0.075061
+    },
+    {
+      "check": "build-and-test / test unit windows (22) / build",
+      "last_on": 224,
+      "out_of": 3264,
+      "p50_s": 668.0,
+      "share": 0.068627
+    },
+    {
+      "check": "build-and-test / test unit windows (20) / build",
+      "last_on": 224,
+      "out_of": 3264,
+      "p50_s": 661.5,
+      "share": 0.068627
+    },
+    {
+      "check": "build-and-test / Wait for preview tarball",
+      "last_on": 132,
+      "out_of": 3264,
+      "p50_s": 534.0,
+      "share": 0.040441
+    },
+    {
+      "check": "build-and-test / test prod (9/10) / build",
+      "last_on": 118,
+      "out_of": 3264,
+      "p50_s": 1046.5,
+      "share": 0.036152
+    },
+    {
+      "check": "build-and-test / test prod (7/10) / build",
+      "last_on": 111,
+      "out_of": 3264,
+      "p50_s": 1019.0,
+      "share": 0.034007
+    },
+    {
+      "check": "build-and-test / test prod (2/10) / build",
+      "last_on": 106,
+      "out_of": 3264,
+      "p50_s": 1036.0,
+      "share": 0.032475
+    },
+    {
+      "check": "build-and-test / test prod (5/10) / build",
+      "last_on": 103,
+      "out_of": 3264,
+      "p50_s": 1020.0,
+      "share": 0.031556
+    },
+    {
+      "check": "build-and-test / test prod (3/10) / build",
+      "last_on": 100,
+      "out_of": 3264,
+      "p50_s": 1020.0,
+      "share": 0.030637
+    },
+    {
+      "check": "build-and-test / test prod (8/10) / build",
+      "last_on": 96,
+      "out_of": 3264,
+      "p50_s": 1025.5,
+      "share": 0.029412
+    },
+    {
+      "check": "build-and-test / test prod (1/10) / build",
+      "last_on": 95,
+      "out_of": 3264,
+      "p50_s": 1039.0,
+      "share": 0.029105
+    },
+    {
+      "check": "build-and-test / test prod (10/10) / build",
+      "last_on": 95,
+      "out_of": 3264,
+      "p50_s": 1011.0,
+      "share": 0.029105
+    },
+    {
+      "check": "build-and-test / test prod (6/10) / build",
+      "last_on": 94,
+      "out_of": 3264,
+      "p50_s": 1032.5,
+      "share": 0.028799
+    },
+    {
+      "check": "build-and-test / test prod (4/10) / build",
+      "last_on": 94,
+      "out_of": 3264,
+      "p50_s": 1021.0,
+      "share": 0.028799
+    },
+    {
+      "check": "build-and-test / test dev (4/10) / build",
+      "last_on": 65,
+      "out_of": 3264,
+      "p50_s": 1198.0,
+      "share": 0.019914
+    },
+    {
+      "check": "build-and-test / test turbopack production (2/7) / build",
+      "last_on": 56,
+      "out_of": 3264,
+      "p50_s": 750.0,
+      "share": 0.017157
+    },
+    {
+      "check": "build-and-test / test dev (10/10) / build",
+      "last_on": 54,
+      "out_of": 3264,
+      "p50_s": 1186.0,
+      "share": 0.016544
+    },
+    {
+      "check": "build-and-test / test dev (7/10) / build",
+      "last_on": 53,
+      "out_of": 3264,
+      "p50_s": 1084.0,
+      "share": 0.016238
+    },
+    {
+      "check": "build-and-test / test turbopack production (4/7) / build",
+      "last_on": 53,
+      "out_of": 3264,
+      "p50_s": 822.0,
+      "share": 0.016238
+    },
+    {
+      "check": "build-and-test / test dev (5/10) / build",
+      "last_on": 51,
+      "out_of": 3264,
+      "p50_s": 1165.0,
+      "share": 0.015625
+    },
+    {
+      "check": "build-and-test / test integration windows / build",
+      "last_on": 47,
+      "out_of": 3264,
+      "p50_s": 558.0,
+      "share": 0.0144
+    },
+    {
+      "check": "build-and-test / test cargo unit / build",
+      "last_on": 46,
+      "out_of": 3264,
+      "p50_s": 666.5,
+      "share": 0.014093
+    },
+    {
+      "check": "build-and-test / test dev (1/10) / build",
+      "last_on": 45,
+      "out_of": 3264,
+      "p50_s": 1182.0,
+      "share": 0.013787
+    },
+    {
+      "check": "build-and-test / test dev (6/10) / build",
+      "last_on": 45,
+      "out_of": 3264,
+      "p50_s": 1146.0,
+      "share": 0.013787
+    },
+    {
+      "check": "build-and-test / test dev (9/10) / build",
+      "last_on": 45,
+      "out_of": 3264,
+      "p50_s": 1046.0,
+      "share": 0.013787
+    },
+    {
+      "check": "build-and-test / test turbopack production (6/7) / build",
+      "last_on": 45,
+      "out_of": 3264,
+      "p50_s": 848.0,
+      "share": 0.013787
+    },
+    {
+      "check": "build-and-test / test turbopack production (7/7) / build",
+      "last_on": 45,
+      "out_of": 3264,
+      "p50_s": 721.0,
+      "share": 0.013787
+    },
+    {
+      "check": "build-and-test / test turbopack production (3/7) / build",
+      "last_on": 44,
+      "out_of": 3264,
+      "p50_s": 740.5,
+      "share": 0.01348
+    },
+    {
+      "check": "build-and-test / test prod windows / build",
+      "last_on": 43,
+      "out_of": 3264,
+      "p50_s": 527.0,
+      "share": 0.013174
+    },
+    {
+      "check": "build-and-test / test turbopack production (1/7) / build",
+      "last_on": 41,
+      "out_of": 3264,
+      "p50_s": 867.0,
+      "share": 0.012561
+    },
+    {
+      "check": "build-and-test / test turbopack production (5/7) / build",
+      "last_on": 41,
+      "out_of": 3264,
+      "p50_s": 835.0,
+      "share": 0.012561
+    },
+    {
+      "check": "build-and-test / optimize-ci / PR Stack CI Gate",
+      "last_on": 37,
+      "out_of": 3264,
+      "p50_s": 3625.0,
+      "share": 0.011336
+    },
+    {
+      "check": "build-and-test / test dev (8/10) / build",
+      "last_on": 37,
+      "out_of": 3264,
+      "p50_s": 1151.0,
+      "share": 0.011336
+    },
+    {
+      "check": "build-and-test / test dev (2/10) / build",
+      "last_on": 35,
+      "out_of": 3264,
+      "p50_s": 1184.0,
+      "share": 0.010723
+    },
+    {
+      "check": "build-and-test / test dev windows / build",
+      "last_on": 31,
+      "out_of": 3264,
+      "p50_s": 534.0,
+      "share": 0.009498
+    },
+    {
+      "check": "build-and-test / test dev (3/10) / build",
+      "last_on": 29,
+      "out_of": 3264,
+      "p50_s": 1175.0,
+      "share": 0.008885
+    },
+    {
+      "check": "build-and-test / test firefox and safari / build",
+      "last_on": 26,
+      "out_of": 3264,
+      "p50_s": 361.0,
+      "share": 0.007966
+    },
+    {
+      "check": "build-and-deploy / Prepare preview tarball",
+      "last_on": 20,
+      "out_of": 3264,
+      "p50_s": 178.0,
+      "share": 0.006127
+    },
+    {
+      "check": "build-and-test / test turbopack dev (6/7) / build",
+      "last_on": 19,
+      "out_of": 3264,
+      "p50_s": 502.0,
+      "share": 0.005821
+    },
+    {
+      "check": "build-and-test / test turbopack dev (7/7) / build",
+      "last_on": 18,
+      "out_of": 3264,
+      "p50_s": 627.5,
+      "share": 0.005515
+    },
+    {
+      "check": "build-and-test / test turbopack dev (2/7) / build",
+      "last_on": 17,
+      "out_of": 3264,
+      "p50_s": 648.0,
+      "share": 0.005208
+    },
+    {
+      "check": "build-and-test / test turbopack dev (4/7) / build",
+      "last_on": 16,
+      "out_of": 3264,
+      "p50_s": 309.5,
+      "share": 0.004902
+    },
+    {
+      "check": "build-and-test / test turbopack dev (5/7) / build",
+      "last_on": 15,
+      "out_of": 3264,
+      "p50_s": 271.0,
+      "share": 0.004596
+    },
+    {
+      "check": "build-and-test / test turbopack dev (3/7) / build",
+      "last_on": 13,
+      "out_of": 3264,
+      "p50_s": 730.0,
+      "share": 0.003983
+    },
+    {
+      "check": "build-and-deploy / build",
+      "last_on": 13,
+      "out_of": 3264,
+      "p50_s": 92.0,
+      "share": 0.003983
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (prod) (2/5) / build",
+      "last_on": 12,
+      "out_of": 3264,
+      "p50_s": 1084.0,
+      "share": 0.003676
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components) (1/5) / build",
+      "last_on": 12,
+      "out_of": 3264,
+      "p50_s": 125.0,
+      "share": 0.003676
+    },
+    {
+      "check": "build-and-test / test cache components dev (1/6) / build",
+      "last_on": 11,
+      "out_of": 3264,
+      "p50_s": 406.0,
+      "share": 0.00337
+    },
+    {
+      "check": "build-and-test / test next-swc wasi / build",
+      "last_on": 10,
+      "out_of": 3264,
+      "p50_s": 169.0,
+      "share": 0.003064
+    },
+    {
+      "check": "build-and-test / build-native / build",
+      "last_on": 10,
+      "out_of": 3264,
+      "p50_s": 166.5,
+      "share": 0.003064
+    },
+    {
+      "check": "build-and-test / build-native-windows / build",
+      "last_on": 9,
+      "out_of": 3264,
+      "p50_s": 488.0,
+      "share": 0.002757
+    },
+    {
+      "check": "build-and-test / test cargo unit (miri) / build",
+      "last_on": 9,
+      "out_of": 3264,
+      "p50_s": 488.0,
+      "share": 0.002757
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, adapter, 4/5) / build",
+      "last_on": 9,
+      "out_of": 3264,
+      "p50_s": 293.0,
+      "share": 0.002757
+    },
+    {
+      "check": "build-and-test / test cache components prod (6/7) / build",
+      "last_on": 9,
+      "out_of": 3264,
+      "p50_s": 276.0,
+      "share": 0.002757
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (non-adapter, 1/5) / build",
+      "last_on": 9,
+      "out_of": 3264,
+      "p50_s": 244.0,
+      "share": 0.002757
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, adapter, 3/5) / build",
+      "last_on": 9,
+      "out_of": 3264,
+      "p50_s": 232.0,
+      "share": 0.002757
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, adapter, 5/5) / build",
+      "last_on": 9,
+      "out_of": 3264,
+      "p50_s": 228.0,
+      "share": 0.002757
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (adapter, 5/5) / build",
+      "last_on": 9,
+      "out_of": 3264,
+      "p50_s": 134.0,
+      "share": 0.002757
+    },
+    {
+      "check": "build-and-test / test turbopack dev (1/7) / build",
+      "last_on": 8,
+      "out_of": 3264,
+      "p50_s": 1170.0,
+      "share": 0.002451
+    },
+    {
+      "check": "build-and-test / test cache components prod (3/7) / build",
+      "last_on": 8,
+      "out_of": 3264,
+      "p50_s": 507.5,
+      "share": 0.002451
+    },
+    {
+      "check": "build-and-test / test cache components dev (2/6) / build",
+      "last_on": 8,
+      "out_of": 3264,
+      "p50_s": 348.5,
+      "share": 0.002451
+    },
+    {
+      "check": "build-and-test / build-next / build",
+      "last_on": 8,
+      "out_of": 3264,
+      "p50_s": 106.5,
+      "share": 0.002451
+    },
+    {
+      "check": "build-and-test / test cache components dev (5/6) / build",
+      "last_on": 7,
+      "out_of": 3264,
+      "p50_s": 745.0,
+      "share": 0.002145
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (adapter, 1/5) / build",
+      "last_on": 7,
+      "out_of": 3264,
+      "p50_s": 366.0,
+      "share": 0.002145
+    },
+    {
+      "check": "build-and-test / test cache components prod (7/7) / build",
+      "last_on": 7,
+      "out_of": 3264,
+      "p50_s": 324.0,
+      "share": 0.002145
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (non-adapter, 4/5) / build",
+      "last_on": 7,
+      "out_of": 3264,
+      "p50_s": 293.0,
+      "share": 0.002145
+    },
+    {
+      "check": "build-and-test / test cache components dev (6/6) / build",
+      "last_on": 7,
+      "out_of": 3264,
+      "p50_s": 176.0,
+      "share": 0.002145
+    },
+    {
+      "check": "build-and-test / test cache components prod (1/7) / build",
+      "last_on": 6,
+      "out_of": 3264,
+      "p50_s": 402.5,
+      "share": 0.001838
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (non-adapter, 5/5) / build",
+      "last_on": 6,
+      "out_of": 3264,
+      "p50_s": 293.0,
+      "share": 0.001838
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (adapter, 4/5) / build",
+      "last_on": 6,
+      "out_of": 3264,
+      "p50_s": 280.0,
+      "share": 0.001838
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (non-adapter, 3/5) / build",
+      "last_on": 6,
+      "out_of": 3264,
+      "p50_s": 213.5,
+      "share": 0.001838
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (non-adapter, 2/5) / build",
+      "last_on": 6,
+      "out_of": 3264,
+      "p50_s": 189.5,
+      "share": 0.001838
+    },
+    {
+      "check": "build-and-test / test unit (22) / build",
+      "last_on": 6,
+      "out_of": 3264,
+      "p50_s": 173.5,
+      "share": 0.001838
+    },
+    {
+      "check": "build-and-test / test prod (7/10, 18.3.1) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 1147.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / test prod (10/10, 18.3.1) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 1006.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / test prod (9/10, 18.3.1) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 992.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / test prod (2/10, 18.3.1) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 977.0,
+      "share": 0.001532
+    },
+    {
+      "check": "next-upgrade-evals / Run upgrade evals",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 689.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / test cache components dev (4/6) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 429.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, adapter, 2/5) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 323.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / test cache components dev (3/6) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 277.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-deploy / stable - x86_64-unknown-linux-gnu - node@20",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 250.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, adapter, 1/5) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 158.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / test unit (20) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 145.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (2/5) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 118.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (5/5) / build",
+      "last_on": 5,
+      "out_of": 3264,
+      "p50_s": 111.0,
+      "share": 0.001532
+    },
+    {
+      "check": "build-and-test / test dev (4/10, 18.3.1) / build",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 1239.5,
+      "share": 0.001225
+    },
+    {
+      "check": "build-and-test / test dev (9/10, 18.3.1) / build",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 1233.5,
+      "share": 0.001225
+    },
+    {
+      "check": "build-and-test / test dev (5/10, 18.3.1) / build",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 1195.0,
+      "share": 0.001225
+    },
+    {
+      "check": "build-and-test / test prod (3/10, 18.3.1) / build",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 1001.0,
+      "share": 0.001225
+    },
+    {
+      "check": "build-and-test / test cache components prod (4/7) / build",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 632.5,
+      "share": 0.001225
+    },
+    {
+      "check": "build-and-test / test cache components prod (2/7) / build",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 413.5,
+      "share": 0.001225
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (adapter, 3/5) / build",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 334.5,
+      "share": 0.001225
+    },
+    {
+      "check": "build-and-test / thank you, next",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 140.5,
+      "share": 0.001225
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 1/5) / build",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 135.0,
+      "share": 0.001225
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (1/5) / build",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 120.5,
+      "share": 0.001225
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (dev) (1/5) / build",
+      "last_on": 4,
+      "out_of": 3264,
+      "p50_s": 110.0,
+      "share": 0.001225
+    },
+    {
+      "check": "Embedded Go toolchain qualification / native (macos-15-intel, x86_64-apple-darwin)",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 2210.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / test dev (6/10, 18.3.1) / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 1105.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / test prod (1/10, 18.3.1) / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 1020.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / test prod (6/10, 18.3.1) / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 1003.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / test cache components prod (5/7) / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 736.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (adapter, 2/5) / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 293.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / rust check / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 217.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (4/5) / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 169.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / rustdoc check / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 140.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / test devlow package / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 119.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components) (2/5) / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 111.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components) (4/5) / build",
+      "last_on": 3,
+      "out_of": 3264,
+      "p50_s": 111.0,
+      "share": 0.000919
+    },
+    {
+      "check": "build-and-test / test prod (8/10, 18.3.1) / build",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 1471.5,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / test turbopack production (2/7, 18.3.1) / build",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 1451.5,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / test dev (7/10, 18.3.1) / build",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 1332.5,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / test dev (3/10, 18.3.1) / build",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 1241.5,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (prod) (1/5) / build",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 1227.5,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / test dev (1/10, 18.3.1) / build",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 1020.0,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (3/5) / build",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 628.0,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / test next-swc wasm / build",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 226.5,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components) (5/5) / build",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 153.5,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / test cargo benches / Test",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 128.5,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / types and precompiled / build",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 109.0,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-deploy / deploy-target",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 95.5,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-deploy / build-wasm (nodejs)",
+      "last_on": 2,
+      "out_of": 3264,
+      "p50_s": 91.0,
+      "share": 0.000613
+    },
+    {
+      "check": "build-and-test / test turbopack production (4/7, 18.3.1) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 1829.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test turbopack production (7/7, 18.3.1) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 1826.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test turbopack production (1/7, 18.3.1) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 1823.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test prod (5/7) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 1649.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test rspack dev (1/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 1367.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-deploy / stable - x86_64-apple-darwin - node@20",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 1321.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test dev (4/6) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 1272.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test dev (2/6) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 1162.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test turbopack production (6/7, 18.3.1) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 1102.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test prod (4/10, 18.3.1) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 833.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test integration (1/13) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 788.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / Test new tests when deployed (3/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 776.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test unit windows (24) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 625.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 2/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 376.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 3/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 376.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 4/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 376.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components, non-adapter, 5/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 376.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (prod) (3/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 336.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / Test new tests when deployed (1/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 254.0,
+      "share": 0.000306
+    },
+    {
+      "check": "Turbopack Go files / native-go (ubuntu-latest, 1.24.x)",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 242.0,
+      "share": 0.000306
+    },
+    {
+      "check": "Turbopack Go files / native-go (ubuntu-latest, 1.27.x)",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 242.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-deploy / build-wasm (web)",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 132.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / Test new and changed tests when deployed (cache components) (3/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 111.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test next-config-ts-native-ts dev (24.15.0) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 100.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (dev) (3/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 84.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / Test new and changed tests for flakes (prod) (5/5) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 68.0,
+      "share": 0.000306
+    },
+    {
+      "check": "build-and-test / test next-config-ts-native-ts prod (24.15.0) / build",
+      "last_on": 1,
+      "out_of": 3264,
+      "p50_s": 62.0,
+      "share": 0.000306
+    }
+  ],
+  "repository": "vercel/next.js",
+  "sample": {
+    "completed_pr_commits": 3834,
+    "completed_with_eligible_jobs": 3264,
+    "distinct_days": 31,
+    "first_completed_at": "2026-10-12T09:59:14Z",
+    "inflight_pr_commits": 0,
+    "last_completed_at": "2026-11-11T09:43:06Z",
+    "total_pr_commits": 3834
+  },
+  "schema_version": 1,
+  "typical_pr_wait_s": 1570.5,
+  "window": {
+    "end": "2026-11-11T09:50:00Z",
+    "start": "2026-10-12T09:50:00Z"
+  }
+}

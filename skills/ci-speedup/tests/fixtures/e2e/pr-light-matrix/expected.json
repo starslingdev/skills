@@ -10,11 +10,6 @@
   "config_eras": [],
   "credited_findings": [
     {
-      "pattern": "OPT14",
-      "runner_min": 2.2,
-      "wall_clock_s": 0.0
-    },
-    {
       "pattern": "OPT33",
       "runner_min": 9.0,
       "wall_clock_s": 0.0
@@ -31,7 +26,6 @@
     }
   ],
   "detected_patterns": [
-    "OPT14",
     "OPT32",
     "OPT33",
     "OPT45",

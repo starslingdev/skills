@@ -30,6 +30,7 @@ decision the JSON can answer.
   "workflow_activity": {"runs_30d": 218, "last_run": "...", "dormant": false},
   "evidence": "   8: job `bench` on `pull_request_target` checks out `${{ github.event.pull_request.head.sha }}` then executes from the tree <-- here",
   "fix_strategy": "switch-to-pull-request-or-drop-head-checkout",
+  "fix_guidance": "Optional evidence-specific guidance when this occurrence needs a narrower fix than the catalog default.",
   "fix_recipe_anchor": "p149--fork-code-executed-with-privileges"
 }
 ```
@@ -43,27 +44,68 @@ to a live workflow unless the distinction is kept. Dormancy drives a mandatory
 note in the report and the `all` fix selection, so read the report's rendered
 dormancy state rather than inferring one from a missing flag.
 
+**P14.18 findings only** also carry `actions_can_approve_prs`: GitHub's
+"Allow GitHub Actions to create and approve pull requests" repository setting
+(`can_approve_pull_request_reviews` from
+`GET repos/{owner}/{repo}/actions/permissions/workflow`), read once per scan
+when a P14.18 finding exists. `state` is `"true"`, `"false"` or `"unread"`,
+and `detail` says where the answer came from or why it could not be read (no
+`--repo`, gh not signed in, an API error). It is never guessed: an unread
+setting renders as "not checked" in the finding's reference block and as a
+sentence under "What an attacker could do then".
+
+```json
+"actions_can_approve_prs": {"state": "true", "detail": "read from the repository's Actions settings"}
+```
+
 ## The attacker_scenario merged in at Phase 2.5
 
-The one non-scripted field. Written once per pattern group and merged onto
-**every member** of that group:
+The one usually non-scripted field. Written once per
+`(pattern, severity, fix_strategy)` profile and merged onto every member of
+that profile, so a group that mixes a detector-lowered profile with the
+catalog one gets one object per profile; the report shows the group's most
+exposed profile. One field per plain section the report renders at the top
+of the finding, in this order (rules per field:
+[scenario-authoring.md](scenario-authoring.md)):
 
 ```json
 {
   ...,
-  "attacker_scenario": "Any GitHub user can open a fork PR — no prior access to the repo. Because bench.yml runs on pull_request_target and checks out the fork's code, the attacker's install scripts execute holding the repo's write token and secrets: they can push commits, mint releases, or exfiltrate credentials."
+  "attacker_scenario": {
+    "what_it_does": "Runs the benchmark suite on every pull request and posts the timings as a comment.",
+    "why_flagged": "It is started by pull requests from forks, runs with this repo's write pass and secrets, and then runs the pull request's own code.",
+    "what_must_go_wrong": "Nothing hard:\n- anyone with a GitHub account can open a fork pull request;\n- the job checks out that pull request's code and runs its install step.\nNo prior access to the repo is needed.",
+    "attacker_could": "Their install step runs holding the repo's write pass and secrets, so they could push commits or read every secret the job has.",
+    "verdict": "High: any stranger can reach it today.",
+    "how_to_close": "1. Run the benchmark on `pull_request` instead, where fork runs get no secrets and a read-only pass.\n2. If the comment must stay, post it from a second workflow that never runs the pull request's code."
+  }
 }
 ```
+
+A field may also be a list of strings (one line each). A single string —
+from an older run, or supplied by the scanner itself (P14.18's MEDIUM
+cosmetic profile) — is still accepted and renders under "What an attacker
+could do then" alone; `tests/verify_report.py` then counts that finding as
+not repo-specific, exactly like the catalog's generic stand-in. So Phase 2.5
+keeps a scanner-supplied string's claim as that profile's `attacker_could`
+and replaces the string with the full object.
 
 ## Top-level blocks
 
 - `gh_checks` — per-network-gated-check status, `P14.11` above all: `ran` /
   `partial` / `skipped` plus the detail (pin counts, or the reason). An
   ABSENT `P14.11` key is the "not recorded" state — a coverage hole, never a
-  pass.
+  pass. `P14.24` is present only when the scan reached a GitHub CLI extension
+  pinned to a tag and then run: the release-immutability lookup's
+  `ran` / `partial` / `skipped` status, e.g. `ran: 2 tag-pinned GitHub CLI
+  extension install(s) looked up, 1 immutable (not reported), 1 reported`.
+  This lookup can only remove a finding, so a `partial` or `skipped` one
+  means some tag-pinned findings were kept without being checked, never that
+  a finding is missing. Its absence means no such install was reached.
 - `gh_check_details` — the per-check detail a `partial` status refers to,
-  including the unresolved-pin list. `gh_checks` gives the status word; this
-  is where the specifics live.
+  including the unresolved-pin list (for `P14.24`, each
+  `owner/repo@tag (file:line) — reason` that was not looked up). `gh_checks`
+  gives the status word; this is where the specifics live.
 - `scan_incomplete` — workflow files skipped or unreadable, with a reason
   each. Non-empty means coverage is PARTIAL.
 - `dropped_matches` and `coverage_notes` — the other two coverage channels.
@@ -95,6 +137,21 @@ The one non-scripted field. Written once per pattern group and merged onto
   found. Its file is not listed in `workflows` unless it also holds counted
   steps. Parallel steps are a github.com / GitHub Enterprise Cloud feature;
   the scan reads the syntax wherever it appears.
+- `action_lockfile` — the GitHub Actions workflow lockfile
+  (`.github/workflows/actions.lock`): `path` (a case variant such as
+  `Actions.lock` is named as it is on disk), `state` (`absent`, `valid`, or
+  `invalid` for a file that is not exactly that name, a symbolic link,
+  unreadable, unparseable, a format version the scan does not recognize, or
+  holding any malformed entry — invalid credits nothing),
+  `covered_references` (step-level `uses:` occurrences not pinned to a full
+  commit, in scanned workflows the lockfile lists, that it locks to a commit;
+  repeats count, and a reusable-workflow call is never counted because the
+  lockfile does not pin one) and `covered_workflows`. The key is always
+  present.
+  Informational, never a coverage gap: GitHub verifies each locked commit at
+  run time, and P14.11 checks only commit pins written in `uses:`, so these
+  are the references P14.11 leaves to GitHub. The report states them on its
+  **Action lockfile** row.
 - `security_score` — present in the JSON and **never rendered**. Phase 3
   forbids a score, ratio or `N/100` anywhere the user sees. It is listed here
   so it is recognized as out of bounds rather than mistaken for a summary

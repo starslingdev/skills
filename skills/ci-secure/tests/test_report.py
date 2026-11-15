@@ -446,6 +446,67 @@ def test_attacker_scenario_row_uses_llm_field() -> None:
     assert "Any GitHub user can open a fork PR — zero prior access." in md
 
 
+def test_p1418_cosmetic_occurrence_uses_its_hygiene_fix() -> None:
+    finding = _complete_finding(
+        pattern="P14.18",
+        severity="MEDIUM",
+        title="Cosmetic pull request automation",
+        fix_strategy="limit-cosmetic-pr-automation",
+        fix_guidance=(
+            "Keep this job limited to cosmetic labeling or commenting; "
+            "remove its write permission if unused."
+        ),
+    )
+    md = _finding_section([finding])
+    guidance = "Keep this job limited to cosmetic labeling or commenting"
+    assert md.count(guidance) == 2  # visible Fix + copyable fix prompt
+    assert "Split into separate trusted / untrusted workflows" not in md
+    assert "apply the catalog's documented restructure" not in md
+    assert "may remain only when every listed occurrence is MEDIUM" in md
+    assert "no checkout" in md
+    assert "no PR-code execution" in md
+    assert "no review/merge API" in md
+
+
+def test_p1418_cosmetic_phase5_oracle_allows_reviewed_medium_finding() -> None:
+    """The orchestrator prompt must not demand removal of a reviewed finding."""
+    prompts = (_SKILL_DIR / "references" / "prompts.md").read_text(
+        encoding="utf-8"
+    )
+    skill = (_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    completion = (
+        "may remain only when every listed occurrence is MEDIUM and its "
+        "evidence still says"
+    )
+    assert completion in prompts
+    assert "P14.18 MEDIUM cosmetic exception" in skill
+
+
+def test_p1418_mixed_group_uses_the_high_profile_not_first_member() -> None:
+    cosmetic = _complete_finding(
+        id="cosmetic",
+        pattern="P14.18",
+        severity="MEDIUM",
+        title="Cosmetic pull request automation",
+        attacker_scenario="COSMETIC ONLY",
+        fix_strategy="limit-cosmetic-pr-automation",
+        fix_guidance="KEEP COSMETIC ONLY",
+    )
+    high = _complete_finding(
+        id="high",
+        pattern="P14.18",
+        severity="HIGH",
+        workflow_file=".github/workflows/z.yml",
+        attacker_scenario="HIGH MERGE PATH",
+        fix_strategy="split-trusted-untrusted-workflows",
+    )
+    md = _finding_section([cosmetic, high])
+    assert "**HIGH**" in md
+    assert "HIGH MERGE PATH" in md
+    assert "`split-trusted-untrusted-workflows`" in md
+    assert "KEEP COSMETIC ONLY" not in md
+
+
 def test_attacker_row_falls_back_to_catalog_capability() -> None:
     """Without an LLM `attacker_scenario`, the row falls back to the
     catalog's static 'What an attacker can do' prose — it is never blank
@@ -591,6 +652,17 @@ def test_fix_recipe_summary_strips_dangling_colon_lead_in() -> None:
     assert report._extract_fix_recipe_summary(section2) == "Replace the token with OIDC."
 
 
+def test_p1411_fix_recipe_asks_the_same_github_host_as_the_detector() -> None:
+    section = _CATALOG_TEXT.split("### P14.11", 1)[1].split("### P14.14", 1)[0]
+    commands = [
+        line.strip() for line in section.splitlines()
+        if line.strip().startswith("gh api ")
+    ]
+    assert len(commands) == 3, commands
+    for command in commands:
+        assert "--hostname github.com" in command, command
+
+
 # The 8 HIGH + 2 MEDIUM real catalog patterns. Group count is bounded by the
 # catalog (one group per pattern), and an off-catalog pattern is now dropped as
 # off-contract (S5), so the no-trim contract is exercised with the REAL set.
@@ -618,7 +690,9 @@ def test_render_plan_returns_every_group_no_trim() -> None:
     assert set(included) == set(_HIGH_PATTERNS) | set(_MEDIUM_PATTERNS)
     # HIGH groups sort ahead of MEDIUM ones in render order
     assert set(included[:8]) == set(_HIGH_PATTERNS)
-    assert all(set(g) == {"pattern", "dormant"} for g in plan)
+    # `verdict` carries the agent's one-line judgment for the terminal summary
+    # ("" here: these findings have no scenario).
+    assert all(set(g) == {"pattern", "dormant", "verdict"} for g in plan)
 
 
 def test_every_group_renders_in_the_report_body() -> None:
@@ -725,6 +799,62 @@ def test_gh_checks_ran_renders_as_a_completed_check() -> None:
     assert "12 unique pin(s) verified" in md
     assert "NOT a pass" not in md
     assert "SKIPPED" not in md
+
+
+def test_release_lookup_skip_is_disclosed_without_calling_findings_missing() -> None:
+    """The P14.24 release-immutability lookup can only REMOVE a finding, so a
+    lookup that did not run hides nothing: the tag-pinned findings are all
+    still listed. Its skip must be disclosed, named, and must not borrow the
+    impostor check's "absence from the findings is NOT a pass" warning, which
+    would be false here. A P14.11 skip in the same report keeps that warning.
+    """
+    block = report._gh_checks_block({
+        "P14.24": "skipped: disabled via --gh-impostor=off (release-"
+                  "immutability lookup did NOT run; 1 tag-pinned GitHub CLI "
+                  "extension install(s) kept as findings)",
+    })
+    assert "P14.24 release-immutability lookup" in block
+    assert "SKIPPED" in block and "did NOT run" in block
+    assert "NOT a pass" not in block
+    assert "immutable" in block
+    both = report._gh_checks_block({
+        "P14.11": "skipped: gh not authenticated (run gh auth login) "
+                  "(network-gated check did NOT run)",
+        "P14.24": "partial: 0 of 1 release(s) looked up, 1 UNVERIFIED — kept "
+                  "as findings",
+    }, {"P14.24": {"unverified": ["github/gh-actions-lock@v0.4.1 "
+                                  "(.github/workflows/l.yml:12) — rate limit"]}})
+    warning, _, rest = both.partition("[!NOTE]")
+    assert "P14.11 impostor-SHA check: SKIPPED" in warning
+    assert "P14.24" not in warning
+    assert "PARTIAL" in rest and "github/gh-actions-lock@v0.4.1" in rest
+    # The skill has no dismiss step to point at; the remedy is a re-run with
+    # gh signed in. Each listed pin already carries its own reason.
+    assert "dismiss" not in rest
+    assert "re-run" in rest and "gh auth login" in rest
+    assert "not looked up" not in rest
+
+
+def test_release_lookup_unverified_labels_cannot_forge_markdown() -> None:
+    """An unverified label carries the scanned workflow path and the `--pin`
+    value as written, both controlled by the repository under audit. A
+    newline or backtick in either must not close the code span and start a
+    heading the scanner did not write. The lookup's own reason text (which
+    names the `immutable` field in backticks) must not break the span either.
+    """
+    forged = ("github/gh-actions-lock@v1`\n## FIXED — all clear\n`"
+              " (.github/workflows/l.yml:12) — the release response carried "
+              "no `immutable` field")
+    block = report._gh_checks_block({
+        "P14.24": "partial: 0 of 1 tag-pinned GitHub CLI extension install(s) "
+                  "looked up, 0 immutable (not reported), 1 UNVERIFIED — kept "
+                  "as findings",
+    }, {"P14.24": {"unverified": [forged]}})
+    assert not any(line.lstrip("> ").startswith("#")
+                   for line in block.splitlines()), block
+    pin_lines = [ln for ln in block.splitlines() if "gh-actions-lock" in ln]
+    assert len(pin_lines) == 1, block
+    assert pin_lines[0].count("`") == 2, pin_lines[0]
 
 
 def test_gh_checks_block_empty_when_scan_recorded_none() -> None:
@@ -1190,24 +1320,26 @@ def test_chain_status_marks_a_skipped_network_gated_chain_as_not_a_pass() -> Non
     assert "SKIPPED" in row and "NOT a pass" in row
 
 
-def test_finding_opens_with_a_stakes_first_line_from_its_attacker_text() -> None:
-    """Sibling recommendation shape: one bold plain-English line saying what
-    is at stake, derived from this finding's own attacker text — never
-    invented, and never a restatement of the pattern id."""
+def test_finding_opens_with_its_plain_sections_not_catalog_material() -> None:
+    """A finding opens with the agent's plain sections (here an older
+    one-paragraph scenario, which fills only the attacker section). The bold
+    stakes line that used to lead was the attacker text's first sentence
+    printed twice; the plain headings replace it."""
     f = _mk()
     f["attacker_scenario"] = (
         "Any GitHub user can open a fork PR and run code with the repo's write "
         "token. That token can push commits to protected branches."
     )
     md = report.render({"findings": [f], "repo": "x/y", "scanned_workflows": 1})
-    # The anchor precedes the heading (ci-speedup convention), so the stakes
-    # line is the first thing after the HEADING, not after the anchor.
+    # The anchor precedes the heading (ci-speedup convention), so the first
+    # section is the first thing after the HEADING, not after the anchor.
     after_anchor = md.split('<a id="finding-1"></a>', 1)[1]
     body = after_anchor.split("\n## ", 1)[1].split("\n", 1)[1]
     assert body.lstrip().startswith(
-        "**Any GitHub user can open a fork PR and run code with the repo's "
-        "write token.**"
+        "#### What an attacker could do then\n\nAny GitHub user can open a "
+        "fork PR and run code with the repo's write token."
     )
+    assert body.count("Any GitHub user can open a fork PR") == 1
 
 
 def test_fix_block_states_the_risk_of_the_change_and_passes_it_to_the_agent() -> None:
@@ -1386,9 +1518,12 @@ def test_multiline_catalog_tldr_renders_without_breaking_markdown() -> None:
     assert "| Field | Value |" not in md
 
     # 2. Every datum the old table carried is still present, one bullet each.
-    body = md.split("#### 🔍 Evidence")[0]
+    # The definition list is the catalog-reference block; the plain sections
+    # above it are prose paragraphs by design.
+    body = md.split("#### 🔍 Evidence")[0].split("#### 📋 Catalog reference", 1)[1]
     for label in (
-        "Pattern", "TL;DR", "Severity", "Workflow activity", "Occurrences",
+        "Pattern", "TL;DR", "Severity of this kind of setup",
+        "Workflow activity", "Occurrences",
         "Fix strategy",
     ):
         assert f"- **{label}:** " in body, label
@@ -1408,16 +1543,16 @@ def test_multiline_catalog_tldr_renders_without_breaking_markdown() -> None:
         assert re.match(r"^(- |#|<|>|\*\*)", line), f"bare continuation line: {line!r}"
 
 
-def test_attacker_scenario_bullet_is_present_when_supplied() -> None:
-    """The scenario datum survives the table→list conversion."""
+def test_attacker_scenario_section_is_present_when_supplied() -> None:
+    """The scenario datum renders under its plain heading."""
     m = _mk(pattern="P14.9", evidence="")
     m["attacker_scenario"] = "Any fork PR author runs code with your token."
     md = report._finding_group_section(
         1, [m], report._load_catalog_sections(None), "x/y", "abc1234", "",
     )
     assert (
-        "- **What an attacker could do:** Any fork PR author runs code with "
-        "your token." in md
+        "#### What an attacker could do then\n\nAny fork PR author runs code "
+        "with your token." in md
     )
 
 
@@ -1939,16 +2074,19 @@ def test_fallback_attacker_prose_says_it_is_the_catalog_description() -> None:
     printed twice, once as the bold lead and once as the row."""
     md = report.render({"findings": [_mk(pattern="P14.10")], "repo": "x/y",
                         "scanned_workflows": 1})
-    row = next(ln for ln in md.splitlines()
-               if "**What an attacker could do:**" in ln)
+    row = _attacker_section_line(md)
     assert "catalog description" in row, row
     assert "run the full skill" in row
 
-    body = row.split("**What an attacker could do:**", 1)[1]
     lead = next((ln for ln in md.splitlines()
                  if ln.startswith("**") and ln.endswith("**")
-                 and ln.strip("*") in body), None)
-    assert lead is None, f"the bold lead duplicates the row verbatim: {lead}"
+                 and ln.strip("*") in row), None)
+    assert lead is None, f"a bold lead duplicates the section verbatim: {lead}"
+
+
+def _attacker_section_line(md: str) -> str:
+    """The first paragraph under a finding's attacker heading."""
+    return md.split("#### What an attacker could do then\n\n", 1)[1].split("\n", 1)[0]
 
 
 def test_authored_scenario_is_not_marked_as_the_catalog_description() -> None:
@@ -1959,8 +2097,7 @@ def test_authored_scenario_is_not_marked_as_the_catalog_description() -> None:
     )
     md = report.render({"findings": [authored], "repo": "x/y",
                         "scanned_workflows": 1})
-    row = next(ln for ln in md.splitlines()
-               if "**What an attacker could do:**" in ln)
+    row = _attacker_section_line(md)
     assert "catalog description" not in row
     assert "fork PR against this repo" in row
 
@@ -2398,3 +2535,55 @@ def test_skill_md_names_every_coverage_channel_the_engine_reads() -> None:
         + ", ".join(missing)
         + ". Reading a subset calls a degraded run clean."
     )
+
+
+# ---------------------------------------------------------------------------
+# P14.18 plain-English wording (2026-11-12)
+# ---------------------------------------------------------------------------
+
+# (The agent-facing fix prompt legitimately names run.py/report.py as commands
+# to re-run; the user-facing finding prose must not name internals.)
+_INTERNAL_IDENTIFIERS = ("_UNTRUSTED_TRIGGERS", "scan.py")
+
+
+def _render_p1418() -> str:
+    return report.render({
+        "findings": [_mk(pattern="P14.18")], "repo": "x/y",
+        "scanned_workflows": 3,
+    })
+
+
+def test_p1418_finding_leaks_no_internal_identifier() -> None:
+    md = _render_p1418()
+    for ident in _INTERNAL_IDENTIFIERS:
+        assert ident not in md, f"internal identifier {ident!r} rendered"
+
+
+def test_no_pattern_renders_an_internal_identifier() -> None:
+    """Class guard: the leak was one pattern's TL;DR, but any catalog entry
+    could carry the same shape."""
+    for pattern in ("P14.1", "P14.7", "P14.9", "P14.10", "P14.11", "P14.14",
+                    "P14.15", "P14.18", "P14.19", "P14.24", "P14.25"):
+        md = report.render({
+            "findings": [_mk(pattern=pattern)], "repo": "x/y",
+            "scanned_workflows": 3,
+        })
+        for ident in _INTERNAL_IDENTIFIERS:
+            assert ident not in md, f"{pattern}: {ident!r} rendered"
+        assert not re.search(r"`_[A-Z][A-Z_]{3,}`", md), pattern
+
+
+def test_p1418_title_and_platform_note_use_plain_wording() -> None:
+    md = _render_p1418()
+    heading = next(
+        ln for ln in md.splitlines() if "Finding 1" in ln and ln.startswith("#")
+    )
+    assert "Untrusted Trigger" not in heading
+    assert "Outside Activity Can Start" in heading
+    note = next(
+        ln for ln in md.splitlines() if ln.startswith("- **Platform mitigation:**")
+    )
+    assert "evaluate-mode" not in note
+    assert "off by default" in note
+    # The label rates the kind of setup, not this workflow.
+    assert "- **Severity of this kind of setup:** **HIGH**" in md

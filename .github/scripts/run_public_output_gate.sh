@@ -7,4 +7,6 @@ body="$(mktemp)"
 printf '%s\n' "$PR_TITLE" > "$title"
 printf '%s\n' "$PR_BODY" > "$body"
 exec python3 .github/scripts/check_public_output.py --target "$GITHUB_REPOSITORY" \
-  --text-file "$title" --text-file "$body" --base "origin/$BASE_REF"
+  --text-file "$title" --text-file "$body" --base "origin/$BASE_REF" \
+  --allow home-assistant/core --allow vercel/next.js \
+  --allow ethereum/go-ethereum --allow microsoft/playwright

@@ -626,16 +626,74 @@ def test_real_adapter_caps_and_counts_job_log_calls():
     assert len(client.text_gets) == 20
     assert cohort["log_api_calls"] == 20
     assert cohort["log_jobs_omitted"] == 2
+    assert _cache_class({**cohort, "position": 2}) == ("warm", "later run")
 
 
 def test_real_adapter_bounds_total_retained_log_text():
-    client = AdapterFixture({"actions/jobs/": "x" * 60_000})
+    client = AdapterFixture({"actions/jobs/": "cache hit " + "x" * 60_000})
     sample = client._job_logs("o/r", [_api_job(job_id) for job_id in range(1, 4)])
 
     assert sum(len(log) for log in sample["logs"]) == 100_000
     assert sample["log_api_calls"] == 2
     assert sample["log_jobs_omitted"] == 1
     assert sample["log_jobs_truncated"] == 1
+
+
+def test_real_adapter_finds_cache_markers_after_a_long_log_prefix():
+    log = "ordinary output\n" * 11_000 + "Cache restored from key: node-v1\n"
+    client = AdapterFixture({"actions/jobs/": log})
+
+    sample = client._job_logs("o/r", [_api_job()])
+
+    assert sample["logs"] == ["Cache restored from key: node-v1"]
+    assert sample["log_jobs_truncated"] == 0
+    assert _cache_class({"position": 1, **sample})[0] == "warm"
+
+
+def test_renamed_cache_actions_without_a_marker_stay_unknown():
+    for action in ("actions/cache@v4", "actions/cache/restore@v4",
+                   "actions/cache/save@v4"):
+        client = AdapterFixture({
+            "actions/jobs/": (
+                f"##[group]Run {action}\n"
+                "with:\n"
+                "  path: node_modules\n"),
+        })
+        job = _api_job()
+        job["steps"][0]["name"] = "Restore dependencies"
+
+        sample = client._job_logs("o/r", [job])
+
+        assert sample["log_has_cache_step"] is True, action
+        assert _cache_class({"position": 2, **sample}) == (
+            "unknown", "no cache marker in sampled job logs"), action
+
+    client = AdapterFixture({
+        "actions/jobs/": (
+            "2026-11-11T08:14:03.1234567Z ##[group]Run actions/setup-node@v4\n"
+            "2026-11-11T08:14:03.1235678Z with:\n"
+            "2026-11-11T08:14:03.1236789Z   cache: npm\n"
+            "2026-11-11T08:14:04.2345678Z npm cache is not found\n"),
+    })
+    job = _api_job()
+    job["steps"][0]["name"] = "Set up Node.js"
+
+    sample = client._job_logs("o/r", [job])
+
+    assert sample["log_has_cache_step"] is True
+    assert _cache_class({"position": 2, **sample}) == (
+        "unknown", "no cache marker in sampled job logs")
+
+
+def test_unreadable_renamed_step_cannot_prove_cache_absence():
+    client = AdapterFixture({})
+    job = _api_job()
+    job["steps"][0]["name"] = "Restore dependencies"
+
+    sample = client._job_logs("o/r", [job])
+
+    assert _cache_class({"position": 2, **sample}) == (
+        "unknown", "1 job log unreadable")
 
 
 def test_real_adapter_discloses_jobs_without_readable_ids():
@@ -712,6 +770,161 @@ def test_collected_baseline_and_real_adapter_use_the_same_work_identity():
         before, after, changed_files=[".github/workflows/ci.yml"])
     assert result["available"] is True
     assert result["workload_state"] == "same"
+
+
+def test_verification_has_one_persisted_baseline_log_budget(tmp_path):
+    class BudgetClient(FakeClient):
+        def __init__(self):
+            super().__init__()
+            self.log_gets = []
+
+        def _text(self, endpoint):
+            self.log_gets.append(endpoint)
+            return "Cache restored from key: node-v1"
+
+        _job_logs = GhVerificationClient._job_logs
+
+        def rerun_cohort(self, repo, cohort, *, trigger=True):
+            self.events.append("rerun-trigger" if trigger else "rerun-poll")
+            return None
+
+    client = BudgetClient()
+    client.initial = None
+    facts = []
+    job_id = 1
+    for fact_number in range(6):
+        jobs = []
+        fact_size = 19 if fact_number == 5 else 20
+        for _ in range(fact_size):
+            jobs.append({
+                **_job(f"base-{fact_number}", 1),
+                "id": job_id,
+                "workflow_file": "ci.yml",
+            })
+            job_id += 1
+        facts.append({
+            "sha": f"base-{fact_number}",
+            "event": "pull_request",
+            "jobs": jobs,
+        })
+    baseline = tmp_path / "base.json"
+    baseline.write_text(json.dumps({
+        "per_workflow_monthly_volume": {"ci.yml": 40},
+        "pr_critical_path": {"commit_wall_clock": {"facts": facts}},
+    }))
+    context_path = tmp_path / "verify.json"
+
+    first = advance_verification(
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        context_path=context_path, changed_files=[".github/workflows/ci.yml"],
+        environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
+
+    assert first["status"] == "waiting-for-first-cohort"
+    assert len(client.log_gets) <= 20
+    assert first["verification_log_api_calls"] == len(client.log_gets)
+    assert first["verification_log_api_budget"] == 20
+    saved = json.loads(context_path.read_text())
+    assert saved["baseline"]
+    after_baseline = client._job_logs(
+        "o/r", [{
+            "id": 1000 + index,
+            "steps": [{"name": "Restore dependencies"}],
+        } for index in range(5)])
+    assert after_baseline["log_api_calls"] == 0
+    assert after_baseline["log_jobs_omitted"] == 5
+    client.log_gets.clear()
+    client.initial = _cohort("fix", "fix-initial")
+    second = advance_verification(
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        context_path=context_path, changed_files=[".github/workflows/ci.yml"],
+        environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
+    assert second["status"] == "waiting-for-rerun"
+    assert second["sample_count"] == 1
+    assert client.log_gets == []
+    assert second["verification_log_api_calls"] == first["verification_log_api_calls"]
+    assert _cache_class({
+        "position": 2,
+        **after_baseline,
+    }) == ("unknown", "5 job logs omitted by cap")
+
+
+def test_verification_persists_log_budget_when_remote_head_is_unavailable(tmp_path):
+    class MissingHeadClient(FakeClient):
+        def __init__(self):
+            super().__init__(head=None)
+            self.log_gets = []
+
+        def _text(self, endpoint):
+            self.log_gets.append(endpoint)
+            return "Cache restored from key: node-v1"
+
+        _job_logs = GhVerificationClient._job_logs
+
+    client = MissingHeadClient()
+    baseline = tmp_path / "base.json"
+    baseline.write_text(json.dumps({
+        "per_workflow_monthly_volume": {"ci.yml": 40},
+        "pr_critical_path": {"commit_wall_clock": {"facts": [{
+            "sha": "base",
+            "event": "pull_request",
+            "jobs": [{
+                **_job("base", 1),
+                "id": job_id,
+                "workflow_file": "ci.yml",
+            } for job_id in range(1, 26)],
+        }]}},
+    }))
+    context_path = tmp_path / "verify.json"
+
+    first = advance_verification(
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        context_path=context_path, changed_files=[".github/workflows/ci.yml"],
+        environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
+    calls_after_first = len(client.log_gets)
+    second = advance_verification(
+        client, repo="o/r", branch="fix", baseline_artifact=str(baseline),
+        context_path=context_path, changed_files=[".github/workflows/ci.yml"],
+        environ={"CI_SPEEDUP_VERIFY_RUNS": "2"}, emit=lambda _line: None)
+
+    assert first["status"] == second["status"] == "ineligible"
+    assert calls_after_first == 20
+    assert len(client.log_gets) == calls_after_first
+    assert second["verification_log_api_calls"] == calls_after_first
+
+
+def test_temporary_missing_remote_head_preserves_inflight_verification(tmp_path):
+    class DelayedRerunClient(FakeClient):
+        def rerun_cohort(self, repo, cohort, *, trigger=True):
+            self.events.append("rerun-trigger" if trigger else "rerun-poll")
+            if trigger:
+                self.reruns += 1
+            elif getattr(self, "rerun_finished", False):
+                return _cohort("fix", "fix-rerun-1", attempt=2)
+            return None
+
+    client = DelayedRerunClient()
+    first = _invoke(tmp_path, client)
+    before_failure = json.loads((tmp_path / "verify.json").read_text())
+    assert first["status"] == "waiting-for-rerun"
+    assert before_failure["initial"]["head_sha"] == "fix"
+    assert before_failure["samples"][0]["head_sha"] == "fix"
+    assert before_failure["pending_rerun"] is not None
+
+    client.head = None
+    second = _invoke(tmp_path, client)
+    after_failure = json.loads((tmp_path / "verify.json").read_text())
+
+    assert second["status"] == "ineligible"
+    assert after_failure["initial"] == before_failure["initial"]
+    assert after_failure["samples"] == before_failure["samples"]
+    assert after_failure["pending_rerun"] == before_failure["pending_rerun"]
+    assert after_failure["binding"] == before_failure["binding"]
+
+    client.head = "fix"
+    client.rerun_finished = True
+    recovered = _invoke(tmp_path, client)
+    assert recovered["status"] == "complete"
+    assert recovered["sample_count"] == 2
 
 
 def test_default_branch_sampling_maps_squash_merge_and_stops_at_a_gap():
