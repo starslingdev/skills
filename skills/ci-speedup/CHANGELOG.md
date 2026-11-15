@@ -34,6 +34,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-15** — Lead bimodal gate reports with both measured modes and their shares, size the slow-mode improvement from per-PR ceilings, and reject a P50-only Bottom line for that shape (#353).
 - **2026-11-12** — Cap baseline job-log reads across an entire post-fix verification, persist the sampled baseline and any in-flight sample or rerun state for later polls even when the branch-head lookup is temporarily unavailable, and disclose the calls used against the budget.
 - **2026-11-11** — Show Wilson intervals and sample spans beside gate frequencies, withhold unsupported pole order from the chat close, and disclose while excluding sub-60-second bookkeeping jobs from developer-wait poles (#317).
 - **2026-11-11** — Split long poles into frequent and rarely-last groups, sort each group by P50, show the finish-last count on every row using the renderer's sampled-population denominator, open the Bottom line with Long pole 1, and carry each pole's frequency group and `needs:`-upstream reason into the report and chat hand-off (#318).
