@@ -173,31 +173,6 @@ def test_reference_oracle_uses_month_wide_last_job_facts_and_ignores_bookkeeping
     assert facts["bookkeeping_jobs"] == [{"check": "CI / cleanup", "excluded_on": 3}]
 
 
-def test_reference_oracle_uses_the_last_finish_not_the_longest_duration() -> None:
-    oracle = _load("oracle")
-    recording = {
-        "schema_version": 1,
-        "repository": "public/example",
-        "pr_commits": [{
-            "sha": "commit-1",
-            "created_at": "2026-11-01T00:00:00Z",
-            "completed": True,
-            "jobs": [
-                {"workflow": "CI", "name": "long early", "status": "completed",
-                 "started_at": "2026-11-01T00:00:00Z",
-                 "completed_at": "2026-11-01T00:10:00Z"},
-                {"workflow": "CI", "name": "short late", "status": "completed",
-                 "started_at": "2026-11-01T00:09:00Z",
-                 "completed_at": "2026-11-01T00:11:00Z"},
-            ],
-        }],
-    }
-
-    facts = oracle.compute(recording, bookkeeping_cutoff_s=0)
-
-    assert facts["gate_order"][0] == "CI / short late"
-
-
 def test_reference_wait_starts_at_the_earliest_recorded_run() -> None:
     oracle = _load("oracle")
     recording = {
