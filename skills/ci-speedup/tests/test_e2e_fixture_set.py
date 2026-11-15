@@ -555,6 +555,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
         monkeypatch, tmp_path):
     docs = {}
     reports = {}
+    fixture_checks = {}
     for name in (
             "cache-lints", "config-era-change", "duplicate-gate-job", "emulated-container",
             "external-required-gate", "heavy-runner-queue", "minority-tail",
@@ -562,7 +563,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
             "vitest-isolated-serial", "cargo-double-compile", "per-test-startup",
             "jest-make-hop", "sharded-floor", "replayed-test-cache",
             "path-filter-unmeasured", "lighthouse-passes"):
-        docs[name], reports[name], _checks = run_fixture(
+        docs[name], reports[name], fixture_checks[name] = run_fixture(
             FIXTURE_ROOT / name, monkeypatch, tmp_path)
 
     assert docs["config-era-change"]["pr_critical_path"]["config_eras"]
@@ -723,9 +724,17 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "package: [api, web]" in restored_workflow
     assert "runtime: [20, 22]" in restored_workflow
     assert "shard:" not in restored_workflow
-    assert any(
-        row.get("name", "").startswith("tests / test (")
-        for row in docs["path-partitioned-monorepo"]["pr_critical_path"]["checks"])
+    assert "pnpm ls --filter '...[HEAD^1]'" in restored_workflow, (
+        "affected-package filter step not restored")
+    assert "make test PACKAGE=${{ matrix.package }}" in restored_workflow
+    assert fixture_facts(docs["path-partitioned-monorepo"], [])["headline"][
+        "check"] == "gate"
+    restored_skips = {
+        check.name for check in fixture_checks["path-partitioned-monorepo"]
+        if check.skipped
+    }
+    assert "headline critical-path check is an actual recurring gate" not in restored_skips
+    assert "every data-driven finding carries a measured signal (no unsupported claims)" not in restored_skips
     path_facts = docs["path-partitioned-monorepo"]["pr_critical_path"][
         "commit_wall_clock"]["facts"]
     assert all(
