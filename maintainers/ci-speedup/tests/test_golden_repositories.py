@@ -454,6 +454,9 @@ def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
     recording = tmp_path / "recording"
     api = recording / "api"
     api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
     with gzip.open(
         api / "repos_public_example.json.gz", "wt", encoding="utf-8"
     ) as stream:

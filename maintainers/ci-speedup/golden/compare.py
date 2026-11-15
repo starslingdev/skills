@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -264,6 +265,27 @@ def _recorded_required_checks(recording: Path) -> set[str]:
     api = recording / "api"
     if not api.is_dir():
         return set()
+
+    def read_payload(path: Path) -> Any:
+        if path.suffix == ".gz":
+            with gzip.open(path, "rt", encoding="utf-8") as stream:
+                return json.load(stream)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    default_branch = ""
+    manifest_path = recording / "manifest.json"
+    if manifest_path.is_file():
+        manifest = load(manifest_path)
+        repository = str(manifest.get("repository") or "")
+        if repository:
+            base = api / _fixture_name(f"repos/{repository}")
+            for repo_path in (base, Path(str(base) + ".gz")):
+                if not repo_path.is_file():
+                    continue
+                payload = read_payload(repo_path)
+                if isinstance(payload, dict):
+                    default_branch = str(payload.get("default_branch") or "")
+                break
     names: set[str] = set()
     candidates = [
         path for path in api.iterdir()
@@ -273,17 +295,27 @@ def _recorded_required_checks(recording: Path) -> set[str]:
     ]
     for path in candidates:
         try:
-            if path.suffix == ".gz":
-                with gzip.open(path, "rt", encoding="utf-8") as stream:
-                    payload = json.load(stream)
-            else:
-                payload = json.loads(path.read_text(encoding="utf-8"))
+            payload = read_payload(path)
         except (OSError, ValueError):
             continue
         if not isinstance(payload, dict):
             continue
-        if payload.get("enforcement") == "disabled":
-            continue
+        if "_rulesets_" in path.name:
+            enforcement = str(payload.get("enforcement") or "")
+            if enforcement and enforcement != "active":
+                continue
+            refs = (payload.get("conditions") or {}).get("ref_name") or {}
+            if default_branch and isinstance(refs, dict):
+                target = f"refs/heads/{default_branch}"
+                includes = [str(value) for value in refs.get("include") or []]
+                excludes = [str(value) for value in refs.get("exclude") or []]
+                if (includes
+                        and "~DEFAULT_BRANCH" not in includes
+                        and not any(fnmatchcase(target, value) for value in includes)):
+                    continue
+                if ("~DEFAULT_BRANCH" in excludes
+                        or any(fnmatchcase(target, value) for value in excludes)):
+                    continue
         classic = payload.get("required_status_checks")
         if isinstance(classic, dict):
             names.update(
