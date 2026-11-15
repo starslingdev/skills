@@ -442,6 +442,51 @@ def test_verifier_walks_the_install_directory(tmp_path):
     assert not c.ok and "already on bun" in c.detail
 
 
+@pytest.mark.parametrize("pm", [None, _pm(unreadable=[".yarnrc.yml"])])
+def test_an_unreadable_layout_never_hides_a_lint_row_on_the_same_step(pm):
+    out, withheld, cands = _run("npm ci && npx prettier --check .",
+                                pole=_pole(category="scan"), block=_block(pm))
+    assert len(out) == 1, (withheld, cands)
+    assert [t["row"] for t in out[0]["tool_swap"]["tools"]] == ["prettier"]
+
+
+@pytest.mark.parametrize("run", ["./scripts/install.sh", "make deps",
+                                 "bash ci/setup.sh"])
+def test_an_install_step_the_read_cannot_follow_is_not_listed(run):
+    out, withheld, cands = _run(run)
+    assert out == [] and cands == []
+    assert withheld == {"tool_not_in_table": 1}
+
+
+def test_an_install_step_that_names_an_install_stays_held_back():
+    out, withheld, cands = _run("npm ci && ./scripts/post-install.sh")
+    assert out == [] and len(cands) == 1 and "tool_not_in_table" not in withheld
+
+
+def test_scan_reads_a_stray_yarnrc_in_an_npm_repo_as_not_pnp(tmp_path):
+    (tmp_path / "package.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "package-lock.json").write_text("{}", encoding="utf-8")
+    (tmp_path / ".yarnrc.yml").write_text("enableTelemetry: false\n", encoding="utf-8")
+    pm = scan._read_type_aware_lint(tmp_path)["package_manager"]
+    assert pm["yarn_pnp"] is False
+
+
+def test_the_migration_caveat_names_the_one_lockfile_bun_migrates():
+    out, _w, _c = _run("npm ci", block=_block(_pm(
+        lockfiles=["package-lock.json", "pnpm-lock.yaml"])))
+    words = " ".join(_install(out[0])["fit_reasons"])
+    assert "migrates `package-lock.json` to `bun.lock`" in words
+    assert "`pnpm-lock.yaml` stay as they are" in words
+    assert "lockfileVersion" in words
+
+
+def test_an_install_step_running_more_than_the_install_says_so():
+    out, _w, _c = _run("pnpm install && pnpm build", pole=_pole(category="build"),
+                       block=_block(scripts={"": {"build": "vite build"}}))
+    words = " ".join(_install(out[0])["fit_reasons"])
+    assert "this step also runs `vite build`" in words
+
+
 @pytest.mark.parametrize("field,pnp", [("yarn@4.5.0", True), ("yarn@2.4.3", True),
                                        ("yarn@1.22.22", False), ("pnpm@9.0.0", False)])
 def test_scan_reads_yarn_berrys_default_linker_from_package_manager(tmp_path, field, pnp):

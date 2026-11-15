@@ -7650,10 +7650,10 @@ def _tal_npmrc_pnpmfile(text: str) -> "str | None":
 
 def _tal_package_manager_read(root: Path) -> dict[str, Any]:
     """What one directory says about its package manager, for OPT84's install
-    row. Yarn Plug'n'Play is on when a PnP loader file is committed, or when
-    `nodeLinker` is unset or `pnp` (Yarn 2+'s documented default) and Yarn 2+
-    is in use: a `.yarnrc.yml` is present, or `packageManager` pins `yarn@2`
-    or later. A file that exists and cannot be read (or a `nodeLinker` given
+    row. Yarn Plug'n'Play is on when a PnP loader file is committed, when
+    `nodeLinker` is `pnp`, or when it is unset (Yarn 2+'s documented default)
+    and Yarn 2+ is in use: `packageManager` pins `yarn@2` or later, or a
+    `.yarnrc.yml` sits beside a `yarn.lock` or sets `yarnPath`. A file that exists and cannot be read (or a `nodeLinker` given
     through `${...}` interpolation) is listed in `unreadable`, so the row holds
     back instead of guessing."""
     lockfiles = sorted(n for n in _TAL_LOCKFILES if (root / n).is_file())
@@ -7677,7 +7677,6 @@ def _tal_package_manager_read(root: Path) -> dict[str, Any]:
     linker: "str | None" = None
     yrc = root / ".yarnrc.yml"
     if yrc.is_file():
-        berry = True
         try:
             text = _read_config_text(yrc)
             data = yaml.safe_load(text) if text is not None else None
@@ -7692,7 +7691,14 @@ def _tal_package_manager_read(root: Path) -> dict[str, Any]:
                 unreadable.append(".yarnrc.yml")
             elif isinstance(raw, str):
                 linker = raw.strip()
-    yarn_pnp = pnp_files or (berry and linker in (None, "pnp"))
+            # A `.yarnrc.yml` is Yarn 2+'s config, but it means Yarn 2+ is in
+            # use only beside a `yarn.lock` or a `yarnPath` (a stray one in an
+            # npm or pnpm repo is not Plug'n'Play); Yarn 1 ignores the file.
+            if ((("yarn.lock" in lockfiles)
+                 or (isinstance(data, dict) and data.get("yarnPath")))
+                    and not (m and int(m.group(1)) < 2)):
+                berry = True
+    yarn_pnp = pnp_files or linker == "pnp" or (berry and linker is None)
     npmrc = root / ".npmrc"
     if npmrc.is_file():
         try:

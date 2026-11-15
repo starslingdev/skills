@@ -11125,10 +11125,15 @@ _VR_OPT84_SUMMARY = "uncredited, benchmark first"
 _VR_OPT84_INSTALL_RECIPE = (
     "Install swap, side by side: on the same commit and runner class, install once "
     "with the current package manager and once with `bun install` (set up with "
-    "`oven-sh/setup-bun` at a pinned version), each into a fresh `node_modules`, "
-    "and run the test suite against each install; keep the old lockfile until both "
-    "pass, then commit `bun.lock`, switch CI to `bun ci` and delete the old "
-    "lockfile in its own commit")
+    "`oven-sh/setup-bun` at a pinned `bun-version`, 1.2 or later for the text "
+    "`bun.lock`), each into a fresh `node_modules` (every workspace package's "
+    "too), and run the test suite against each install, in whichever job runs it; "
+    "keep the old lockfile until both pass. Before the old installer goes, list "
+    "what else still uses it (`actions/setup-node` `cache:`, `pnpm/action-setup`, "
+    "other workflows, the `packageManager` field, Dockerfiles and deploy settings, "
+    "the dependency-update bot) and move each one; then commit `bun.lock` with the "
+    "`package.json` changes the migration made, switch CI to `bun ci`, and delete "
+    "the old lockfile in its own commit")
 _VR_OPT84_REPLACEMENT = "is the native replacement"
 _VR_OPT84_SOURCE_NAME = {"prettier": "Prettier", "eslint": "ESLint", "tsc": "tsc",
                          "install": "npm / pnpm / Yarn install"}

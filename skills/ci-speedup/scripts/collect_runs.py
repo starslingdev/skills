@@ -20921,6 +20921,13 @@ _OPT84_INSTALL_VALUE_FLAGS = frozenset({
     "--fetch-timeout", "--fetch-retries"})
 _OPT84_INSTALL_SUBCOMMANDS = {"npm": ("ci", "clean-install", "install", "i"),
                               "pnpm": ("install", "i")}
+# A `run:` that names an npm / pnpm / Yarn install somewhere in its text: on an
+# `install` step whose command the read cannot follow, only this keeps the
+# exit a held-back listing (an install may hide behind it) rather than the
+# `tool_not_in_table` verdict.
+_OPT84_INSTALL_HINT_RE = re.compile(
+    r"(?<![\w.-])(?:npm\s+(?:ci|clean-install|install|i)|pnpm\s+(?:install|i)"
+    r"|yarn)(?![\w.-])")
 
 
 def _opt84_install_kind(tokens: list[str]) -> "str | None":
@@ -22000,17 +22007,34 @@ def _opt84_install_fit(block: dict[str, Any], runs_on: Any,
                        "time, and bun's pnpm migration does not carry it")
     if blocked:
         return "blocked", blocked
-    old = locks
+    # bun migrates ONE lockfile, the first it can in this order (its lockfile
+    # docs), and not an npm 6 (`lockfileVersion` 1) one.
+    order = ("npm-shrinkwrap.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml")
+    old = sorted(locks, key=lambda x: (order.index(x.rsplit("/", 1)[-1])
+                                      if x.rsplit("/", 1)[-1] in order else 99, x))
+    if old:
+        first = old[0]
+        mig = (f"the first `bun install` migrates `{first}` to `bun.lock` and keeps "
+               "the old lockfile")
+        if len(old) > 1:
+            mig += (f" (bun migrates one lockfile; `{'`, `'.join(old[1:])}` "
+                    "stay as they are)")
+        if first.rsplit("/", 1)[-1] in order[:2]:
+            mig += ("; an npm 6 lockfile (`lockfileVersion` 1) is not migrated, "
+                    "and bun then resolves versions afresh")
+        mig += ": delete the old lockfile only after both installs pass the tests"
+    else:
+        mig = ("no lockfile was found for this install: commit the `bun.lock` the "
+               "first install writes, so CI can install with `bun ci` "
+               "(`--frozen-lockfile`)")
     reasons = [
-        (f"the first `bun install` migrates `{'`, `'.join(old)}` to `bun.lock` and "
-         "keeps the old lockfile: delete it only after both installs pass the tests"
-         if old else
-         "no lockfile was found for this install: commit the `bun.lock` the first "
-         "install writes, so CI can install with `bun ci` (`--frozen-lockfile`)"),
+        mig,
         ("bun runs a dependency's install scripts (a native addon's node-gyp build, "
          "for example) only for packages on its default trusted list or in "
-         "`trustedDependencies`: a skipped build shows up in the side-by-side test "
-         "run, and the scripts it skips are code that no longer runs at install"),
+         "`trustedDependencies`: compare the scripts `bun pm untrusted` lists as "
+         "blocked with those the current installer runs (pnpm 10 runs none by "
+         "default, npm and Yarn run them all), since a skipped build may fail only "
+         "at runtime, not in the tests"),
         ("bun replaces the installer only: the scripts and tests keep running on "
          "Node unless the repo moves its runtime on purpose"),
     ]
@@ -22054,13 +22078,26 @@ def _detect_opt84_tool_swap(
         if (no_js_manifest and gate in _OPT84_HELD_BACK_GATES
                 and not ctx.pop("table_tool_seen", False)):
             gate = "tool_not_in_table"
+        # An `install` step is a candidate for the install row only: an exit the
+        # read could not follow there (a setup script, `make`, an action) can
+        # never become an install finding unless an install was seen, so it is
+        # the verdict, not a held-back listing.
+        if (step is not None and step_ctx["install"]
+                and gate in _OPT84_HELD_BACK_GATES
+                and gate != "install_layout_unreadable"
+                and not ctx.pop("install_seen", step_ctx["hint"])):
+            gate = "tool_not_in_table"
         ctx.pop("table_tool_seen", None)
+        ctx.pop("install_seen", None)
         _opt84_count(withheld, withheld_candidates, gate, wf, job, step)
         logger.debug("OPT84 %s %s %s: withheld by %s%s", wf, job, step or "", gate,
                      (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
 
     import shlex
 
+    # The step being read: whether it is an `install` step, and whether its own
+    # `run:` text names an npm / pnpm / Yarn install (`_OPT84_INSTALL_HINT_RE`).
+    step_ctx: dict[str, bool] = {"install": False, "hint": False}
     tal: dict[str, Any] = block if isinstance(block, dict) else {}
     scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
                       if isinstance(v, dict)}
@@ -22238,6 +22275,8 @@ def _detect_opt84_tool_swap(
             return r.get("working-directory") if isinstance(r, dict) else None
 
         for name, category, p50 in cands:
+            step_ctx["install"] = category == _OPT84_INSTALL_CATEGORY
+            step_ctx["hint"] = False
             idx = by_name.get(name, [])
             if len(idx) != 1:
                 _no("measured_step_not_matched_in_yaml", wf, job, name)
@@ -22248,6 +22287,7 @@ def _detect_opt84_tool_swap(
                     else "tool_not_in_table", wf, job, name)
                 continue
             run = str(st["run"])
+            step_ctx["hint"] = bool(_OPT84_INSTALL_HINT_RE.search(run))
             raw_wd = st.get("working-directory",
                             _defaults_wd(spec) if _defaults_wd(spec) is not None
                             else _defaults_wd(doc))
@@ -22288,7 +22328,9 @@ def _detect_opt84_tool_swap(
             leaves, opaque = _opt84_expand_leaves(res.leaves, scripts_by_dir,
                                                   scripts_unreadable, walk_complete)
             if opaque:
-                _no(opaque, wf, job, name, table_tool_seen=_opt84_any_row(leaves))
+                _no(opaque, wf, job, name, table_tool_seen=_opt84_any_row(leaves),
+                    install_seen=any(_opt84_classify(lf["tokens"])[0] == "install"
+                                     for lf in _opt84_install_leaves(leaves, run, wd)))
                 continue
             leaves = _opt84_install_leaves(leaves, run, wd)
             found: list[tuple[str, dict[str, Any]]] = []
@@ -22320,6 +22362,7 @@ def _detect_opt84_tool_swap(
             deferred = (wf, yaml_key, " ".join(name.split())) in opt82_steps
             tools: list[dict[str, Any]] = []
             held: "str | None" = None
+            install_held = False
             for row, lf in found:
                 spec_row = _OPT84_TABLE[row]
                 if category == _OPT84_INSTALL_CATEGORY and row != "install":
@@ -22336,7 +22379,7 @@ def _detect_opt84_tool_swap(
                 if row == "install":
                     verdict, why = _opt84_install_fit(tal, spec.get("runs-on"), lwd)
                     if verdict == "held":
-                        held = held or "install_layout_unreadable"
+                        install_held = True     # drops this row only
                         continue
                     if verdict == "in_use":
                         silenced.append(row)
@@ -22344,7 +22387,17 @@ def _detect_opt84_tool_swap(
                     if verdict == "blocked":
                         install_blocked += why
                         continue
-                    fit, reasons, version = "dual-run", why, None
+                    fit, reasons, version = "dual-run", list(why), None
+                    rest = list(dict.fromkeys(
+                        str(o.get("command") or "") for o in leaves
+                        if _opt84_classify(o["tokens"])[0] != "install"))
+                    if rest:
+                        reasons.append(
+                            f"this step also runs `{'`, `'.join(rest[:3])}`"
+                            + (" and more" if len(rest) > 3 else "")
+                            + ": the ceiling and the share floor are the whole "
+                            "step's time, and how much of it the install takes is "
+                            "unknown until measured")
                 elif row == "tsc":
                     majors = [(g, _opt84_major(_opt84_version(
                         tal, str(g["wd"] or ""), spec_row["package"]))) for g in group]
@@ -22440,6 +22493,11 @@ def _detect_opt84_tool_swap(
                 if expanded:
                     t["packages"] = len(lwds)
                 tools.append(t)
+            if held is None and install_held and not tools:
+                # The install row could not be decided and nothing else on the
+                # step was reported: the step is held back for it. A lint row
+                # beside it still reports on its own.
+                held = "install_layout_unreadable"
             if held:
                 _no(held, wf, job, name, table_tool_seen=True)
                 continue
