@@ -38,8 +38,8 @@ only — this is not a comprehensive audit.*
 **Prereqs:** PyYAML (`pip install pyyaml` — the scanner's only third-party
 dep). `gh` is optional, used for the network-gated impostor-SHA check (P14.11
 — the one vector that cannot be answered from YAML alone), the dormancy note,
-and six config facts read over the API (required checks skippable, fork-PR
-approval, CODEOWNERS enforced, two environment checks, secrets). Everything
+and seven config facts read over the API (required checks, fork-PR approval,
+CODEOWNERS, two environment checks, secrets, default-branch review). Everything
 else runs locally in seconds. Troubleshooting: [references/troubleshooting.md](references/troubleshooting.md).
 
 **`<ci-secure>` in the commands below is this skill's own install directory** —
@@ -56,7 +56,7 @@ By default the skill operates on the current working directory.
    If it's not, ask the user for a path and `cd` there before continuing.
 2. Verify `.github/workflows/` exists. If it doesn't, stop and tell the
    user the repo has no GitHub Actions workflows to scan.
-3. Dormancy and the six API-gated facts need `owner/repo`; Phase 2's block
+3. Dormancy and the seven API-gated facts need `owner/repo`; Phase 2's block
    derives it in its own shell (never carry it in a variable). If gh is
    unavailable or no repo derives, proceed: the report says so (impostor-SHA
    skipped without gh; those facts UNMEASURED, never passes). Name the cause.
@@ -88,11 +88,11 @@ respect to the report (e.g. `["P14.10", "P14.9"]`). Every group needs an
 attacker scenario in Phase 2.5, because **every group renders** — no render
 cut, no tiering, no topping-up.
 
-The impostor-SHA check takes `--gh-impostor auto|on|off`, default `auto`: it
-runs iff gh is authenticated. `on` demands it (scan.py exits 2 if gh is not
-authenticated, rather than quietly skipping); `off` disables it. Either way
-`gh_checks` records the status. **A skipped network-gated check is never a
-pass** — the report and terminal summary must both say so explicitly.
+`--gh-impostor auto|on|off` (default `auto`: runs iff gh is authenticated)
+gates the impostor-SHA check AND P14.24's release-immutability lookup. `on`
+demands gh (scan.py exits 2, never a quiet skip); `off` disables both, and
+`gh_checks` records each. **A skipped P14.11 is never a pass** — report and
+terminal summary say so; a skipped P14.24 lookup only keeps its findings.
 
 **Each later block re-derives `$FINDINGS`/`$REPORT` on its first line (fresh
 shell); inline commands use the literal path. Write NO scratch or pointer
@@ -100,7 +100,7 @@ files.** A run leaves at most two files: the findings JSON (in tmp) and — only
 on the user's save pick — the report. One exception, not a scratch file: a
 Phase 5 fix subagent writes its verification re-scan to
 `${TMPDIR:-/tmp}/ci-secure-recheck-${SLUG}.json` (same per-repo slug), because
-its oracle is "re-run the scan and show the finding is gone", which cannot overwrite `$FINDINGS`.
+its oracle is "re-run the scan and satisfy the finding's completion condition", which cannot overwrite `$FINDINGS`. The P14.18 MEDIUM cosmetic exception may remain only while every listed occurrence stays MEDIUM and retains all three cosmetic-boundary evidence markers; every other finding must be gone.
 
 If `run.py` exits non-zero — OR exits zero but `$FINDINGS` is missing or
 unparseable — that is a **coverage failure, not a clean result**: surface
@@ -112,7 +112,7 @@ a findings file on failure, so there is nothing safe to render over.
 markdown report to make decisions.** One object per occurrence in
 `findings`, keyed `id`, `pattern`, `severity`, `title`, `workflow_file`,
 `line`, `affected_jobs`, `workflow_activity` (with `dormant`), `evidence`,
-`evidence_kind`, `fix_strategy`, `fix_recipe_anchor`; top-level `gh_checks`,
+`evidence_kind`, `fix_strategy`, optional evidence-specific `fix_guidance`, `fix_recipe_anchor`; top-level `gh_checks`,
 `timings`, and the THREE coverage arrays `scan_incomplete`, `dropped_matches`
 and `coverage_notes` — coverage is `complete` only when ALL THREE are empty,
 so reading one alone calls a degraded run clean. Full shape:
@@ -120,8 +120,8 @@ so reading one alone calls a degraded run clean. Full shape:
 
 ## Phase 2.5: Write the attack scenario for every group
 
-The one non-scripted field is the `attacker_scenario`: the report's "What an
-attacker could do" row. `severity` is catalog-authored, the scenario repo-grounded.
+The usually non-scripted field is the `attacker_scenario`: the report's "What an
+attacker could do" row. `severity` starts from the catalog; a detector may override it only when evidence proves a narrower profile.
 
 **Write all scenarios in ONE pass — never one subagent per group.** At most
 ten groups, 2–3 sentences each, and everything needed is at hand: per group
@@ -133,7 +133,7 @@ Write them inline, or hand all groups to a SINGLE `general-purpose` subagent
 at once, using the session model. The
 [scenario writing guide](references/scenario-authoring.md) covers who the
 attacker is, the access they need, the plain-words mechanic, and worked
-examples. Merge each scenario onto **every member** of its group in
+examples. Preserve any scanner-authored scenario; for missing members, author per `(pattern, severity, fix_strategy)` profile and merge only onto matching members in
 `$FINDINGS` — the merged object's shape is worked through in
 [references/scan-output.md](references/scan-output.md).
 
@@ -167,8 +167,8 @@ spacing-sensitive — see the reference above):
 ```bash
 SLUG="$(printf '%s' "$(git rev-parse --show-toplevel)" | shasum | cut -c1-12)"; FINDINGS="${TMPDIR:-/tmp}/ci-secure-findings-${SLUG}.json"; REPORT="${TMPDIR:-/tmp}/ci-secure-report-${SLUG}.md"
 grep '^CI Secure' "$REPORT"                       # the banner (ENDS with the impostor word; `not recorded` is two)
-python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("gh_checks",{}).get("P14.11",""))' "$FINDINGS"  # status + pin detail
-grep '^| .*P14\.11' "$REPORT"                      # the ⚠️ vector-map row — only carries the reason on a skip/partial
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("gh_checks",{}).get("P14.11","")); print(d.get("action_lockfile","")); print(d.get("gh_checks",{}).get("P14.24",""))' "$FINDINGS"  # P14.11 status + pin detail, the lockfile state + count, then the P14.24 lookup status
+grep '^| [^*].*P14\.11' "$REPORT"                  # the ⚠️ vector-map row — only carries the reason on a skip/partial
 grep '^| \*\*Coverage\*\* |' "$REPORT"               # the provenance row
 grep -A4 'Incomplete coverage' "$REPORT"          # only when Coverage says PARTIAL
 ```
@@ -192,7 +192,7 @@ Contract lines, all mandatory:
   failed: `One hygiene gap: no enforced reviewer rule covers your workflows.` Two
   or more: name each, one short clause apiece. All passing: `All config
   hygiene checks pass.` Unmeasured is a coverage gap, n/a did not apply to
-  this repo: say each as itself, never as a pass and never as nothing.
+  this repo: say each as itself, never as a pass and never as nothing. A failing `sec.secrets.environment-scoped` goes first, in consequence words (terminal-summary.md).
 - **Then the vector map** — the line-item receipt, so the user sees what they
   are good on and what did not run without opening the file. Head it exactly
   `Vector scan — 10 attack vectors checked, N hit:` (N from the banner), so

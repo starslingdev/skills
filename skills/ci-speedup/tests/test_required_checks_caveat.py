@@ -37,6 +37,7 @@ _SPLIT_INTO_NEW_JOBS_FIX_KEYS = [
     "pytest-no-xdist",         # the "shard by directory across matrix jobs" alternative
     "playwright-parallel",     # the "shard across jobs" alternative
     "benchmark-serial-reruns", # the "parallelise across runners" alternative
+    "lighthouse-serial-audits", # the "passes on separate runners" alternative
 ]
 
 _PATTERN_FILES = sorted((Path(__file__).resolve().parents[1] / "references" / "patterns").glob("opt*.md"))

@@ -1,0 +1,46 @@
+name: "Update test results DB"
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 */3 * * *"
+
+concurrency:
+  group: test-results-db
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update DuckDB
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    if: github.repository == 'microsoft/playwright'
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: lts/*
+      - run: npm ci
+      - name: Download current database
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node utils/test-results-db/cli.ts download
+      - name: Ingest new test results
+        id: ingest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_OPTIONS: --max-old-space-size=8192
+        run: node utils/test-results-db/cli.ts update --lookback-days 7 --concurrency 32
+      - name: Truncate to run cap
+        if: steps.ingest.outputs.imported != '0'
+        run: node utils/test-results-db/cli.ts truncate --max-runs 2000
+      - name: Upload database
+        if: steps.ingest.outputs.imported != '0'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results-db
+          path: utils/test-results-db/test-results.duckdb
+          retention-days: 7
+          overwrite: true

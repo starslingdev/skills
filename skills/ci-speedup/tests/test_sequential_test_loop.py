@@ -87,6 +87,7 @@ _EXPECTED_PARSE_LOG_LEAF_ORDER = (
     "benchmark-serial-reruns",
     "android-emulator-shard",
     "gradle-test-parallelism",
+    "lighthouse-serial-audits",
     "dependency-cache",
     "per-invocation-startup",
     "test-isolated-serial",

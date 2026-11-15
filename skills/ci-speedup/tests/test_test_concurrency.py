@@ -95,6 +95,58 @@ def _pytest_verbose_log(*, startup_s: int = 0) -> str:
     return "\n".join(lines)
 
 
+def _pytest_verbose_capture_log() -> str:
+    """The message shape captured from ``pytest -v -s`` on 2026-11-09.
+
+    The runner timestamps are applied to the captured physical output lines;
+    pytest writes the node id, the test's print, and ``PASSED`` separately.
+    """
+    at = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    rows = [
+        (0, "python3 -m pytest -v -s tests/test_accounts.py"),
+        (0, "collecting ... collected 4 items"),
+    ]
+    for index in range(1, 5):
+        rows.extend((
+            ((index - 1) * 60,
+             f"tests/test_accounts.py::test_account[{index - 1}] "
+             f"schema_name=schema_test_{index}"),
+            (index * 60, "PASSED"),
+        ))
+    rows.append((240, "4 passed in 240.00s"))
+    return "\n".join(
+        f"{_stamp(at + timedelta(seconds=offset))} {message}"
+        for offset, message in rows
+    )
+
+
+def _pytest_mixed_verbose_capture_log() -> str:
+    """A ``-v -s`` run where only alternating tests print to stdout."""
+    at = datetime(2026, 11, 9, tzinfo=timezone.utc)
+    rows = [(0, "python3 -m pytest -v -s tests/test_accounts.py"),
+            (0, "collecting ... collected 4 items")]
+    for index in range(1, 5):
+        if index % 2:
+            rows.extend((
+                ((index - 1) * 60,
+                 f"tests/test_accounts.py::test_account[{index - 1}] "
+                 f"schema_name=schema_test_{index}"),
+                (index * 60, "PASSED"),
+            ))
+        else:
+            rows.extend((
+                ((index - 1) * 60, f"schema_name=schema_test_{index}"),
+                (index * 60,
+                 f"tests/test_accounts.py::test_account[{index - 1}] PASSED "
+                 f"[{index * 25}%]"),
+            ))
+    rows.append((240, "4 passed in 240.00s"))
+    return "\n".join(
+        f"{_stamp(at + timedelta(seconds=offset))} {message}"
+        for offset, message in rows
+    )
+
+
 def _vitest_verbose_log() -> str:
     at = datetime(2026, 11, 6, tzinfo=timezone.utc)
     durations = (68_100, 68_400, 67_900, 68_200, 21_000, 24_000, 28_000,
@@ -106,7 +158,7 @@ def _vitest_verbose_log() -> str:
             f"{_stamp(at)} ✓ tests/accounts.test.ts > accounts > case {index} "
             f"{duration_ms}ms"
         )
-    lines.append(f"{_stamp(at)} 11 tests passed")
+    lines.append(f"{_stamp(at)} Tests  11 passed (11)")
     return "\n".join(lines)
 
 
@@ -158,6 +210,37 @@ def test_pytest_verbose_runner_timestamps_get_the_concurrency_leaf() -> None:
     assert leaf["fix_key"] == "test-isolated-serial"
 
 
+def test_pytest_verbose_s_capture_gets_the_concurrency_leaf() -> None:
+    leaf = bp._parse_log(_pytest_verbose_capture_log())
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+
+
+def test_pytest_verbose_s_mixed_printed_output_gets_the_concurrency_leaf() -> None:
+    leaf = bp._parse_log(_pytest_mixed_verbose_capture_log())
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+
+
+def test_pytest_verbose_s_does_not_trust_a_printed_pass_before_failure() -> None:
+    log = _pytest_verbose_capture_log().replace(
+        "2026-11-09T00:01:00.0000000Z PASSED",
+        "2026-11-09T00:00:59.0000000Z PASSED\n"
+        "2026-11-09T00:01:00.0000000Z FAILED [25%]",
+        1,
+    ).replace("4 passed in 240.00s", "1 failed, 3 passed in 240.00s")
+    assert bp._parse_log(log) is None
+
+
+def test_pytest_verbose_s_does_not_treat_printed_ok_as_an_outcome() -> None:
+    log = _pytest_verbose_capture_log().replace(
+        "2026-11-09T00:01:00.0000000Z PASSED",
+        "2026-11-09T00:01:00.0000000Z OK",
+        1,
+    )
+    assert bp._parse_log(log) is None
+
+
 def test_pytest_verbose_requires_isolation_inside_each_test_interval() -> None:
     log = _pytest_verbose_log().replace(
         "2026-11-06T00:00:59.0000000Z schema_name=schema_test_1",
@@ -179,6 +262,44 @@ def test_vitest_verbose_durations_use_source_proven_isolation() -> None:
     assert leaf["test_count"] == 11
 
 
+def _vitest_verbose_log_after_another_file(
+        prior_ms: int, *, prior_has_duration: bool = True) -> str:
+    """One Vitest invocation whose serial candidate is one file in a larger run."""
+    lines = _vitest_verbose_log().splitlines()
+    started = datetime(2026, 11, 6, tzinfo=timezone.utc)
+    prior_done = started + timedelta(milliseconds=prior_ms)
+    prior = f"{_stamp(prior_done)} ✓ tests/health.test.ts > health > responds"
+    if prior_has_duration:
+        prior += f" {prior_ms}ms"
+    shifted = [lines[0], prior]
+    last_when = prior_done
+    for line in lines[1:-1]:
+        stamp, message = line.split(" ", 1)
+        when = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        last_when = when + timedelta(milliseconds=prior_ms)
+        shifted.append(f"{_stamp(last_when)} {message}")
+    shifted.append(f"{_stamp(last_when)} Tests  12 passed (12)")
+    return "\n".join(shifted)
+
+
+def test_vitest_file_count_is_scoped_to_the_serial_candidate() -> None:
+    leaf = bp._parse_log(
+        _vitest_verbose_log_after_another_file(
+            100, prior_has_duration=False),
+        _vitest_source_facts(),
+    )
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+    assert leaf["test_count"] == 11
+
+
+def test_vitest_file_span_starts_when_that_file_begins() -> None:
+    leaf = bp._parse_log(
+        _vitest_verbose_log_after_another_file(180_000), _vitest_source_facts())
+    assert leaf is not None
+    assert leaf["fix_key"] == "test-isolated-serial"
+
+
 def test_vitest_verbose_rejects_overlapping_duration_sum() -> None:
     lines = _vitest_verbose_log().splitlines()
     at = datetime(2026, 11, 6, tzinfo=timezone.utc)
@@ -197,7 +318,8 @@ def test_vitest_verbose_rejects_overlapping_intervals_with_equal_total_span() ->
             f"{_stamp(at + timedelta(seconds=completed_s))} "
             f"✓ tests/accounts.test.ts > accounts > case {index} 60000ms"
         )
-    lines.append(f"{_stamp(at + timedelta(seconds=240))} 4 tests passed")
+    lines.append(
+        f"{_stamp(at + timedelta(seconds=240))} Tests  4 passed (4)")
     facts = {
         "isolated_test_files": {
             "tests/accounts.test.ts": {

@@ -34,8 +34,20 @@ are not optional.
 | Line | Where it comes from |
 | --- | --- |
 | `CI Secure …` | **Pre-drawn — copy, never compose.** `grep '^CI Secure' "$REPORT"`. Rendered inside a fenced block under the provenance table with its counts already computed. |
-| `Impostor-SHA check (P14.11): …` | **Assembled** from the **banner's** own impostor-check word (`ran` / `partial` / `SKIPPED` / `not recorded` — the impostor word ENDS the pre-drawn line, and it is two words in the `not recorded` state, so read to the end of the line rather than taking the last token) plus the `gh_checks["P14.11"]` status/detail in `$FINDINGS` (the pin counts — "14 unique pins verified, 0 flagged", or the UNVERIFIED count on a partial — live there, NOT in any report row). On a run that did NOT fully complete, add the reason from the report's `> [!WARNING]` gh-checks blockquote (or the ⚠️ `P14.11` vector-map row). Do NOT read the pin counts off the vector-map row: when the check ran clean that row is a generic ✅ "no match" like every other clean vector and carries none of them. Always say `PARTIAL … NOT a pass` / `SKIPPED … this check did NOT run` verbatim when it did not run. |
+| `Impostor-SHA check (P14.11): …` | **Assembled** from the **banner's** own impostor-check word (`ran` / `partial` / `SKIPPED` / `not recorded` — the impostor word ENDS the pre-drawn line, and it is two words in the `not recorded` state, so read to the end of the line rather than taking the last token) plus the `gh_checks["P14.11"]` status/detail in `$FINDINGS` (the pin counts — "14 unique pins verified, 0 flagged", or the UNVERIFIED count on a partial — live there, NOT in any report row). On a run that did NOT fully complete, add the reason from the report's `> [!WARNING]` gh-checks blockquote (or the ⚠️ `P14.11` vector-map row). Do NOT read the pin counts off the vector-map row: when the check ran clean that row is a generic ✅ "no match" like every other clean vector and carries none of them. Always say `PARTIAL … NOT a pass` / `SKIPPED … this check did NOT run` verbatim when it did not run. Then read the `action_lockfile` dict the same `$FINDINGS` one-liner prints on its second line (the JSON, not the report, is the source): when `state` is `valid` and `covered_references` is above 0, append `; N action reference(s) in M workflow(s) locked by actions.lock are verified by GitHub at run time, not by this check` (N = `covered_references`, M = the length of `covered_workflows`); when `state` is `invalid`, append `; <path> is not a lockfile this scan can read, so no reference is counted as locked`; when `absent`, append nothing. |
 | `Coverage: …` | **Assembled** from the **Coverage** ROW of the provenance table at the top of the report — NOT from any sentence under the banner, where nothing of the kind is rendered. The row reads `✅ complete — every workflow file was scanned` or `⚠️ **PARTIAL** — not every workflow was fully scanned`, and on PARTIAL it does **not** say what was missed: that lives in the separate `> [!WARNING] **Incomplete coverage — …**` blockquote further down, and your line must carry it. |
+
+**P14.24's release-immutability lookup is not a header line.** It is
+recorded in `gh_checks["P14.24"]` only when the scan reached a GitHub CLI
+extension pinned to a tag and then run, and it can only remove a finding.
+The Phase 3 `$FINDINGS` one-liner prints it on its third line (empty when
+the key is absent). When that status is `skipped` or `partial`, say so in
+one clause where the summary names the P14.24 finding(s):
+`release-immutability lookup did not run (<reason>), so tag-pinned
+extensions are reported as mutable`, adding `; sign in to gh and re-run to
+check them` when the reason is gh sign-in or `--gh-impostor=off`. Never
+call this a missing finding, and never word it as `NOT a pass`: every
+tag-pinned finding is still listed.
 
 The extraction commands are in SKILL.md Phase 3. Run them as written; do not
 re-derive them here. The one to be careful with is the P14.11 vector-map row:
@@ -51,12 +63,24 @@ sub-heading holding three hygiene rows (`sec.environments.branch-restricted`,
 are hygiene checks like the rest: name a failed one in the hygiene clause, in
 one short clause each (`3 environments accept a branch any push credential
 can make`, `3 environments let the requester approve their own run`,
-`11 repo/org secrets sit outside every environment`), and an unmeasured one
+`any workflow pushed to any branch can read 11 secrets`), and an unmeasured one
 as unmeasured with its reason — never `0 secrets` over a list that could not
 be read. Say what must be done in plain words, as the row does; there is no
 prompt to hand to another agent. Never claim these rows would have stopped
 an attack by an admin or org owner; they do not, and the report does not say
 so either.
+
+**When `sec.secrets.environment-scoped` fails, it leads the hygiene clause.**
+The report then carries a `> [!CAUTION]` **Secrets reachable from any
+branch** callout right under the headline; take the count from it and say
+the consequence, not the bookkeeping: `Hygiene: any workflow pushed to any
+branch can read 11 secrets, so one leaked push credential exposes them all
+with no review and no merge; move them into an environment only protected
+branches can use (one that passes the branch-restriction check).` When the
+callout says "at least", say "at least 11" too. Name secrets only as the report names them (names, never values),
+and never call this an attack-vector hit: the vector count is unchanged. No
+callout means the row did not fail; an unmeasured row is still said as
+unmeasured, never as this sentence.
 
 ## The vector-map receipt format
 

@@ -1,6 +1,7 @@
 """Differential policy tests for the repository-local ci-speedup guard."""
 from __future__ import annotations
 
+import copy
 import importlib.util
 import shutil
 import sys
@@ -43,6 +44,247 @@ jobs:
 """
 
 
+def two_duplicate_setup_groups(*, grow_first: bool = False) -> str:
+    extra = """
+  added:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm install
+      - run: npm test
+""" if grow_first else ""
+    return """name: Test
+on: pull_request
+jobs:
+  guard-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm install
+      - run: npm test
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm install
+      - run: npm test
+""" + extra + """
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - run: pip install ruff
+      - run: ruff check .
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+      - run: pip install ruff
+      - run: ruff check .
+"""
+
+
+def repeated_setup_matrix(*, shard_legs: int = 8, axis: str = "shard",
+                          artifact_handoff: bool = False,
+                          exclude_shards: tuple[int, ...] = ()) -> str:
+    values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    exclusions = ("\n        exclude:" + "".join(
+        f"\n          - {axis}: {value}" for value in exclude_shards)
+        if exclude_shards else "")
+    handoff = """
+      - uses: actions/download-artifact@v4
+        with: {name: app}
+""" if artifact_handoff else ""
+    upload = """
+      - uses: actions/upload-artifact@v4
+        with: {name: app, path: dist}
+""" if artifact_handoff else ""
+    sibling = f"""  sibling:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+{upload}""" if artifact_handoff else ""
+    return f"""name: Matrix setup
+on: pull_request
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        {axis}: [{values}]{exclusions}
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --shard=${{{{ matrix.{axis} }}}}/{shard_legs}
+{handoff}{sibling}"""
+
+
+def playwright_report_matrix(*, shard_legs: int) -> str:
+    """The blob-report handoff shape from Playwright's sharding guide."""
+    values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    return f"""name: Playwright tests
+on: pull_request
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        index: [{values}]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npx playwright test --shard=${{{{ matrix.index }}}}/{shard_legs}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: blob-report-${{{{ matrix.index }}}}
+          path: blob-report
+  merge-reports:
+    needs: shards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: blob-report-*
+          merge-multiple: true
+          path: all-blob-reports
+      - run: npx playwright merge-reports --reporter html ./all-blob-reports
+"""
+
+
+def playwright_include_report_matrix(*, shard_legs: int) -> str:
+    """The same report layout with shard indexes supplied by include rows."""
+    workflow = playwright_report_matrix(shard_legs=shard_legs)
+    values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    include = "\n".join(
+        f"          - index: {value}" for value in range(1, shard_legs + 1))
+    return workflow.replace(
+        f"        index: [{values}]",
+        f"        include:\n{include}",
+    )
+
+
+def index_metadata_matrix(*, matrix_legs: int) -> str:
+    """An index dimension used beside, rather than inside, --shard."""
+    workflow = repeated_setup_matrix(shard_legs=matrix_legs, axis="index")
+    return workflow.replace(
+        f"--shard=${{{{ matrix.index }}}}/{matrix_legs}",
+        "--shard=1/1 --project=${{ matrix.index }}",
+    )
+
+
+def bracket_index_shard_matrix(*, shard_legs: int) -> str:
+    """An index shard selected through GitHub's bracket expression form."""
+    return playwright_report_matrix(shard_legs=shard_legs).replace(
+        "${{ matrix.index }}", "${{ matrix['index'] }}")
+
+
+def sharded_build_export_matrix(*, shard_legs: int) -> str:
+    """Shards export their own builds; they do not consume a shared build."""
+    values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    return f"""name: Sharded build export
+on: pull_request
+jobs:
+  shards:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [{values}]
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --shard=${{{{ matrix.shard }}}}/{shard_legs}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-${{{{ matrix.shard }}}}
+          path: dist
+  deploy:
+    needs: shards
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: app-*
+"""
+
+
+def build_once_with_lint(*, include_lint: bool) -> str:
+    """One job builds an artifact consumed by tests beside an ordinary lint."""
+    lint = """  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run lint
+""" if include_lint else ""
+    return f"""name: Build once
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        with: {{name: app, path: dist}}
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {{name: app}}
+      - run: npm test
+{lint}"""
+
+
+def report_producer_with_sharded_consumer(
+        *, shard_legs: int, artifact_name: str = "coverage-report",
+        artifact_paths: tuple[str, ...] = ("coverage",),
+        upload_step_name: str = "Upload artifact") -> str:
+    """A build job exports test results that shards read as data, not a build."""
+    values = ", ".join(str(i) for i in range(1, shard_legs + 1))
+    path_block = "\n".join(f"            {path}" for path in artifact_paths)
+    return f"""name: Report consumer
+on: pull_request
+jobs:
+  prepare-report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --coverage
+      - name: {upload_step_name}
+        uses: actions/upload-artifact@v4
+        with:
+          name: {artifact_name}
+          path: |
+{path_block}
+  shards:
+    needs: prepare-report
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        shard: [{values}]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: {{name: {artifact_name}}}
+      - run: npm ci
+      - run: npm run build
+      - run: npm test -- --shard=${{{{ matrix.shard }}}}/{shard_legs}
+"""
+
+
 def trees(tmp_path: Path, base_text: str, merge_text: str):
     base, merge = tmp_path / "base", tmp_path / "merge"
     for root, text in ((base, base_text), (merge, merge_text)):
@@ -52,10 +294,14 @@ def trees(tmp_path: Path, base_text: str, merge_text: str):
     return base, merge
 
 
-def run(guard, base: Path, merge: Path, capsys, monkeypatch, allow=()):
+def run(guard, base: Path, merge: Path, capsys, monkeypatch, allow=(),
+        summary: Path | None = None):
     monkeypatch.setattr(guard, "BLOCKING_ALLOWLIST", frozenset(allow))
-    code = guard.main(["--base", str(base), "--merge", str(merge),
-                       "--default-branch", "main"])
+    args = ["--base", str(base), "--merge", str(merge),
+            "--default-branch", "main"]
+    if summary is not None:
+        args.extend(["--summary", str(summary)])
+    code = guard.main(args)
     captured = capsys.readouterr()
     return code, captured.out + captured.err
 
@@ -66,6 +312,307 @@ def test_identical_trees_pass_with_existing_debt(guard, tmp_path, capsys, monkey
     assert code == 0
     assert "Pass" in output
     assert "blocked:" not in output
+
+
+def test_identical_same_identity_aggregate_findings_do_not_report_scope_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    text = two_duplicate_setup_groups()
+    base, merge = trees(tmp_path, text, text)
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "scope grew" not in output
+
+
+def test_brand_new_aggregate_finding_is_not_also_reported_as_scope_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        "name: Test\non: pull_request\njobs: {}\n",
+        two_duplicate_setup_groups(),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT12" in output
+    assert "OPT12 scope grew" not in output
+
+
+def test_new_group_under_existing_identity_is_not_also_scope_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    merge_text = (two_duplicate_setup_groups()
+                  .replace("  guard-verify:\n", "  a:\n")
+                  .replace("  test:\n", "  b:\n")
+                  .replace("  lint:\n", "  c:\n")
+                  .replace("  docs:\n", "  d:\n"))
+    base_text = merge_text.split("  c:\n", 1)[0]
+    base, merge = trees(tmp_path, base_text, merge_text)
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "ci-speedup-guard warning: OPT12" in output
+    assert "OPT12 scope grew to jobs: c, d" not in output
+
+
+def test_same_identity_aggregate_finding_reports_only_the_added_job(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path, two_duplicate_setup_groups(),
+        two_duplicate_setup_groups(grow_first=True))
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    growth = [line for line in output.splitlines() if "scope grew" in line]
+    assert growth
+    assert any("OPT12 scope grew to jobs: added" in line for line in growth)
+    assert all("added" in line for line in growth)
+    assert all("guard-verify" not in line and "test" not in line for line in growth)
+
+
+def test_shard_matrix_leg_growth_warns_with_repeated_setup(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path, repeated_setup_matrix(shard_legs=8),
+        repeated_setup_matrix(shard_legs=16))
+
+    summary = tmp_path / "summary.md"
+    code, output = run(
+        guard, base, merge, capsys, monkeypatch, summary=summary)
+
+    assert code == 0
+    warnings = [line for line in output.splitlines() if "8 -> 16 legs" in line]
+    assert len(warnings) == 1
+    assert warnings[0].startswith("::warning file=.github/workflows/ci.yml,line=1::")
+    assert "shards" in warnings[0]
+    assert "repeats checkout, install and build" in warnings[0]
+    rendered = summary.read_text(encoding="utf-8")
+    assert "### New warnings" in rendered
+    assert "OPT14 job shards: 8 -> 16 legs" in rendered
+
+
+def test_removing_matrix_exclusions_warns_on_effective_shard_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        repeated_setup_matrix(
+            shard_legs=16, exclude_shards=tuple(range(9, 17))),
+        repeated_setup_matrix(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_playwright_blob_report_handoff_does_not_hide_shard_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        playwright_report_matrix(shard_legs=8),
+        playwright_report_matrix(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_playwright_include_indexes_feed_shard_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        playwright_include_report_matrix(shard_legs=8),
+        playwright_include_report_matrix(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_bracket_index_expression_feeds_shard_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        bracket_index_shard_matrix(shard_legs=8),
+        bracket_index_shard_matrix(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_index_axis_beside_shard_argument_is_not_a_shard_dimension(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        index_metadata_matrix(matrix_legs=8),
+        index_metadata_matrix(matrix_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards" not in output
+
+
+def test_sharded_producer_is_not_a_build_handoff_consumer(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        sharded_build_export_matrix(shard_legs=8),
+        sharded_build_export_matrix(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_report_from_a_build_job_does_not_hide_shard_growth(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        report_producer_with_sharded_consumer(shard_legs=8),
+        report_producer_with_sharded_consumer(shard_legs=16),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_report_step_name_identifies_a_generic_report_artifact(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        report_producer_with_sharded_consumer(
+            shard_legs=8, artifact_name="artifact", artifact_paths=("tmp/out",),
+            upload_step_name="Upload coverage report"),
+        report_producer_with_sharded_consumer(
+            shard_legs=16, artifact_name="artifact", artifact_paths=("tmp/out",),
+            upload_step_name="Upload coverage report"),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards: 8 -> 16 legs" in output
+
+
+def test_mixed_build_output_and_report_remains_a_build_handoff(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        report_producer_with_sharded_consumer(
+            shard_legs=8, artifact_name="app", artifact_paths=("dist", "coverage")),
+        report_producer_with_sharded_consumer(
+            shard_legs=16, artifact_name="app", artifact_paths=("dist", "coverage")),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14 job shards" not in output
+
+
+def test_build_once_handoff_keeps_ordinary_setup_group_silent(
+        guard, tmp_path, capsys, monkeypatch):
+    base, merge = trees(
+        tmp_path,
+        build_once_with_lint(include_lint=False),
+        build_once_with_lint(include_lint=True),
+    )
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "OPT14" not in output
+
+
+@pytest.mark.parametrize("merge_text", [
+    repeated_setup_matrix(shard_legs=8),
+    repeated_setup_matrix(shard_legs=16, axis="os"),
+    repeated_setup_matrix(shard_legs=16, axis="version"),
+    repeated_setup_matrix(shard_legs=16, artifact_handoff=True),
+])
+def test_matrix_growth_exception_stays_silent_for_non_growth_or_non_shards(
+        guard, tmp_path, capsys, monkeypatch, merge_text):
+    base, merge = trees(tmp_path, repeated_setup_matrix(shard_legs=8), merge_text)
+
+    code, output = run(guard, base, merge, capsys, monkeypatch)
+
+    assert code == 0
+    assert "legs; each leg repeats" not in output
+    assert "OPT14 job shards" not in output
+
+
+def test_same_identity_aggregate_finding_reports_regrouped_job(
+        guard, tmp_path, capsys, monkeypatch):
+    base = two_duplicate_setup_groups()
+    merge = base.replace(
+        "  lint:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - uses: actions/setup-python@v5\n"
+        "      - run: pip install ruff\n"
+        "      - run: ruff check .\n",
+        "  lint:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n"
+        "      - uses: actions/setup-node@v4\n"
+        "      - run: npm install\n"
+        "      - run: npm test\n",
+    )
+    base_root, merge_root = trees(tmp_path, base, merge)
+
+    code, output = run(guard, base_root, merge_root, capsys, monkeypatch)
+
+    assert code == 0
+    growth = [line for line in output.splitlines()
+              if "OPT12 scope grew" in line]
+    assert growth
+    assert all("lint" in line for line in growth)
+
+
+def test_new_same_identity_aggregate_group_names_its_jobs(
+        guard, tmp_path, capsys, monkeypatch):
+    base = two_duplicate_setup_groups()
+    added_group = """
+  added-a:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+      - run: go mod download
+      - run: go test ./...
+  added-b:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+      - run: go mod download
+      - run: go test ./...
+"""
+    merge = base.replace("jobs:\n", "jobs:\n" + added_group, 1)
+    base_root, merge_root = trees(tmp_path, base, merge)
+
+    code, output = run(guard, base_root, merge_root, capsys, monkeypatch)
+
+    assert code == 0
+    growth = [line for line in output.splitlines()
+              if "OPT12 scope grew" in line]
+    assert growth
+    assert all("added-a" in line and "added-b" in line for line in growth)
 
 
 def test_new_allowlisted_instance_is_policy_block_not_operational_failure(
@@ -207,6 +754,29 @@ def test_malformed_finding_schema_fails_closed(
     monkeypatch.setattr(guard, "BLOCKING_ALLOWLIST", frozenset())
     with pytest.raises(guard.OperationalFailure, match=message):
         guard.validate_scan(doc, module)
+
+
+def test_malformed_matrix_setup_facts_fail_closed(guard, tmp_path, monkeypatch):
+    root, _ = trees(
+        tmp_path, repeated_setup_matrix(shard_legs=8),
+        repeated_setup_matrix(shard_legs=8))
+    engine, _refs, _layout = guard.resolve_layout()
+    module = guard.load_engine(engine)
+    doc = guard.run_scan(engine, root, "main")
+    monkeypatch.setattr(guard, "BLOCKING_ALLOWLIST", frozenset())
+
+    mutations = (
+        lambda facts: facts.__setitem__(".github/workflows/ci.yml", []),
+        lambda facts: facts[".github/workflows/ci.yml"].__setitem__("shards", []),
+        lambda facts: facts[".github/workflows/ci.yml"]["shards"].__setitem__("legs", "8"),
+        lambda facts: facts[".github/workflows/ci.yml"]["shards"].__setitem__(
+            "repeated", ["checkout", 1]),
+    )
+    for mutate in mutations:
+        malformed = copy.deepcopy(doc)
+        mutate(malformed["matrix_setup_facts"])
+        with pytest.raises(guard.OperationalFailure, match="matrix_setup_facts"):
+            guard.validate_scan(malformed, module)
 
 
 def test_unknown_scan_gap_kind_fails_closed(guard, tmp_path, monkeypatch):

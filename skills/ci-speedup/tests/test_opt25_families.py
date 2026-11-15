@@ -104,6 +104,177 @@ def _named_findings(pairs):
     return cr._detect_opt25_shard_imbalance("ci.yml", [jobs, jobs], 0, {})
 
 
+@pytest.mark.parametrize("active_count", [1, 5])
+def test_skipped_matrix_legs_do_not_create_an_imbalance(active_count):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index in range(10):
+        ran = index < active_count
+        duration = 600 if ran else 12
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"name": "Set up job", "conclusion": "success"},
+                {"name": "Install dependencies", "conclusion": "success"},
+                {"name": "Run divided tests",
+                 "conclusion": "success" if ran else "skipped"},
+            ],
+        })
+
+    assert cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600}) == []
+
+
+def test_real_imbalance_stamps_excluded_legs_without_work():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((600, 400, 100, 12)):
+        ran = index < 3
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"name": "Set up job", "conclusion": "success"},
+                {"name": "Run divided tests",
+                 "conclusion": "success" if ran else "skipped"},
+            ],
+        })
+
+    findings = cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600})
+    assert findings[0]["legs_excluded_no_work"] == 1
+
+
+@pytest.mark.parametrize("housekeeping", [
+    ["Run actions/checkout@v4"],
+    ["Run actions/setup-node@v4"],
+    ["Run actions/setup-python@v5"],
+    ["Post Run actions/checkout@v4", "Run actions/upload-artifact@v4"],
+    ["Upload test results"],
+    [""],
+])
+def test_pr_light_legs_with_github_step_names_do_not_create_an_imbalance(
+        housekeeping):
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((600, 400, 12, 12)):
+        ran = index < 2
+        steps = [{"name": name, "conclusion": "success"}
+                 for name in housekeeping]
+        steps.append({"name": "Run divided tests",
+                      "conclusion": "success" if ran else "skipped",
+                      "started_at": start.isoformat() if ran else None,
+                      "completed_at": ((start + timedelta(seconds=duration)).isoformat()
+                                       if ran else None)})
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": steps,
+        })
+
+    assert cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600}) == []
+
+
+def test_always_run_upload_cannot_become_the_dominant_step():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, ran in enumerate((True, True, False, False)):
+        duration = 90 if ran else 40
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"name": "Run divided tests",
+                 "conclusion": "success" if ran else "skipped",
+                 "started_at": start.isoformat() if ran else None,
+                 "completed_at": ((start + timedelta(seconds=50)).isoformat()
+                                  if ran else None)},
+                {"name": "Upload test results", "conclusion": "success",
+                 "started_at": (start + timedelta(seconds=50 if ran else 0)).isoformat(),
+                 "completed_at": (start + timedelta(seconds=duration)).isoformat()},
+            ],
+        })
+
+    assert cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 90}) == []
+
+
+def test_shared_test_work_keeps_working_legs_in_the_matrix():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((900, 100, 100)):
+        integration = index == 0
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"name": "Run tests", "conclusion": "success",
+                 "started_at": start.isoformat(),
+                 "completed_at": (start + timedelta(seconds=100)).isoformat()},
+                {"name": "Run integration tests",
+                 "conclusion": "success" if integration else "skipped",
+                 "started_at": (start + timedelta(seconds=100)).isoformat()
+                 if integration else None,
+                 "completed_at": (start + timedelta(seconds=900)).isoformat()
+                 if integration else None},
+            ],
+        })
+
+    findings = cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900})
+    assert findings
+    assert findings[0]["legs_excluded_no_work"] == 0
+
+
+def test_a_working_leg_with_a_different_step_name_is_not_discarded():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, (duration, platform, conclusion) in enumerate((
+            (900, "linux", "success"),
+            (100, "windows", "success"),
+            (90, "windows", "success"),
+            (12, "empty", "skipped"))):
+        linux_ran = platform == "linux"
+        windows_ran = platform == "windows"
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"name": "Install dependencies", "conclusion": "success"},
+                {"name": "Run Linux tests",
+                 "conclusion": "success" if linux_ran else "skipped",
+                 "started_at": start.isoformat() if linux_ran else None,
+                 "completed_at": ((start + timedelta(seconds=800)).isoformat()
+                                  if linux_ran else None)},
+                {"name": "Run Windows tests",
+                 "conclusion": "success" if windows_ran else "skipped",
+                 "started_at": start.isoformat() if windows_ran else None,
+                 "completed_at": ((start + timedelta(seconds=duration - 10)).isoformat()
+                                  if windows_ran else None)},
+            ],
+        })
+
+    findings = cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900})
+
+    assert findings[0]["legs_excluded_no_work"] == 1
+    assert "Test (Shard 1)" in findings[0]["measured_evidence"]["summary"]
+
+
 @pytest.mark.parametrize("prefix", ["ubuntu", "ubuntu-", "macos-"])
 def test_platform_versions_remain_heterogeneous(prefix):
     findings = _named_findings([(f"Test ({prefix}{version})", duration)

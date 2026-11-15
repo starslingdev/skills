@@ -134,3 +134,45 @@ def test_reading_check_patterns_name_real_catalog_entries_and_reference_files():
                 assert re.search(rf"(?m)^#{{1,3}} {i} —", catalog), (c["name"], i)
             for f in re.findall(r"[\w-]+\.(?:md|tsv|json)", pat):
                 assert f in names, (c["name"], f)
+
+
+@pytest.mark.parametrize("answer,ok", [
+    ("Slowest job: the `test` job of the `CI` check (`ci.yml`), at 3m 17s median.", True),
+    ("Slowest: CI, and its `test` job — 3m 17s.", True),
+    ("Slowest job: `test` in `ci.yml` — 3m 17s", True),
+    ("`CI / test` is the slowest job at 3m 17s.", True),
+    ("Slowest job: `CI / lint` at 3m 17s.", False),
+    ("`CI / test` is the slowest job.", False),
+    ("Slowest: `CI / build` at 3m 17s; its tests pass.", False),
+])
+def test_the_slowest_job_check_takes_any_wording_of_the_right_job(answer, ok):
+    """Correct answers name the `test` job of the `CI` workflow in many ways; the
+    check must accept each of them on the line carrying the 3m 17s median, and
+    still reject another job or a missing time."""
+    entry = next(e for e in _RUNNABLE if e["name"] == "no-catalog-read-needed")
+    check = next(c for c in entry["checks"] if c["name"] == "names-the-slowest-job")
+    text = "A typical PR waits 3m 40s.\n" + answer
+    assert bool(re.search(check["pattern"], text)) is ok
+
+
+def test_the_verification_resume_entry_starts_from_a_finished_audit(tmp_path):
+    """The prompt says a fix from "this audit" was pushed, so the session must
+    start with that audit's findings in its own scratch. Without a fixture the
+    session had none, and passing depended on scratch another entry left in /tmp."""
+    import subprocess
+    import sys
+    entry = next(e for e in _RUNNABLE if e["name"] == "post-fix-verification-resume")
+    assert entry.get("fixture"), "the entry needs a fixture that runs the audit first"
+    assert "$CI_SPEEDUP_AUDIT_FINDINGS" in entry["prompt"]
+    script = _SKILL / "evals" / "fixtures" / entry["fixture"] / "scaffold.py"
+    sandbox, aux = tmp_path / "repo", tmp_path / "aux"
+    sandbox.mkdir()
+    aux.mkdir()
+    r = subprocess.run([sys.executable, str(script), str(sandbox), str(aux)],
+                       capture_output=True, text=True, timeout=300)
+    assert r.returncode == 0, r.stderr[-1500:]
+    env = dict(l.split("=", 1) for l in r.stdout.splitlines() if "=" in l)
+    findings = Path(env["CI_SPEEDUP_AUDIT_FINDINGS"])
+    assert findings.is_file() and findings.is_relative_to(aux), findings
+    assert json.loads(findings.read_text(encoding="utf-8")).get("pr_critical_path")
+    assert env.get("CI_SPEEDUP_GH_FIXTURES") and env.get("EVAL_GH_SHIM_REPO")

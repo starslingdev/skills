@@ -372,11 +372,20 @@ def test_full_verifier_reads_cluster_win_after_smaller_queue_clock(
             "completed_at": _iso(450),
         })
         facts.append(fact)
-    doc["pr_critical_path"]["commit_wall_clock"] = cr._stamp_commit_queue_work({
+    clock = cr._stamp_commit_queue_work({
         "facts": facts,
         "p50_s": 450.0,
         "p90_s": 450.0,
     })
+    clock.update({
+        "median_projection_multiple": projection.multiple,
+        "worst_commit": {
+            "sha": "cluster-1",
+            "wall_s": 450.0,
+            "workflow_file": _CI,
+        },
+    })
+    doc["pr_critical_path"]["commit_wall_clock"] = clock
     cluster = copy.deepcopy(doc["findings"][0])
     cluster.update({
         "id": "cluster-finding",

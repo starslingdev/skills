@@ -446,6 +446,67 @@ def test_attacker_scenario_row_uses_llm_field() -> None:
     assert "Any GitHub user can open a fork PR — zero prior access." in md
 
 
+def test_p1418_cosmetic_occurrence_uses_its_hygiene_fix() -> None:
+    finding = _complete_finding(
+        pattern="P14.18",
+        severity="MEDIUM",
+        title="Cosmetic pull request automation",
+        fix_strategy="limit-cosmetic-pr-automation",
+        fix_guidance=(
+            "Keep this job limited to cosmetic labeling or commenting; "
+            "remove its write permission if unused."
+        ),
+    )
+    md = _finding_section([finding])
+    guidance = "Keep this job limited to cosmetic labeling or commenting"
+    assert md.count(guidance) == 2  # visible Fix + copyable fix prompt
+    assert "Split into separate trusted / untrusted workflows" not in md
+    assert "apply the catalog's documented restructure" not in md
+    assert "may remain only when every listed occurrence is MEDIUM" in md
+    assert "no checkout" in md
+    assert "no PR-code execution" in md
+    assert "no review/merge API" in md
+
+
+def test_p1418_cosmetic_phase5_oracle_allows_reviewed_medium_finding() -> None:
+    """The orchestrator prompt must not demand removal of a reviewed finding."""
+    prompts = (_SKILL_DIR / "references" / "prompts.md").read_text(
+        encoding="utf-8"
+    )
+    skill = (_SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+    completion = (
+        "may remain only when every listed occurrence is MEDIUM and its "
+        "evidence still says"
+    )
+    assert completion in prompts
+    assert "P14.18 MEDIUM cosmetic exception" in skill
+
+
+def test_p1418_mixed_group_uses_the_high_profile_not_first_member() -> None:
+    cosmetic = _complete_finding(
+        id="cosmetic",
+        pattern="P14.18",
+        severity="MEDIUM",
+        title="Cosmetic pull request automation",
+        attacker_scenario="COSMETIC ONLY",
+        fix_strategy="limit-cosmetic-pr-automation",
+        fix_guidance="KEEP COSMETIC ONLY",
+    )
+    high = _complete_finding(
+        id="high",
+        pattern="P14.18",
+        severity="HIGH",
+        workflow_file=".github/workflows/z.yml",
+        attacker_scenario="HIGH MERGE PATH",
+        fix_strategy="split-trusted-untrusted-workflows",
+    )
+    md = _finding_section([cosmetic, high])
+    assert "**HIGH**" in md
+    assert "HIGH MERGE PATH" in md
+    assert "`split-trusted-untrusted-workflows`" in md
+    assert "KEEP COSMETIC ONLY" not in md
+
+
 def test_attacker_row_falls_back_to_catalog_capability() -> None:
     """Without an LLM `attacker_scenario`, the row falls back to the
     catalog's static 'What an attacker can do' prose — it is never blank
@@ -591,6 +652,17 @@ def test_fix_recipe_summary_strips_dangling_colon_lead_in() -> None:
     assert report._extract_fix_recipe_summary(section2) == "Replace the token with OIDC."
 
 
+def test_p1411_fix_recipe_asks_the_same_github_host_as_the_detector() -> None:
+    section = _CATALOG_TEXT.split("### P14.11", 1)[1].split("### P14.14", 1)[0]
+    commands = [
+        line.strip() for line in section.splitlines()
+        if line.strip().startswith("gh api ")
+    ]
+    assert len(commands) == 3, commands
+    for command in commands:
+        assert "--hostname github.com" in command, command
+
+
 # The 8 HIGH + 2 MEDIUM real catalog patterns. Group count is bounded by the
 # catalog (one group per pattern), and an off-catalog pattern is now dropped as
 # off-contract (S5), so the no-trim contract is exercised with the REAL set.
@@ -725,6 +797,62 @@ def test_gh_checks_ran_renders_as_a_completed_check() -> None:
     assert "12 unique pin(s) verified" in md
     assert "NOT a pass" not in md
     assert "SKIPPED" not in md
+
+
+def test_release_lookup_skip_is_disclosed_without_calling_findings_missing() -> None:
+    """The P14.24 release-immutability lookup can only REMOVE a finding, so a
+    lookup that did not run hides nothing: the tag-pinned findings are all
+    still listed. Its skip must be disclosed, named, and must not borrow the
+    impostor check's "absence from the findings is NOT a pass" warning, which
+    would be false here. A P14.11 skip in the same report keeps that warning.
+    """
+    block = report._gh_checks_block({
+        "P14.24": "skipped: disabled via --gh-impostor=off (release-"
+                  "immutability lookup did NOT run; 1 tag-pinned GitHub CLI "
+                  "extension install(s) kept as findings)",
+    })
+    assert "P14.24 release-immutability lookup" in block
+    assert "SKIPPED" in block and "did NOT run" in block
+    assert "NOT a pass" not in block
+    assert "immutable" in block
+    both = report._gh_checks_block({
+        "P14.11": "skipped: gh not authenticated (run gh auth login) "
+                  "(network-gated check did NOT run)",
+        "P14.24": "partial: 0 of 1 release(s) looked up, 1 UNVERIFIED — kept "
+                  "as findings",
+    }, {"P14.24": {"unverified": ["github/gh-actions-lock@v0.4.1 "
+                                  "(.github/workflows/l.yml:12) — rate limit"]}})
+    warning, _, rest = both.partition("[!NOTE]")
+    assert "P14.11 impostor-SHA check: SKIPPED" in warning
+    assert "P14.24" not in warning
+    assert "PARTIAL" in rest and "github/gh-actions-lock@v0.4.1" in rest
+    # The skill has no dismiss step to point at; the remedy is a re-run with
+    # gh signed in. Each listed pin already carries its own reason.
+    assert "dismiss" not in rest
+    assert "re-run" in rest and "gh auth login" in rest
+    assert "not looked up" not in rest
+
+
+def test_release_lookup_unverified_labels_cannot_forge_markdown() -> None:
+    """An unverified label carries the scanned workflow path and the `--pin`
+    value as written, both controlled by the repository under audit. A
+    newline or backtick in either must not close the code span and start a
+    heading the scanner did not write. The lookup's own reason text (which
+    names the `immutable` field in backticks) must not break the span either.
+    """
+    forged = ("github/gh-actions-lock@v1`\n## FIXED — all clear\n`"
+              " (.github/workflows/l.yml:12) — the release response carried "
+              "no `immutable` field")
+    block = report._gh_checks_block({
+        "P14.24": "partial: 0 of 1 tag-pinned GitHub CLI extension install(s) "
+                  "looked up, 0 immutable (not reported), 1 UNVERIFIED — kept "
+                  "as findings",
+    }, {"P14.24": {"unverified": [forged]}})
+    assert not any(line.lstrip("> ").startswith("#")
+                   for line in block.splitlines()), block
+    pin_lines = [ln for ln in block.splitlines() if "gh-actions-lock" in ln]
+    assert len(pin_lines) == 1, block
+    assert pin_lines[0].count("`") == 2, pin_lines[0]
 
 
 def test_gh_checks_block_empty_when_scan_recorded_none() -> None:

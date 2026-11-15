@@ -184,6 +184,20 @@ def validate_scan(doc: Any, engine_module: Any) -> None:
     parallel = doc.get("parallel_steps", {})
     if not isinstance(parallel, dict) or not isinstance(parallel.get("held_back", []), list):
         raise OperationalFailure("parallel_steps.held_back is malformed")
+    matrix_facts = doc.get("matrix_setup_facts", {})
+    if not isinstance(matrix_facts, dict):
+        raise OperationalFailure("matrix_setup_facts is malformed")
+    for workflow, jobs in matrix_facts.items():
+        if not isinstance(workflow, str) or not workflow or not isinstance(jobs, dict):
+            raise OperationalFailure("matrix_setup_facts workflow is malformed")
+        for job, fact in jobs.items():
+            if not isinstance(job, str) or not job or not isinstance(fact, dict):
+                raise OperationalFailure("matrix_setup_facts job is malformed")
+            legs, repeated = fact.get("legs"), fact.get("repeated")
+            if (type(legs) is not int or legs < 2 or not isinstance(repeated, list)
+                    or not repeated
+                    or any(not isinstance(name, str) or not name for name in repeated)):
+                raise OperationalFailure("matrix_setup_facts entry is malformed")
 
 
 def workflow_files(root: Path) -> dict[str, bytes]:
@@ -290,6 +304,40 @@ def multiset_delta(base: list[dict[str, Any]], merge: list[dict[str, Any]],
     return new, resolved, existing
 
 
+def pair_aggregate_scopes(
+        base: list[dict[str, Any]], merge: list[dict[str, Any]],
+) -> list[tuple[dict[str, Any], dict[str, Any] | None]]:
+    """Pair repeated aggregate findings by exact jobs, then greatest overlap."""
+    remaining_base = list(base)
+    remaining_merge = list(merge)
+    pairs: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+
+    for current in list(remaining_merge):
+        jobs = set(current.get("affected_jobs", []))
+        exact = next((old for old in remaining_base
+                      if set(old.get("affected_jobs", [])) == jobs), None)
+        if exact is not None:
+            pairs.append((current, exact))
+            remaining_merge.remove(current)
+            remaining_base.remove(exact)
+
+    while remaining_base and remaining_merge:
+        candidates = []
+        for current in remaining_merge:
+            current_jobs = set(current.get("affected_jobs", []))
+            for old in remaining_base:
+                old_jobs = set(old.get("affected_jobs", []))
+                candidates.append((
+                    -len(current_jobs & old_jobs),
+                    sorted(current_jobs), sorted(old_jobs), current, old))
+        *_, current, old = min(candidates, key=lambda row: row[:3])
+        pairs.append((current, old))
+        remaining_merge.remove(current)
+        remaining_base.remove(old)
+    pairs.extend((current, None) for current in remaining_merge)
+    return pairs
+
+
 def job_body(root: Path, finding: dict[str, Any]) -> str:
     """Best-effort normalized YAML body for a job-id subject, stdlib only."""
     subject, rel = finding.get("subject"), finding.get("workflow_file")
@@ -374,6 +422,28 @@ def held_back(doc: dict[str, Any], mapping: dict[str, str]) -> set[tuple]:
         path = mapping.get(row.get("path", ""), row.get("path", ""))
         records.add(("parallel", path, row.get("job")))
     return records
+
+
+def matrix_setup_facts(
+    doc: dict[str, Any], mapping: dict[str, str]
+) -> dict[tuple[str, str], tuple[int, list[str]]]:
+    """Index guard-only matrix setup facts by stable workflow and job identity."""
+    result: dict[tuple[str, str], tuple[int, list[str]]] = {}
+    workflows = doc.get("matrix_setup_facts")
+    if not isinstance(workflows, dict):
+        return result
+    for workflow, jobs in workflows.items():
+        if not isinstance(workflow, str) or not isinstance(jobs, dict):
+            continue
+        workflow = mapping.get(workflow, workflow)
+        for job, fact in jobs.items():
+            if not isinstance(job, str) or not isinstance(fact, dict):
+                continue
+            legs, repeated = fact.get("legs"), fact.get("repeated")
+            if (isinstance(legs, int) and isinstance(repeated, list)
+                    and all(isinstance(name, str) for name in repeated)):
+                result[workflow, job] = legs, repeated
+    return result
 
 
 def write_summary(path: Path | None, lines: list[str]) -> None:
@@ -487,15 +557,53 @@ def main(argv: list[str] | None = None) -> int:
                 warnings += 1
 
         # An aggregate workflow finding can keep its key while covering more jobs.
-        b_by_key = {finding_key(f, {}, non_perfile): f for f in base_doc["findings"]}
+        new_finding_ids = {id(f) for f in unpaired}
+        base_aggregates: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
+        merge_aggregates: dict[tuple, list[dict[str, Any]]] = defaultdict(list)
+        for f in base_doc["findings"]:
+            if f["subject"] == "(workflow)":
+                base_aggregates[finding_key(f, {}, non_perfile)].append(f)
         for f in merge_doc["findings"]:
-            key = finding_key(f, mapping, non_perfile)
-            old = b_by_key.get(key)
-            if old and f["subject"] == "(workflow)":
-                grew = sorted(set(f.get("affected_jobs", [])) - set(old.get("affected_jobs", [])))
-                if grew:
-                    annotation("warning", f"{f['pattern']} scope grew to jobs: {', '.join(grew)}", f)
+            if f["subject"] == "(workflow)":
+                merge_aggregates[finding_key(f, mapping, non_perfile)].append(f)
+        aggregate_warning_messages: list[str] = []
+        for key, current_findings in merge_aggregates.items():
+            old_findings = base_aggregates.get(key, [])
+            all_old_jobs = {job for old in old_findings
+                            for job in old.get("affected_jobs", [])}
+            for f, old in pair_aggregate_scopes(old_findings, current_findings):
+                old_jobs = (set(old.get("affected_jobs", []))
+                            if old is not None else all_old_jobs)
+                grew = sorted(set(f.get("affected_jobs", []))
+                              - old_jobs)
+                if grew and old_findings and id(f) not in new_finding_ids:
+                    message = f"{f['pattern']} scope grew to jobs: {', '.join(grew)}"
+                    annotation("warning", message, f)
+                    aggregate_warning_messages.append(message)
                     warnings += 1
+        base_matrix = matrix_setup_facts(base_doc, {})
+        merge_matrix = matrix_setup_facts(merge_doc, mapping)
+        for key in sorted(set(base_matrix) & set(merge_matrix)):
+            before, _old_work = base_matrix[key]
+            after, work = merge_matrix[key]
+            if after <= before or not ({"install", "build"} & set(work)):
+                continue
+            workflow, job = key
+            repeated_text = ", ".join(work[:-1])
+            if len(work) > 1:
+                repeated_text += f" and {work[-1]}"
+            elif work:
+                repeated_text = work[0]
+            message = (
+                f"OPT14 job {job}: {before} -> {after} legs; each leg "
+                f"repeats {repeated_text}; try running the work in parallel on "
+                "one machine first (see OPT88)")
+            annotation("warning", message, {
+                "workflow_file": workflow,
+                "line": 1,
+            })
+            aggregate_warning_messages.append(message)
+            warnings += 1
 
         if increases and not bootstrap:
             verdict = "Policy block: " + ", ".join(
@@ -522,7 +630,9 @@ def main(argv: list[str] | None = None) -> int:
                       for f in warning_findings),)
         lines.extend(f"- {nf['pattern']} {label}: {flat(rf.get('workflow_file'))} -> {flat(nf.get('workflow_file'))}"
                      for label, nf, rf in pairs)
-        if not warning_findings and not pairs and not new_gaps and not new_held:
+        lines.extend(f"- {flat(message)}" for message in aggregate_warning_messages)
+        if (not warning_findings and not pairs and not new_gaps and not new_held
+                and not aggregate_warning_messages):
             lines.append("- None.")
         lines.extend(["", "### Resolved findings", ""])
         lines.extend((f"- {f['pattern']} at {flat(f.get('workflow_file'))} ({flat(f.get('subject'))})"

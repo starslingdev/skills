@@ -46,6 +46,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from pr_sample_contract import (
+    PR_SAMPLE_CANDIDATE_PAGE_CAP as _PR_CANDIDATE_PAGE_CAP,
+    PR_SAMPLE_JOB_LIST_READ_CAP as _PR_SAMPLE_JOB_LIST_READ_CAP,
+    PR_SAMPLE_MIN_DISTINCT_DAYS as _PR_SAMPLE_MIN_DISTINCT_DAYS,
+    PR_SAMPLE_TARGET as _PR_SAMPLE_TARGET,
+)
+
 # Module logger — inherits the entry point's logging config (WARNING by default,
 # DEBUG under STARSLING_LOG_LEVEL). Used for diagnosable-but-non-fatal gh paths
 # (e.g. an expected-absent rulesets endpoint) so a real collection failure is
@@ -2238,13 +2245,149 @@ def _chain_facts_for_pr(
 def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
                                   chain_summary: "dict[str, Any] | None",
                                   jg: "dict[str, Any] | None",
-                                  crit_by_wf: "dict[str, Any]") -> None:
+                                  crit_by_wf: "dict[str, Any]",
+                                  outcome_jobs_by_wf: "dict[str, list[list[dict[str, Any]]]] | None" = None,
+                                  ) -> None:
     """ENG-1 PR-N3: append the measured-gate-chain note to every OPT21
     (unnecessary `needs:`) finding on the chain's own workflow - the edge
     OPT21 questions IS the serialization the headline measures. Evidence
-    annotation only (sizing unchanged); idempotent (the note is never
+    sizes a resolvable single edge from sampled job history; the chain note is
+    idempotent (it is never
     appended twice); a <2-member modal chain or an unresolvable chain
     workflow is a no-op."""
+    outcome_jobs_by_wf = outcome_jobs_by_wf or {}
+
+    def _path_s(graph: dict[str, Any], durations: dict[str, float],
+                removed: tuple[str, str] | None = None) -> float | None:
+        memo: dict[str, float] = {}
+        visiting: set[str] = set()
+
+        def visit(node: str) -> float | None:
+            if node in memo:
+                return memo[node]
+            if node in visiting or node not in durations:
+                return None
+            visiting.add(node)
+            spec = graph.get(node) if isinstance(graph.get(node), dict) else {}
+            parents = [str(parent) for parent in (spec.get("needs") or [])
+                       if str(parent) in durations
+                       if removed != (str(parent), node)]
+            parent_spans = [visit(parent) for parent in parents]
+            visiting.remove(node)
+            if any(span is None for span in parent_spans):
+                return None
+            memo[node] = durations[node] + max(
+                (float(span) for span in parent_spans if span is not None), default=0.0)
+            return memo[node]
+
+        spans = [visit(str(node)) for node in durations]
+        if not spans or any(span is None for span in spans):
+            return None
+        return max(float(span) for span in spans if span is not None)
+
+    for f in findings:
+        if f.get("pattern") != "OPT21":
+            continue
+        wf = str(f.get("workflow_file") or "")
+        graph = ((jg or {}).get(wf) or {})
+        affected = [str(job) for job in (f.get("affected_jobs") or [])]
+        needs = [str(job) for job in (f.get("opt21_needs") or [])]
+        crit = crit_by_wf.get(wf) or {}
+        if (len(affected) == 1 and len(needs) == 1 and affected[0] in graph
+                and needs[0] in graph):
+            durations: dict[str, float] = {}
+            compute_durations: dict[str, float] = {}
+            job_p50 = crit.get("job_p50") or {}
+            for node, spec in graph.items():
+                display = str((spec or {}).get("name") or node)
+                duration = _resolve_job_p50(display, job_p50)
+                if duration > 0:
+                    durations[str(node)] = float(duration)
+                    matrix_legs = [
+                        float(value) for name, value in job_p50.items()
+                        if str(name).startswith(display + " (")
+                        and isinstance(value, (int, float))
+                    ]
+                    compute_durations[str(node)] = (
+                        sum(matrix_legs) if matrix_legs else float(duration))
+            before = _path_s(graph, durations)
+            after = _path_s(graph, durations, (needs[0], affected[0]))
+            samples = outcome_jobs_by_wf.get(wf) or []
+            dep_outcomes: list[str] = []
+            for run_jobs in samples:
+                dependency_names = {
+                    needs[0], _matrix_base_name(str(
+                        (graph.get(needs[0]) or {}).get("name") or needs[0])),
+                }
+                dependency_legs = [
+                    job for job in run_jobs
+                    if _matrix_base_name(str(job.get("name") or "")) in dependency_names
+                ]
+                # An empty successful jobs response, or a response whose names
+                # do not resolve to this dependency, is unavailable evidence —
+                # never turn it into a synthetic failure. A matrix dependency
+                # succeeds only when every matching leg succeeds (neutral is
+                # also a completed non-failure outcome).
+                conclusions = [str(job.get("conclusion") or "")
+                               for job in dependency_legs]
+                if dependency_legs and all(conclusions):
+                    dep_outcomes.append(
+                        "success" if all(outcome in {"success", "neutral"}
+                                         for outcome in conclusions) else "failure"
+                    )
+            if (before is not None and after is not None and before > after
+                    and dep_outcomes):
+                failed = sum(outcome not in {"success", "neutral"}
+                             for outcome in dep_outcomes)
+                share = failed / len(dep_outcomes)
+                downstream = {affected[0]}
+                changed = True
+                while changed:
+                    prior = len(downstream)
+                    downstream.update(
+                        str(node) for node, spec in graph.items()
+                        if any(str(parent) in downstream
+                               for parent in ((spec or {}).get("needs") or [])))
+                    changed = len(downstream) != prior
+                downstream_s = sum(compute_durations.get(node, 0.0)
+                                   for node in downstream)
+                projection = project_commit_wall(
+                    before, before, after, float("inf"), chain_s=before,
+                    pole_s=before - after, runner_up_s=after)
+                extra_minutes = round(share * downstream_s / 60.0, 2)
+                stamp = {
+                    "dependency": needs[0], "dependent": affected[0],
+                    "chain_before_s": round(before, 1),
+                    "chain_after_s": round(projection.projected_s, 1),
+                    "dependency_failed_runs": failed,
+                    "dependency_sampled_runs": len(dep_outcomes),
+                    "dependency_unmatched_runs": len(samples) - len(dep_outcomes),
+                    "dependency_failure_share": round(share, 4),
+                    "downstream_p50_s": round(downstream_s, 1),
+                    "extra_runner_min_per_run": extra_minutes,
+                }
+                unmatched_note = (
+                    f" {len(samples) - len(dep_outcomes)} sampled run(s) without a "
+                    "resolvable dependency job were excluded."
+                    if len(samples) != len(dep_outcomes) else ""
+                )
+                f.update({
+                    "opt21_edge_sizing": stamp,
+                    "sizing_basis": "measured",
+                    "wall_clock_p50_s": round(before - projection.projected_s, 1),
+                    "runner_min_saving": None,
+                    "tier": 1,
+                    "realization": "direct",
+                    "size_note": "measured change in the workflow's longest dependency path",
+                })
+                f["evidence"] = (str(f.get("evidence") or "")
+                    + f" Measured longest path: {before:.0f}s -> "
+                      f"{projection.projected_s:.0f}s. The dependency did not succeed "
+                      f"on {failed}/{len(dep_outcomes)} sampled runs ({share:.0%}); "
+                      f"starting downstream work on those paths can add up to "
+                      f"{extra_minutes:.2f} extra runner-minutes per run."
+                      f"{unmatched_note}")
+
     modal = [str(m) for m in ((chain_summary or {}).get("modal_chain") or [])]
     if len(modal) < 2:
         return
@@ -4172,9 +4315,6 @@ def _all_status_runs(client: GhClient, repo: str, wf_id: int,
         f"?per_page={max_runs}{pin}")
 
 
-_PR_CANDIDATE_PAGE_CAP = 3
-
-
 def _all_status_run_page(client: GhClient, repo: str, wf_id: int,
                          page: int, created_before: str | None = None
                          ) -> list[dict[str, Any]] | None:
@@ -4418,6 +4558,17 @@ class _JobFetchMemo:
             if lock is None:
                 lock = self._key_locks[key] = threading.Lock()
             return lock
+
+    def contains(self, fetch: Callable[..., Any], repo: str, run_id: Any) -> bool:
+        """Whether this successful job payload is already owned by the memo.
+
+        Prefetch planners use this before scheduling an endpoint.  The later
+        gather would be a memo hit either way, but prefetching the same endpoint
+        first would still issue an unnecessary GitHub request.
+        """
+        key = (self._flavour(fetch), repo, run_id)
+        with self._lock:
+            return key in self._hits
 
     @staticmethod
     def _flavour(fetch: Callable[..., Any]) -> str:
@@ -4892,6 +5043,10 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
         "sample_candidate_pages_fetched": sample_diag.get("candidate_pages_fetched", 1),
         "sample_candidate_page_cap": sample_diag.get(
             "candidate_page_cap", _PR_CANDIDATE_PAGE_CAP),
+        "sample_job_list_reads": sample_diag.get("job_list_reads", 0),
+        "sample_job_list_read_cap": sample_diag.get(
+            "job_list_read_cap", _PR_SAMPLE_JOB_LIST_READ_CAP),
+        "sample_job_list_cap_hit": sample_diag.get("job_list_cap_hit", False),
         "sample_candidate_pages_exhausted": sample_diag.get(
             "candidate_pages_exhausted", True),
         "sample_candidate_page_fetch_failures": sample_diag.get(
@@ -4899,6 +5054,12 @@ def _sampling_provenance_fields(sample_diag: dict[str, Any]) -> dict[str, Any]:
         "sample_candidate_era_door": sample_diag.get("candidate_era_door", False),
         "sample_candidate_selection_limited": sample_diag.get(
             "selection_limited", False),
+        "sample_distinct_days": sample_diag.get("distinct_days", 0),
+        "sample_min_distinct_days": _PR_SAMPLE_MIN_DISTINCT_DAYS,
+        "sample_span_first": sample_diag.get("span_first", ""),
+        "sample_span_last": sample_diag.get("span_last", ""),
+        "sample_partial_count": sample_diag.get("partial_count", 0),
+        "sample_job_list_scoped": sample_diag.get("job_list_scoped", False),
         "sample_fetch_failures": sample_diag["fetch_failures"],
         "sample_fetched": sample_diag["fetched"],
         "required_suite_scoped": sample_diag["required_suite_scoped"],
@@ -5687,7 +5848,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     "OPT19": {"model": "measured"},  # test source sleep dominance
     "OPT20": {"model": "runner-min-only", "hit_rate": 0.0},  # unpinned docker tags — reliability
     # Parallelization (non fast-path).
-    "OPT21": {"model": "direct", "default_s": 30.0},  # unnecessary needs:
+    "OPT21": {"model": "measured"},  # unnecessary needs: edge path delta
     "OPT22": {"model": "direct", "default_s": 60.0},  # sequential workflow_run
     # Actions/Checkout (non fast-path).
     "OPT26": {"model": "runner-min-only", "hit_rate": 0.0},  # outdated action major
@@ -5854,9 +6015,9 @@ def _opt9_is_build_state(f: dict[str, Any]) -> bool:
 # credited `runner_min_saving` is set to None (so the bill headline / Also-noticed
 # appendix skip it) and the modeled amount is preserved in `runner_min_unrealizable_s` so the
 # report can show it, annotated, instead of summing it into the bill total.
-#   OPT21 — removing a `needs:` edge changes WHEN a job starts (queue wait), not
-#           how long it runs; compute is unchanged, so the bill saving is 0.
-_WALL_CLOCK_ONLY_NO_RUNNER_MIN = {"OPT21"}
+# OPT21 is excluded: its measured stamp reports the extra failure-path compute
+# caused by removing an edge rather than claiming a runner-minute saving.
+_WALL_CLOCK_ONLY_NO_RUNNER_MIN: set[str] = set()
 #   OPT32 — a missing `paths:` filter's bill saving is the compute on irrelevant
 #           runs the filter would skip; it's a GROSS UPPER BOUND that's only
 #           realizable where the workflow's jobs don't ALREADY self-skip (via
@@ -6023,11 +6184,25 @@ def _measure_opt32_path_filters(
     if not targets:
         return
     repo_patterns, pattern_sources = _opt32_repository_paths_ignore(wf_docs)
+    pr_runs_by_workflow = {
+        workflow: [
+            run for run in runs
+            if str(run.get("event") or "") in {"pull_request", "pull_request_target"}
+        ]
+        for workflow, runs in sampled_runs_by_wf.items()
+    }
     numbers_by_workflow = {
         workflow: list(dict.fromkeys(
             number for run in runs for number in [_run_pr_number(run)]
             if isinstance(number, int)))
-        for workflow, runs in sampled_runs_by_wf.items()
+        for workflow, runs in pr_runs_by_workflow.items()
+    }
+    run_coverage_by_workflow = {
+        workflow: (
+            len(runs),
+            sum(isinstance(_run_pr_number(run), int) for run in runs),
+        )
+        for workflow, runs in pr_runs_by_workflow.items()
     }
     all_numbers = list(dict.fromkeys(
         number for finding in targets
@@ -6038,8 +6213,29 @@ def _measure_opt32_path_filters(
         if number not in changed:
             changed[number] = _opt32_changed_files(client, repo, number)
     for finding in targets:
-        numbers = numbers_by_workflow.get(str(finding.get("workflow_file") or ""), [])
-        if not numbers or any(changed[number] is None for number in numbers):
+        workflow = str(finding.get("workflow_file") or "")
+        numbers = numbers_by_workflow.get(workflow, [])
+        sampled_runs, runs_with_pr_number = run_coverage_by_workflow.get(
+            workflow, (0, 0))
+        if not numbers:
+            if sampled_runs <= 0:
+                continue
+            finding["path_filter_measurement"] = {
+                "status": "unmeasured",
+                "reason": "no PR number on sampled runs",
+                "sampled_prs": 0,
+                "sampled_runs": sampled_runs,
+                "runs_with_pr_number": runs_with_pr_number,
+            }
+            continue
+        if any(changed[number] is None for number in numbers):
+            finding["path_filter_measurement"] = {
+                "status": "unmeasured",
+                "reason": "changed-file list unavailable or incomplete",
+                "sampled_prs": len(numbers),
+                "sampled_runs": sampled_runs,
+                "runs_with_pr_number": runs_with_pr_number,
+            }
             continue
         would_skip = 0
         for number in numbers:
@@ -6056,6 +6252,8 @@ def _measure_opt32_path_filters(
         source = "repository paths-ignore" if repo_patterns else "conservative defaults"
         finding["path_filter_measurement"] = {
             "sampled_prs": sampled,
+            "sampled_runs": sampled_runs,
+            "runs_with_pr_number": runs_with_pr_number,
             "would_skip_prs": would_skip,
             "hit_rate": round(hit_rate, 4),
             "source": source,
@@ -6064,6 +6262,10 @@ def _measure_opt32_path_filters(
         }
         measured = (f" Measured {would_skip} of {sampled} sampled PRs as fully "
                     "covered by the candidate filter.")
+        coverage = (
+            f" Measured on {runs_with_pr_number} of {sampled_runs} sampled runs; "
+            "runs without a PR number were excluded."
+            if runs_with_pr_number < sampled_runs else "")
         if repo_patterns:
             named = ", ".join(f"`{p}`" for p in repo_patterns)
             workflows = ", ".join(f"`{p}`" for p in pattern_sources)
@@ -6073,11 +6275,11 @@ def _measure_opt32_path_filters(
             suffix = (" Measured with conservative documentation-only defaults: "
                       "`*.md`, `docs/**/*.md`, `LICENSE*`, `.github/*.md`.")
         finding["evidence"] = (str(finding.get("evidence") or "").rstrip()
-                               + measured + suffix)
+                               + measured + coverage + suffix)
 
 
 _CACHE_SIZING_PATTERNS = frozenset(
-    {"OPT4", "OPT6", "OPT9", "OPT61", "OPT96", "OPT101"})
+    {"OPT4", "OPT6", "OPT9", "OPT61", "OPT62", "OPT96", "OPT101"})
 _CACHE_DEFAULT_BUDGET_BYTES = 10 * 1024 ** 3
 _CACHE_BUDGET_FULL_FRACTION = 0.90
 _CACHE_LIMIT_UNKNOWN_ABOVE = 1.10
@@ -6284,6 +6486,19 @@ def _apply_cache_sizing_guard(
     wf_docs: dict[str, dict[str, Any]],
 ) -> None:
     """Admit a cache saving only after budget, invalidation and net-cost checks."""
+    old_guard = finding.get("cache_sizing_guard")
+    if isinstance(old_guard, dict):
+        old_checks = old_guard.get("checks") if isinstance(old_guard.get("checks"), dict) else {}
+        old_details = "; ".join(
+            str(value.get("detail") or "") for value in old_checks.values()
+            if isinstance(value, dict) and value.get("status") != "passed"
+        )
+        if old_guard.get("status") == "passed":
+            old_details = "all three cache sizing checks passed"
+        old_suffix = f" Cache sizing guard: {old_details}."
+        evidence = str(finding.get("evidence") or "")
+        if old_details and evidence.endswith(old_suffix):
+            finding["evidence"] = evidence[:-len(old_suffix)]
     real_edit_shas = {
         str(run.get("head_sha") or "")
         for run in sampled_runs
@@ -6566,7 +6781,13 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
-    if f.get("static_cache_lint"):
+    cache_confirmation = f.get("cache_log_confirmation")
+    confirmed_miss_majority = (
+        isinstance(cache_confirmation, dict)
+        and int(cache_confirmation.get("misses") or 0)
+        > int(cache_confirmation.get("hits") or 0)
+    )
+    if f.get("static_cache_lint") and not confirmed_miss_majority:
         f["wall_clock_p50_s"] = None
         f["runner_min_saving"] = None
         f["tier"] = 2
@@ -6710,6 +6931,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         # do NOT substitute the long pole — we render qualitatively (omit rather
         # than fake), since we genuinely can't size the job's own cost.
         measurement = f.get("path_filter_measurement") if pat == "OPT32" else None
+        measurement_unavailable = (
+            isinstance(measurement, dict)
+            and measurement.get("status") == "unmeasured")
         rate = (measurement.get("hit_rate", 0.0)
                 if isinstance(measurement, dict) else cfg.get("hit_rate", 0.0))
         cost_basis = cfg.get("cost_basis")
@@ -6743,7 +6967,13 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f["wall_clock_p50_s"] = 0.0
         f["tier"] = 2
         f["realization"] = "none"
-        if unresolved and cost_basis == "affected_jobs":
+        if measurement_unavailable:
+            reason = str(measurement.get("reason") or "unknown reason")
+            f["runner_min_saving"] = None
+            f["size_note"] = (
+                "runner-minute (bill) only - hit rate not measured "
+                f"({reason})")
+        elif unresolved and cost_basis == "affected_jobs":
             f["runner_min_saving"] = None
             f["size_note"] = ("whole-run cancel runner-minutes not sized — none of "
                               "the affected jobs' durations could be resolved from "
@@ -8495,7 +8725,7 @@ _PAYLOAD_TEST_EXEC = (
     r"phpunit|coverage")
 _PAYLOAD_SCAN_EXEC = (
     r"\blint\b|eslint|codeql|\bsast\b|semgrep|trivy|snyk|typecheck|type.?check|"
-    r"biome|ruff|clippy|sonar")
+    r"biome|ruff|clippy|sonar|lighthouse|\blhci\b")
 _STEP_CATEGORY_RES: list[tuple[str, "_re.Pattern[str]"]] = [
     ("post", _re.compile(r"^Post[\s:]", _re.IGNORECASE)),
     ("checkout", _re.compile(r"checkout|fetch.?depth|git fetch|\bclone\b|sparse.?checkout", _re.IGNORECASE)),
@@ -8553,7 +8783,7 @@ _STEP_CATEGORY_RES: list[tuple[str, "_re.Pattern[str]"]] = [
     ("scan", _re.compile(
         r"\bscan\b|codeql|\blint\b|eslint|\baudit\b|security|sast|semgrep|"
         r"trivy|snyk|type.?check|typecheck|\btsc --noemit\b|biome|ruff|"
-        r"clippy|vet\b|analyze|sonar", _re.IGNORECASE)),
+        r"clippy|vet\b|analyze|sonar|lighthouse|\blhci\b", _re.IGNORECASE)),
     # Remaining packaging signals that DON'T conflict with build (checked after build
     # so `mvn package`/`docker build` stay builds): bare package/publish/archive verbs
     # and `docker buildx` (no `\bbuild\b` boundary before the `x`, so build misses it).
@@ -10017,7 +10247,86 @@ def _detect_opt25_shard_imbalance(
     suffix_base = _detect_common_suffix_matrices(jobs_per_run)
     by_base: dict[str, dict[str, list[tuple[float, str]]]] = {}
     base_sharded: dict[str, bool] = {}
+    excluded_by_base: dict[str, set[str]] = {}
+
+    def _is_preparation_step(name: str) -> bool:
+        return bool(_re.search(
+            r"(?i)^(?:set up|setup(?:\s|$)|complete|post |checkout|restore|"
+            r"(?:post )?run actions/(?:checkout|upload-artifact)@|"
+            r"save cache|install (?:dependencies|deps|packages)(?:\s|$))",
+            name.strip()))
+
+    def _is_universal_housekeeping_step(name: str) -> bool:
+        return not name.strip() or bool(_re.search(
+            r"(?i)(?:\b(?:artifact|cleanup|tear\s*down|upload)\b|"
+            r"^run\s+[\w.-]+/setup-[\w.-]+@)", name.strip()))
+
+    dominant_step_by_base: dict[str, str] = {}
+    step_seconds_by_base: dict[str, dict[str, float]] = {}
+    always_run_by_run: list[dict[str, set[str]]] = []
+    non_universal_names_by_base: dict[str, set[str]] = {}
     for run_jobs in jobs_per_run:
+        active_names_by_base: dict[str, list[set[str]]] = {}
+        for job in run_jobs:
+            if str(job.get("conclusion") or "").lower() == "skipped":
+                continue
+            job_name = str(job.get("name", ""))
+            matrix_base = _matrix_base_name(job_name)
+            if matrix_base != job_name:
+                base = matrix_base
+            elif job_name in suffix_base:
+                base = suffix_base[job_name]
+            else:
+                continue
+            active_names_by_base.setdefault(base, []).append({
+                str(step.get("name") or "")
+                for step in job.get("steps") or []
+                if (isinstance(step, dict)
+                    and not _is_preparation_step(str(step.get("name") or ""))
+                    and str(step.get("conclusion") or "").lower() != "skipped")
+            })
+        always_run_by_base: dict[str, set[str]] = {}
+        for base, active_names in active_names_by_base.items():
+            universal = set.intersection(*active_names) if active_names else set()
+            always_run_by_base[base] = universal
+            for names in active_names:
+                non_universal_names_by_base.setdefault(base, set()).update(
+                    names - universal)
+        always_run_by_run.append(always_run_by_base)
+
+    for run_jobs in jobs_per_run:
+        for job in run_jobs:
+            job_name = str(job.get("name", ""))
+            matrix_base = _matrix_base_name(job_name)
+            if matrix_base != job_name:
+                base = matrix_base
+            elif job_name in suffix_base:
+                base = suffix_base[job_name]
+            else:
+                continue
+            for step in job.get("steps") or []:
+                if (not isinstance(step, dict)
+                        or _is_preparation_step(str(step.get("name") or ""))
+                        or str(step.get("conclusion") or "").lower() == "skipped"):
+                    continue
+                started = _parse_dt(step.get("started_at"))
+                completed = _parse_dt(step.get("completed_at"))
+                if started is None or completed is None or completed <= started:
+                    continue
+                step_name = str(step.get("name") or "")
+                seconds = (completed - started).total_seconds()
+                by_step = step_seconds_by_base.setdefault(base, {})
+                by_step[step_name] = by_step.get(step_name, 0.0) + seconds
+    for base, totals in step_seconds_by_base.items():
+        if totals:
+            distinctive_totals = {
+                name: seconds for name, seconds in totals.items()
+                if name in non_universal_names_by_base.get(base, set())}
+            candidates = distinctive_totals or totals
+            dominant_step_by_base[base] = max(
+                candidates, key=lambda step_name: (candidates[step_name], step_name))
+
+    for run_jobs, always_run_by_base in zip(jobs_per_run, always_run_by_run):
         for j in run_jobs:
             name = str(j.get("name", ""))
             mbase = _matrix_base_name(name)
@@ -10030,6 +10339,36 @@ def _detect_opt25_shard_imbalance(
                 sharded = False  # prefix varies → distinct packages, not shards
             else:
                 continue  # neither convention matched → not a matrix job
+            steps = [step for step in j.get("steps") or [] if isinstance(step, dict)]
+            work_steps = [
+                step for step in steps
+                if not _is_preparation_step(str(step.get("name") or ""))]
+            active_work_steps = [
+                step for step in work_steps
+                if str(step.get("conclusion") or "").lower() != "skipped"]
+            dominant_name = dominant_step_by_base.get(base)
+            distinctive_active_steps = [
+                step for step in active_work_steps
+                if (str(step.get("name") or "") == dominant_name
+                    or str(step.get("name") or "")
+                    not in always_run_by_base.get(base, set())
+                    or not _is_universal_housekeeping_step(
+                        str(step.get("name") or "")))]
+            dominant_steps = [step for step in work_steps
+                              if str(step.get("name") or "") == dominant_name]
+            # A differently named active step is positive evidence that this
+            # leg did real work (for example platform-specific test steps).
+            # Only use the dominant sibling step to confirm an otherwise
+            # workless leg; never discard that alternate work.
+            skipped_dominant = bool(dominant_name) and not distinctive_active_steps and (
+                not dominant_steps or all(
+                    str(step.get("conclusion") or "").lower() == "skipped"
+                    for step in dominant_steps))
+            if (str(j.get("conclusion") or "").lower() == "skipped"
+                    or skipped_dominant
+                    or (work_steps and not active_work_steps)):
+                excluded_by_base.setdefault(base, set()).add(name)
+                continue
             d, url = _job_dur_url(j)
             if d is None or d <= 0:
                 continue
@@ -10189,6 +10528,7 @@ def _detect_opt25_shard_imbalance(
             out[-1]["measured_signal"] = summary
         if next_step is not None:
             out[-1]["next_step"] = next_step
+        out[-1]["legs_excluded_no_work"] = len(excluded_by_base.get(base, set()))
     return out
 
 
@@ -19895,6 +20235,11 @@ _OPT83_TOOL_STATE_RES = (
     _re.compile(r"--cov\b|--coverage\b|-coverprofile\b|\bcoverage run\b|\bnyc\b"
                 r"|\bc8\b"),
 )
+# A Lighthouse audit shares the runner's cores with whatever runs beside it, which skews
+# the scores its budget gates on (OPT103), and each `lhci collect` also clears the shared
+# `.lighthouseci/` folder. So any candidate set with a Lighthouse step is held back,
+# whatever the other steps are and whatever their trees.
+_OPT83_LIGHTHOUSE_RE = _re.compile(r"\blhci\b|\blighthouse\b", _re.I)
 _OPT83_DOCKER_RE = _re.compile(r"(^|[\s;&|(])(docker|podman|docker-compose)\b")
 # An action that starts or drives containers (`docker://` images, docker/*
 # actions, compose actions): treated like a `docker` command.
@@ -20263,12 +20608,13 @@ def _detect_opt83_parallel_steps(
         runs_txt = [str(s.get("run") or "") for s in cands]
         if (spec.get("services")
                 or sum(bool(_OPT83_DOCKER_RE.search(t)) for t in runs_txt) >= 2
+                or any(_OPT83_LIGHTHOUSE_RE.search(t) for t in runs_txt)
                 or any(rx.search(runs_txt[a]) and rx.search(runs_txt[b])
                        and _opt83_same_tree(wds[a], wds[b])
                        for rx in _OPT83_TOOL_STATE_RES
                        for a in range(len(cands)) for b in range(a + 1, len(cands)))):
-            # Service containers, one Docker daemon, or one tool's target/ or
-            # coverage file in one tree: state the workflow file does not show
+            # Service containers, one Docker daemon, a Lighthouse audit sharing the
+            # runner's cores, or one tool's target/ or coverage file in one tree: state the workflow file does not show
             # as a dependency, but that side-by-side steps would share.
             _no("siblings_share_tool_state", wf, job, cand_names)
             continue
@@ -22077,6 +22423,7 @@ def _detect_structural_candidates(
     overlap_withheld: "list[dict[str, Any]] | None" = None,
     status_publishers: "dict[str, dict[str, Any]] | None" = None,
     pr_check_populations_complete: list[bool] | None = None,
+    log_leaf_owners: "frozenset[tuple[str, str, str]]" = frozenset(),
 ) -> list[dict[str, Any]]:
     """Route the top measured critical-path checks into STRUCTURAL candidates
     instead of the old inherent-cost dead-end. For each top check: map it to its
@@ -22410,6 +22757,45 @@ def _detect_structural_candidates(
                         "could not confirm this check blocks merging. Optimize it only "
                         "if repository policy confirms that it gates the merge.")
                 f["size_note"] = note
+            if (pat == "OPT72" and (
+                    wf_path, job_name, "emulated-image-compile") in log_leaf_owners):
+                # The log-grounded emulated compile is the specific root cause for this
+                # pole. Retain an uncredited OPT72 row so downstream lever selection does
+                # not invent a different generic route, but remove both its saving and
+                # its cache-warming advice: neither follows from foreign-platform work.
+                f["wall_clock_p50_s"] = 0.0
+                f.pop("wall_clock_uncapped_p50_s", None)
+                f.pop("wall_clock_derivation", None)
+                f["realization"] = "none"
+                f["tier"] = 2
+                f["guardrail"] = (
+                    "Preserve every published platform, artifact, release flag, test, "
+                    "provenance record, and manifest; confirm the builder topology before "
+                    "changing how the foreign-platform work executes.")
+                f["rollout"] = (
+                    "Do not run a separate OPT72 rollout for this pole; follow the "
+                    "emulated-image compile drill and re-measure the same check after "
+                    "that change.")
+                f["failure_mode"] = (
+                    "Treating this uncredited row as an independent lever would "
+                    "double-count the same pole; preserve every published platform and "
+                    "artifact while validating the specific compile change.")
+                f["size_note"] = (
+                    "The emulated-image compile leaf owns this pole; OPT72 receives no "
+                    "separate saving.")
+            if (pat == "OPT75" and (
+                    wf_path, job_name, "lighthouse-serial-audits") in log_leaf_owners):
+                # OPT103 credits no saving: its three dials trade score stability or runner
+                # minutes for wall time, which only the owner can price. The generic route
+                # on the same pole must not credit what the specific cause withholds.
+                f["wall_clock_p50_s"] = 0.0
+                f.pop("wall_clock_uncapped_p50_s", None)
+                f.pop("wall_clock_derivation", None)
+                f["realization"] = "none"
+                f["tier"] = 2
+                f["size_note"] = (
+                    "The Lighthouse audit-count leaf (OPT103) owns this pole; OPT75 "
+                    "receives no separate saving.")
             out.append(f)
         if mapping is not None:
             seen_jobs.add((wf_path, job_name))
@@ -23165,6 +23551,12 @@ _SHARD_FLOOR_BASIS = "p50_step_timing_before_first_divided_work"
 
 
 _SHARD_DIMENSION_RE = re.compile(r"(?:^|[_-])(?:shard|partition|chunk)(?:$|[_-])", re.I)
+_PLAYWRIGHT_SHARD_ARG_RE = re.compile(
+    r"(?:^|\s)--shard\s*=\s*"
+    r"(?P<value>(?:(?:\$\{\{[^}\n]+\}\})|[^\s;&|])+)",
+    re.I,
+)
+_MATRIX_REF_RE = re.compile(r"\bmatrix\.([A-Za-z_][A-Za-z0-9_-]*)\b")
 
 
 def _matrix_variant_values(job_name: str) -> tuple[str, ...] | None:
@@ -23201,9 +23593,18 @@ def _workflow_shard_scope(
         values = _matrix_variant_values(job_name)
         if values is None or len(values) != len(dimensions):
             return None
+        shard_arg_dimensions = {
+            ref.group(1)
+            for step in (spec.get("steps") or []) if isinstance(step, dict)
+            for command in [step.get("run")]
+            if isinstance(command, str)
+            for shard_arg in _PLAYWRIGHT_SHARD_ARG_RE.finditer(command)
+            for ref in _MATRIX_REF_RE.finditer(shard_arg.group("value"))
+        }
         shard_positions = tuple(
             index for index, name in enumerate(dimensions)
-            if _SHARD_DIMENSION_RE.search(name))
+            if (_SHARD_DIMENSION_RE.search(name)
+                or name in shard_arg_dimensions))
         return shard_positions or None
     return None
 
@@ -24162,6 +24563,27 @@ _CACHE_KEYWORDS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _cache_keywords_for_finding(finding: dict[str, Any]) -> tuple[str, ...]:
+    """Scope a static cache lint to the cache family it predicts."""
+    pattern = str(finding.get("pattern") or "")
+    keywords = _CACHE_KEYWORDS.get(pattern, ())
+    if not finding.get("static_cache_lint"):
+        return keywords
+    explicit = str(finding.get("cache_family") or "").strip().lower()
+    if explicit:
+        return (explicit,)
+    explicit_path = str(
+        finding.get("cache_path") or finding.get("cache_key") or ""
+    ).strip().lower()
+    if explicit_path:
+        return (explicit_path,)
+    # An unscoped static lint must not borrow an unrelated cache line. Current
+    # scanners stamp one of the fields above; this sentinel keeps older or
+    # malformed findings unconfirmed instead of treating an empty tuple as
+    # "any cache".
+    return ("__unscoped_static_cache_lint__",)
+
+
 def _clean_log_line(line: str) -> str:
     return _TS_PREFIX_RE.sub("", line).strip()[:160]
 
@@ -24171,8 +24593,32 @@ def _cache_status_from_log(log: str, keywords: tuple[str, ...] = ()) -> tuple[st
     the finding is about). Prefer a MISS line (the problem); else a HIT line;
     else ('unknown', '') — which for a 'not cached at all' finding is itself
     the proof (no cache line ⇒ the work ran full)."""
+    if keywords == ("buildkit",):
+        first_hit = ""
+        for raw_line in log.splitlines():
+            if re.search(
+                    r"(?:error|failed|not found).*(?:importing cache|cache manifest)|"
+                    r"(?:importing cache|cache manifest).*(?:error|failed|not found)",
+                    raw_line, re.I):
+                return "miss", _clean_log_line(raw_line)
+            if not first_hit and re.search(
+                    r"\bCACHED\b|imported cache manifest|cache import complete",
+                    raw_line, re.I):
+                first_hit = _clean_log_line(raw_line)
+        return ("hit", first_hit) if first_hit else ("unknown", "")
+
     def _relevant(line: str) -> bool:
-        return not keywords or any(k.lower() in line.lower() for k in keywords)
+        if not keywords:
+            return True
+        for keyword in keywords:
+            if keyword == "go":
+                if re.search(r"\b(?:go(?:\s+build)?\s+cache|GOCACHE)\b", line, re.I):
+                    return True
+                continue
+            if re.search(rf"(?<![A-Za-z0-9]){re.escape(keyword)}(?![A-Za-z0-9])",
+                         line, re.I):
+                return True
+        return False
     first_hit = ""
     for raw_line in log.splitlines():
         if not _relevant(raw_line):
@@ -24219,7 +24665,7 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
         sel = []
         for f in findings:
             pat = f.get("pattern")
-            if pat not in _CACHE_FAMILY:
+            if pat not in _CACHE_FAMILY and not f.get("static_cache_lint"):
                 continue
             jobs = f.get("affected_jobs") or []
             if not jobs:
@@ -24228,7 +24674,7 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
                 jobs_per_run_by_wf.get(f.get("workflow_file", ""), []), jobs[0])
             if not instances:
                 continue
-            sel.append((f, _CACHE_KEYWORDS.get(pat, ()), instances[:cap]))
+            sel.append((f, _cache_keywords_for_finding(f), instances[:cap]))
         return sel
 
     targets = _targets()
@@ -24286,12 +24732,20 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
         if not rows:
             continue
         sampled = len(rows)
+        f["cache_log_confirmation"] = {
+            "misses": miss_n,
+            "hits": hit_n,
+            "unreadable": unknown_n,
+            "sampled_runs": sampled,
+        }
         noun = f"{keywords[0]} cache" if keywords else "cache"   # "pnpm cache"
         the_cache = f"the {noun}"                                  # "the pnpm cache"
         if miss_n and hit_n:
+            credit = ("misses outnumber hits, so the miss-mode saving is eligible "
+                      "for the sizing guards" if miss_n > hit_n else
+                      "hits are at least as common as misses, so no saving is credited")
             summary = (f"Across {sampled} sampled run(s), {the_cache} MISSED on "
-                       f"{miss_n} and hit on {hit_n} — bimodal, so the saving is "
-                       f"the miss-mode cost × miss rate, not the full step:")
+                       f"{miss_n} and hit on {hit_n} — bimodal; {credit}:")
             note = ("Each link opens that run's job log with the verbatim cache "
                     "line. Compare the MISS vs hit run durations to size the win.")
         elif miss_n:
@@ -24302,13 +24756,24 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
             note = ("Each link opens that run's job log; the quoted line is the "
                     "verbatim cache-miss line from it.")
         elif hit_n:
-            summary = (f"⚠️ {the_cache.capitalize()} HIT on all {hit_n} sampled "
-                       f"run(s) — no miss observed in logs. Config-hygiene only "
-                       f"unless a miss is shown; do NOT claim wall-clock savings:")
+            if hit_n == sampled:
+                summary = (f"⚠️ {the_cache.capitalize()} HIT on all {hit_n} sampled "
+                           f"run(s) — no miss observed in logs. Config-hygiene only "
+                           f"unless a miss is shown; do NOT claim wall-clock savings:")
+                f["size_note"] = (
+                    "logs show the cache HITTING on every sampled run — treat as "
+                    "config hygiene, savings unconfirmed")
+            else:
+                summary = (f"⚠️ {the_cache.capitalize()} HIT on {hit_n} of {sampled} "
+                           f"sampled run(s) ({unknown_n} showed no matching cache "
+                           "line) — no miss observed in logs. Config-hygiene only "
+                           "unless a miss is shown; do NOT claim wall-clock savings:")
+                f["size_note"] = (
+                    f"logs show the cache hitting on {hit_n} of {sampled} sampled "
+                    f"runs; {unknown_n} had no matching cache line — treat as config "
+                    "hygiene, savings unconfirmed")
             note = ("Logs show the cache restoring. Re-review: the configured "
                     "issue may not actually cost time on this runner.")
-            f["size_note"] = ("logs show the cache HITTING on every sampled run — "
-                              "treat as config hygiene, savings unconfirmed")
             # The evidence here REFUTES a wall-clock saving (the cache already
             # restores), so don't keep a sized wall-clock number that the
             # evidence contradicts — zero it. (Config hygiene = no measured
@@ -27199,6 +27664,8 @@ def _magnitude_sample(
         return leaf.get("magnitude")
 
     parsed: dict[Any, float | None] = {}
+    replayed_ids: set[Any] = set()
+    replay_share = getattr(bp, "_test_result_replay_share", lambda _log: None)
     states: dict[Any, Any] = {}   # jid -> cache_state (only populated when state_fn set)
     units: dict[Any, Any] = {}    # jid -> the run's own magnitude unit (for unit consistency)
 
@@ -27212,6 +27679,15 @@ def _magnitude_sample(
             return parsed[jid]
         log = (repr_log if jid == repr_job.get("id")
                else _fetch_job_log(client, repo, j))
+        replay = replay_share(log)
+        # Cache poles use the same fetched log to ground their miss distribution.
+        # Cached test output beside a real restore/miss line must not hide that
+        # independent cache evidence.
+        if (state_fn is None and isinstance(replay, dict)
+                and replay.get("replayed") is True):
+            parsed[jid] = None
+            replayed_ids.add(jid)
+            return None
         leaf = bp._parse_log(log, iso) if log else None
         v = _same_leaf_magnitude(leaf)
         parsed[jid] = v["value"] if v and v.get("value") is not None else None
@@ -27240,6 +27716,12 @@ def _magnitude_sample(
             for jid, log in _fetch_pool().map(
                     lambda j: (j.get("id"), _fetch_job_log(client, repo, j)),
                     chunk):
+                replay = replay_share(log)
+                if (state_fn is None and isinstance(replay, dict)
+                        and replay.get("replayed") is True):
+                    parsed[jid] = None
+                    replayed_ids.add(jid)
+                    continue
                 leaf = bp._parse_log(log, iso) if log else None
                 v = _same_leaf_magnitude(leaf)
                 parsed[jid] = v["value"] if v and v.get("value") is not None else None
@@ -27320,10 +27802,11 @@ def _magnitude_sample(
             idx = sorted({round(i * (len(qual) - 1) / (k_max - 1))
                           for i in range(k_max)})
             add([qual[i][1] for i in idx], k_max)
-    if not values:
+    if not values and not replayed_ids:
         return None
     return {"label": mag["label"], "unit": mag.get("unit", "%"),
-            "this_run": mag["value"], "escalated": escalated, "values": values}
+            "this_run": mag["value"], "escalated": escalated, "values": values,
+            "replayed_result_logs_excluded": len(replayed_ids)}
 
 
 def _job_is_fork(j: dict[str, Any], repo: str) -> bool:
@@ -27973,6 +28456,20 @@ def _persist_pole_logs(
             logger.warning("no log captured for pole job %r (id=%s) - fetch returned "
                            "empty; this pole will render without a drill-down", job, jid)
             continue
+        # A replay-heavy test log can still contain an independent catalog leaf
+        # (most commonly dependency-cache state). Preserve that drill; replay
+        # exclusion applies only when the log has no other recognized work.
+        leaf0 = bp._parse_log(log, iso) or {}
+        replay = bp._test_result_replay_share(log)
+        if (not leaf0 and isinstance(replay, dict)
+                and replay.get("replayed") is True):
+            p["replayed_test_results"] = {
+                "cached_lines": replay["cached_lines"],
+                "test_result_lines": replay["test_result_lines"],
+                "share": round(float(replay["share"]), 4),
+                "excluded_fetched_runs": 1,
+            }
+            continue
         safe = _re.sub(r"[^A-Za-z0-9._-]+", "-", str(job))[:60].strip("-") or "job"
         fn = f"{safe}-{jid}.log"
         try:
@@ -28013,7 +28510,6 @@ def _persist_pole_logs(
                         if str(j.get("name", "")) == job]
             p["cache_path_sample"] = _cache_path_sample(client, repo, all_jobs, facts,
                                                         known={repr_job.get("id"): log})
-        leaf0 = bp._parse_log(log, iso) or {}
         _cache_fk = leaf0.get("fix_key") if leaf0.get("fix_key") in _CACHE_LEAF_KEYS else None
         # A restore line sits in nearly every job log. Sample dependency-cache
         # outcomes (sibling logs + the push probe) only for a job a static OPT96
@@ -28050,6 +28546,7 @@ def _persist_pole_logs(
                 mag_fn = None
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
+            "leaf_fix_key": leaf0.get("fix_key"),
             "steps_file": steps_fn, "mag_file": mag_fn,
             "html_url": repr_job.get("html_url", ""), "workflow_file": wf,
             "duration_s": round(repr_dur, 1), "selected": "nearest-p50",
@@ -28234,8 +28731,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # a per-workflow wall-clock saving at the cross-workflow floor.
     events_by_wf: dict[str, set[str]] = {}
     # Candidate PR head-commits with their most-recent run timestamp, across all
-    # workflows — the pool the measured-critical-path sample is drawn from (the
-    # 20 most recent that ran the full required-check suite).
+    # workflows — the pool the representative measured-critical-path sample is
+    # drawn from.
     pr_sha_ts: dict[str, str] = {}
     # #58: per-head-sha identity metadata (event + derived PR number) so merge-queue
     # runs can be folded onto their PR before the presence denominator is formed. Fed
@@ -28627,7 +29124,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                                  min(shallow_runs, len(runs_for_spine))))
         # Candidate PR head-SHAs where THIS workflow ran (developer-facing
         # events), with their most-recent run timestamp — the pool the measured
-        # critical-path sample (20 most recent full-suite PRs) is drawn from.
+        # representative critical-path sample is drawn from.
         #
         # Draw from `runs_for_spine` (issue #66) so a NON-straddling workflow is byte-identical.
         # On a STRADDLE (issue #77), seed from the FULL sample instead: content-keying the spine
@@ -28639,7 +29136,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # enumeration — it is only made VISIBLE to the flip decision, never blended into the spine.
         _pool_runs = runs if _era_fact is not None else runs_for_spine
         for r in _pool_runs:
-            if str(r.get("event") or "") in _DEVELOPER_EVENTS and r.get("head_sha"):
+            if (str(r.get("event") or "") in _DEVELOPER_EVENTS
+                    and r.get("head_sha")
+                    and str(r.get("status") or "") == "completed"):
                 sha = str(r["head_sha"])
                 ts = str(r.get("created_at") or r.get("updated_at") or "")
                 if ts > pr_sha_ts.get(sha, ""):
@@ -29094,16 +29593,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         getattr(client, "graphql", lambda query: None), repo,
         sorted(required_checks.names) if required_checks is not None and required_checks.complete else None)
 
-    # MEASURED CRITICAL PATH — fetch the full check-run set for the 20 most recent
-    # PRs that ran the FULL CI suite (their check-runs include every required
-    # status check), so the sampled critical path reflects what a real code PR
-    # actually waits on — not a docs-only PR that self-skips the gate. check-runs
-    # include checks with NO workflow file (CodeQL default setup, app checks) that
-    # scan.py can't see, so this is the true concurrent-check floor for sizing.
-    # Falls back to the 20 most recent dev-event PRs when required checks are
-    # unreadable. Candidates are walked newest-first; we fetch each one's
-    # check-runs and keep it only if it ran the full required suite.
-    _REPR_PR_TARGET = 20
+    # MEASURED CRITICAL PATH — collect a representative stretch of completed PR
+    # commits. Run and job lists are the primary basis: unlike check-run reads they
+    # are already needed for workflow timing and let a busy repository build a
+    # useful population without one extra API request per candidate commit.
+    _REPR_PR_TARGET = _PR_SAMPLE_TARGET
     req_names = required_checks.names if required_checks is not None else frozenset()
 
     # ENG-1 PR-N1: per-sha latest-attempt check-run intervals, stashed on the
@@ -29125,6 +29619,17 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # with no merge_group runs this is the identity map: one member per group, exactly
     # the pre-#58 per-sha behaviour.
     _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+
+    def _spread_target(rep_ts: dict[str, str]) -> int:
+        """Keep walking past the count floor until five UTC dates are represented."""
+        days: set[str] = set()
+        for index, sha in enumerate(
+                sorted(rep_ts, key=lambda key: rep_ts[key], reverse=True), 1):
+            days.add(str(rep_ts[sha])[:10])
+            if index >= _REPR_PR_TARGET and len(days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS:
+                return index
+        return _REPR_PR_TARGET
+
     check_runs_complete_by_sha: dict[str, bool] = {}
     _member_check_runs: dict[str, list[dict[str, Any]]] = {}
     _member_check_runs_complete: dict[str, bool] = {}
@@ -29160,10 +29665,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         sha_check_intervals[rep_sha] = iv
         return m
 
-    repr_shas, per_sha_checks, check_durs, sample_diag = _select_repr_shas(
-        _rep_ts, _checks_for, req_names, _REPR_PR_TARGET,
-        repo_published=_repo_published_required(
-            req_names, findings_doc.get("workflow_status_publishers")))
+    # Selection is finalized after the bounded run-page walk. A representative
+    # population uses job lists directly; only a genuinely short history falls
+    # back to the older per-commit check-run selector.
+    repr_shas: list[str] = []
+    per_sha_checks: list[dict[str, float]] = []
+    check_durs: dict[str, list[float]] = {}
+    sample_diag: dict[str, Any] = {}
 
     # The timing walk above starts from the all-status page already fetched for each
     # workflow. A busy repository can fill that page while yielding only a handful of
@@ -29175,19 +29683,263 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _candidate_page = 1
     _candidate_page_failed = False
     _candidate_page_failures = 0
-    _candidate_era_door = bool(config_era_facts)
+    # This is a property of the PR-candidate walk, not of the repository. A
+    # schedule/push workflow may have a config-era fact without constraining any
+    # pull-request candidate; only a boundary crossed below may close this door.
+    _candidate_era_door = False
     _candidate_runs_by_wf: dict[str, list[dict[str, Any]]] = defaultdict(list)
+
+    # The workflow timing pass intentionally visits only workflows tied to a
+    # finding. Gate-frequency sampling has a different denominator: every
+    # workflow that ran on the PR commit. Always read every workflow's first
+    # run-list page so a clean workflow cannot disappear merely because a
+    # finding-bearing sibling already filled the commit target.
+    for _wf_path in sorted(wf_by_path):
+        _wf_id = (wf_by_path.get(_wf_path) or {}).get("id")
+        if _wf_id is None:
+            continue
+        # The timing pass may already have cached this page, but its success
+        # sample is deliberately capped by ``max_runs``.  Candidate discovery
+        # needs every row on the cached page, so always fold the page here even
+        # when fetching it is free.
+        _page_rows = _all_status_page(_wf_path, _wf_id)
+        if _page_rows is None:
+            continue
+        for _row in _page_rows:
+            if (str(_row.get("event") or "") not in _DEVELOPER_EVENTS
+                    or not _row.get("head_sha")
+                    or str(_row.get("status") or "") != "completed"):
+                continue
+            _sha = str(_row["head_sha"])
+            _ts = str(_row.get("created_at") or _row.get("updated_at") or "")
+            if _ts > pr_sha_ts.get(_sha, ""):
+                pr_sha_ts[_sha] = _ts
+            _prev = sha_meta.get(_sha)
+            if _prev is None or _ts > str(_prev.get("ts") or ""):
+                sha_meta[_sha] = {
+                    "event": str(_row.get("event") or ""),
+                    "pr_num": _run_pr_number(_row), "ts": _ts,
+                }
+        _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+    _workflow_triggers = findings_doc.get("workflow_triggers") or {}
+    _pr_candidate_workflows = {
+        str(path) for path, events in _workflow_triggers.items()
+        if isinstance(events, list)
+        and set(str(event) for event in events) & set(_DEVELOPER_EVENTS)
+    }
     _candidate_active = {
         wf_path
         for wf_path, page_rows in all_status_runs_by_wf.items()
         if len(page_rows) >= _COST_RUNLIST_MAX
+        and (wf_path in _pr_candidate_workflows
+             or (not _workflow_triggers and any(
+                 str(row.get("event") or "") in _DEVELOPER_EVENTS
+                 for row in page_rows)))
         and (wf_by_path.get(wf_path) or {}).get("id") is not None
     }
-    while ((len(repr_shas) < _REPR_PR_TARGET
-            or sample_diag.get("required_suite_unsatisfiable"))
-           and not config_era_facts
-           and _candidate_active
-           and _candidate_page < _PR_CANDIDATE_PAGE_CAP):
+
+    _candidate_scoped_ts: dict[str, str] = {}
+    _candidate_scope_evaluated = False
+    _candidate_observable_required: frozenset[str] = frozenset()
+    _candidate_unobservable_required: frozenset[str] = frozenset()
+    _candidate_evaluated_count = 0
+    _candidate_job_list_reads = 0
+    _candidate_job_list_cap_hit = False
+    _candidate_repo_published_required = frozenset(_repo_published_required(
+        req_names, findings_doc.get("workflow_status_publishers")))
+
+    def _budget_candidate_job_runs(
+            runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Keep memo hits plus at most the remaining PR-sample job-read budget."""
+        nonlocal _candidate_job_list_reads, _candidate_job_list_cap_hit
+        allowed: list[dict[str, Any]] = []
+        seen: set[Any] = set()
+        for run in runs:
+            run_id = run.get("id")
+            if run_id in seen:
+                continue
+            seen.add(run_id)
+            if job_memo.contains(_fetch_run_jobs, repo, run_id):
+                allowed.append(run)
+                continue
+            if _candidate_job_list_reads >= _PR_SAMPLE_JOB_LIST_READ_CAP:
+                _candidate_job_list_cap_hit = True
+                continue
+            _candidate_job_list_reads += 1
+            allowed.append(run)
+        return allowed
+
+    def _candidate_snapshot() -> tuple[
+            list[dict[str, Any]], dict[str, list[dict[str, Any]]], dict[str, str]]:
+        rows = [
+            row
+            for page_rows in all_status_runs_by_wf.values() for row in page_rows
+            if str(row.get("event") or "") in _DEVELOPER_EVENTS
+            and row.get("head_sha")
+        ] + [
+            row
+            for page_rows in _candidate_runs_by_wf.values() for row in page_rows
+            if str(row.get("event") or "") in _DEVELOPER_EVENTS
+            and row.get("head_sha")
+        ]
+        by_sha: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for row in rows:
+            by_sha[str(row["head_sha"])].append(row)
+        # A full page means older workflow history remains unseen.  Do not call
+        # a candidate complete when it predates that workflow's oldest observed
+        # row: a sibling run may exist on the next page and can still change the
+        # candidate's gate membership.  Once the workflow returns a short page,
+        # it leaves ``_candidate_active`` and its observed history is exhaustive.
+        active_horizons: list[str] = []
+        for wf_path in _candidate_active:
+            workflow_rows = (
+                list(all_status_runs_by_wf.get(wf_path) or [])
+                + list(_candidate_runs_by_wf.get(wf_path) or []))
+            timestamps = [
+                str(row.get("created_at") or row.get("updated_at") or "")
+                for row in workflow_rows
+                if row.get("created_at") or row.get("updated_at")
+            ]
+            if timestamps:
+                active_horizons.append(min(timestamps))
+        incomplete_horizon = max(active_horizons, default="")
+        eligible_reps = {
+            rep for rep, members in _rep_members.items()
+            if all(by_sha.get(member) for member in members)
+            and all(str(row.get("status") or "") == "completed"
+                    for member in members for row in by_sha[member])
+            and (not incomplete_horizon
+                 or str(_rep_ts.get(rep) or "") >= incomplete_horizon)
+        }
+        return rows, by_sha, {
+            sha: ts for sha, ts in _rep_ts.items() if sha in eligible_reps
+        }
+
+    def _candidate_sample_ready() -> bool:
+        """Whether the observed run/job population already satisfies the sample.
+
+        Count only completed identities first. When a readable required suite is
+        present, use the job lists already required for timing to keep commits that
+        ran every observable required check. A failed job read remains eligible and
+        is disclosed later as partial; silently replacing it with an older commit
+        would turn an I/O gap into a clean suite decision.
+        """
+        nonlocal _candidate_scoped_ts, _candidate_observable_required
+        nonlocal _candidate_unobservable_required, _candidate_scope_evaluated
+        nonlocal _candidate_evaluated_count
+        _rows, rows_by_sha, eligible_ts = _candidate_snapshot()
+        raw_days = {str(ts or "")[:10] for ts in eligible_ts.values()}
+        if (len(eligible_ts) < _REPR_PR_TARGET
+                or len(raw_days) < _PR_SAMPLE_MIN_DISTINCT_DAYS):
+            return False
+        if not req_names:
+            _candidate_scoped_ts = eligible_ts
+            return True
+
+        ordered_reps = sorted(
+            eligible_ts, key=lambda sha: eligible_ts[sha], reverse=True)
+        # Read only the newest prefix that can satisfy both public sample goals.
+        # If path-conditional jobs remove too many commits, extend in bounded
+        # batches until the scoped population is ready or visible candidates end.
+        # This keeps a busy page with 200 eligible commits from paying 200 job-list
+        # requests when its newest 100 already span the configured date floor.
+        evaluation_count = min(len(ordered_reps), _spread_target(eligible_ts))
+        evaluated_reps: set[str] = set()
+        failed_reps: set[str] = set()
+        names_by_rep: dict[str, set[str]] = defaultdict(set)
+        observed: set[str] = set()
+        while len(evaluated_reps) < len(ordered_reps):
+            batch_reps = ordered_reps[len(evaluated_reps):evaluation_count]
+            if not batch_reps:
+                break
+            run_rep: dict[Any, str] = {}
+            selected_runs: list[dict[str, Any]] = []
+            run_ids_by_rep: dict[str, set[Any]] = defaultdict(set)
+            for rep in batch_reps:
+                for member in _rep_members.get(rep, [rep]):
+                    for row in rows_by_sha.get(member, []):
+                        rid = row.get("id")
+                        if rid in run_rep:
+                            continue
+                        run_rep[rid] = rep
+                        run_ids_by_rep[rep].add(rid)
+                        selected_runs.append(row)
+            selected_runs = _budget_candidate_job_runs(selected_runs)
+            selected_ids = {run.get("id") for run in selected_runs}
+            completed_reps = {
+                rep for rep, run_ids in run_ids_by_rep.items()
+                if run_ids <= selected_ids
+            }
+            evaluated_reps.update(completed_reps)
+            run_rep = {
+                run_id: rep for run_id, rep in run_rep.items()
+                if rep in completed_reps
+            }
+            selected_runs = [
+                run for run in selected_runs
+                if run_rep.get(run.get("id")) in completed_reps
+            ]
+            kept_jobs, _failures = _gather_run_jobs(
+                client, repo, selected_runs, keep_empty=True, memo=job_memo)
+            fetched_ids = {run.get("id") for run, _jobs in kept_jobs}
+            failed_reps.update(
+                run_rep.get(run.get("id"), "") for run in selected_runs
+                if run.get("id") not in fetched_ids)
+            for run, jobs in kept_jobs:
+                rep = run_rep.get(run.get("id"), "")
+                for job in jobs:
+                    name = str(job.get("name") or "")
+                    if name and str(job.get("conclusion") or "") != "skipped":
+                        names_by_rep[rep].add(name)
+                        observed.add(name)
+
+            observable = frozenset(set(req_names) & observed)
+            _candidate_scope_evaluated = True
+            _candidate_observable_required = observable
+            _candidate_unobservable_required = frozenset(
+                set(req_names) - observed)
+            evaluated_ts = {
+                rep: eligible_ts[rep] for rep in ordered_reps
+                if rep in evaluated_reps}
+            _candidate_evaluated_count = max(
+                _candidate_evaluated_count, len(evaluated_ts))
+            if not observable:
+                # No Actions job in the newest sufficient population implements
+                # the readable required names.  A full workflow page can still
+                # hide older commits that do implement them, so exhaust the
+                # active history horizon before declaring the suite external.
+                if evaluation_count < len(ordered_reps):
+                    evaluation_count = min(
+                        len(ordered_reps), evaluation_count + 25)
+                    continue
+                if _candidate_active:
+                    return False
+                _candidate_scoped_ts = evaluated_ts
+                return True
+            _candidate_scoped_ts = {
+                rep: ts for rep, ts in evaluated_ts.items()
+                if (rep in failed_reps
+                    or observable <= names_by_rep.get(rep, set()))
+            }
+            scoped_days = {str(ts or "")[:10]
+                           for ts in _candidate_scoped_ts.values()}
+            if (len(_candidate_scoped_ts) >= _REPR_PR_TARGET
+                    and len(scoped_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS):
+                return True
+            if _candidate_job_list_cap_hit:
+                return False
+            if evaluation_count >= len(ordered_reps):
+                break
+            evaluation_count = min(len(ordered_reps), evaluation_count + 25)
+        return False
+
+    # Apply the completed-only eligibility after every bounded workflow walk.
+    # Stopping on the aggregate count first can strand clean commits on older
+    # pages when the apparent target is later removed by an in-flight sibling.
+    while (_candidate_active
+           and _candidate_page < _PR_CANDIDATE_PAGE_CAP
+           and not _candidate_job_list_cap_hit
+           and not _candidate_sample_ready()):
         _candidate_page += 1
         _next_active: set[str] = set()
         for wf_path in sorted(_candidate_active):
@@ -29223,7 +29975,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _next_active.add(wf_path)
             for r in page_rows:
                 if (str(r.get("event") or "") not in _DEVELOPER_EVENTS
-                        or not r.get("head_sha")):
+                        or not r.get("head_sha")
+                        or str(r.get("status") or "") != "completed"):
                     continue
                 sha = str(r["head_sha"])
                 ts = str(r.get("created_at") or r.get("updated_at") or "")
@@ -29237,21 +29990,157 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     }
         _candidate_active = _next_active
         _rep_ts, _rep_members = _group_dev_shas_by_pr(sha_meta)
+
+    # Re-read the selected population from run/job lists. Besides avoiding a
+    # check-runs-only view of a busy repository, this excludes an in-flight burst:
+    # a commit is eligible only when every developer-event run we observed for its
+    # identity has completed. The memo makes jobs already used by the workflow drill
+    # free here; deeper candidate pages pay one jobs read per selected run.
+    _candidate_rows, _rows_by_sha, _eligible_ts = _candidate_snapshot()
+    _candidate_sample_ready()
+    _raw_eligible_days = {str(ts or "")[:10] for ts in _eligible_ts.values()}
+    _job_population_read = (
+        len(_eligible_ts) >= _REPR_PR_TARGET
+        and len(_raw_eligible_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
+        and (not req_names or _candidate_scope_evaluated))
+    if _candidate_scope_evaluated and _candidate_observable_required:
+        _eligible_ts = _candidate_scoped_ts
+    _selection_target = _spread_target(_eligible_ts)
+    _eligible_days = {str(ts or "")[:10] for ts in _eligible_ts.values()}
+    if _job_population_read:
+        repr_shas = sorted(
+            _eligible_ts, key=lambda sha: _eligible_ts[sha], reverse=True
+        )[:_selection_target]
+        per_sha_checks = [{} for _sha in repr_shas]
+        check_durs = {}
+        _required_suite_unsatisfiable = bool(
+            req_names and (
+                (not _candidate_observable_required
+                 and not _candidate_repo_published_required)
+                or (_candidate_observable_required
+                    and not _candidate_scoped_ts)))
+        sample_diag = {
+            "target": _REPR_PR_TARGET, "kept": len(repr_shas),
+            "fetched": _candidate_evaluated_count, "fetch_failures": 0,
+            "complete": (
+                len(repr_shas) >= _REPR_PR_TARGET
+                and len(_eligible_days) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
+                and not _required_suite_unsatisfiable),
+            "required_suite_scoped": bool(
+                req_names and _candidate_observable_required
+                and not _candidate_repo_published_required),
+            "required_suite_unsatisfiable": _required_suite_unsatisfiable,
+            "required_checks_unobservable": sorted(
+                _candidate_unobservable_required),
+            "selection_limited": False,
+            "job_list_scoped": True,
+        }
+        _rep_ts = _eligible_ts
+    else:
         repr_shas, per_sha_checks, check_durs, sample_diag = _select_repr_shas(
-            _rep_ts, _checks_for, req_names, _REPR_PR_TARGET,
+            _eligible_ts, _checks_for, req_names, _selection_target,
             repo_published=_repo_published_required(
                 req_names, findings_doc.get("workflow_status_publishers")),
-            # Every candidate already paid for by the bounded run-page walk is
-            # eligible. The ordinary selector keeps its 160-fetch runaway cap;
-            # this path's three-page cap is the bound instead.
-            max_fetch_override=len(_rep_ts))
+            max_fetch_override=len(_eligible_ts))
+        _rep_ts = _eligible_ts
 
-    if (len(repr_shas) >= _REPR_PR_TARGET
+    _selected_runs: list[dict[str, Any]] = []
+    _run_rep: dict[Any, str] = {}
+    for _rep in repr_shas:
+        for _member in _rep_members.get(_rep, [_rep]):
+            for _row in _rows_by_sha.get(_member, []):
+                _rid = _row.get("id")
+                if _rid in _run_rep:
+                    continue
+                _run_rep[_rid] = _rep
+                _selected_runs.append(_row)
+    if len(repr_shas) < _REPR_PR_TARGET and not _job_population_read:
+        # A short history keeps the established check-run population. Its ordinary
+        # workflow job sample has already been read; do not retry failed job pages
+        # merely to decorate a sample that cannot meet the representative contract.
+        _selected_runs = []
+    _selected_runs = _budget_candidate_job_runs(_selected_runs)
+    _sample_kept_jobs, _sample_job_failures = _gather_run_jobs(
+        client, repo, _selected_runs, keep_empty=True, memo=job_memo)
+    jobs_fetch_failures += _sample_job_failures
+    _sample_fetched_run_ids = {
+        run.get("id") for run, _jobs in _sample_kept_jobs}
+    _sample_failed_reps = {
+        _run_rep.get(run.get("id"), "") for run in _selected_runs
+        if run.get("id") not in _sample_fetched_run_ids
+    }
+    _jobs_by_rep: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for _run, _jobs in _sample_kept_jobs:
+        _jobs_by_rep[_run_rep.get(_run.get("id"), "")].extend(_jobs)
+    _job_maps: list[dict[str, float]] = []
+    _job_durs: dict[str, list[float]] = defaultdict(list)
+    _partial_reps = 0
+    _partial_sample_shas: set[str] = set()
+    for _rep in repr_shas:
+        _m: dict[str, float] = {}
+        _iv: dict[str, tuple[str, str]] = {}
+        for _job in _jobs_by_rep.get(_rep, []):
+            _name = str(_job.get("name") or "")
+            _duration = _job_duration_s(_job)
+            if not _name or _duration is None:
+                continue
+            if _duration >= _m.get(_name, -1.0):
+                _m[_name] = _duration
+            _started = str(_job.get("started_at") or "")
+            _completed = str(_job.get("completed_at") or "")
+            if _started and _completed:
+                _iv[_name] = (_started, _completed)
+        if ((not _m or _rep in _sample_failed_reps)
+                and _job_population_read):
+            _partial_reps += 1
+            _partial_sample_shas.add(_rep)
+        for _name, _duration in _m.items():
+            _job_durs[_name].append(_duration)
+        _job_maps.append(_m)
+        if _job_population_read:
+            sha_check_intervals[_rep] = _iv
+            check_runs_complete_by_sha[_rep] = bool(_m) and _rep not in _sample_failed_reps
+    if _job_population_read and _job_maps and any(_job_maps):
+        per_sha_checks = _job_maps
+        check_durs = dict(_job_durs)
+        _observed_job_names = set(_job_durs)
+        _missing_required = set(req_names) - _observed_job_names
+        _repo_published = set(_repo_published_required(
+            req_names, findings_doc.get("workflow_status_publishers")))
+        sample_diag["required_checks_unobservable"] = sorted(
+            _missing_required - _repo_published)
+        if _missing_required & _repo_published:
+            sample_diag["required_checks_repo_published"] = sorted(
+                _missing_required & _repo_published)
+        if req_names and not (set(req_names) & _observed_job_names):
+            sample_diag["required_suite_unsatisfiable"] = not bool(
+                _missing_required and _missing_required <= _repo_published)
+            sample_diag["required_suite_scoped"] = False
+
+    _sample_dates = sorted({str(_rep_ts.get(sha) or "")[:10] for sha in repr_shas
+                            if _rep_ts.get(sha)})
+    sample_diag.update({
+        "distinct_days": len(_sample_dates),
+        "span_first": min((_rep_ts.get(sha) or "" for sha in repr_shas), default=""),
+        "span_last": max((_rep_ts.get(sha) or "" for sha in repr_shas), default=""),
+        "partial_count": _partial_reps,
+    })
+
+    if (_candidate_job_list_cap_hit):
+        sample_diag["stop_reason"] = "job_list_cap"
+    elif (len(repr_shas) >= _REPR_PR_TARGET
+            and len(_sample_dates) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
             and not sample_diag.get("required_suite_unsatisfiable")):
         sample_diag["stop_reason"] = "target_met"
     elif (sample_diag.get("fetch_failures") or _candidate_page_failed
           or all_status_failed):
         sample_diag["stop_reason"] = "fetch_failures"
+    elif sample_diag.get("required_suite_unsatisfiable"):
+        sample_diag["stop_reason"] = (
+            "required_checks_unobservable"
+            if sample_diag.get("required_checks_unobservable")
+            and not sample_diag.get("required_suite_scoped")
+            else "required_suite_empty")
     elif _candidate_era_door:
         sample_diag["stop_reason"] = "era_door"
     elif (sample_diag.get("selection_limited")
@@ -29270,6 +30159,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "candidate_page_fetch_failures": (
             _candidate_page_failures + len(all_status_failed)),
         "candidate_era_door": _candidate_era_door,
+        "job_list_reads": _candidate_job_list_reads,
+        "job_list_read_cap": _PR_SAMPLE_JOB_LIST_READ_CAP,
+        "job_list_cap_hit": _candidate_job_list_cap_hit,
     })
     # Config-era thin-flip (issue #74, direction (a): the timing spine flips WITH the rule). Now that
     # the PR gate sample (`per_sha_checks`) is in hand we can tell whether a `disclosed_pre` straddle's
@@ -29302,7 +30194,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         # so every downstream consumer (pr_check_p50, poles, the detector loop) sees the post era.
         nonlocal jobs_fetch_failures, runs_sampled, jobs_sampled
         post_slice = post_runs[:max_runs]
-        _prefetch_json(client, [_run_jobs_endpoint(repo, r.get("id")) for r in post_slice])
+        _prefetch_json(client, [
+            _run_jobs_endpoint(repo, r.get("id")) for r in post_slice
+            if not job_memo.contains(_fetch_run_jobs, repo, r.get("id"))])
         kept_jobs, wf_failures = _gather_run_jobs(client, repo, post_slice, memo=job_memo)
         # Surface a post re-drill fetch failure through the SAME coverage machinery as every other
         # job-fetch path (issue #74 review): never swallow it into unmeasured-silence.
@@ -29599,15 +30493,30 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _era_repr_shas, _era_per_sha_checks, _era_sha_intervals, _era_dropped_pr_count = (
         _era_scope_pr_spine_sample(
             repr_shas, per_sha_checks, sha_check_intervals, _rep_ts,
-            set(pr_check_p50), config_era_facts, _era_check_wf_of))
+            set(pr_check_p50), [
+                fact for fact in config_era_facts
+                if events_by_wf.get(str(fact.get("workflow_file") or ""), set())
+                & set(_DEVELOPER_EVENTS)
+            ], _era_check_wf_of))
     # The public sample count is the post-era-door population, so completeness
     # and its reason must be post-door too. Keeping the pre-door `complete=True`
     # would render a short 12/20 population as complete.
     sample_diag["kept"] = len(_era_repr_shas)
+    _era_sample_ts = [str(_rep_ts.get(sha) or "") for sha in _era_repr_shas
+                      if _rep_ts.get(sha)]
+    sample_diag["distinct_days"] = len({ts[:10] for ts in _era_sample_ts})
+    sample_diag["span_first"] = min(_era_sample_ts, default="")
+    sample_diag["span_last"] = max(_era_sample_ts, default="")
+    sample_diag["partial_count"] = sum(
+        sha in _partial_sample_shas for sha in _era_repr_shas)
     sample_diag["complete"] = (
         len(_era_repr_shas) >= _REPR_PR_TARGET
+        and int(sample_diag.get("distinct_days") or 0) >= _PR_SAMPLE_MIN_DISTINCT_DAYS
         and not sample_diag.get("required_suite_unsatisfiable"))
-    if _era_dropped_pr_count and len(_era_repr_shas) < _REPR_PR_TARGET:
+    if (_era_dropped_pr_count and not sample_diag["complete"]
+            and sample_diag.get("stop_reason") not in {
+                "fetch_failures", "required_checks_unobservable",
+                "required_suite_empty"}):
         sample_diag["stop_reason"] = "era_door"
         sample_diag["candidate_era_door"] = True
     _era_check_runs_complete = [
@@ -29941,6 +30850,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 } for _step in _job.get("steps") or []
                     if isinstance(_step, dict) and _step.get("name")]
                 _job_intervals.append({
+                    "id": _job.get("id"),
                     "name": str(_job.get("name") or ""),
                     "workflow_file": _wf,
                     "duration_s": round(_duration, 3),
@@ -30172,6 +31082,69 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _commit_facts.append(_commit_wall_fact(
             _sha, _event, _run_rows, _commit_jobs_by_run, _expected_workflows))
 
+    def _projection_population(facts: list[dict[str, Any]]) -> dict[str, Any]:
+        complete = [
+            fact for fact in facts
+            if fact.get("partial") is not True
+            and isinstance(fact.get("wall_s"), (int, float))
+            and not isinstance(fact.get("wall_s"), bool)
+            and float(fact["wall_s"]) > 0
+        ]
+        if not complete:
+            return {"median_projection_multiple": None, "worst_commit": None}
+        p50 = _percentile([float(fact["wall_s"]) for fact in complete], 50)
+        typical = min(
+            complete, key=lambda fact: abs(float(fact["wall_s"]) - p50))
+        target = typical.get("slowest_job") or {}
+        target_workflow = str(target.get("workflow_file") or "")
+        target_name = str(target.get("name") or "")
+        multiples: list[float] = []
+        for fact in complete:
+            wall = float(fact["wall_s"])
+            target_row = next((
+                row for row in fact.get("job_projections") or []
+                if isinstance(row, dict)
+                and str(row.get("workflow_file") or "") == target_workflow
+                and str(row.get("name") or "") == target_name
+            ), None)
+            if target_row is None:
+                fact_slowest = fact.get("slowest_job") or {}
+                if (str(fact_slowest.get("workflow_file") or "") == target_workflow
+                        and str(fact_slowest.get("name") or "") == target_name):
+                    target_row = {
+                        "duration_s": fact_slowest.get("duration_s"),
+                        "next_longest_s": (fact.get("next_longest_job") or {}).get(
+                            "duration_s", 0.0),
+                        "chain_span_s": fact.get("slowest_chain_span_s"),
+                    }
+            if target_row is None:
+                multiples.append(1.0)
+                continue
+            duration = float(target_row.get("duration_s") or 0.0)
+            next_longest = float(target_row.get("next_longest_s") or 0.0)
+            chain = float(target_row.get("chain_span_s") or duration)
+            if duration <= 0:
+                multiples.append(1.0)
+                continue
+            projection = project_commit_wall(
+                wall, duration, next_longest, 4.0,
+                **({"chain_s": chain, "pole_s": duration,
+                    "runner_up_s": next_longest}
+                   if chain > duration else {}))
+            if isinstance(projection.multiple, (int, float)):
+                multiples.append(float(projection.multiple))
+        worst = max(complete, key=lambda fact: float(fact["wall_s"]))
+        return {
+            "median_projection_multiple": (
+                round(_percentile(multiples, 50), 3) if multiples else None),
+            "worst_commit": {
+                "sha": worst.get("sha"),
+                "wall_s": worst.get("wall_s"),
+                "workflow_file": (worst.get("slowest_job") or {}).get(
+                    "workflow_file"),
+            },
+        }
+
     _complete_walls = [float(f["wall_s"]) for f in _commit_facts
                        if isinstance(f.get("wall_s"), (int, float))]
     _commit_wall_clock = {
@@ -30180,6 +31153,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         "p90_s": (round(_percentile(_complete_walls, 90), 3)
                   if _complete_walls else None),
         "facts": _commit_facts,
+        **_projection_population(_commit_facts),
     }
     _joint_runner_bases = {
         tuple(sorted((observation.get("check_runners") or {}).items()))
@@ -30250,23 +31224,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             _typical_push = min(
                 _complete_push_facts,
                 key=lambda fact: abs(float(fact["wall_s"]) - _push_p50))
-            _worst_push = max(_complete_push_facts, key=lambda fact: float(fact["wall_s"]))
-            _projection_multiples = [
-                float(projection["multiple"])
-                for fact in _complete_push_facts
-                for projection in [fact.get("projection_4x")]
-                if isinstance(projection, dict)
-                and isinstance(projection.get("multiple"), (int, float))
-            ]
-            _push_lane["median_projection_multiple"] = (
-                round(_percentile(_projection_multiples, 50), 3)
-                if _projection_multiples else None)
-            _push_lane["worst_commit"] = {
-                "sha": _worst_push.get("sha"),
-                "wall_s": _worst_push.get("wall_s"),
-                "workflow_file": (_worst_push.get("slowest_job") or {}).get(
-                    "workflow_file"),
-            }
+            _push_lane.update(_projection_population(_complete_push_facts))
 
             # Drill the representative push-lane pole from the job lists already
             # fetched above. The only new request is its log; selection, steps,
@@ -30480,13 +31438,58 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
     _chain_summary_val = _chain_summary(_chain_facts)
-    # ENG-1 PR-N3: an OPT21 (unnecessary `needs:`) finding whose workflow hosts
-    # the measured gate chain now cites that fact — the edge it questions IS
-    # the serialization the headline measures (evidence annotation only; OPT21
-    # keeps its modeled sizing, follow-up trigger in the plan). Named helper so
-    # the path is directly red/green-testable (the e2e corpus keeps OPT21
-    # deliberately quiet, so it can never exercise this).
-    _cite_chain_in_opt21_evidence(findings, _chain_summary_val, _jg, crit_by_wf)
+    _opt21_workflows = {
+        str(f.get("workflow_file") or "") for f in findings
+        if f.get("pattern") == "OPT21" and f.get("workflow_file")
+    }
+    def _opt21_kept_era(wf: str, run: dict[str, Any]) -> bool:
+        era = next((row for row in config_era_facts
+                    if str(row.get("workflow_file") or "") == wf), None)
+        if not isinstance(era, dict):
+            return True
+        kept = str(era.get("kept_era") or "")
+        by_sha = era.get("content_era_by_sha")
+        sha = str(run.get("head_sha") or "")
+        if isinstance(by_sha, dict) and sha in by_sha:
+            return str(by_sha.get(sha) or "") == kept
+        boundary = str(era.get("boundary") or "")
+        created = str(run.get("created_at") or "")
+        if boundary and created:
+            return ("post" if created >= boundary else "pre") == kept
+        return False
+
+    # One newest-first, event- and configuration-scoped cohort supplies both
+    # successes and failures. Sampling each outcome independently would inflate
+    # a 10% failure rate to 33% when the success stratum hits `max_runs` first.
+    _opt21_outcome_runs = {
+        wf: [
+            run for run in (all_status_runs_by_wf.get(wf)
+                            or sampled_runs_by_wf.get(wf) or [])
+            if str(run.get("event") or "") in _DEVELOPER_EVENTS
+            and str(run.get("conclusion") or "")
+            in {"success", "failure", "timed_out"}
+            and _opt21_kept_era(wf, run)
+        ][:max_runs]
+        for wf in _opt21_workflows
+    }
+    _prefetch_json(client, [
+        _run_jobs_endpoint(repo, run.get("id"))
+        for runs in _opt21_outcome_runs.values() for run in runs
+        if not job_memo.contains(_fetch_run_jobs, repo, run.get("id"))])
+    _opt21_outcome_jobs: dict[str, list[list[dict[str, Any]]]] = {}
+    for _wf in sorted(_opt21_workflows):
+        _outcome_kept, _outcome_fetches = _gather_run_jobs(
+            client, repo, _opt21_outcome_runs.get(_wf) or [], memo=job_memo,
+            keep_empty=True)
+        jobs_fetch_failures += _outcome_fetches
+        _add_cost_spine_fetch_failures(_wf, _outcome_fetches)
+        _opt21_outcome_jobs[_wf] = [jobs for _run, jobs in _outcome_kept]
+    # Size each resolvable OPT21 edge from the measured workflow graph and
+    # disclose its sampled dependency-failure rate plus the upper bound on
+    # downstream compute exposed by removing the edge. The serial-chain E2E
+    # fixture drives this path through collect, render, and the full verifier.
+    _cite_chain_in_opt21_evidence(
+        findings, _chain_summary_val, _jg, crit_by_wf, _opt21_outcome_jobs)
     # ENG-1 PR-N3: the chain fields the sizing cascade consumes (empty/zero on
     # chainless repos — the cascade then behaves exactly as before).
     _cs_modal = [str(m) for m in ((_chain_summary_val or {}).get("modal_chain") or [])]
@@ -30518,6 +31521,35 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         if not _workflow or not _affected:
             return _commit_ctx_facts
         _affected_bases = {_matrix_base_name(name) for name in _affected}
+
+        # Removing a dependency edge shortens a WHOLE path; it does not shorten
+        # the dependent job. Project the measured path delta against each
+        # commit's competing floor instead of capping it at the dependent's own
+        # duration (A(600) -> B(10) can legitimately expose 600s of parallelism).
+        _edge_stamp = _finding.get("opt21_edge_sizing")
+        if isinstance(_edge_stamp, dict):
+            _edge_before = _finite_float(_edge_stamp.get("chain_before_s"))
+            if _edge_before is None or _edge_before <= 0:
+                return _commit_ctx_facts
+            _edge_rows: list[tuple[float, ...]] = []
+            for _fact in _commit_facts:
+                _wall = _finite_float(_fact.get("wall_s"))
+                if _wall is None or _wall <= 0:
+                    continue
+                _workflow_present = any(
+                    isinstance(row, dict)
+                    and str(row.get("workflow_file") or "") == _workflow
+                    for row in (_fact.get("job_projections") or []))
+                if not _workflow_present:
+                    _edge_rows.append((float(_wall), 0.0, 0.0, 0.0))
+                    continue
+                _competitor = _finite_float(
+                    (_fact.get("next_longest_job") or {}).get("duration_s")) or 0.0
+                _edge_rows.append((
+                    float(_wall), float(_edge_before), float(_competitor),
+                    float(_edge_before),
+                ))
+            return tuple(_edge_rows)
 
         def _matches_affected(_row: dict[str, Any]) -> bool:
             return bool(
@@ -31319,6 +32351,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _prefetch_json(client, [
                     _run_jobs_endpoint(repo, run.get("id"))
                     for run in _cancelled_runs
+                    if not job_memo.contains(
+                        _fetch_run_jobs, repo, run.get("id"))
                 ])
                 _cancelled_kept, _cancelled_failures = _gather_run_jobs(
                     client, repo, _cancelled_runs, memo=job_memo)
@@ -31663,6 +32697,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         client, repo, findings, sampled_runs_by_wf, _wf_docs,
         changed_files=_changed_files)
 
+    # Confirm static cache misses before the shared sizing pass so newly
+    # creditable findings cross the same guards and wall-clock cascade as every
+    # other finding.
+    if with_logs:
+        _attach_cache_log_evidence(client, repo, findings, jobs_per_run_by_wf)
+
     # A cache log distribution belongs to the same workflow/job finding even
     # when the finding is not OPT96. Reuse the already-fetched pole logs; this
     # adds no job-log reads.
@@ -31696,6 +32736,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         crit = crit_by_wf.get(wf_path, {})
         vol = vol_by_wf.get(wf_path)
         _size_finding(f, crit, vol)
+        confirmation = f.get("cache_log_confirmation")
+        if isinstance(confirmation, dict):
+            misses = int(confirmation.get("misses") or 0)
+            hits = int(confirmation.get("hits") or 0)
+            if hits and misses <= hits:
+                f["wall_clock_p50_s"] = 0.0
+                f["runner_min_saving"] = 0.0
+                f["tier"] = 2
+                f["realization"] = "none"
+                f["size_note"] = (
+                    "sampled cache hits are at least as common as misses — no "
+                    "wall-clock or runner-minute saving is credited")
         if f in _cache_candidates:
             _apply_cache_sizing_guard(
                 f, usage_bytes=_cache_usage, changed=_changed_files,
@@ -31817,8 +32869,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # pre-start/queue-axis finding (OPT43) shortens time-to-start, not the
     # dominant step, so it must not stand in for the OPT75/etc lever on the pole.
     covered_job_savings = _build_covered_job_savings(findings)
-    # (required_checks + the measured-critical-path sample were fetched above,
-    # scoped to the 20 most recent full-suite PRs.)
+    # (required_checks + the representative measured-critical-path sample were
+    # fetched above.)
     struct_start = max(
         (int(f["id"][1:]) for f in findings
          if f.get("id", "").startswith("f") and f["id"][1:].isdigit()),
@@ -31835,7 +32887,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         chain_win_s=_chain_ctx_win,
         wf_docs=_wf_docs, overlap_withheld=_overlap_withheld,
         status_publishers=findings_doc.get("workflow_status_publishers"),
-        pr_check_populations_complete=pr_check_population_complete)
+        pr_check_populations_complete=pr_check_population_complete,
+        log_leaf_owners=frozenset(
+            (str(entry.get("workflow_file") or ""), str(entry.get("job") or ""),
+             str(entry.get("leaf_fix_key") or ""))
+            for entry in pole_logs if entry.get("leaf_fix_key")))
     # Stamped only when a lever was held back, so a repo without `parallel:`
     # groups or background steps keeps a byte-identical findings document.
     if _overlap_withheld:
@@ -32017,7 +33073,6 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     tiers = ["gh-timing"]
     logs_fetched: int | None = None
     if with_logs:
-        _attach_cache_log_evidence(client, repo, findings, jobs_per_run_by_wf)
         tiers.append("job-logs")
         # Capture the long-pole jobs' raw logs into a local data bundle so the
         # report / fix-agent can read the step's internal timing without

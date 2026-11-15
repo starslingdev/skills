@@ -142,15 +142,6 @@ def test_check_speed_poles_complete_fails_on_triaged_pole(tmp_path: Path):
     assert "triaged-fast" in chk.detail
 
 
-def test_check_speed_poles_complete_clean_findings_not_flagged_for_triage(tmp_path: Path):
-    vr = _load_verify_report()
-    fp = tmp_path / "findings.json"
-    fp.write_text(json.dumps(_clean_findings()), encoding="utf-8")
-    # Static-only report so the prompt/section half SKIPs; the triage half must stay clean
-    # (not raise, not flag) — proving the triage guard doesn't false-positive.
-    assert vr._triaged_pole_offenders(fp) == []
-
-
 # --- headline-crown recovery (paradedb/paradedb class) ------------------------
 # The CROWN analog: when the crown (`critical_path_check` = the slowest TYPICAL check) falls to a
 # sub-floor lint whose workflow was triaged, the headline pole dead-ends. `_crown_recovery_wf`

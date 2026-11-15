@@ -181,6 +181,13 @@ STRICT_GH = STRICT_RAW == "1"
 # less, and both are held to be short of "ran".
 GH_CHECK_COMPLETE_PREFIX = "ran:"
 
+# Network lookups that can only REMOVE a finding (P14.24's release-immutability
+# lookup). When one does not finish, every finding it would have judged is
+# still reported, so nothing is uncovered: it is disclosed as a notice, never
+# as missing coverage, and never reds a strict run (a pin set by a `${{ }}`
+# expression can never be looked up, so that red could never be cleared).
+GH_LOOKUPS_THAT_ONLY_SUPPRESS = frozenset({"P14.24"})
+
 
 # GitHub rejects a step summary over 1 MiB, so an oversized one is not a big
 # summary - it is no summary. The budget is in BYTES because that is what GitHub
@@ -450,8 +457,12 @@ def main() -> int:
     # reader who stops after the headline must not come away with a coverage
     # claim the run cannot support: "no findings from P14.11" and "P14.11 never
     # ran" are different statements, and the reassuring one is false.
-    incomplete_gh = {k: v for k, v in gh_checks.items()
+    unfinished_gh = {k: v for k, v in gh_checks.items()
                      if not str(v).startswith(GH_CHECK_COMPLETE_PREFIX)}
+    incomplete_gh = {k: v for k, v in unfinished_gh.items()
+                     if k not in GH_LOOKUPS_THAT_ONLY_SUPPRESS}
+    lookup_notes = {k: v for k, v in unfinished_gh.items()
+                    if k in GH_LOOKUPS_THAT_ONLY_SUPPRESS}
     if incomplete_gh:
         lines += [f"> **Network-gated check(s) did NOT run to completion:** "
                   f"{', '.join(flat(k) for k in sorted(incomplete_gh))}. "
@@ -493,6 +504,10 @@ def main() -> int:
         for name, status in sorted(incomplete_gh.items()):
             print(f"::warning::ci-secure network-gated check {esc(name)} did not "
                   f"complete: {esc(status)} - this scan does not cover it")
+    for name, status in sorted(lookup_notes.items()):
+        print(f"::notice::ci-secure {esc(name)} release-immutability lookup did "
+              f"not fully run: {esc(status)} - every finding it would have "
+              f"judged is still reported")
     if incomplete:
         lines += ["", f"### Coverage gaps: {flat(incomplete)}"]
 

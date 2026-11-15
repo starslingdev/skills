@@ -1670,6 +1670,77 @@ def test_playwright_cause_asserts_no_unrendered_timeline_or_worker_pool_shape():
     assert "do not share a worker pool" not in lp
 
 
+def test_test_result_replay_share_marks_a_cached_majority():
+    log = "\n".join(
+        [f"ok example/pkg{i} (cached)" for i in range(144)]
+        + ["ok example/live 1.23s"])
+
+    replay = bp._test_result_replay_share(log)
+
+    assert replay == {
+        "cached_lines": 144,
+        "test_result_lines": 145,
+        "share": 144 / 145,
+        "replayed": True,
+    }
+
+
+def test_test_result_replay_share_leaves_uncached_results_unchanged():
+    log = "\n".join(f"ok example/pkg{i} 1.23s" for i in range(145))
+
+    replay = bp._test_result_replay_share(log)
+
+    assert replay["cached_lines"] == 0
+    assert replay["test_result_lines"] == 145
+    assert replay["share"] == 0.0
+    assert replay["replayed"] is False
+
+
+def test_test_result_replay_share_reads_cached_go_coverage_results():
+    log = "ok example/pkg (cached) coverage: 81.2% of statements"
+
+    replay = bp._test_result_replay_share(log)
+
+    assert replay == {
+        "cached_lines": 1,
+        "test_result_lines": 1,
+        "share": 1.0,
+        "replayed": True,
+    }
+
+
+def test_test_result_replay_share_reads_each_supported_test_format_only():
+    log = "\n".join([
+        "ok example/go (cached)",
+        "//example:bazel_test (cached) PASSED in 0.1s",
+        "> Task :app:integrationTest FROM-CACHE",
+        "web:unit-test: cache hit, replaying logs",
+        "//example:bazel_live PASSED in 1.2s",
+        "> Task :app:otherTest",
+        "web:test: cache miss, executing abc123",
+    ])
+
+    replay = bp._test_result_replay_share(log)
+
+    assert replay == {
+        "cached_lines": 4,
+        "test_result_lines": 7,
+        "share": 4 / 7,
+        "replayed": True,
+    }
+
+
+def test_test_result_replay_share_ignores_non_test_build_cache_hits():
+    log = "\n".join([
+        "> Task :app:compileJava FROM-CACHE",
+        "> Task :app:processResources FROM-CACHE",
+        "web:build: cache hit, replaying logs",
+        "web:lint: cache hit, replaying logs",
+    ])
+
+    assert bp._test_result_replay_share(log) is None
+
+
 # A real Lint pole shape (generalized from a captured gap): a `bun run lint` step that
 # shells to a bare `$ eslint` with no `--cache`, followed by a whole-graph `knip` pass in
 # the same job. eslint prints no duration, so the finding is the missing-flag, not a wall.
@@ -2587,11 +2658,12 @@ def test_provenance_omits_deep_scan_note_for_a_shallow_walk():
     block = "\n".join(bp._provenance_block(
         _prov_doc(sampled_pr_count=20, sample_fetched=50), "o/r", "2026-06-08"))
     assert "recent PRs**" not in block
-    assert "20/20 sampled PRs" in block          # the plain honest baseline
+    assert "20 of 20 PRs sampled" in block       # the plain honest baseline
 
 
 def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():
-    # P2 regression: an external required suite that was READ but ran on no sampled PR
+    # P2 regression: an external required suite that was READ but was not observable
+    # in the sampled Actions job lists
     # sets required_suite_scoped=False AND required_suite_unsatisfiable=True. The
     # provenance must report the PR-floor cause, NOT the "unreadable (no admin / 404)"
     # cause — the two share the scoped=False flag but are different failures.
@@ -2599,7 +2671,8 @@ def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():
         _prov_doc(required_suite_scoped=False, required_suite_unsatisfiable=True),
         "o/r", "2026-06-08"))
     assert "No file-backed required gate" in block
-    assert "ran on **none** of the sampled PRs" in block
+    assert "per-commit presence and timing could not be established" in block
+    assert "ran on **none** of the sampled PRs" not in block
     assert "Required checks were unreadable" not in block      # the wrong cause
 
 
@@ -2811,6 +2884,23 @@ def test_demoted_frequency_pole_prompt_and_toc_drop_typical_gate_framing():
     # The demoted row must not carry a "gates N/NN PRs" tail (the sibling `test`'s frequency).
     gore_row = next(l for l in toc.splitlines() if "goreleaser-check](#pole-2)" in l)
     assert "gates" not in gore_row
+
+
+def test_rarely_slowest_first_pole_is_not_framed_as_the_typical_gate():
+    # The first ordered pole is the frequency `blocker`, but under the `pole_n` schema that
+    # identity must not reclaim the typical-gate wording: `test` is the slowest check on only
+    # 1/20 sampled PRs (below the recurring floor), so its drill says "Rarely the merge pole",
+    # matching the verifier's spine-demoted rule (Next.js `Wait for preview tarball` shape).
+    doc = _doc_demoted_frequency_pole()
+    cp = doc["pr_critical_path"]
+    cp["checks"][0]["pole_n"] = 1
+    cp["checks"][1]["pole_n"] = 0
+    md = bp.render(doc, {"ci": _IMPORT_BOUND_LOG}, {},
+                   {"ci": "https://example.invalid/actions/runs/1"}, "2026-06-08")
+    start = md.index("Long pole 1:")
+    first = md[start:md.index("Long pole 2:", start)]
+    assert "Slowest check a typical PR waits on" not in first
+    assert "Rarely the merge pole" in first
 
 
 def test_bimodal_note_surfaces_a_fast_median_check_but_not_a_slow_median_one():
@@ -4159,8 +4249,26 @@ def test_render_handles_pole_with_no_captured_log():
     assert "no captured log" in md
 
 
-def test_render_no_poles_is_graceful():
-    assert "No measured critical path" in bp.render({"pr_critical_path": {}})
+def test_jest_provider_note_keeps_a_static_only_report_visible():
+    doc = {
+        "repo": "demo/repo",
+        "findings": [],
+        "pr_critical_path": {},
+        "data_sources": {},
+        "jest_coverage_notes": [{
+            "workflow_file": ".github/workflows/ci.yml",
+            "job": "test",
+            "note": ("Jest coverage provider is `v8`; compare providers on the same "
+                     "commit; no provider-switch saving is credited without matched "
+                     "measurements"),
+        }],
+    }
+
+    report = bp.render(doc)
+
+    assert "No measured critical path" not in report
+    assert "Jest coverage configuration" in report
+    assert "no provider-switch saving is credited" in report
 
 
 def _load_verify_report():
@@ -4288,9 +4396,10 @@ def test_render_pr_workflow_without_pr_runs_keeps_hedged_banner(tmp_path):
 
 def test_render_no_poles_no_findings_still_dead_ends_gracefully():
     # The truly-empty case (no poles AND no static findings) keeps the one-line note —
-    # there is genuinely nothing to report.
-    md = bp.render({"pr_critical_path": {"poles": []}, "findings": []})
-    assert "No measured critical path" in md
+    # there is genuinely nothing to report — whether the fields are missing or empty.
+    for doc in ({"pr_critical_path": {}},
+                {"pr_critical_path": {"poles": []}, "findings": []}):
+        assert "No measured critical path" in bp.render(doc), doc
 
 
 def test_primary_section_invariant_flags_measured_pole_dropped_to_static(tmp_path):
@@ -6478,6 +6587,37 @@ def test_mag_line_healthy_step_wall_still_reads_stable():
     out = "\n".join(bp._mag_line(mag, None))
     assert "stable across runs" in out
     assert "NOT cross-run validated" not in out
+
+
+def test_mag_line_discloses_replayed_sibling_when_too_few_values_survive():
+    mag = {
+        "label": "test work", "unit": "s", "this_run": 10.0,
+        "values": [{"run_url": "https://example/runs/1", "value": 10.0,
+                    "drilled": True}],
+        "replayed_result_logs_excluded": 1,
+    }
+
+    out = "\n".join(bp._mag_line(mag, None))
+
+    assert "1 fetched sibling log was left out" in out
+    assert "replayed from cache" in out
+    assert "Cross-run check" not in out
+
+
+def test_mag_line_discloses_replayed_sibling_beside_surviving_baseline():
+    mag = {
+        "label": "test work", "unit": "s", "this_run": 10.0,
+        "values": [
+            {"run_url": "https://example/runs/1", "value": 10.0, "drilled": True},
+            {"run_url": "https://example/runs/2", "value": 11.0},
+        ],
+        "replayed_result_logs_excluded": 2,
+    }
+
+    out = "\n".join(bp._mag_line(mag, None))
+
+    assert "Cross-run check" in out
+    assert "2 fetched sibling logs were left out" in out
 
 
 # The one sentence every fork disclosure must land on. A fork PR is NOT colder because it

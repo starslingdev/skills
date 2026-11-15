@@ -415,6 +415,49 @@ def test_persist_pole_logs_picks_run_nearest_the_p50(tmp_path: Path):
     assert 2.0 not in [r["duration_s"] for r in entry["sample"]]
 
 
+def test_persist_pole_logs_marks_and_excludes_replayed_test_results(tmp_path: Path):
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return "\n".join(
+                [f"ok example/pkg{i} (cached)" for i in range(144)]
+                + ["ok example/live 2.1s"]
+            )
+
+    poles = [{"check": "test", "workflow_file": ".github/workflows/ci.yml",
+              "job": "test", "p50_s": 300.0}]
+    jobs = {".github/workflows/ci.yml": [[_job_inst("test", 333, 300)]]}
+
+    manifest = cr._persist_pole_logs(FakeClient(), "o/r", poles, jobs, tmp_path)
+
+    assert manifest == []
+    assert poles[0]["replayed_test_results"] == {
+        "cached_lines": 144,
+        "test_result_lines": 145,
+        "share": round(144 / 145, 4),
+        "excluded_fetched_runs": 1,
+    }
+
+
+def test_persist_pole_logs_keeps_a_cache_drill_beside_replayed_tests(tmp_path: Path):
+    log = "\n".join(
+        ["Cache not found for input keys: go-linux"]
+        + [f"ok example/pkg{i} (cached)" for i in range(4)]
+    )
+
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return log
+
+    poles = [{"check": "test", "workflow_file": ".github/workflows/ci.yml",
+              "job": "test", "p50_s": 300.0}]
+    jobs = {".github/workflows/ci.yml": [[_job_inst("test", 333, 300)]]}
+
+    manifest = cr._persist_pole_logs(FakeClient(), "o/r", poles, jobs, tmp_path)
+
+    assert manifest[0]["leaf_fix_key"] == "dependency-cache"
+    assert "replayed_test_results" not in poles[0]
+
+
 def test_persist_pole_logs_picks_real_run_when_noops_are_the_majority(tmp_path: Path):
     # The hard case: a gated job (e.g. `changed-tests`) self-skips on MOST sampled
     # PRs, so no-op instances are the MAJORITY. Here the median is ITSELF a no-op, so
@@ -754,6 +797,98 @@ def test_persist_pole_logs_writes_cross_run_magnitude_sample(tmp_path: Path):
     assert sum("/logs" in c for c in client.calls) == 3
 
 
+def test_magnitude_sample_excludes_replayed_sibling_log():
+    replayed = "\n".join(
+        [f"ok example/pkg{i} (cached)" for i in range(144)]
+        + ["ok example/live 2.1s"]
+    )
+
+    class FakeBp:
+        _test_result_replay_share = staticmethod(bp._test_result_replay_share)
+
+        @staticmethod
+        def _parse_log(log: str, iso=None) -> dict:
+            return {"fix_key": "same", "magnitude": {
+                "label": "work", "unit": "s", "value": 10.0}}
+
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return replayed if "/jobs/2/" in endpoint else "ordinary result"
+
+    primary = _job_inst("test", 1, 300)
+    cached = _job_inst("test", 2, 310)
+    sample = cr._magnitude_sample(
+        FakeBp(), FakeClient(), "o/r", [(300.0, primary), (310.0, cached)],
+        primary, "ordinary result",
+    )
+
+    assert sample is not None
+    assert [v["value"] for v in sample["values"]] == [10.0]
+    assert sample["replayed_result_logs_excluded"] == 1
+
+
+def test_magnitude_sample_reports_when_every_log_was_replayed():
+    replayed = "\n".join(
+        [f"ok example/pkg{i} (cached)" for i in range(144)]
+        + ["ok example/live 2.1s"]
+    )
+
+    class FakeBp:
+        _test_result_replay_share = staticmethod(bp._test_result_replay_share)
+
+        @staticmethod
+        def _parse_log(log: str, iso=None) -> dict:
+            return {"fix_key": "same", "magnitude": {
+                "label": "work", "unit": "s", "value": 10.0}}
+
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return replayed
+
+    first = _job_inst("test", 1, 300)
+    second = _job_inst("test", 2, 310)
+    sample = cr._magnitude_sample(
+        FakeBp(), FakeClient(), "o/r", [(300.0, first), (310.0, second)],
+        first, replayed,
+    )
+
+    assert sample is not None
+    assert sample["values"] == []
+    assert sample["replayed_result_logs_excluded"] == 2
+
+
+def test_magnitude_sample_keeps_cache_state_beside_replayed_tests():
+    log = "\n".join(
+        ["Cache not found for input keys: go-linux"]
+        + [f"ok example/pkg{i} (cached)" for i in range(4)]
+    )
+
+    class FakeBp:
+        _test_result_replay_share = staticmethod(bp._test_result_replay_share)
+
+        @staticmethod
+        def _parse_log(text: str, iso=None) -> dict:
+            return {"fix_key": "dependency-cache", "magnitude": {
+                "label": "cache misses", "unit": "%", "value": 100.0}}
+
+    class FakeClient:
+        def text(self, endpoint: str, allow_missing: bool = False) -> str:
+            return log
+
+    first = _job_inst("test", 1, 300)
+    second = _job_inst("test", 2, 310)
+    sample = cr._magnitude_sample(
+        FakeBp(), FakeClient(), "o/r", [(300.0, first), (310.0, second)],
+        first, log, state_fn=lambda _log: {
+            "miss_pct": 100.0, "cold": True, "remote_off": False},
+    )
+
+    assert sample is not None
+    assert len(sample["values"]) == 2
+    assert all(v["cache_state"]["cold"] is True for v in sample["values"])
+    assert sample["replayed_result_logs_excluded"] == 0
+
+
 def test_persist_pole_logs_escalates_sample_on_a_wide_spread(tmp_path: Path):
     # Adaptive: a TIGHT 3-run probe stops cheap, but a WIDE bracket widens the sample
     # (to tell a smooth spread from two clusters). Here one run has a warm cache (low
@@ -928,6 +1063,9 @@ def test_step_category_classifier_spans_ecosystems():
         # the broad `\bbuild\b` must not steal it. But `mvn package` stays a build
         # (Maven's package phase is the build), so the artifact pre-entry is narrow.
         "Upload build artifacts": "package", "mvn package": "build",
+        # A Lighthouse CI run is an audit: payload, binned `scan` by the tool's name.
+        "Lighthouse CI": "scan", "Run lhci autorun": "scan",
+        "Lighthouse audit (desktop)": "scan", "lighthouse": "scan",
     }
     for name, want in cases.items():
         assert cr._step_category(name) == want, (name, want)
@@ -944,6 +1082,7 @@ def test_combined_payload_and_build_step_classifies_as_payload_not_build():
     assert cr._step_category("Run Checks/Lint/Test/Build") == "test"
     assert cr._step_category("Run Checks / Lint / Test / Build") == "test"
     assert cr._step_category("Lint and Build") == "scan"
+    assert cr._step_category("Build and run Lighthouse") == "scan"
     assert cr._step_category("Build and test") == "test"
     # A PURE build step (no payload token) still classifies as `build`, so the
     # genuine OPT70/OPT72 build levers are untouched.

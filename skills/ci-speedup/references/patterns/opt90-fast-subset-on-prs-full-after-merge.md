@@ -12,7 +12,7 @@ category: 7
 
 # OPT90 — Every Pull Request Pays for Coverage That Could Run After Merge
 
-**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
+**Not auto-detected yet.** Like OPT86, no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
 
 **TL;DR**: Every pull request waits for the full matrix (every OS, every runtime version, every heavyweight configuration) even though a small subset catches almost every failure. Run the subset that catches what matters before merge, and move the rest to a run after merge or on a schedule, where it still gates releases and pages someone when it fails.
 

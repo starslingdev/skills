@@ -60,7 +60,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--repo", default=None, help="owner/repo for the dormancy lookup and the API-gated config facts.")
     parser.add_argument(
         "--gh-impostor", choices=["auto", "on", "off"], default="auto",
-        help="Pass-through to scan.py's network-gated impostor-SHA check.",
+        help="Pass-through to scan.py's GitHub API lookups (the impostor-SHA "
+             "check and the P14.24 release-immutability lookup).",
     )
     parser.add_argument("--catalog", default=None, help="Override catalog path.")
     args = parser.parse_args(argv)

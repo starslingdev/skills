@@ -47,7 +47,7 @@ Checkout · 6. Conditional Execution · 7. Trigger and Scope · 8. Release Workf
 - **Category 8 — Release Workflow**: release-path caching + redundancy.
 - **Category 9 — Queue Times and Concurrency**: missing/!coarse concurrency groups; measured one-at-a-time capacity waits (`OPT97`) and repeated merge validation (`OPT98`).
 - **Category 10 — Timing Anomalies**: failure-rate / bimodal duration signals (advisory), and the same job measured faster on another runner class (`OPT81`), and infrastructure faults that fail whole runs (`OPT100`).
-- **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`).
+- **Category 11 — Stack-Specific**: turbo task outputs, unstable turbo env keys, type-aware ESLint on a slow lint job (`OPT82`), Lighthouse CI audits multiplied by runs, URLs and device passes (`OPT103`).
 - **Category 12 — Build Caching (language-agnostic)**: uncached compiled-language builds, a dependency compiled from source when a prebuilt package exists (`OPT86`), a compile nobody profiled (`OPT91`), a machine-wide .NET SDK reconciling unrelated workloads (`OPT94`).
 - **Category 13 — Hidden Failures and Dead Config**: dead env vars, misconfigured caches.
 - **Category 14 — Structural / Critical-Path Levers** (`OPT70`–`OPT75`, `OPT78`, `OPT83`–`OPT85`, `OPT87`): routed from the measured long pole (see ARCHITECTURE §11), not a flat grep. `OPT87` and `OPT74` remain manual. `OPT78` and `OPT85` are routed by drill-time log leaves; `OPT83` and `OPT84` are routed by structural passes over the drilled poles' step decomposition plus the workflow YAML, not by the log leaves (`OPT84` also follows the step's `package.json` scripts).
@@ -357,7 +357,7 @@ fix_strategy: tool-specific-cache-flag-not-enabled
 title_template: "Tool-Specific Cache Flag Not Enabled"
 -->
 
-**TL;DR**: A tool with a built-in cache (ESLint, Jest, tsc, etc.) runs without its cache flag, so it reprocesses every file each run.
+**TL;DR**: A tool's result cache is disabled or left on an ephemeral runner, so it reprocesses files that a later run could reuse.
 
 **Anti-pattern**: A linter, formatter, type-checker, or build tool supports its OWN cache flag (e.g. Prettier `--cache`, ESLint `--cache`, TypeScript `--incremental`, Turbo `--cache-dir`, Vitest cache options, Jest cache), but the CI invocation omits the flag. Every run re-parses and re-processes every file from scratch even when `actions/cache` holds the previous run's cache dir. This is distinct from OPT2 (binary download caching) and OPT5 (pnpm store caching) — it's the tool's INTERNAL work cache, not its install cache.
 
@@ -369,12 +369,12 @@ title_template: "Tool-Specific Cache Flag Not Enabled"
   - `tsc` WITHOUT `--incremental` / `--build`
   - `turbo run` WITHOUT persistent `--cache-dir` and `actions/cache` for it
   - `vitest run` WITHOUT a configured cache directory preserved in `actions/cache`
-  - `jest` WITHOUT `--cache --cacheDirectory=<persisted path>`
+  - `jest` with its cache disabled, or with its default-enabled cache left in the runner's temporary directory instead of an explicit `cacheDirectory` preserved by `actions/cache`; omitting `--cache` alone is not a defect because Jest enables caching by default
 - Cross-check that the relevant cache directory is NOT already wrapped by `actions/cache`
 - For lint and format result caches, compare the affected step before and after enabling the cache; a warm hit can avoid a large share of repeated parsing.
 - For compiler build state such as `.tsbuildinfo` and generated-client output, a cache hit does not by itself prove a saving: restore, validation, and save overhead can cancel the avoided work. Treat these as uncredited suggestions until a same-workload before/after measurement shows a net reduction.
 
-**Fix**: Add the tool's cache flag AND wrap the cache directory in `actions/cache`. Because tool-result caches change on every run, use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated result be saved for the next run. Each rolling entry consumes cache budget, so use this per-commit shape for small tool-result caches. Large dependency or build stores need a separately measured key and retention strategy; a stable exact key can also prevent updated mutable state from being saved. For Prettier: `prettier --check --cache --cache-strategy content --cache-location ./node_modules/.cache/prettier`. For ESLint: `eslint --cache --cache-location ./node_modules/.cache/eslint`. Verify the tool's cache file is gitignored. For compiler state and generated output, benchmark the full restore/run/save path against an uncached run on the same workload and keep the cache only when it reduces total step time.
+**Fix**: Enable the tool's cache when it is off, choose an explicit cache directory, and wrap that directory in `actions/cache`. Jest already enables its cache by default, so its fix is to set and persist `cacheDirectory`, not to add a redundant `--cache` flag. Because tool-result caches change on every run, use a rolling primary key such as `<tool>-<os>-<lockfile-hash>-${{ github.sha }}` with a stable `restore-keys` prefix such as `<tool>-<os>-<lockfile-hash>-`. An exact primary-key hit is not saved again; the rolling suffix lets the updated result be saved for the next run. Each rolling entry consumes cache budget, so use this per-commit shape for small tool-result caches. Large dependency or build stores need a separately measured key and retention strategy; a stable exact key can also prevent updated mutable state from being saved. For Prettier: `prettier --check --cache --cache-strategy content --cache-location ./node_modules/.cache/prettier`. For ESLint: `eslint --cache --cache-location ./node_modules/.cache/eslint`. Verify the tool's cache file is gitignored. For compiler state and generated output, benchmark the full restore/run/save path against an uncached run on the same workload and keep the cache only when it reduces total step time.
 
 ---
 
@@ -2219,15 +2219,15 @@ This applies to any framework with sharding (pytest `--shard`, cargo-nextest `--
 <!-- METADATA
 pattern: OPT88
 impact: MEDIUM
-class: data-driven
-detector: manual
+class: static
+detector: bespoke
 risk: MEDIUM
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,pyproject.toml,pytest.ini,setup.cfg,.bazelrc,.config/nextest.toml,jest.config.*,vitest.config.*,package.json"
 fix_strategy: measure-test-concurrency
 title_template: "Test concurrency is set by guess, not measurement"
 -->
 
-**Not auto-detected yet.** Like OPT86, no pass emits OPT88, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow test step's command and configuration against the heuristic below.
+**Narrowly auto-detected for Jest.** When a workflow invokes Jest and its nearest configuration pins `maxWorkers` to an absolute number or a percentage below 100%, the static pass emits this uncredited measurement note. Other tools and unpinned Jest worker counts still require the measured review below.
 
 **TL;DR**: The slowest test job runs with a worker count nobody measured: one worker on a runner with several cores, a fixed cap carried over from an older runner, or "as many as there are cores" where memory or a shared service is the real limit. Time two or three settings on the real runner class and keep the fastest. More workers is not always faster.
 
@@ -2235,9 +2235,9 @@ title_template: "Test concurrency is set by guess, not measurement"
 
 **Relation to other patterns**: [OPT23](#opt23--single-threaded-matrix-max-parallel-1) is `max-parallel: 1` across matrix jobs and [OPT24](#opt24--long-test-job-without-sharding) splits a suite across machines. OPT88 is the worker count inside one job on one machine, and it applies before sharding: a shard that wastes its own cores multiplies the waste.
 
-**Detection heuristic** (manual; read, never inferred):
+**Detection heuristic**:
 
-A log-level `test-loop-serial` observation can point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another; OPT88 remains manual because the safe worker count still has to be measured.
+A configured Jest `maxWorkers` below 100% is static evidence to measure, never evidence of a saving. A log-level `test-loop-serial` observation can also point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another. In both cases the safe worker count still has to be measured.
 
 1. The slow step runs tests, and concurrency is set explicitly (serial, or a fixed number), or not at all on a runner whose test tool defaults to serial. Look everywhere it can be set: the test command, the workflow, and the test tool's own config files (for example `local_test_jobs` and a `test_env` thread count such as `RUST_TEST_THREADS` in `.bazelrc`, or pytest, jest and nextest config files).
 2. The setting does not match the runner: compare it with the core count of the job's runner label. If the label is custom and its core count is not documented, measure it first with a one-line probe step (`nproc`, or `[Environment]::ProcessorCount` on Windows).
@@ -3480,7 +3480,7 @@ fix_strategy: fast-subset-on-prs-full-after-merge
 title_template: "Every pull request pays for coverage that could run after merge"
 -->
 
-**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
+**Not auto-detected yet.** Like OPT86, no pass emits OPT90, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the pull-request workflows and their run history against the heuristic below.
 
 **TL;DR**: Every pull request waits for the full matrix (every OS, every runtime version, every heavyweight configuration) even though a small subset catches almost every failure. Run the subset that catches what matters before merge, and move the rest to a run after merge or on a schedule, where it still gates releases and pages someone when it fails.
 
@@ -4879,6 +4879,115 @@ table: OPT82's ledger is the prerequisite that row assumes.
 
 ---
 
+### OPT103 — Lighthouse CI Audits Every URL N Times Per Pass, One After Another
+
+<!-- METADATA
+pattern: OPT103
+impact: MEDIUM
+class: data-driven
+detector: log-leaf
+risk: MEDIUM
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,lighthouserc*,.lighthouserc*"
+fix_strategy: lighthouse-audit-count
+title_template: "Lighthouse CI audits every URL N times per pass, one after another"
+-->
+
+**TL;DR**: A merge-gating job spends most of its wall time inside Lighthouse CI's
+collect phase. Every configured URL is audited `numberOfRuns` times, and each
+run is a complete page load plus the full audit. The runs go one after another,
+and a job with one pass per device preset pays all of it again per pass. The
+audit count is the product passes x URLs x runs. The report states that
+product, measured from the log, and hands the owner three dials: runs per URL,
+the URL list, and where the passes run. It credits no saving.
+
+**Scope: Lighthouse CI only** (`@lhci/cli` through `lhci autorun` or
+`lhci collect`, and the actions that drive the same collector). Other audit
+tools print other shapes and stay out of scope.
+
+**Anti-pattern**: A `lighthouserc` config lists every page of the site and keeps
+or raises the default of 3 runs per URL. The workflow then runs the collector
+once per device preset, as consecutive steps. The budget check that was meant
+to take a minute now takes ten. With 4 URLs, 5 runs and 2 passes the job runs
+40 audits, and 36 of them audit a page it has already audited.
+
+```
+before:  job: [ mobile pass: 4 URLs x 5 runs ] -> [ desktop pass: 4 URLs x 5 runs ]   (40 audits in a row)
+after:   leg mobile:  4 URLs x N runs   |  separate runners, the same assertions,
+         leg desktop: 4 URLs x N runs   |  N kept at what the assertions need
+```
+
+**Detection heuristic** (the `lighthouse-serial-audits` leaf in
+`blocking_path.py`, run over the drilled job's captured log, see ARCHITECTURE
+§12.3). Everything is read from the log:
+
+1. The log holds at least one completed collect pass. A pass is a block of
+   `Running Lighthouse N time(s) on <url>` lines, one per configured URL,
+   closed by `Done running Lighthouse!`. A block with no closing line (a
+   cancelled or crashed collect) is not counted.
+2. Summing N over every URL of every completed pass gives at least 20 audits.
+   lhci's default of 3 runs over a couple of URLs is a smoke audit and stays
+   silent.
+3. The sum is at least two audits per distinct URL, so the count is a
+   multiplier from repeat runs or repeat passes. One run over many URLs is a
+   different lever (the URL list) and stays silent.
+4. The job's measured dominant step is the Lighthouse step: its name carries
+   `lighthouse` or `lhci`. Otherwise the leaf is shown as a labelled secondary
+   observation and never as the job's cause. The step classifier bins those
+   names as `scan`, so Lighthouse time counts as the job's payload.
+
+The magnitude is the share of audits beyond the first per distinct URL: the
+repeat runs and repeat passes. It follows from the config, so it is stable from
+run to run. The evidence is verbatim lhci output: each pass's first
+`Running Lighthouse` line and its
+`Checking assertions against U URL(s), M total run(s)` line, which states the
+pass's audit count in the tool's own words. A pass is
+named after the `--config` or preset flag of its command when the log pairs
+one command with one pass.
+
+**Fix recipe** (the report hands off, it does not prescribe):
+
+1. Read the config history first (`git log -p` on `lighthouserc*` and the
+   workflow): why these runs, URLs and presets. A deliberate choice is a policy
+   change for the owner.
+2. Runs per URL. lhci's assertions aggregate across the runs of a URL
+   (`aggregationMethod`, set per assertion: `median`, `optimistic`,
+   `pessimistic` or `median-run`). Keep N at what those assertions need for a
+   stable verdict, and compare old and new medians side by side before
+   lowering it. Dropping to 1 trades speed for a flakier or falsely green
+   budget.
+3. The URL list. Audit one representative page per template, and keep every
+   URL that carries a budget.
+4. Where the passes run. The device presets and URL shards are independent, so
+   run them on separate runners (a matrix leg per preset). Never run two
+   Lighthouse passes at the same time on one runner. Concurrent audits
+   compete for the same cores, which skews the scores the budget gates on, and
+   each collect clears the shared `.lighthouseci/` report folder when it
+   starts. OPT83 never suggests running a Lighthouse step side by side with
+   any other step, for that reason.
+
+**Required-checks caveat**: a split into matrix legs creates new check names.
+If the Lighthouse job is a required status check, add the new jobs to branch
+protection as required checks (or the ruleset equivalent). Otherwise the
+split-out audits silently stop gating merges while everything stays green.
+
+**Sizing: uncredited.** The skill measures the audit count and the repeat
+share, not a saving. How far N can drop is the owner's measurement decision, a
+shorter URL list is a coverage decision, and a runner split moves wall time off
+the job without removing it. Each added leg also repeats checkout, install and
+build, so runner minutes go up while the wait goes down.
+
+**Risk: MEDIUM.** Fewer runs or fewer URLs weaken a performance budget's
+signal: a flakier gate, or a regression that slips through. Keep every
+assertion gating, and check that a deliberately regressed page still fails
+after the change.
+
+**References**: [Lighthouse CI configuration](https://googlechrome.github.io/lighthouse-ci/docs/configuration.html)
+(`collect.numberOfRuns`, `collect.url`, `settings.preset`, `aggregationMethod`).
+[Lighthouse performance scoring](https://developer.chrome.com/docs/lighthouse/performance/performance-scoring)
+(why scores fluctuate between runs).
+
+---
+
 ## Category 12: Build Caching (Language-Agnostic)
 
 ---
@@ -5077,7 +5186,7 @@ fix_strategy: profile-the-compile
 title_template: "The compile is the long pole and nobody profiled it"
 -->
 
-**Not auto-detected yet.** Like OPT86 and OPT88, no pass emits OPT91, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow build step and the compiler's own timing reports against the heuristic below.
+**Not auto-detected yet.** Like OPT86, no pass emits OPT91, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow build step and the compiler's own timing reports against the heuristic below.
 
 **TL;DR**: The slowest job's time goes to compiling, the cache is already doing its job, and nobody has asked the compiler where the time goes. Profile the compile with the compiler's own timing reports, then fix the hotspot it names: a build-profile setting that costs far more build time than it returns at runtime, or one piece of code that is expensive to compile.
 
@@ -5357,7 +5466,7 @@ title_template: "Dead Workflow Env Vars / Config"
 ## Category 14: Structural / Critical-Path Levers
 
 These patterns are a **different class** from everything above. The catalog
-patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98, OPT100 and OPT101 are *hygiene*: each is a named,
+patterns OPT1–OPT69, OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98, OPT100, OPT101 and OPT103 are *hygiene*: each is a named,
 locally-checkable defect with
 a mechanical, low-risk fix, detected by matching workflow YAML against the
 catalog. OPT81, like OPT79 and OPT80, is derived from run history rather than matched against YAML, and its A2 advisory is risk MEDIUM. On real repos almost every hygiene hit moves **~0 developer
@@ -5815,7 +5924,7 @@ Two or more candidates that sit directly next to each other in the job's top-lev
 | a candidate that may write build output (build or package by name or by any command line; `tsc --noEmit` is not a build) shares its effective working directory with another candidate, or one directory sits inside the other (`./web`, `web/` and `web` are one directory), whichever step comes first. A working directory outside the checkout (`..`, `../x`, an absolute path) overlaps every tree. When a build is among the candidates, any candidate whose command reaches outside its own tree (`--prefix`, `--cwd`, `--dir`, `-C`, `--outDir` or `--out-dir`, a `../` or absolute path) counts as sharing every tree | run side by side, the build writes files the other step is reading |
 | a candidate carries a step-level `if:` | the group's shape would change by condition |
 | a candidate sets `continue-on-error` (anything but a literal `false`) | a step allowed to fail changes what a failing child does to the job once they run side by side |
-| the job has `services:` containers; two candidates drive Docker; or two candidates in one tree run the same Cargo, Maven, Gradle, .NET (`dotnet test`, `build`, `run`, `publish`), sbt, Swift (`swift test`, `swift build`), Mix (`mix test`, `mix compile`) or Xcode (`xcodebuild`) build, or both run a recognised coverage tool (`pytest --cov`, `coverage run`, `nyc`, `c8`, `--coverage`, `go test -coverprofile`) | they share state the workflow file does not show as a dependency (one `target/`, `bin/` and `obj/`, `.build`, `_build` or DerivedData folder and its lock, one coverage file, one daemon or database) |
+| the job has `services:` containers; two candidates drive Docker; any candidate runs Lighthouse (`lhci` or `lighthouse`); or two candidates in one tree run the same Cargo, Maven, Gradle, .NET (`dotnet test`, `build`, `run`, `publish`), sbt, Swift (`swift test`, `swift build`), Mix (`mix test`, `mix compile`) or Xcode (`xcodebuild`) build, or both run a recognised coverage tool (`pytest --cov`, `coverage run`, `nyc`, `c8`, `--coverage`, `go test -coverprofile`) | they share state the workflow file does not show as a dependency (one `target/`, `bin/` and `obj/`, `.build`, `_build` or DerivedData folder and its lock, one coverage file, one daemon or database, or one runner's cores, which a Lighthouse audit shares with anything beside it and which skews its scores) |
 | any line, or any `&&`, `\|\|`, `;` or `\|` part of a line, of a candidate's command is a dependency install (`npm ci`, `pip install`, `uv sync`, `bundle install`, ...) | it writes the dependency tree every other candidate reads |
 | any step up to the last candidate (before them or one of them) runs Docker, Podman or Compose, or is a container action (`docker://`, a Docker or Compose action); or any step before the first candidate runs with `background: true` | the job starts a container or a server the candidates would all use at once (one database, one port) |
 

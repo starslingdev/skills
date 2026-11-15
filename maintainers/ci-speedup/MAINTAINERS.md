@@ -448,8 +448,10 @@ fixture builds the offline e2e test's repository and replays its gh corpus, and
 that repository from the same corpus. Each run costs about $0.40 to $0.65 and
 under two minutes; results (tokens, time, cost, per-check verdicts) land in the gitignored
 `skill-eval-results/`, failing sessions in `skill-eval-logs/`. CI runs the same
-command in the `ci-speedup skill evals` job. Run it before merging a SKILL.md or
-references change that CI did not cover (fork PRs). Details:
+command in the `ci-speedup skill evals` job, nightly and on dispatch; pull
+requests do not run it. Before merging a SKILL.md, references or scripts change,
+dispatch it on the branch (`gh workflow run skill-evals.yml --ref <branch>`) or run
+it locally. Details:
 `skills/ci-speedup/evals/README.md`.
 
 **Reading baseline.** Every run also records how much of `references/` the

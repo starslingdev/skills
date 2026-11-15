@@ -1,0 +1,17 @@
+name: Per-test startup
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          python -m pytest tests/case_0.py
+          python -m pytest tests/case_1.py
+          python -m pytest tests/case_2.py
+          python -m pytest tests/case_3.py
+          python -m pytest tests/case_4.py
+          python -m pytest tests/case_5.py
+          python -m pytest tests/case_6.py
+          python -m pytest tests/case_7.py
+          python -m pytest tests/case_8.py
+          python -m pytest tests/case_9.py

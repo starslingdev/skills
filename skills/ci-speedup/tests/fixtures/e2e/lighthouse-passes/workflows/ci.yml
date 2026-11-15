@@ -1,0 +1,16 @@
+name: CI
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+  gate:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Lighthouse CI (mobile)
+        run: npx lhci autorun --config=lighthouserc.mobile.json
+      - name: Lighthouse CI (desktop)
+        run: npx lhci autorun --config=lighthouserc.desktop.json

@@ -10,10 +10,12 @@ Usage:
     scan.py [--catalog PATH] [--root PATH] [--repo OWNER/REPO]
             [--gh-impostor auto|on|off]
 
-`--gh-impostor` gates the one network-gated detector (P14.11). `auto`
-(the default) runs it iff `gh` is authenticated; `on` requires it; `off`
-skips it. Every outcome is recorded in the output's `gh_checks` — a skip
-is never silence.
+`--gh-impostor` gates every GitHub API lookup the vectors make: the
+network-gated detector P14.11, and P14.24's release-immutability lookup for
+a GitHub CLI extension pinned to a tag. `auto` (the default) runs them iff
+`gh` is authenticated; `on` requires it; `off` skips them, so the scan stays
+offline. Every outcome is recorded in the output's `gh_checks` — a skip is
+never silence.
 
 Exit codes:
     0  success (with or without findings)
@@ -34,6 +36,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -99,6 +102,9 @@ class FindingExtra(Finding, total=False):
     # report renders as its "What an attacker could do" row. Absent → the
     # report falls back to the catalog's static capability line.
     attacker_scenario: str
+    # Detector-specific guidance for findings whose evidence changes the
+    # appropriate remediation within one catalog pattern.
+    fix_guidance: str
     audit_id: str
     audit_url: str
     # "source" (evidence quotes the workflow verbatim) or "derived" (evidence
@@ -424,15 +430,70 @@ class RawHit:
     # `evidence` would either lose the verbatim quote or dress the derived half
     # as source; a separate field keeps both honest.
     derived_note: str | None = None
+    # A small number of evidence-sensitive patterns have a catalog default
+    # severity but can prove a narrower risk profile for this occurrence.
+    severity_override: Severity | None = None
+    attacker_scenario: str | None = None
+    fix_strategy_override: str | None = None
+    fix_guidance: str | None = None
 
 
-def detect_regex(file_path: Path, pattern: str) -> Iterator[RawHit]:
+_TEMPLATE_EXPRESSION_RE = re.compile(r"\$\{\{(?:(?!\}\}).)*\}\}", re.DOTALL)
+_CONTEXT_PATH_RE = re.compile(
+    r"\b(?P<path>(?:inputs|client_payload|repository_dispatch\.client_payload|"
+    r"github\.event)(?:(?:\.[A-Za-z_][A-Za-z0-9_-]*)|"
+    r"(?:\s*\[\s*(?:'[^']+'|\"[^\"]+\")\s*\]))+)",
+)
+_CONTEXT_BRACKET_KEY_RE = re.compile(
+    r"\s*\[\s*(?:'(?P<single>[^']+)'|\"(?P<double>[^\"]+)\")\s*\]",
+)
+
+
+def _normalize_context_brackets(text: str) -> str:
+    """Turn quoted context indexes into dotted paths without moving offsets.
+
+    The detector patterns describe context paths in dotted form. GitHub also
+    accepts bracket indexing, which is required for names containing a hyphen.
+    Each complete bracket chain is rewritten at once so a chain such as
+    ``github.event['inputs']['max-items']`` remains one path. Spaces pad the
+    shorter dotted spelling to the original length, preserving source offsets
+    and line attribution for the raw workflow text.
+    """
+    def _replace_path(match: re.Match[str]) -> str:
+        path = match.group("path")
+
+        def _replace_key(key_match: re.Match[str]) -> str:
+            key = key_match.group("single") or key_match.group("double") or ""
+            return "." + re.sub(r"[^A-Za-z0-9_]", "_", key)
+
+        dotted = _CONTEXT_BRACKET_KEY_RE.sub(_replace_key, path)
+        # Pad before the replacement so every dotted and bracket segment stays
+        # attached. The total length is unchanged, so later source offsets
+        # still line up with the original workflow text.
+        return " " * (len(path) - len(dotted)) + dotted
+
+    def _replace_expression(match: re.Match[str]) -> str:
+        return _CONTEXT_PATH_RE.sub(_replace_path, match.group(0))
+
+    # Shell text may contain bracket-looking strings whose quoted key embeds a
+    # template expression. Rewriting the whole shell scalar would consume that
+    # expression and hide the injection, so only expression bodies are
+    # normalized.
+    return _TEMPLATE_EXPRESSION_RE.sub(_replace_expression, text)
+
+
+def detect_regex(file_path: Path, pattern: str, *,
+                 normalize_context_brackets: bool = False) -> Iterator[RawHit]:
     content = _read_text_safe(file_path)
     if not content:
         return
+    match_content = (
+        _normalize_context_brackets(content)
+        if normalize_context_brackets else content
+    )
     lines = content.splitlines()
     compiled = re.compile(pattern, re.MULTILINE)
-    for m in compiled.finditer(content):
+    for m in compiled.finditer(match_content):
         line_no = content.count("\n", 0, m.start()) + 1
         idx = line_no - 1
         start = max(0, idx - 1)
@@ -881,7 +942,7 @@ def _is_shape_safe_operand(expr: str) -> bool:
 
 
 def detect_yaml_run_injection(
-    file_path: Path, pattern: str
+    file_path: Path, pattern: str, *, normalize_context_brackets: bool = False,
 ) -> Iterator[RawHit]:
     """Apply a regex only to the text of ``jobs.*.steps.*.run`` scalars.
 
@@ -916,6 +977,10 @@ def detect_yaml_run_injection(
     if not isinstance(jobs, dict):
         return
     compiled = re.compile(pattern)
+    match_text = (
+        _normalize_context_brackets(text)
+        if normalize_context_brackets else text
+    )
     lines = text.splitlines()
     triggers = _on_trigger_names(_get_on_node(doc))
     job_nodes = _job_nodes(text)
@@ -971,7 +1036,11 @@ def detect_yaml_run_injection(
             # step.
             search_cursor = run_node.start_mark.index
             run_end = run_node.end_mark.index
-            for m in compiled.finditer(run_text):
+            match_run_text = (
+                _normalize_context_brackets(run_text)
+                if normalize_context_brackets else run_text
+            )
+            for m in compiled.finditer(match_run_text):
                 snippet = m.group(0)
                 if _is_shape_safe_expression(snippet):
                     logger.debug(
@@ -980,7 +1049,7 @@ def detect_yaml_run_injection(
                         snippet, file_path,
                     )
                     continue
-                idx = text.find(snippet, search_cursor, run_end)
+                idx = match_text.find(snippet, search_cursor, run_end)
                 if idx < 0:
                     # The match exists in the parsed scalar but not
                     # verbatim in the raw file. This happens with YAML
@@ -2263,19 +2332,54 @@ _CMD_WRAPPERS = (
     "sudo", "command", "time", "nice", "ionice", "exec", "env",
     "xvfb-run", "nohup", "setsid", "stdbuf", "timeout", "retry",
 )
+# Every piece below has exactly ONE way to read any text. Earlier forms offered
+# two (a bare value that also matched quotes, `--a` as `-`+`-a` or `--`+`a`, an
+# option value that could also be the next wrapper word), and inside the outer
+# repeat a line of repeated `_="" ` made `search()` backtrack exponentially and
+# freeze the scan. Each exclusion below drops a parse that ANOTHER branch
+# reaches at the same position in the same state, so the set of matches, and
+# the order they are tried in, stays what it was; `test_cmd_prefix_redos.py`
+# pins the agreement with the old form and the linear time.
+#
+# A bare run that opens a quoted string the quoted branch can read to its
+# end (`""`, `'a'`, `" A="`, spaces included) is left to the quoted branch.
+_NOT_ONE_QUOTED_WORD = (
+    r"(?!\"[^\"]*\"(?![^\s;&|]))(?!'[^']*'(?![^\s;&|]))"
+)
+_CMD_WRAPPER_ALT = "|".join(re.escape(w) for w in _CMD_WRAPPERS)
+# A wrapper option's value, minus the tokens the rest of the prefix already
+# reads from the same spot: a wrapper word (`sudo -x sudo …`), `export NAME=`,
+# and, unless more options or a numeric operand follow, an assignment
+# (`sudo -u A=1 npm ci`) or a numeric operand (`timeout -k 5 npm ci`).
+_WRAPPER_OPT_VALUE = (
+    r"(?!(?:" + _CMD_WRAPPER_ALT + r")[ \t])"
+    r"(?!export[ \t]+[A-Za-z_][A-Za-z0-9_]*=)"
+    r"(?!(?:[A-Za-z_][A-Za-z0-9_]*=[^\s;&|]*|\d[\w.]*)[ \t]+(?![ \t\d-]))"
+    r"[^-\s;&|][^\s;&|]*"
+)
 _CMD_PREFIX = (
     r"(?:"
-    r"(?:" + "|".join(re.escape(w) for w in _CMD_WRAPPERS) + r")"
+    r"(?:" + _CMD_WRAPPER_ALT + r")"
     # A wrapper option may carry its own VALUE (`sudo -u root`, `nice -n 10`).
     # The value is optional and cannot start with `-`, so `sudo -E npm ci`
-    # backtracks out of it rather than eating the manager.
-    r"(?:[ \t]+-{1,2}[\w-]*(?:[ \t]+[^-\s;&|][^\s;&|]*)?)*"
+    # backtracks out of it rather than eating the manager. `-[\w-]*` reads
+    # `-E` and `--preserve-env` alike.
+    r"(?:[ \t]+-[\w-]*(?:[ \t]+" + _WRAPPER_OPT_VALUE + r")?){0,16}"
     # …and a bare NUMERIC argument, for the wrappers whose first operand is a
     # duration or a count: `timeout 60 npm ci`, `retry 3 pnpm install`.
     r"(?:[ \t]+\d[\w.]*)?[ \t]+"
+    # An assignment value may be empty (`FOO= npm ci`).
     r"|(?:export[ \t]+)?[A-Za-z_][A-Za-z0-9_]*="
-    r"(?:\"[^\"]*\"|'[^']*'|[^\s;&|]*)[ \t]+"
-    r")*"
+    r"(?:\"[^\"]*\"|'[^']*'|" + _NOT_ONE_QUOTED_WORD + r"[^\s;&|]*)[ \t]+"
+    # Bounded: no real command carries 64 prefixes or a wrapper 16 options, and
+    # the bound caps the work each command-position start can do on a hostile
+    # line, so the search over a whole run block stays linear.
+    r"){0,64}"
+)
+# A yarn option's value: `=` then any value, or a space then a value that is
+# not itself the next option (`yarn -a -b` reads `-b` as an option only).
+_YARN_OPT_VALUE = (
+    r"(?:\"[^\"]*\"|'[^']*'|" + _NOT_ONE_QUOTED_WORD + r"[^\s;&|]+)"
 )
 _INSTALL_CMD_RE = re.compile(
     _CMD_START + _CMD_PREFIX +
@@ -2284,7 +2388,9 @@ _INSTALL_CMD_RE = re.compile(
     r"|pnpm\s+(?:install|i)(?![\w-])"
     r"|yarn\s+install(?![\w-])"
     r"|yarn(?!\s+-{0,2}(?:version|help|[vV]|h)(?![\w-]))"
-    r"(?:\s+-[\w-]+(?:[= ](?:\"[^\"]*\"|'[^']*'|[^\s;&|]+))?)*\s*(?:$|[\n;&|])"
+    r"(?:\s+-[\w-]+(?:=" + _YARN_OPT_VALUE + r"|[ ]"
+    r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _YARN_OPT_VALUE + r")?){0,32}"
+    r"\s*(?:$|[\n;&|])"
     r")",
     re.MULTILINE,
 )
@@ -3503,6 +3609,8 @@ _CHAIN_RELEVANT_RE = re.compile(
     # Command NAMES that fetch or execute…
     r"\b(?:git|cd|source|pip|pip3|python[0-9.]*|node|nodejs|bash|sh|zsh|ksh"
     r"|ruby|perl|php|pwsh|powershell)\b"
+    # …a GitHub CLI extension install (the third shape)…
+    r"|\bgh\s+(?:extensions?|ext)\s"
     # …and the shape of an execution that names no command at all: a PATH
     # invoked directly (`tools/setup.py --msg=…`). Without this arm a visible
     # clone followed by an unparseable `tools/setup.py` produced zero findings
@@ -3675,7 +3783,9 @@ def _ref_description(ref: str | None) -> str:
         # it stays a NOUN PHRASE — a trailing clause here produced a sentence
         # that ran on through the rest of the finding.
         return f"`{ref}` (an ABBREVIATED commit id git re-resolves at fetch time)"
-    return f"`{ref}`"
+    # `_as_written`: a `${{ }}` ref is held as an internal stand-in token, and
+    # that token reached the reader's finding text verbatim.
+    return f"`{_as_written(ref)}`"
 
 
 def _git_subcommand(tokens: list[str]) -> tuple[str | None, str | None, list[str]]:
@@ -4601,6 +4711,401 @@ def _mutable_fetch_executions(
     return sorted(pairs, key=lambda p: p[0].line)
 
 
+# --- P14.24, third shape: a GitHub CLI extension installed at a mutable ref ---
+#
+# `gh extension install OWNER/REPO` downloads the extension — a release binary,
+# or the repository's own script — at the LATEST release, or at the ref named by
+# `--pin`. A release tag or a branch is whatever that repository's owner points
+# it at when the job runs, so it is the same trust model as a `git clone` at a
+# branch, and it follows the same rule: a finding needs the install AND a later
+# run of the extension in the same job (`gh <name> …`, or `gh extension exec
+# <name>`). Only a full 40-hex `--pin` is immutable, and a local install
+# (`gh extension install .`) is the repository's own code.
+_GH_EXTENSION_GROUPS = frozenset({"extension", "extensions", "ext"})
+_GH_EXTENSION_VALUE_OPTS = frozenset({"--pin"})
+
+
+@dataclass(frozen=True)
+class _GhExtensionInstall:
+    line: int
+    raw: str
+    repo: str            # as written: OWNER/REPO, HOST/OWNER/REPO or a URL
+    name: str | None     # the command it installs; None when not knowable
+    ref: str | None      # None = the latest release (no `--pin`)
+    pos: int
+
+
+def _gh_extension_command(tokens: list[str]) -> tuple[str, list[str]] | None:
+    """(subcommand, args) for `gh extension|ext <sub> …`, else None."""
+    if len(tokens) >= 3 and tokens[0] == "gh" and tokens[1] in _GH_EXTENSION_GROUPS:
+        return tokens[2], tokens[3:]
+    return None
+
+
+def _parse_gh_extension_install(
+    args: list[str],
+) -> tuple[str | None, str | None]:
+    """(target, `--pin` value) from `gh extension install`'s arguments."""
+    target: str | None = None
+    pin: str | None = None
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        if tok.startswith("--pin="):
+            pin = tok.split("=", 1)[1]
+        elif tok in _GH_EXTENSION_VALUE_OPTS:
+            if i + 1 < len(args):
+                pin = args[i + 1]
+            i += 1
+        elif not tok.startswith("-") and target is None:
+            target = tok
+        i += 1
+    return target, pin
+
+
+def _gh_extension_is_local(target: str) -> bool:
+    return target == "." or target.startswith(("./", "../", "/", "~"))
+
+
+def _gh_extension_name(target: str) -> str | None:
+    """The command an extension repository installs: its name minus `gh-`."""
+    if "$" in target or "\x00" in target:
+        return None
+    base = target.rstrip("/").rsplit("/", 1)[-1]
+    if base.endswith(".git"):
+        base = base[: -len(".git")]
+    if base.startswith("gh-"):
+        base = base[len("gh-"):]
+    return base or None
+
+
+def _single_quoted_flags(text: str) -> list[bool]:
+    """Per character of `text`: is it inside single quotes? (`_shell_scan`'s
+    quoting rules, which do not say WHICH quote a data character sits in.)"""
+    flags: list[bool] = []
+    quote: str | None = None
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if quote != "'" and ch == "\\" and i + 1 < n:
+            flags += [False, False]
+            i += 2
+            continue
+        if quote:
+            flags.append(quote == "'")
+            if ch == quote:
+                quote = None
+        else:
+            if ch in "'\"":
+                quote = ch
+            flags.append(ch == "'")
+        i += 1
+    return flags
+
+
+def _commands_in_execution_order(command: str) -> list[str]:
+    """Each command of `command`, preceded by the commands its `$( … )`
+    substitutions run, in the order the shell runs them.
+
+    `install && out=$(gh <name>)` installs first and then runs: reading every
+    substitution body ahead of the whole line put the run before the install.
+    A substitution inside single quotes is printed text, never run, so its body
+    is not a command at all.
+    """
+    flags = _single_quoted_flags(command)
+    subs = iter(_COMMAND_SUBSTITUTION_RE.finditer(command))
+    out: list[str] = []
+    for segment in _install_command_segments(
+            _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
+        for _ in range(segment.count("$SUBST")):
+            match = next(subs, None)
+            if match is not None and not flags[match.start()]:
+                out.extend(_commands_in_execution_order(match.group(0)[2:-1]))
+        out.append(segment)
+    return out
+
+
+def _gh_extension_executions(
+    text: str, job_range: tuple[int, int] | None,
+    gap: Callable[..., None] | None = None,
+    file_path: Path | None = None,
+) -> list[tuple[_GhExtensionInstall, int, str]]:
+    """Every (mutable install, invocation line, invocation as written) in a job.
+
+    Mirrors `_mutable_fetch_executions`: both halves must be in the SAME job and
+    the invocation must come after the install it runs (or in a step that may
+    run at the same time). A mutable install with no visible invocation is a
+    coverage note — the extension may still run from a script this scan cannot
+    read — rather than a finding or a silent pass.
+    """
+    installs: list[_GhExtensionInstall] = []
+    # (position, line, extension name, invocation as written)
+    invocations: list[tuple[int, int, str, str]] = []
+    pos = 0
+    for line_no, raw, command, _new_step in _job_shell_commands(text, job_range):
+        for segment in _commands_in_execution_order(command):
+            pos += 1
+            tokens = _strip_command_prefix(_shell_tokens(segment))
+            if not tokens or tokens[0] != "gh" or len(tokens) < 2:
+                continue
+            ext = _gh_extension_command(tokens)
+            if ext is None:
+                # `gh <name> …` — a built-in command never collides with an
+                # installed extension's name (gh refuses the install), so only
+                # names a visible install provided are ever matched below.
+                invocations.append((pos, line_no, tokens[1],
+                                    f"gh {tokens[1]}"))
+                continue
+            sub, args = ext
+            if sub == "exec" and args and not args[0].startswith("-"):
+                invocations.append((pos, line_no, args[0],
+                                    f"gh {tokens[1]} exec {args[0]}"))
+                continue
+            if sub != "install":
+                continue
+            target, pin = _parse_gh_extension_install(args)
+            if not target or _gh_extension_is_local(target):
+                continue
+            if "://" in target:
+                slug_url = target
+            elif target.count("/") >= 2:            # HOST/OWNER/REPO
+                slug_url = "https://" + target
+            else:                                   # OWNER/REPO
+                slug_url = "https://github.com/" + target
+            if file_path is not None and _is_self_clone(slug_url, file_path):
+                continue
+            if pin and _FULL_SHA_RE.match(pin):
+                if gap is not None:
+                    gap(f"a GitHub CLI extension `{_as_written(target)}` on "
+                        f"line {line_no} is pinned to a full commit id, so it "
+                        f"is deliberately not reported", kind=_KIND_SUPPRESSED)
+                continue
+            installs.append(_GhExtensionInstall(
+                line_no, raw, target, _gh_extension_name(target), pin, pos))
+
+    spans = _step_spans(text)
+    pairs: list[tuple[_GhExtensionInstall, int, str]] = []
+    for idx, inst in enumerate(installs):
+        # A later install of the same extension replaces this one; it is then
+        # judged on its own.
+        until = next((later.pos for later in installs[idx + 1:]
+                      if later.name == inst.name), None)
+        hit = None
+        if inst.name is not None:
+            hit = next(
+                ((line, written) for at, line, name, written in invocations
+                 if name == inst.name
+                 and (at > inst.pos or _lines_concurrent(spans, inst.line, line))
+                 and (until is None or at < until)),
+                None,
+            )
+        if hit is not None:
+            pairs.append((inst, hit[0], hit[1]))
+        elif until is None and gap is not None:
+            gap(f"a GitHub CLI extension `{_as_written(inst.repo)}` is "
+                f"installed at a mutable reference on line {inst.line}, but "
+                f"no run of it is visible in this job, so whether it executes "
+                f"was NOT checked — review the job by hand")
+    return pairs
+
+
+def _gh_extension_ref_description(ref: str | None) -> str:
+    """`_ref_description` in the GitHub CLI's terms, not git's: `--pin` is
+    resolved by `gh` when the job installs the extension, and a binary
+    extension reads it as a release TAG name."""
+    if ref is None:
+        return "its latest release (no `--pin`)"
+    if _ABBREV_SHA_RE.match(ref):
+        return (f"`{ref}` (an ABBREVIATED commit id: the GitHub CLI resolves "
+                f"it when the job installs the extension, and a binary "
+                f"extension reads it as a release tag name, so it names no "
+                f"one fixed commit)")
+    return f"`{_as_written(ref)}`"
+
+
+# --- P14.24, gh extension arm: the release-immutability lookup -------------
+#
+# A binary extension's `--pin` names a release TAG. A release GitHub publishes
+# as IMMUTABLE locks its tag and assets, so that pin cannot move — but the
+# setting lives on GitHub, not in the workflow. With the network checks on
+# (the same `--gh-impostor` switch as P14.11, so `off` keeps every vector
+# lookup offline), each tag-pinned install that the job then runs is looked up once
+# per (repository, tag) per scan:
+#
+#   GET /repos/{owner}/{repo}/releases/tags/{tag}   → the release's
+#   `immutable` boolean.
+#
+# Only a confirmed `immutable: true` removes a finding, and it is recorded as a
+# suppression. Everything else — `false`, a 404 (no published release there, not a
+# release), an error, a rate limit, the lookup switched off — keeps today's
+# finding, and `gh_checks["P14.24"]` says how many lookups ran and why any did
+# not. The lookup can only ever remove a finding, never add one.
+_RELEASE_LOOKUP_ATTEMPTS = 3
+_RELEASE_LOOKUP_BACKOFF_S = 1.0
+_GITHUB_HOSTS = ("github.com", "www.github.com")
+
+
+@dataclass
+class _ReleaseLookupState:
+    enabled: bool = False
+    skip_reason: str = ""
+    root: Path | None = None
+    # (owner/repo lowercased, tag) → (verdict, reason). verdict is one of
+    # "immutable", "mutable", "not_release", "unknown".
+    cache: dict[tuple[str, str], tuple[str, str]] | None = None
+    # Every tag-pinned install that was paired with a run, in scan order:
+    # (shown as repo@tag (file:line), verdict, reason).
+    reached: list[tuple[str, str, str]] | None = None
+
+
+_RELEASE_LOOKUP = _ReleaseLookupState(cache={}, reached=[])
+
+
+def _reset_release_lookup(enabled: bool, skip_reason: str,
+                          root: Path | None) -> None:
+    global _RELEASE_LOOKUP
+    _RELEASE_LOOKUP = _ReleaseLookupState(
+        enabled=enabled, skip_reason=skip_reason, root=root,
+        cache={}, reached=[])
+
+
+def _extension_repo_slug(target: str) -> str | None:
+    """`owner/repo` for an extension hosted on github.com, else None."""
+    t = target
+    if "://" in t:
+        t = t.split("://", 1)[1]
+    parts = [p for p in t.rstrip("/").split("/") if p]
+    if len(parts) == 3 and parts[0].lower() in _GITHUB_HOSTS:
+        parts = parts[1:]
+    if len(parts) != 2:
+        return None
+    owner, repo = parts
+    if repo.endswith(".git"):
+        repo = repo[: -len(".git")]
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+", owner) or \
+            not re.fullmatch(r"[A-Za-z0-9_.-]+", repo):
+        return None
+    return f"{owner}/{repo}"
+
+
+def _gh_release_immutability(slug: str, tag: str) -> tuple[str, str]:
+    """(verdict, reason) for the release at `tag` in `slug`.
+
+    Transient failures (a timeout, a server error) are tried up to
+    ``_RELEASE_LOOKUP_ATTEMPTS`` times; a rate limit or an authentication
+    failure is not, since retrying cannot change it. The reason never carries
+    a response body — only a classification.
+    """
+    from urllib.parse import quote
+    from gh_utils import check_auth_error, check_rate_limit_error  # noqa: E402
+    endpoint = f"repos/{slug}/releases/tags/{quote(tag, safe='')}"
+    last = "the lookup did not complete"
+    for attempt in range(_RELEASE_LOOKUP_ATTEMPTS):
+        if attempt:
+            time.sleep(_RELEASE_LOOKUP_BACKOFF_S * attempt)
+        try:
+            result = subprocess.run(
+                # github.com only: `_extension_repo_slug` admits no other
+                # host, and `GH_HOST` must not send the question elsewhere.
+                ["gh", "api", endpoint, "--hostname", "github.com"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except FileNotFoundError:
+            return "unknown", "gh is not installed"
+        except OSError:
+            return "unknown", "gh could not be run"
+        except subprocess.TimeoutExpired:
+            last = "the GitHub API timed out"
+            continue
+        logger.debug("gh api %s — exit=%s, response %d bytes", endpoint,
+                     result.returncode, len(result.stdout or ""))
+        if result.returncode == 0:
+            try:
+                body = json.loads(result.stdout or "{}")
+            except ValueError:
+                return "unknown", "the release response was not JSON"
+            if not isinstance(body, dict):
+                return "unknown", "the release response was not an object"
+            if body.get("tag_name") != tag or body.get("draft") is True:
+                # Only the published release at exactly this tag can vouch.
+                return "unknown", ("the release response did not describe "
+                                   "the published release at this tag")
+            flag = body.get("immutable")
+            if flag is True:
+                return "immutable", ""
+            if flag is False:
+                return "mutable", ""
+            return "unknown", "the release response carried no `immutable` field"
+        stderr = result.stderr or ""
+        if "HTTP 404" in stderr or "Not Found" in stderr:
+            return "not_release", ""
+        if check_rate_limit_error(stderr)[0]:
+            return "unknown", "GitHub API rate limit reached"
+        if check_auth_error(stderr):
+            return "unknown", "gh authentication failed (run gh auth login)"
+        last = "the GitHub API returned an error"
+    return "unknown", f"{last} ({_RELEASE_LOOKUP_ATTEMPTS} attempts)"
+
+
+def _release_lookup(inst: "_GhExtensionInstall",
+                    file_path: Path) -> tuple[str, str]:
+    """Look up (or recall) the release an install's tag pin names, record the
+    outcome for `gh_checks`, and return (verdict, reason)."""
+    state = _RELEASE_LOOKUP
+    assert inst.ref is not None
+    shown_ref = _as_written(inst.ref)
+    shown_repo = _as_written(inst.repo)
+    try:
+        rel = (str(file_path.relative_to(state.root)) if state.root
+               else file_path.name)
+    except ValueError:
+        rel = file_path.name
+    label = f"{shown_repo}@{shown_ref} ({rel}:{inst.line})"
+    slug = _extension_repo_slug(inst.repo)
+    if not state.enabled:
+        verdict, reason = "unknown", state.skip_reason
+    elif "$EXPR" in inst.ref or "\x00" in inst.ref or "$" in inst.ref:
+        verdict, reason = ("unknown", "the pin is set at run time, so the "
+                           "release it names cannot be looked up")
+    elif slug is None:
+        verdict, reason = ("unknown", "the extension is not hosted on "
+                           "github.com")
+    else:
+        key = (slug.lower(), inst.ref)
+        assert state.cache is not None
+        if key not in state.cache:
+            state.cache[key] = _gh_release_immutability(slug, inst.ref)
+        verdict, reason = state.cache[key]
+    assert state.reached is not None
+    state.reached.append((label, verdict, reason))
+    return verdict, reason
+
+
+def _release_lookup_status() -> tuple[str | None, list[str]]:
+    """The `gh_checks["P14.24"]` status and its unverified list, or
+    (None, []) when the scan reached no tag-pinned extension that runs."""
+    state = _RELEASE_LOOKUP
+    reached = state.reached or []
+    if not reached:
+        return None, []
+    n = len(reached)
+    if not state.enabled:
+        return (f"skipped: {state.skip_reason} (release-immutability lookup "
+                f"did NOT run; {n} tag-pinned GitHub CLI extension install(s) "
+                f"kept as findings)"), []
+    immutable = sum(1 for _, v, _ in reached if v == "immutable")
+    unknown = [(label, reason) for label, v, reason in reached
+               if v == "unknown"]
+    kept = n - immutable
+    if unknown:
+        return (f"partial: {n - len(unknown)} of {n} tag-pinned GitHub CLI "
+                f"extension install(s) looked up, {immutable} immutable (not "
+                f"reported), {len(unknown)} UNVERIFIED — kept as findings"), \
+            [f"{label} — {reason}" for label, reason in unknown]
+    return (f"ran: {n} tag-pinned GitHub CLI extension install(s) looked up, "
+            f"{immutable} immutable (not reported), {kept} reported"), []
+
+
 def _pin_races(pin_line: int | None, lines: tuple[int, ...],
                racing: Callable[[int, int], bool], concurrency: bool) -> bool:
     """A pin may run at the same time as one of `lines` (the fetch, the
@@ -4667,7 +5172,7 @@ def _correlation_unverified_remote_code_execution(
                 # line byte-identical and the second chain vanished with no
                 # record anywhere.
                 match_text=(f"fetch into {_as_written(fetch.dest)} at "
-                            f"{fetch.ref or 'HEAD'}"),
+                            f"{_as_written(fetch.ref or 'HEAD')}"),
                 derived_note=(
                     (f"jobs.{job_name} checks out `{fetch.source}` at "
                      if fetch.source else
@@ -4680,6 +5185,55 @@ def _correlation_unverified_remote_code_execution(
                     f"line {exec_line}. "
                     f"A full 40-character commit id is the only reference that "
                     f"cannot change under you."
+                ),
+            )
+
+        for inst, exec_line, invoked in _gh_extension_executions(
+            text, job_range, _gap, file_path,
+        ):
+            # `--pin=` with no value installs the latest release, as no pin.
+            pin = inst.ref or None
+            ref_text = _gh_extension_ref_description(pin)
+            observed = ""
+            offline = " (not visible offline)"
+            if pin is not None and not _ABBREV_SHA_RE.match(pin):
+                verdict, _reason = _release_lookup(inst, file_path)
+                if verdict == "immutable":
+                    _gap(f"a GitHub CLI extension `{_as_written(inst.repo)}` "
+                         f"on line {inst.line} is pinned to release tag "
+                         f"`{_as_written(inst.ref)}`, which GitHub reports as "
+                         f"an immutable release (its tag and assets cannot "
+                         f"change), so it is deliberately not reported",
+                         kind=_KIND_SUPPRESSED)
+                    continue
+                if verdict in ("mutable", "not_release"):
+                    offline = ""             # the scan did look
+                if verdict == "mutable":
+                    observed = (" GitHub reports this release is NOT "
+                                "immutable, so its tag can be moved.")
+                elif verdict == "not_release":
+                    observed = (" GitHub returned no published release at "
+                                "this tag: it may be a branch, a bare tag or "
+                                "a repository this scan cannot see, and "
+                                "nothing shows it is locked.")
+            yield RawHit(
+                line=inst.line,
+                evidence=f"{inst.line:>4}: {inst.raw}  <-- here",
+                match_text=(f"gh extension {_as_written(inst.repo)} at "
+                            f"{_as_written(inst.ref or 'latest release')}"),
+                derived_note=(
+                    f"jobs.{job_name} installs the GitHub CLI extension "
+                    f"`{_as_written(inst.repo)}` at {ref_text} — a MUTABLE "
+                    f"reference, so what is installed is whatever that "
+                    f"repository's owner publishes under it at the moment the "
+                    f"job runs — and then runs it as `{invoked}` at line "
+                    f"{exec_line}. For a script extension, a full "
+                    f"40-character commit id passed to `--pin` cannot change "
+                    f"under you; a binary extension's `--pin` names a release "
+                    f"tag, which is fixed only when that release is published "
+                    f"as immutable{offline} — otherwise download "
+                    f"the release asset, verify its digest and run the local "
+                    f"copy." + observed
                 ),
             )
 
@@ -5151,6 +5705,10 @@ def _walk_pull_requests_write(
         )
         return
     if isinstance(node, dict):
+        permissions = node.get("permissions")
+        if isinstance(permissions, str) \
+                and permissions.strip().lower() == "write-all":
+            yield path + ("permissions",)
         if (
             "pull-requests" in node
             and isinstance(node["pull-requests"], str)
@@ -5206,6 +5764,107 @@ def _find_pull_requests_write_line(lines: list[str]) -> int | None:
     return None
 
 
+def _p1418_grants_pr_write(permissions: Any) -> bool:
+    """Whether one workflow/job permissions value grants PR write access."""
+    if isinstance(permissions, str):
+        return permissions.strip().lower() == "write-all"
+    if not isinstance(permissions, dict):
+        return False
+    value = permissions.get("pull-requests")
+    return isinstance(value, str) and value.strip().lower() == "write"
+
+
+def _p1418_write_scoped_jobs(doc: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
+    """Jobs whose effective permissions include ``pull-requests: write``.
+
+    A job-level permissions block replaces the workflow-level block; an
+    unrelated read-only job therefore cannot lend its steps to the job that
+    owns the write token, or make that token look more dangerous than it is.
+    """
+    workflow_write = _p1418_grants_pr_write(doc.get("permissions"))
+    scoped: list[tuple[str, dict[str, Any]]] = []
+    for name, job in _walk_jobs(doc):
+        if "permissions" in job:
+            has_write = _p1418_grants_pr_write(job.get("permissions"))
+        else:
+            has_write = workflow_write
+        if has_write:
+            scoped.append((name, job))
+    return scoped
+
+
+_P1418_COSMETIC_CALL_RE = re.compile(
+    r"^\s*(?:await\s+)?(?:github\.)?(?:rest\.)?issues\."
+    r"(?:addLabels|createComment)\s*\(",
+    re.I,
+)
+
+
+def _p1418_is_one_cosmetic_call(script: str) -> bool:
+    """Prove the narrow inline-script shape eligible for MEDIUM.
+
+    The accepted program is exactly one label/comment API call. Its argument
+    may be an object or arrays of literal labels, but it may not contain a
+    nested call, a template expression, or trailing JavaScript. This is
+    intentionally a positive proof rather than a deny-list of dangerous JS.
+    """
+    if "${{" in script or "`" in script:
+        return False
+    match = _P1418_COSMETIC_CALL_RE.match(script)
+    if match is None:
+        return False
+    opening = match.end() - 1
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index in range(opening, len(script)):
+        char = script[index]
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        # This is a deliberately small recognizer, not a JavaScript parser.
+        # Quotes inside comments and regex literals have different lexical
+        # rules and can otherwise desynchronise the string state below.  Fail
+        # closed on every such shape instead of proving it cosmetic.
+        if char == "/" or script.startswith("<!--", index):
+            return False
+        if char in ("'", '"', "`"):
+            quote = char
+        elif char == "(":
+            depth += 1
+            if depth > 1:
+                return False
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return not script[index + 1:].strip().strip(";").strip()
+            if depth < 0:
+                return False
+    return False
+
+
+def _p1418_script_risk(script: str) -> str | None:
+    """Specific HIGH reason for a script, before the generic fail-closed one."""
+    for expression in re.findall(r"\$\{\{.*?\}\}", script, re.S):
+        lowered = expression.lower()
+        if ("github.event.pull_request." in lowered or "github.head_ref" in lowered) \
+                and not _is_shape_safe_expression(expression):
+            return "executes attacker-controlled PR text"
+    flattened = re.sub(r"[\s.\[\]'\"]+", ".", script.lower())
+    if "pulls.createreview" in flattened \
+            or re.search(r"/pulls/[^'\"\s]+/reviews\b", script, re.I):
+        return "review API"
+    if "pulls.merge" in flattened \
+            or re.search(r"/pulls/[^'\"\s]+/merge\b", script, re.I):
+        return "merge API"
+    return None
+
+
 def _correlation_pr_write_and_untrusted_trigger(
     file_path: Path,
 ) -> Iterator[RawHit]:
@@ -5229,14 +5888,93 @@ def _correlation_pr_write_and_untrusted_trigger(
     line = _find_pull_requests_write_line(text.splitlines()) or _find_line_for_top_level_key(
         text.splitlines(), "permissions"
     ) or 1
+    risk_reasons: list[str] = []
+    scoped_jobs = _p1418_write_scoped_jobs(doc)
+    # A job-level permissions block replaces the workflow-level grant.  A
+    # workflow-wide write-all declaration therefore exposes no PR-write token
+    # when every job narrows it to a read-only block.
+    if not scoped_jobs:
+        return
+    all_scoped_jobs_cosmetic = bool(scoped_jobs)
+    for _job_name, job in scoped_jobs:
+        steps = _job_steps(job)
+        job_is_cosmetic = len(steps) == 1
+        if not steps:
+            job_is_cosmetic = False
+        for step in steps:
+            uses = step.get("uses")
+            with_block = step.get("with")
+            if isinstance(uses, str) and uses.startswith("actions/checkout") \
+                    and isinstance(with_block, dict) \
+                    and any(_attacker_head_ref(with_block.get(key))
+                            for key in ("ref", "repository")):
+                risk_reasons.append("checks out attacker-head PR code")
+            run = step.get("run")
+            if isinstance(run, str) and re.search(
+                r"\$\{\{\s*(?:github\.event\.pull_request\.(?!number\b|id\b|commits\b|sha\b|head_sha\b|merge_commit_sha\b|fork\b|merged\b|author_association\b)|github\.head_ref\b)",
+                run,
+            ):
+                risk_reasons.append("executes attacker-controlled PR text")
+            script = with_block.get("script") if isinstance(with_block, dict) else None
+            action_id = uses.split("@", 1)[0].lower() if isinstance(uses, str) else ""
+            is_github_script = (
+                action_id == "actions/github-script"
+                and isinstance(script, str)
+            )
+            if is_github_script:
+                specific_risk = _p1418_script_risk(script)
+                if specific_risk:
+                    risk_reasons.append(specific_risk)
+                if not _p1418_is_one_cosmetic_call(script):
+                    job_is_cosmetic = False
+            else:
+                job_is_cosmetic = False
+        all_scoped_jobs_cosmetic = all_scoped_jobs_cosmetic and job_is_cosmetic
+
+    # Preserve order while keeping the evidence compact when two risky legs
+    # coexist in one workflow.
+    risk_reasons = list(dict.fromkeys(risk_reasons))
+    if not risk_reasons and not all_scoped_jobs_cosmetic:
+        risk_reasons.append(
+            "workflow is not limited to label/comment-only github-script automation"
+        )
+    if risk_reasons:
+        profile = "; HIGH because " + ", ".join(risk_reasons)
+        severity_override: Severity | None = None
+        attacker_scenario = None
+        fix_strategy_override = None
+        fix_guidance = None
+    else:
+        profile = (
+            "; MEDIUM hygiene: no checkout, no PR-code execution, and no "
+            "review/merge API"
+        )
+        severity_override = "MEDIUM"
+        attacker_scenario = (
+            "A pull request author can influence cosmetic label or comment "
+            "automation, but this workflow does not execute PR content or "
+            "call review or merge APIs."
+        )
+        fix_strategy_override = "limit-cosmetic-pr-automation"
+        fix_guidance = (
+            "Keep the job limited to cosmetic labeling or commenting; remove "
+            "`pull-requests: write` if it is unused, and do not add PR-head "
+            "checkout, PR-controlled execution, or review/merge API calls."
+        )
+
     yield RawHit(
         line=line,
         evidence=(
             f"{line:>4}: workflow triggers on {sorted(untrusted)} AND "
-            f"grants `pull-requests: write` at scope `{sample_scope}` <-- here"
+            f"grants `pull-requests: write` at scope `{sample_scope}`"
+            f"{profile} <-- here"
         ),
         match_text=sample_scope,
         derived=True,
+        severity_override=severity_override,
+        attacker_scenario=attacker_scenario,
+        fix_strategy_override=fix_strategy_override,
+        fix_guidance=fix_guidance,
     )
 
 
@@ -5464,6 +6202,221 @@ def _collect_sha_pins(
     return pins
 
 
+# ---- GitHub Actions workflow lockfile ---------------------------------------
+#
+# `gh actions-lock` writes `.github/workflows/actions.lock`: the workflow YAML
+# keeps `uses: owner/repo@v7.0.1` and the commit that runs lives only in the
+# lockfile. For a workflow listed under `workflows:`, GitHub runs the locked
+# commit and, at run time, rejects one that is not reachable from its recorded
+# ref or whose owner/repository identity no longer matches. P14.11 reads only
+# full-commit `uses:` pins, so on a locked repository it has nothing to check;
+# `_action_lockfile_summary` makes that visible instead of silent.
+#
+# A minimal, fail-closed reader of the same format ci-score credits (skills
+# install standalone, so no cross-skill import). Its accept/reject verdict is
+# pinned against ci-score's reader by tests/test_action_lockfile_parity.py at
+# the repo root. Shape (format v0.0.x):
+#   version: 'v0.0.3'
+#   workflows: {'.github/workflows/ci.yml': ['actions/checkout@v7.0.1', ...]}
+#   dependencies: {'actions/checkout@v7.0.1': {ref, commit: 'sha1-<40 hex>',
+#                                              owner_id, repo_id, uses?}}
+_LOCKFILE_REL = ".github/workflows/actions.lock"
+_LOCK_COMMIT_RE = re.compile(r"\Asha1-[0-9a-f]{40}\Z")
+_LOCK_VERSIONS = ("v0.0.2", "v0.0.3")  # the versions ci-score accepts (GitHub's docs show v0.0.3)
+_LOCK_WORKFLOW_KEY_RE = re.compile(r"\A\.github/workflows/[^/]+\Z")
+_LOCK_SHA40_RE = re.compile(r"\A[0-9a-f]{40}\Z")
+
+
+class _StrictLockLoader(yaml.SafeLoader):
+    """SafeLoader that refuses a duplicated mapping key: plain yaml keeps the
+    LAST of two equal keys, so a malformed entry followed by a valid one would
+    read as valid."""
+
+
+def _lock_no_duplicate_keys(loader: yaml.SafeLoader, node: Any,
+                            deep: bool = False) -> Any:
+    seen: set[Any] = set()
+    for key_node, _value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            dup = key in seen
+            seen.add(key)
+        except TypeError:
+            raise yaml.YAMLError("unhashable mapping key")
+        if dup:
+            raise yaml.YAMLError(f"duplicated key {key!r}")
+    return loader.construct_mapping(node, deep=deep)
+
+
+_StrictLockLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _lock_no_duplicate_keys)
+
+
+def _lock_ref_key(text: Any) -> str | None:
+    """`owner/repo[/path]@ref` → the lookup key (owner/repo matched
+    case-insensitively, as GitHub resolves them; the ref exactly)."""
+    if not isinstance(text, str) or "@" not in text:
+        return None
+    action, _, ref = text.partition("@")
+    return f"{action.strip().lower()}@{ref.strip()}"
+
+
+def _load_action_lockfile(root: Path) -> tuple[str, dict[str, set[str]]]:
+    """(state, per_workflow): state is "absent", "valid" or "invalid";
+    per_workflow maps each listed workflow to the reference keys locked for it.
+
+    Fails CLOSED — anything this reader cannot fully vouch for is "invalid"
+    and covers nothing: a file not spelled exactly `actions.lock` (GitHub
+    reads only that path), a symbolic link, unreadable bytes, YAML that does
+    not parse or repeats a key, an unknown top-level key, an undocumented
+    format version, a commit that is not `sha1-` plus 40 hex, a missing ref /
+    owner_id / repo_id, an entry whose `ref` disagrees with its key, a
+    reference listed (or named in `uses:`) with no entry of its own, or a
+    workflow key that is not exactly `.github/workflows/<file>`."""
+    bad: tuple[str, dict[str, set[str]]] = ("invalid", {})
+    wf_dir = root / ".github" / "workflows"
+    try:
+        names = os.listdir(wf_dir)
+    except OSError:
+        return "absent", {}
+    if "actions.lock" not in names:
+        # A case variant is not GitHub's lockfile either; it covers nothing.
+        return ("invalid", {}) if any(n.lower() == "actions.lock" for n in names) \
+            else ("absent", {})
+    path = wf_dir / "actions.lock"
+    if path.is_symlink() or not path.is_file():
+        return bad
+    try:
+        loader = _StrictLockLoader(path.read_text(encoding="utf-8"))
+        try:
+            doc = loader.get_single_data()
+        finally:
+            loader.dispose()
+    except (OSError, ValueError, yaml.YAMLError):
+        return bad
+    if not isinstance(doc, dict) or set(doc) - {"version", "workflows", "dependencies"}:
+        return bad
+    wfs, deps = doc.get("workflows"), doc.get("dependencies")
+    if (doc.get("version") not in _LOCK_VERSIONS
+            or not isinstance(wfs, dict) or not isinstance(deps, dict)):
+        return bad
+    valid: set[str] = set()
+    nested: set[str] = set()
+    for key, entry in deps.items():
+        k = _lock_ref_key(key)
+        if (k is None or not isinstance(entry, dict)
+                or not isinstance(entry.get("ref"), str)
+                or not (isinstance(entry.get("commit"), str)
+                        and _LOCK_COMMIT_RE.match(entry["commit"]))
+                or not all(isinstance(entry.get(f), int)
+                           and not isinstance(entry.get(f), bool)
+                           for f in ("owner_id", "repo_id"))):
+            return bad
+        key_ref = key.partition("@")[2].strip()
+        if _LOCK_SHA40_RE.match(key_ref):
+            if entry["commit"] != f"sha1-{key_ref}":
+                return bad
+        elif entry["ref"] != key_ref:
+            return bad
+        uses = entry.get("uses", [])
+        if not isinstance(uses, list) or any(_lock_ref_key(u) is None for u in uses):
+            return bad
+        valid.add(k)
+        nested.update(_lock_ref_key(u) for u in uses)
+    per_workflow: dict[str, set[str]] = {}
+    for wf, refs in wfs.items():
+        if (not isinstance(wf, str) or not isinstance(refs, list)
+                or not _LOCK_WORKFLOW_KEY_RE.match(wf)
+                or os.path.normpath(wf) != wf or wf in per_workflow):
+            return bad
+        keys = [_lock_ref_key(r) for r in refs]
+        if any(k is None or k not in valid for k in keys):
+            return bad
+        per_workflow[wf] = set(keys)
+    if not nested <= valid:
+        return bad
+    return "valid", per_workflow
+
+
+def _lock_step_uses(doc: Any) -> Iterator[str]:
+    """Each step-level `uses:` value (`jobs.<id>.steps[].uses`), in order.
+
+    Deliberately NOT `_walk_uses_values`: GitHub's lockfile does not pin a
+    call to a reusable workflow (`jobs.<id>.uses`), so a lockfile entry for
+    one is never verified at run time, and an action input named `uses`
+    under `with:` is not a reference at all. Same rule as ci-score's
+    `_step_uses`."""
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return
+    for job in jobs.values():
+        steps = job.get("steps") if isinstance(job, dict) else None
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if isinstance(step, dict) and isinstance(step.get("uses"), str):
+                yield step["uses"].strip()
+
+
+def _lockfile_display_path(root: Path, state: str) -> str:
+    """The lockfile path to name: a case variant (`Actions.lock`) is named as
+    it is on disk, so the report never points at a file that is not there."""
+    if state != "invalid":
+        return _LOCKFILE_REL
+    try:
+        names = os.listdir(root / ".github" / "workflows")
+    except OSError:
+        return _LOCKFILE_REL
+    if "actions.lock" in names:
+        return _LOCKFILE_REL
+    variants = sorted(n for n in names if n.lower() == "actions.lock")
+    return f".github/workflows/{variants[0]}" if variants else _LOCKFILE_REL
+
+
+def _action_lockfile_summary(root: Path,
+                             workflow_files: list[Path]) -> dict[str, Any]:
+    """What the lockfile covers that P14.11 does not read.
+
+    Counts each step-level `uses:` occurrence, in a scanned workflow the
+    lockfile lists, whose ref is NOT a full commit and that the lockfile
+    locks for that workflow — the references whose commit lives only in the
+    lockfile. A full-commit pin is left to P14.11, which checks it directly;
+    a reusable-workflow call is never counted (the lockfile does not pin
+    it). Always returns the key set so report.py can rely on it."""
+    state, per_workflow = _load_action_lockfile(root)
+    covered = 0
+    covered_workflows: list[str] = []
+    if state == "valid":
+        for wf in workflow_files:
+            rel = _repo_relative(str(wf), root)
+            locked = per_workflow.get(rel)
+            if not locked:
+                continue
+            text = _read_text_safe(wf)
+            doc = _parse_yaml_text(text, wf, quiet=True) if text else None
+            if not isinstance(doc, dict):
+                continue  # an unparseable workflow is already a coverage gap
+            n = 0
+            for value in _lock_step_uses(doc):
+                k = _lock_ref_key(value)
+                if (k is None or value.startswith(("./", "docker://"))
+                        or _LOCK_SHA40_RE.match(k.rpartition("@")[2].lower())):
+                    continue
+                if k in locked:
+                    n += 1
+            if n:
+                covered += n
+                covered_workflows.append(rel)
+    logger.debug("action lockfile: state=%s, %d reference(s) in %d workflow(s)",
+                 state, covered, len(covered_workflows))
+    return {
+        "path": _lockfile_display_path(root, state),
+        "state": state,
+        "covered_references": covered,
+        "covered_workflows": covered_workflows,
+    }
+
+
 @lru_cache(maxsize=None)
 def _gh_repo_visible(repo: str) -> bool:
     """Can this `gh` identity see `repo` at all? The commit endpoint answers
@@ -5474,7 +6427,8 @@ def _gh_repo_visible(repo: str) -> bool:
     a CRITICAL impostor finding."""
     try:
         result = subprocess.run(
-            ["gh", "api", f"repos/{repo}", "--silent"],
+            ["gh", "api", f"repos/{repo}", "--silent",
+             "--hostname", "github.com"],
             capture_output=True, text=True, timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -5495,7 +6449,8 @@ def _gh_commit_probe(repo: str, sha: str) -> bool | None:
     """
     try:
         result = subprocess.run(
-            ["gh", "api", f"repos/{repo}/commits/{sha}", "--silent"],
+            ["gh", "api", f"repos/{repo}/commits/{sha}", "--silent",
+             "--hostname", "github.com"],
             capture_output=True, text=True, timeout=30,
         )
     except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -5553,7 +6508,8 @@ def _gh_peel_tag_object(repo: str, sha: str) -> tuple[str | None, bool]:
         seen.add(current)
         try:
             result = subprocess.run(
-                ["gh", "api", f"repos/{repo}/git/tags/{current}"],
+                ["gh", "api", f"repos/{repo}/git/tags/{current}",
+                 "--hostname", "github.com"],
                 capture_output=True, text=True, timeout=30,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError):
@@ -5759,6 +6715,13 @@ def _dedupe_occurrences(findings: list[Finding]) -> list[Finding]:
 _DEFAULT_GH_SKIP_REASON = "gh not authenticated (run gh auth login)"
 
 
+def _gh_unavailable_reason() -> str:
+    """Specific guidance when the optional gh-backed checks cannot run."""
+    if shutil.which("gh") is None:
+        return "gh not installed (install the GitHub CLI)"
+    return _DEFAULT_GH_SKIP_REASON
+
+
 def scan(
     catalog: list[CatalogEntry],
     root: Path,
@@ -5766,8 +6729,27 @@ def scan(
     gh_impostor: bool = False,
     gh_skip_reason: str = _DEFAULT_GH_SKIP_REASON,
 ) -> dict[str, Any]:
+    try:
+        return _scan_once(catalog, root, repo, gh_impostor, gh_skip_reason)
+    finally:
+        # Back to offline on EVERY exit, a raised CoverageError included: a
+        # detector called outside a scan never reaches the network on the
+        # strength of an earlier scan's switch.
+        _reset_release_lookup(False, _DEFAULT_GH_SKIP_REASON, None)
+
+
+def _scan_once(
+    catalog: list[CatalogEntry],
+    root: Path,
+    repo: str | None,
+    gh_impostor: bool,
+    gh_skip_reason: str,
+) -> dict[str, Any]:
     _DROPPED_MATCHES.clear()
     _reset_expression_tokens()
+    # P14.24's release-immutability lookup rides the same network switch as
+    # P14.11, so `--gh-impostor off` keeps every vector lookup offline.
+    _reset_release_lookup(gh_impostor, gh_skip_reason, root)
     _PARSE_FAILURES_LOGGED.clear()
     workflow_files = all_workflow_files(root)
     missed = _undiscovered_workflows(root, workflow_files)
@@ -5933,7 +6915,10 @@ def scan(
 
             if entry.detector == "regex":
                 assert entry.match is not None  # validated in __post_init__
-                hits = list(detect_regex(wf, entry.match))
+                hits = list(detect_regex(
+                    wf, entry.match,
+                    normalize_context_brackets=entry.pattern == "P14.15",
+                ))
             elif entry.detector == "yaml-path":
                 assert entry.yaml_path is not None
                 hits = list(
@@ -5947,7 +6932,10 @@ def scan(
                 hits = list(detect_yaml_on_trigger(wf, entry.trigger_keys))
             elif entry.detector == "yaml-run-injection":
                 assert entry.match is not None
-                hits = list(detect_yaml_run_injection(wf, entry.match))
+                hits = list(detect_yaml_run_injection(
+                    wf, entry.match,
+                    normalize_context_brackets=entry.pattern == "P14.10",
+                ))
             elif entry.detector == "yaml-job-correlated":
                 assert entry.correlation, "validated in __post_init__"
                 corr_fn = _JOB_CORRELATIONS.get(entry.correlation)
@@ -6017,7 +7005,7 @@ def scan(
                 fmt_vars = {
                     "basename": basename,
                     "pattern": entry.pattern,
-                    "severity": entry.severity,
+                    "severity": hit.severity_override or entry.severity,
                     "match_text": hit.match_text,
                 }
                 try:
@@ -6034,7 +7022,7 @@ def scan(
                 findings.append({
                     "id": f"f{finding_seq}",
                     "pattern": entry.pattern,
-                    "severity": entry.severity,
+                    "severity": hit.severity_override or entry.severity,
                     "title": title,
                     "workflow_file": rel,
                     "line": hit.line,
@@ -6055,7 +7043,13 @@ def scan(
                     # the two differently so a derived sentence is never
                     # dressed as source the reader can go and find.
                     "evidence_kind": "derived" if hit.derived else "source",
-                    "fix_strategy": entry.fix_strategy,
+                    "fix_strategy": (
+                        hit.fix_strategy_override or entry.fix_strategy
+                    ),
+                    **({"attacker_scenario": hit.attacker_scenario}
+                       if hit.attacker_scenario else {}),
+                    **({"fix_guidance": hit.fix_guidance}
+                       if hit.fix_guidance else {}),
                     "fix_recipe_anchor": entry.anchor,
                     # `risk` and `risk_note` are deliberately absent.
                     # The orchestrator scores them per group against
@@ -6105,6 +7099,15 @@ def scan(
     # report's "…were NOT scanned…" headline — a computed `working-directory:`
     # is a real gap the headline does not describe, and a pin suppression is
     # not a gap at all.
+    # Recorded only when the scan reached a tag-pinned GitHub CLI extension
+    # that its job runs: every other repository's output is unchanged.
+    # `scan()` switches the lookup back off once this returns or raises.
+    lookup_status, lookup_unverified = _release_lookup_status()
+    if lookup_status is not None:
+        gh_checks["P14.24"] = lookup_status
+        if lookup_unverified:
+            gh_check_details["P14.24"] = {"unverified": lookup_unverified}
+
     dropped_matches: list[dict[str, str]] = []
     coverage_notes: list[dict[str, str]] = []
     suppressed_findings: list[dict[str, str]] = []
@@ -6195,6 +7198,13 @@ def scan(
         # other (control steps hold no code), and the count is disclosed so
         # that is never left implicit.
         "parallel_steps": parallel_steps,
+        # The workflow lockfile (`.github/workflows/actions.lock`): its state
+        # and how many tag-pinned `uses:` references it locks to a commit in
+        # the workflows it lists. Informational, never a coverage gap: GitHub
+        # verifies each locked commit at run time, and P14.11 reads only
+        # full-commit `uses:` pins, so without this a locked repository's
+        # impostor check would go quiet with no sign of why.
+        "action_lockfile": _action_lockfile_summary(root, workflow_files),
         # Findings the scanner REACHED and deliberately did not report, above
         # all a fetch pinned to a full commit id. Informational: this must
         # never degrade coverage, or a repository that did exactly what the fix
@@ -6308,9 +7318,10 @@ def main(argv: list[str] | None = None) -> int:
         choices=["auto", "on", "off"],
         default="auto",
         help=(
-            "The P14.11 impostor-SHA check needs the GitHub API. auto "
-            "(default): run iff gh is authenticated; on: require it (error "
-            "if gh unavailable); off: skip (recorded loudly in gh_checks)."
+            "The P14.11 impostor-SHA check and P14.24's release-"
+            "immutability lookup need the GitHub API. auto (default): run "
+            "iff gh is authenticated; on: require it (error if gh "
+            "unavailable); off: skip (recorded loudly in gh_checks)."
         ),
     )
     args = parser.parse_args(argv)
@@ -6346,13 +7357,12 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    gh_skip_reason = _DEFAULT_GH_SKIP_REASON
+    gh_skip_reason = _gh_unavailable_reason()
     if args.gh_impostor == "on":
         from gh_utils import check_prereqs  # noqa: E402
         if not check_prereqs():
             print(
-                "ERROR: --gh-impostor=on but gh is not authenticated "
-                "(gh auth login)",
+                f"ERROR: --gh-impostor=on but {gh_skip_reason}",
                 file=sys.stderr,
             )
             return 2

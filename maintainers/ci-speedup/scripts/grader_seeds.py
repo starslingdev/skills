@@ -56,12 +56,13 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 91 AUTO_SEED / 1 EXCLUDE /
+# name is in the trailing comment for cross-reference with spec §2-A. 93 AUTO_SEED / 1 EXCLUDE /
 # 3 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
     "wall-clock headline carries next gate and verification guidance": AUTO_SEED,
     "per-commit wall-clock projections are physically bounded": AUTO_SEED,
+    "OPT21 edge sizing re-derives from the workflow graph": AUTO_SEED,
     "primary section present (Long poles)": AUTO_SEED,                                              # check_primary_section_present
     "static-only banner matches CI shape": AUTO_SEED,                                               # check_static_only_banner_matches_ci_shape
     "headline names the wall-clock (merge-wait) axis": AUTO_SEED,                                   # check_headline_names_wall_clock
@@ -187,6 +188,7 @@ CLASS_ENUM = frozenset({
 # instances of the same underlying defect shape, and for the audit trail.
 CHECK_CLASS = {
     "per-commit wall-clock projections are physically bounded": "fabricated-or-unsupported-finding",
+    "OPT21 edge sizing re-derives from the workflow graph": "fabricated-or-unsupported-finding",
     "primary section present (Long poles)": "missing-phase-check",                       # a required phase section is absent
     "static-only banner matches CI shape": "fabricated-or-unsupported-finding",          # dormant-repo banner asserted at a live no-PR-gating repo / "no run timing" beside priced timed runs — the report contradicts its own data
     "headline names the wall-clock (merge-wait) axis": "ambiguous-phase-instruction",     # headline mislabels the axis it renders

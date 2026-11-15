@@ -9,7 +9,8 @@ jobs:
   test:
     strategy:
       matrix:
-        shard: [api-20, api-22, web-20, web-22]
+        package: [api, web]
+        runtime: [20, 22]
     runs-on: ubuntu-latest
     steps:
       - name: Setup

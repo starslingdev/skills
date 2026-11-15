@@ -94,6 +94,12 @@ pattern/workflow names — never gh response bodies**, so secrets returned by gh
 API calls won't appear. Workflow file paths and pattern names DO appear; review a
 captured log before sharing it externally if your workflow names are sensitive.
 
+## Registry-scanner triggers
+
+Before changing anything under `skills/`, check it against the five shapes the
+registry security scan has flagged before; the table and the two hand-review
+rules live in AGENTS.md, section "Registry-scanner triggers".
+
 ## Registry audit triage (maintainers-only)
 
 When a published skill shows a failing security audit on skills.sh, do NOT

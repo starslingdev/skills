@@ -11,8 +11,58 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- P14.18 now keeps `pull_request_target` automation HIGH when it checks out
+  attacker-head code, executes PR-controlled text, or calls review/merge APIs,
+  while classifying label/comment-only jobs with none of those paths as MEDIUM
+  hygiene and recommending that their cosmetic scope stay narrow. Its
+  fail-closed script proof now rejects comments and regex literals, recognizes
+  effective `write-all` grants, and gives cosmetic jobs a completion check that
+  permits a still-required `pull-requests: write` grant.
+
 ### Added
 
+- **2026-11-12** (#341) — ci-secure: a new API-gated config hygiene check,
+  `sec.default-branch.review-required`, and the incident that grounds it.
+  The check passes when the default branch, through an active ruleset or
+  classic branch protection, needs a pull request with at least one approval
+  and either dismisses stale approvals on a new push or requires approval of
+  the most recent push; it fails when no pull request is required, the
+  approval count is 0, or neither stale-approval setting is on, naming which.
+  Anyone short of an admin who can skip the review fails it, named in the
+  evidence: a ruleset bypass actor that is an app, a deploy key, a team, a
+  user or a non-admin role (including "For pull requests only" bypass,
+  which still lets them merge without the approval), and classic
+  protection's bypass allowances; repositories with such bypassers fail
+  this check. Admins qualify a pass in its evidence. An unreadable bypass
+  list, like any unreadable setting, is unmeasured, never a pass. The
+  environment checks and this one share one reading of a bypass actor. It reads the rules endpoint first (read access)
+  and classic protection only when the rules alone do not hold. Fourteen
+  facts now; up to seven are API-gated. The catalog's Reference incidents
+  records the November 2026 compromised GitHub accounts CI secret stealer
+  campaign as the grounding for this check and for
+  `sec.secrets.environment-scoped`; it is not cited as a vector incident,
+  because the attacker already held a push credential. The environment
+  secrets checks now say what is at stake: a failing
+  `sec.secrets.environment-scoped` states that any workflow pushed to any
+  branch can read its N secrets, so one leaked push credential exposes them
+  all with no review and no merge, and that the fix is an environment only
+  protected branches can use (one that passes the branch-restriction check); it names them (never values), up to 10 per
+  list and then `and N more`. A failing `sec.environments.branch-restricted`
+  says an environment any branch can use protects nothing from a pushed
+  workflow. When the secrets check fails, the report also puts a short
+  **Secrets reachable from any branch** callout under its headline (a
+  blockquote linking to the "If a push credential leaks" section; it adds
+  nothing to the vector count), and the terminal summary leads its hygiene
+  clause with it. The findings JSON shape is unchanged. The new check also
+  recognizes a plain `Not Found (HTTP 404)` from classic branch protection
+  as GitHub's ordinary hide from a non-admin reader (the same reading as the
+  required-checks fix below, #327). Hidden classic protection can only add
+  review rules, so rulesets that hold on their own still pass, and rulesets
+  that fall short are unmeasured, never a fail: the evidence says classic
+  protection is hidden from this reader and an admin can confirm. A 5xx
+  quoting a 404, a rate limit or a timeout stays unmeasured.
 - ci-secure: "If a push credential leaks" — three new config hygiene checks,
   read over the GitHub API the way the required-checks and fork-approval
   checks already are. A credential that can push workflow files (GitHub's
@@ -304,6 +354,123 @@ entries are dated (UTC). Format loosely follows
   no detector, catalog entry, pattern id or count changes.
 
 ### Fixed
+
+- **2026-11-12** (#332) — Optional GitHub checks now distinguish a missing
+  `gh` executable from an installed CLI that is not authenticated, so the
+  skip guidance tells users whether to install or log in. The README count is
+  updated to the two network lookups plus seven API-gated config facts.
+
+- **2026-11-12** (#324) — P14.10 and P14.15 now treat quoted bracket-indexed
+  attacker inputs like their dotted equivalents, including hyphenated input
+  names and mixed dotted/bracket `github.event` / `client_payload` lookups.
+  Normalization stays inside template expressions and preserves multiline
+  source attribution; bracket access on non-source contexts remains silent.
+
+- **2026-11-12** (#345) — ci-secure: the default-branch review check, when it
+  fails on the rule's own settings, now also names anyone short of an admin
+  on a bypass list (with the classic or ruleset setting to change) and any
+  bypass list it could not read, so one report lists every fix instead of a
+  second fail or unmeasured after the first fix.
+
+- **2026-11-12** (#341, closes #327) — Required-check auditing now keeps a readable ruleset
+  answer when GitHub hides classic branch protection from a non-admin reader
+  behind a plain `404 Not Found`. The fact remains measured, names that classic
+  protection was unread, and still fails closed on rate limits, timeouts and
+  server errors.
+
+- **2026-11-12** (#332) — P14.11 now sends every repository, commit and tag
+  lookup to github.com explicitly. Workflow action references resolve there,
+  so a caller whose `GH_HOST` points at GitHub Enterprise Server can no longer
+  verify a same-named repository on the wrong server. The config-fact verdict
+  action resolver uses the same host pin, while audited-repository API calls
+  continue to follow the repository's selected host.
+
+- **2026-11-11** (#331) — A GitHub CLI extension pinned to a tag on a
+  release GitHub has locked as immutable is no longer reported (P14.24). That
+  tag and its assets cannot move, but the offline scan could not see the
+  setting, so roughly a third of real gh-extension findings were this case,
+  including GitHub's own recommended lockfile-check workflow. With the GitHub
+  API lookups on (`--gh-impostor`, the same switch as P14.11, default `auto`),
+  the scan asks GitHub for the release at that tag once per repository and
+  tag (always on github.com, whatever `GH_HOST` names), and reads its
+  `immutable` field: `true` is recorded as a suppression
+  naming the release; `false` or no published release at that tag (a
+  branch, a bare tag, or a repository the scan cannot see) stays a finding that says which. No `--pin` and an abbreviated commit
+  stay findings with no lookup. When the lookup is off, `gh` is unavailable,
+  or it fails (timeouts and server errors are tried up to three times in all; a
+  rate limit or authentication failure is not), the finding is kept with its
+  offline wording and `gh_checks["P14.24"]` records `skipped` or `partial`
+  with the reason; the report shows this as a note, not as a missing
+  finding, and each unverified pin it lists is flattened like any other
+  scanned text, so a workflow path or `--pin` value cannot add Markdown of
+  its own. A scan that stops with an error switches the lookup back off, as
+  a finished one does. Only the published release whose tag is exactly the
+  pin can vouch for it; a `gh` that cannot be run is a failed lookup, not a
+  crashed scan; `--pin=` with no value is read as no pin (latest release);
+  and a finding whose release was looked up no longer says the setting is
+  not visible offline. Also fixed in the same finding text: a `--pin` written as a
+  `${{ }}` expression showed the scanner's internal placeholder instead of
+  the expression (a git clone/fetch/checkout at an expression ref had the
+  same bug in its finding text and `match_text`, fixed by the same change),
+  and an abbreviated `--pin` was described as something git re-resolves,
+  which a gh extension install does not do. The CI gate treats an
+  unfinished P14.24 lookup as a `::notice::`, not as missing coverage: it
+  never reds a `CI_SECURE_GH_STRICT=1` run, since its findings are all still
+  reported and a run-time pin can never be looked up. The report note and
+  terminal summary now say to sign in to gh and re-run, not to dismiss
+  the finding; the Phase 3 one-liner prints the P14.24 status, and
+  SKILL.md says `--gh-impostor` gates both lookups.
+
+- **2026-11-11** (#329) — A repository that adopts GitHub's workflow lockfile no
+  longer loses the impostor-SHA check (P14.11) in silence. With a lockfile,
+  `uses:` lines carry tags and the commit lives only in
+  `.github/workflows/actions.lock`, so P14.11 had nothing to check and the
+  report gave no sign of it. The scan now reads the lockfile (fail-closed: an
+  unreadable or malformed one credits nothing) and records an informational
+  `action_lockfile` block; the report adds an **Action lockfile** row naming
+  how many references in how many workflows are locked, that GitHub verifies
+  each locked commit at run time, and that P14.11 checks only commit pins
+  written in `uses:`. Only step-level `uses:` count: a call to a reusable
+  workflow is never counted, since the lockfile does not pin one. A lockfile
+  the scan cannot read is named by its real path and the row says its tag
+  references are checked by neither. The terminal summary reads the state
+  from the findings JSON. Coverage is unchanged: a locked repository still
+  reads complete. The reader's accept/reject verdict is pinned against
+  ci-score's by a repo-root parity test.
+
+- **2026-11-11** — Unverified remote code execution now covers a GitHub CLI
+  extension installed at a mutable reference (#330). A job that runs
+  `gh extension install OWNER/REPO` with no `--pin` (the latest release) or
+  with `--pin` set to a tag, branch or abbreviated commit, and then runs that
+  extension in the same job (`gh <name> …` or `gh extension exec <name>`),
+  is reported: whoever can move that tag or branch decides what the next run
+  executes with the job's token. A binary extension's tag on a release
+  published as immutable cannot move, which the offline scan cannot see; the
+  finding and catalog say so and give the fix for each extension kind (a
+  commit pin for a script extension; an immutable-release tag, or a
+  digest-verified download, for a binary one). A full 40-hex `--pin`, a local install
+  and an install of the scanned repository are not reported; an install with
+  no visible run of the extension is recorded as a coverage note. Covers the
+  `ext` alias, `--pin=X`, `--force`, flag order, `HOST/OWNER/REPO` and URL
+  targets, multi-line `run:` blocks, and a run captured with `$( … )` after
+  the install on the same line; a `$( … )` inside single quotes is printed
+  text and is read as neither half.
+
+- **2026-11-09** — A crafted workflow line can no longer freeze the scan. The
+  install-command matcher (dependency install scripts in a job that holds
+  secrets) offered two readings of the same text in four places: an
+  assignment value whose bare form also matched quotes (including a quoted
+  value with spaces, `A=" A="`, spanning two assignments), a wrapper option read
+  as `-`+`-a` or `--`+`a`, a wrapper option value that could also be the next
+  wrapper word, assignment or numeric operand, and a yarn option value that
+  could also be the next option or a quoted string. Inside a repeat, a line of
+  a short repeated unit backtracked exponentially (twenty units took about a
+  second; twenty-eight did not finish in ten). Each piece now has one parse
+  and the repeats are bounded (64 prefixes, 16 options per wrapper, 32 yarn
+  options), so the same lines finish in milliseconds. Matches are unchanged on
+  realistic lines, empty values (`FOO= npm ci`) included; one contrived shape,
+  a wrapper option value with an unclosed quote, now matches the install after
+  the quoted string instead of inside it.
 
 - **2026-10-28** — Required summary checks no longer certify upstream jobs
   with a step allowed to fail. Literal `false` keeps the existing proof; other

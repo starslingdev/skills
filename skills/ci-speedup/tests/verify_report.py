@@ -126,6 +126,23 @@ def _load_untrusted_wrap():
 uw = _load_untrusted_wrap()
 
 
+def _load_pr_sample_contract():
+    """Load the shipped pure PR-sample defaults without importing the renderer."""
+    path = Path(__file__).resolve().parents[1] / "scripts" / "pr_sample_contract.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "ci_speedup_pr_sample_contract_for_verify", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("PR-sample contract module is unavailable")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_PR_SAMPLE_CONTRACT = _load_pr_sample_contract()
+
+
 @dataclass(frozen=True)
 class Check:
     name: str
@@ -834,14 +851,83 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
         basis, wall, slowest, next_longest, chain = min(
             complete, key=lambda row: abs(row[1] - expected_p50))
         projected, multiple = projection(wall, slowest, next_longest, 4.0, chain)
+        target = basis.get("slowest_job") or {}
+        target_workflow = str(target.get("workflow_file") or "")
+        target_name = str(target.get("name") or "")
+        population_multiples = []
+        for fact, item_wall, _item_slowest, _item_next, _item_chain in complete:
+            if item_wall <= 0:
+                continue
+            target_row = next((
+                row for row in fact.get("job_projections") or []
+                if isinstance(row, dict)
+                and str(row.get("workflow_file") or "") == target_workflow
+                and str(row.get("name") or "") == target_name
+            ), None)
+            if target_row is None:
+                fact_slowest = fact.get("slowest_job") or {}
+                if (str(fact_slowest.get("workflow_file") or "") == target_workflow
+                        and str(fact_slowest.get("name") or "") == target_name):
+                    target_row = {
+                        "duration_s": fact_slowest.get("duration_s"),
+                        "next_longest_s": (fact.get("next_longest_job") or {}).get(
+                            "duration_s", 0.0),
+                        "chain_span_s": fact.get("slowest_chain_span_s"),
+                    }
+            if target_row is None:
+                population_multiples.append(1.0)
+                continue
+            item_duration = _num(target_row.get("duration_s")) or 0.0
+            item_next = _num(target_row.get("next_longest_s")) or 0.0
+            item_chain = _num(target_row.get("chain_span_s")) or item_duration
+            if item_duration <= 0:
+                population_multiples.append(1.0)
+                continue
+            _item_projected, value = projection(
+                item_wall, item_duration, item_next, 4.0, item_chain)
+            if value is not None:
+                population_multiples.append(value)
+        expected_median_multiple = (
+            round(percentile(population_multiples, 50), 3)
+            if population_multiples else None)
+        if _num(stamp.get("median_projection_multiple")) != expected_median_multiple:
+            failures.append("median per-commit projection multiple does not re-derive")
+        worst_fact, worst_wall, *_rest = max(complete, key=lambda row: row[1])
+        worst_stamp = stamp.get("worst_commit") or {}
+        expected_worst_wf = str(
+            (worst_fact.get("slowest_job") or {}).get("workflow_file") or "")
+        if worst_wall > 0:
+            if (str(worst_stamp.get("sha") or "") != str(worst_fact.get("sha") or "")
+                    or _num(worst_stamp.get("wall_s")) != worst_wall
+                    or str(worst_stamp.get("workflow_file") or "") != expected_worst_wf):
+                failures.append("worst per-commit projection fact does not re-derive")
+        elif worst_stamp:
+            failures.append("zero-wall population publishes a worst commit")
+        projection_clause = ""
+        if multiple is not None:
+            projection_clause = (
+                " At the sampled p50 commit, a 4x speedup to its slowest job "
+                f"projects to **{duration(projected)}** (**{multiple:.2f}x**).")
+            if expected_median_multiple is not None:
+                projection_clause += (
+                    " Across commits, the median projection is "
+                    f"**{expected_median_multiple:.2f}x**.")
+            worst_sha = str(worst_fact.get("sha") or "")[:7]
+            if worst_sha:
+                held = ""
+                if (expected_median_multiple is not None
+                        and expected_median_multiple < multiple / 2.0
+                        and expected_worst_wf):
+                    held = f"; `{_wf_base(expected_worst_wf)}` holds its slowest job"
+                projection_clause += (
+                    f" The worst sampled commit is `{worst_sha}` at "
+                    f"**{duration(worst_wall)}**{held}.")
         expected_line = (
             "> **Per-commit PR wait:** p50 "
             f"**{duration(expected_p50)}**, p90 **{duration(expected_p90)}**, from the "
             "earliest workflow run created to the last job completed across every "
             "workflow on that commit."
-            + (" At the sampled p50 commit, a 4x speedup to its slowest job "
-               f"projects to **{duration(projected)}** (**{multiple:.2f}x**)."
-               if multiple is not None else ""))
+            + projection_clause)
         if report.splitlines().count(expected_line) != 1:
             failures.append("report lacks the re-derived per-commit wait/projection line")
     elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
@@ -869,6 +955,20 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
 
         caps: list[float] = []
         for fact, wall, slowest, next_longest, chain in complete:
+            edge_stamp = finding.get("opt21_edge_sizing")
+            if isinstance(edge_stamp, dict) and workflow:
+                edge_before = _num(edge_stamp.get("chain_before_s"))
+                workflow_present = any(
+                    isinstance(row, dict)
+                    and str(row.get("workflow_file") or "") == workflow
+                    for row in (fact.get("job_projections") or []))
+                if edge_before is None or edge_before <= 0 or not workflow_present:
+                    caps.append(0.0)
+                    continue
+                projected = projection(
+                    wall, edge_before, next_longest, float("inf"), edge_before)[0]
+                caps.append(max(0.0, wall - projected))
+                continue
             candidates = [
                 row for row in (fact.get("job_projections") or [])
                 if isinstance(row, dict)
@@ -2101,10 +2201,17 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     cp = _as_dict(data.get("pr_critical_path"))
     if "sample_stop_reason" not in cp:
         return Check(name, True, "artifact predates the stop-reason contract", skipped=True)
+    if _PR_SAMPLE_CONTRACT is None:
+        return Check(name, False, "PR-sample contract module is unavailable")
     required = (
         "sample_candidate_pages_fetched", "sample_candidate_page_cap",
+        "sample_job_list_reads", "sample_job_list_read_cap",
+        "sample_job_list_cap_hit",
         "sample_candidate_pages_exhausted", "sample_candidate_page_fetch_failures",
         "sample_candidate_era_door", "sample_candidate_selection_limited",
+        "sample_distinct_days", "sample_min_distinct_days",
+        "sample_span_first", "sample_span_last",
+        "sample_partial_count",
     )
     missing = [key for key in required if key not in cp]
     if missing:
@@ -2120,26 +2227,60 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     page_failures = cp.get("sample_candidate_page_fetch_failures")
     pages = cp.get("sample_candidate_pages_fetched")
     cap = cp.get("sample_candidate_page_cap")
+    job_reads = cp.get("sample_job_list_reads")
+    job_cap = cp.get("sample_job_list_read_cap")
+    job_cap_hit = cp.get("sample_job_list_cap_hit")
     exhausted = cp.get("sample_candidate_pages_exhausted")
     era_door = cp.get("sample_candidate_era_door")
     selection_limited = cp.get("sample_candidate_selection_limited")
+    distinct_days = cp.get("sample_distinct_days")
+    min_distinct_days = cp.get("sample_min_distinct_days")
+    span_first = cp.get("sample_span_first")
+    span_last = cp.get("sample_span_last")
+    partial_count = cp.get("sample_partial_count")
     if (not isinstance(failures, int) or failures < 0
             or not isinstance(page_failures, int) or page_failures < 0
             or not isinstance(pages, int) or pages < 1
             or not isinstance(cap, int) or cap < 1
+            or not isinstance(job_reads, int) or job_reads < 0
+            or not isinstance(job_cap, int) or job_cap < 1
+            or not isinstance(job_cap_hit, bool)
             or not isinstance(exhausted, bool) or not isinstance(era_door, bool)
-            or not isinstance(selection_limited, bool)):
+            or not isinstance(selection_limited, bool)
+            or not isinstance(distinct_days, int) or distinct_days < 0
+            or not isinstance(min_distinct_days, int)
+            or min_distinct_days != _PR_SAMPLE_CONTRACT.PR_SAMPLE_MIN_DISTINCT_DAYS
+            or not isinstance(span_first, str) or not isinstance(span_last, str)
+            or not isinstance(partial_count, int) or partial_count < 0
+            or partial_count > sampled):
         return Check(name, False, "candidate-page stop facts are malformed")
+    if (target != _PR_SAMPLE_CONTRACT.PR_SAMPLE_TARGET
+            or cap != _PR_SAMPLE_CONTRACT.PR_SAMPLE_CANDIDATE_PAGE_CAP
+            or job_cap != _PR_SAMPLE_CONTRACT.PR_SAMPLE_JOB_LIST_READ_CAP):
+        return Check(name, False, "sample contract target, page cap, or job-read cap drifted")
+    if pages > cap:
+        return Check(name, False, "candidate pages exceed the page cap")
+    if job_reads > job_cap or (job_cap_hit and job_reads != job_cap):
+        return Check(name, False, "PR-sample job-list reads disagree with their cap")
     strict_complete = (
-        sampled >= target and not cp.get("required_suite_unsatisfiable"))
+        sampled >= target and distinct_days >= min_distinct_days
+        and not cp.get("required_suite_unsatisfiable") and not job_cap_hit)
     if complete != strict_complete:
         return Check(
             name, False,
             "sample_complete does not match the strict required-suite target")
-    if strict_complete:
+    if job_cap_hit:
+        expected = "job_list_cap"
+    elif strict_complete:
         expected = "target_met"
     elif failures or page_failures:
         expected = "fetch_failures"
+    elif cp.get("required_suite_unsatisfiable"):
+        expected = (
+            "required_checks_unobservable"
+            if cp.get("required_checks_unobservable")
+            and cp.get("required_suite_scoped") is False
+            else "required_suite_empty")
     elif era_door:
         expected = "era_door"
     elif selection_limited or (not exhausted and pages >= cap):
@@ -2150,9 +2291,38 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     problems: list[str] = []
     if actual != expected:
         problems.append(f"sample_stop_reason={actual!r}, expected {expected!r}")
-    rendered = f"{sampled} of {target} PRs sampled: {expected.replace('_', ' ')}"
+    sample_size = (f"{sampled} PRs sampled (minimum target {target})"
+                   if sampled > target else f"{sampled} of {target} PRs sampled")
+    rendered = f"{sample_size}: {expected.replace('_', ' ')}"
     if rendered not in report:
         problems.append("rendered report omits or changes the re-derived sample statement")
+    budget = f"{job_reads} of at most {job_cap}"
+    if budget not in report:
+        problems.append("rendered report omits the PR-sample job-list read cap")
+    if sampled and (not span_first or not span_last):
+        problems.append("nonempty sample omits its first-to-last commit span")
+    elif span_first and span_last:
+        try:
+            from datetime import datetime as _sample_datetime
+            first_dt = _sample_datetime.fromisoformat(span_first.replace("Z", "+00:00"))
+            last_dt = _sample_datetime.fromisoformat(span_last.replace("Z", "+00:00"))
+            if first_dt > last_dt:
+                problems.append("sample commit span is reversed")
+        except ValueError:
+            problems.append("sample commit span is not ISO-8601")
+        rendered_span = f"{span_first[:10]} to {span_last[:10]}"
+        if rendered_span not in report:
+            problems.append("rendered report omits the sampled commit span")
+    unreliable = sampled and (
+        _PR_SAMPLE_CONTRACT.pr_sample_is_mostly_partial(partial_count, sampled)
+        or distinct_days < min_distinct_days)
+    if unreliable:
+        if "gate frequency and pole order are unreliable" not in report:
+            problems.append("thin sample omits the gate-frequency reliability warning")
+        if "Which checks gate (the critical-path ordering)" in report:
+            problems.append("thin sample still headlines gate frequency and pole order")
+        if "PR gate sample (ordering withheld)" not in report:
+            problems.append("thin sample omits the neutral gate-sample heading")
     return Check(name, not problems, "; ".join(problems) if problems else rendered)
 
 
@@ -4880,6 +5050,138 @@ def check_headline_presence_causal_only_when_minority(report: str,
     return Check(name, True,
                  f"headline presence-causal claim OK: `{label}` present {pres}/{npop} "
                  f"(<= {_VR_RARE_PRESENCE_FRAC:g}·npop) — a typical PR genuinely skips it")
+
+
+def check_opt21_edge_sizing_rederived(report: str, findings_path: Path | None) -> Check:
+    """Re-derive OPT21's removed-edge certificate from the workflow DAG.
+
+    The failure observations themselves are collector inputs, but their count,
+    rate, downstream upper bound, and rendered wording must agree internally;
+    the path delta and downstream duration are independently re-walked from the
+    stamped graph and per-workflow p50 timings.
+    """
+    name = "OPT21 edge sizing re-derives from the workflow graph"
+    if not findings_path:
+        return Check(name, True, "no findings — no OPT21 edge certificate")
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, False, "findings.json unreadable")
+    data = _as_dict(data)
+    findings = [f for f in _as_list(data.get("findings"))
+                if isinstance(f, dict) and f.get("opt21_edge_sizing")]
+    if not findings:
+        return Check(name, True, "no OPT21 edge certificate")
+    graphs = _as_dict(data.get("workflow_job_graph"))
+    timings = _as_dict(data.get("per_workflow_timing"))
+    failures: list[str] = []
+
+    def needs_of(spec: dict) -> list[str]:
+        raw = spec.get("needs") or []
+        return [str(raw)] if isinstance(raw, str) else [str(v) for v in _as_list(raw)]
+
+    def longest_path(graph: dict, durations: dict[str, float],
+                     removed: tuple[str, str] | None = None) -> float | None:
+        memo: dict[str, float] = {}
+        visiting: set[str] = set()
+
+        def visit(node: str) -> float | None:
+            if node in memo:
+                return memo[node]
+            if node in visiting or node not in durations:
+                return None
+            visiting.add(node)
+            parents = [parent for parent in needs_of(_as_dict(graph.get(node)))
+                       if parent in durations
+                       if removed != (parent, node)]
+            spans = [visit(parent) for parent in parents]
+            visiting.remove(node)
+            if any(span is None for span in spans):
+                return None
+            memo[node] = durations[node] + max(
+                (float(span) for span in spans if span is not None), default=0.0)
+            return memo[node]
+
+        spans = [visit(str(node)) for node in durations]
+        if not spans or any(span is None for span in spans):
+            return None
+        return max(float(span) for span in spans if span is not None)
+
+    for finding in findings:
+        fid = str(finding.get("id") or "OPT21")
+        wf = str(finding.get("workflow_file") or "")
+        graph = _as_dict(graphs.get(wf))
+        p50 = _as_dict(_as_dict(timings.get(wf)).get("job_p50"))
+        affected = [str(v) for v in _as_list(finding.get("affected_jobs"))]
+        dependency = [str(v) for v in _as_list(finding.get("opt21_needs"))]
+        stamp = _as_dict(finding.get("opt21_edge_sizing"))
+        if len(affected) != 1 or len(dependency) != 1 or not graph or not p50:
+            failures.append(f"{fid} has no single resolvable edge and timing graph")
+            continue
+        durations: dict[str, float] = {}
+        compute_durations: dict[str, float] = {}
+        for node, raw_spec in graph.items():
+            display = str(_as_dict(raw_spec).get("name") or node)
+            candidates = [
+                float(value) for check, value in p50.items()
+                if isinstance(value, (int, float))
+                and (_cmp_name(str(check)) == _cmp_name(display)
+                     or _cmp_name(str(check)).startswith(_cmp_name(display) + " ("))
+            ]
+            if candidates:
+                durations[str(node)] = max(candidates)
+                matrix_legs = [
+                    float(value) for check, value in p50.items()
+                    if isinstance(value, (int, float))
+                    and str(check).startswith(display + " (")
+                ]
+                compute_durations[str(node)] = (
+                    sum(matrix_legs) if matrix_legs else max(candidates))
+        before = longest_path(graph, durations)
+        after = longest_path(graph, durations, (dependency[0], affected[0]))
+        downstream = {affected[0]}
+        changed = True
+        while changed:
+            prior = len(downstream)
+            downstream.update(
+                str(node) for node, raw_spec in graph.items()
+                if any(parent in downstream for parent in needs_of(_as_dict(raw_spec))))
+            changed = len(downstream) != prior
+        downstream_s = sum(compute_durations.get(node, 0.0) for node in downstream)
+        try:
+            failed = int(stamp.get("dependency_failed_runs"))
+            sampled = int(stamp.get("dependency_sampled_runs"))
+            unmatched = int(stamp.get("dependency_unmatched_runs"))
+            share = float(stamp.get("dependency_failure_share"))
+            stamped_before = float(stamp.get("chain_before_s"))
+            stamped_after = float(stamp.get("chain_after_s"))
+            stamped_downstream = float(stamp.get("downstream_p50_s"))
+            extra = float(stamp.get("extra_runner_min_per_run"))
+            wall = float(finding.get("wall_clock_p50_s"))
+            uncapped_wall = float(finding.get("wall_clock_uncapped_p50_s", wall))
+        except (TypeError, ValueError):
+            failures.append(f"{fid} carries a non-numeric OPT21 certificate")
+            continue
+        expected_share = round(failed / sampled, 4) if sampled > 0 else -1.0
+        expected_extra = round(expected_share * downstream_s / 60.0, 2)
+        if (before is None or after is None
+                or abs(stamped_before - round(before, 1)) > 0.01
+                or abs(stamped_after - round(after, 1)) > 0.01
+                or abs(uncapped_wall - round(before - after, 1)) > 0.01
+                or wall < 0 or wall > uncapped_wall + 0.01):
+            failures.append(f"{fid} path delta does not re-derive from the workflow graph")
+        if (sampled <= 0 or failed < 0 or failed > sampled or unmatched < 0
+                or abs(share - expected_share) > 0.0001):
+            failures.append(f"{fid} dependency failure share does not re-derive from its counts")
+        if (abs(stamped_downstream - round(downstream_s, 1)) > 0.01
+                or abs(extra - expected_extra) > 0.01):
+            failures.append(f"{fid} downstream runner-minute upper bound does not re-derive")
+        phrase = f"can add up to {extra:.2f} extra runner-minutes per run"
+        if phrase not in str(finding.get("evidence") or ""):
+            failures.append(f"{fid} does not state its runner-minute figure as an upper bound")
+    return Check(name, not failures,
+                 "; ".join(failures[:8]) if failures
+                 else f"{len(findings)} OPT21 edge certificate(s) re-derived")
 
 
 def check_headline_chain_matches_stamp(report: str, findings_path: Path | None,
@@ -12469,15 +12771,65 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
     name = "no drilled pole's job is also framed as an 'Also noticed' minor-cleanup finding"
     pole_jobs = {(Path(wf).name, _matrix_base(_cmp_name(check)))
                  for wf, check, _body in _pole_header_sections(report)}
-    if not pole_jobs or not findings_path:
-        return Check(name, True, "no drilled poles / no findings", skipped=True)
+    if not findings_path:
+        return Check(name, True, "no findings", skipped=True)
     appendix = _section(report, "Also noticed")
-    if not appendix:
-        return Check(name, True, "no 'Also noticed' appendix", skipped=True)
     try:
         findings = _as_list(_as_dict(json.loads(findings_path.read_text(encoding="utf-8"))).get("findings"))
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
+    if not _is_static_only(report):
+        opt32_block = next((
+            block for block in appendix.split("<details>")
+            if re.search(r"<summary><strong>OPT32(?:\s|-)", block)
+        ), "")
+        opt32_findings = [
+            finding for finding in findings
+            if isinstance(finding, dict) and finding.get("pattern") == "OPT32"
+        ]
+        for index, finding in enumerate(opt32_findings):
+            measurement = finding.get("path_filter_measurement")
+            if not isinstance(measurement, dict):
+                continue
+            sampled_runs = measurement.get("sampled_runs")
+            numbered_runs = measurement.get("runs_with_pr_number")
+            sampled_prs = measurement.get("sampled_prs")
+            if (not isinstance(sampled_runs, int) or isinstance(sampled_runs, bool)
+                    or sampled_runs <= 0
+                    or not isinstance(numbered_runs, int) or isinstance(numbered_runs, bool)
+                    or not 0 <= numbered_runs <= sampled_runs
+                    or not isinstance(sampled_prs, int) or isinstance(sampled_prs, bool)
+                    or not 0 <= sampled_prs <= numbered_runs):
+                return Check(name, False,
+                             "an OPT32 measurement has an invalid sampled-run coverage stamp")
+            if measurement.get("status") == "unmeasured":
+                reason = measurement.get("reason")
+                if (reason == "no PR number on sampled runs"
+                        and (numbered_runs != 0 or sampled_prs != 0)):
+                    return Check(name, False,
+                                 "OPT32 says no sampled run had a PR number, but its coverage "
+                                 "stamp says otherwise")
+            elif sampled_prs <= 0:
+                return Check(name, False,
+                             "a measured OPT32 finding has no sampled pull requests")
+            elif numbered_runs < sampled_runs:
+                disclosure = f"Measured on {numbered_runs} of {sampled_runs} sampled runs"
+                if (disclosure not in str(finding.get("evidence") or "")
+                        or (opt32_block and index < 8 and disclosure not in opt32_block)):
+                    return Check(name, False,
+                                 "a partially measured OPT32 finding does not disclose its "
+                                 "sampled-run coverage")
+    has_unmeasured_opt32 = any(
+        isinstance(f, dict) and f.get("pattern") == "OPT32"
+        and isinstance(f.get("path_filter_measurement"), dict)
+        and f["path_filter_measurement"].get("status") == "unmeasured"
+        for f in findings)
+    if not appendix:
+        if has_unmeasured_opt32:
+            return Check(name, False,
+                         "an unmeasured path-filter finding vanished instead of "
+                         "appearing in 'Also noticed'")
+        return Check(name, True, "no 'Also noticed' appendix", skipped=True)
     # Per appendix pattern block, the (wf_base, job_base) keys its `**Where:**` line discloses.
     block_keys: dict[str, set[tuple[str, str]]] = {}
     for block in appendix.split("<details>"):
@@ -12488,6 +12840,19 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         keys = {_appendix_wf_job_key(wf, job)
                 for wf, job in (_APPENDIX_WHERE_PAIR_RE.findall(mw.group(1)) if mw else [])}
         block_keys.setdefault(mp.group(1), set()).update(keys)
+    missing_unmeasured = [
+        str(f.get("pattern") or "") for f in findings
+        if isinstance(f, dict) and f.get("pattern") == "OPT32"
+        and isinstance(f.get("path_filter_measurement"), dict)
+        and f["path_filter_measurement"].get("status") == "unmeasured"
+        and "OPT32" not in block_keys
+    ]
+    if missing_unmeasured:
+        return Check(name, False,
+                     "an unmeasured path-filter finding vanished instead of appearing "
+                     "in 'Also noticed'")
+    if not pole_jobs:
+        return Check(name, True, "no drilled poles", skipped=True)
     offenders = []
     for f in findings:
         if not isinstance(f, dict) or f.get("advisory"):
@@ -12495,6 +12860,12 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         pat = str(f.get("pattern", ""))
         if pat not in block_keys:
             continue   # this pattern isn't rendered in the appendix
+        if f.get("non_pr_lane") is True:
+            # The pole is measured on the pull-request lane. A finding stamped
+            # as non-PR-only is a separate lane disclosure even when its static
+            # job name matches, and the lane-isolation check independently
+            # requires zero merge-gate wall-clock credit and a rendered tag.
+            continue
         if pat == "OPT82":
             # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
             # keeps an OPT82 card on a drilled-pole lint job (its card is the only
@@ -12504,6 +12875,8 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         if pat == "OPT32":
             measurement = f.get("path_filter_measurement")
             if isinstance(measurement, dict):
+                if measurement.get("status") == "unmeasured":
+                    continue
                 sampled = measurement.get("sampled_prs")
                 skipped = measurement.get("would_skip_prs")
                 rate = measurement.get("hit_rate")
@@ -14489,6 +14862,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
     "gradle-test-parallelism": "test",
+    "lighthouse-serial-audits": frozenset({"scan", "test"}),
     "eslint-no-cache": "scan",
     "turbo-remote-cache": "build",
     "turbo-partial-cache": "build",
@@ -14765,7 +15139,7 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
         return Check(name, True, "findings unreadable", skipped=True)
     findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
     guarded = [f for f in findings if isinstance(f.get("cache_sizing_guard"), dict)]
-    cache_patterns = {"OPT4", "OPT6", "OPT9", "OPT61", "OPT96", "OPT101"}
+    cache_patterns = {"OPT4", "OPT6", "OPT9", "OPT61", "OPT62", "OPT96", "OPT101"}
     missing = [
         f for f in findings
         if (str(f.get("pattern") or "") in cache_patterns
@@ -15596,6 +15970,15 @@ def check_default_branch_push_lane_isolated(
         ordered = sorted(lanes)
         label = ", ".join(ordered).replace("_", " ")
         label += " lane only" if len(ordered) == 1 else " lanes"
+        grouped_lanes = sorted({
+            str(value)
+            for finding in _as_list(data.get("findings"))
+            if isinstance(finding, dict) and finding.get("pattern") == pattern
+            for value in _as_list(finding.get("workflow_lanes"))
+            if str(value)
+        })
+        grouped_label = ", ".join(grouped_lanes).replace("_", " ")
+        grouped_label += " lane only" if len(grouped_lanes) == 1 else " lanes"
         matching_groups = [
             details for details in finding_details
             if (not pattern or f"<strong>{pattern} -" in details)
@@ -15605,7 +15988,9 @@ def check_default_branch_push_lane_isolated(
             and finding.get("pattern") == pattern
             and finding.get("lane") == "push"
             for finding in _as_list(data.get("findings")))
-        if (not any(label in details for details in matching_groups)
+        if (not any(
+                label in details or grouped_label in details
+                for details in matching_groups)
                 and not (push_route and f"**Catalog route:** {pattern}." in block)):
             failures.append(
                 f"report omits the static finding group's {label} tag")
@@ -16439,6 +16824,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_headline_slowest_matches_stamp(report, findings_path, report_path),
         check_headline_floor_presence_reconciled(report, findings_path),
         check_headline_presence_causal_only_when_minority(report, findings_path),
+        check_opt21_edge_sizing_rederived(report, findings_path),
         check_headline_chain_matches_stamp(report, findings_path, report_path),
         check_aggregate_total_ge_largest_member(report, findings_path, report_path),
         check_headline_wait_within_makespan(report, findings_path, report_path),

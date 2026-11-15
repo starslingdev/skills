@@ -1,0 +1,12 @@
+name: Advisory CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make build
+  gate:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - run: make test

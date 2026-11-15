@@ -1,8 +1,9 @@
 """The skill-evals gate cannot go green over a session that did not happen.
 
-This workflow exists to run ci-secure's and ci-speedup's behavioural evals against a live agent.
-Its entire value is that a green `skill evals` check means five real sessions ran
-and behaved. Every way that decays is invisible in the check list: a fork PR that
+This workflow runs ci-secure's behavioural evals on internal pull requests, and both
+suites nightly and through manual dispatch. A green PR
+`skill evals` check means the PR-gated sessions ran and behaved; a green dispatch
+means both suites ran. Every way that decays is invisible in the check list: a fork PR that
 reports green having reached no API key, a verdict job that exits 0 on a skip, a
 harness that could not start and is read as a behaviour change, a floating CLI
 version that turns an upstream release into a "skill regression".
@@ -81,34 +82,50 @@ def test_only_the_verdict_job_carries_the_check_name_skill_evals():
         f"exactly one job may report the check name 'skill evals'; got {named}")
 
 
-@pytest.mark.parametrize("result,speedup,expected", [
-    ("success", "success", 0),
-    ("failure", "success", 1),
-    ("cancelled", "success", 1),
-    ("skipped", "success", 1),
-    ("", "success", 1),
-    ("neutral", "success", 1),
-    ("success", "failure", 1),
-    ("success", "skipped", 1),
-    ("success", "", 1),
+@pytest.mark.parametrize("event,result,speedup,expected", [
+    ("pull_request", "success", "skipped", 0),
+    ("pull_request", "failure", "skipped", 1),
+    ("pull_request", "cancelled", "skipped", 1),
+    ("pull_request", "skipped", "skipped", 1),
+    ("pull_request", "", "skipped", 1),
+    ("pull_request", "neutral", "skipped", 1),
+    ("pull_request", "success", "failure", 1),
+    ("workflow_dispatch", "success", "success", 0),
+    ("workflow_dispatch", "success", "failure", 1),
+    ("workflow_dispatch", "success", "skipped", 1),
+    ("workflow_dispatch", "success", "", 1),
+    ("schedule", "success", "success", 0),
+    ("schedule", "success", "skipped", 1),
 ])
-def test_the_verdict_script_passes_only_on_a_real_success(result, speedup, expected):
-    """Executed, not read. `skipped` reads as green to branch protection, so the
-    verdict must turn every non-success of EITHER suite into a non-zero exit."""
+def test_the_verdict_script_passes_only_the_suites_selected_for_the_event(
+        event, result, speedup, expected):
+    """Executed, not read. Pull requests deliberately skip the long ci-speedup
+    suite; a manual dispatch must still fail unless both suites really passed."""
     script = _job("verdict")["steps"][0]["run"]
     proc = subprocess.run(
         ["bash", "-c", script],
-        env={"RESULT": result, "SPEEDUP_RESULT": speedup, "PATH": "/usr/bin:/bin"},
+        env={"EVENT_NAME": event, "RESULT": result,
+             "SPEEDUP_RESULT": speedup, "PATH": "/usr/bin:/bin"},
         capture_output=True, text=True)
     assert proc.returncode == expected, (
         f"RESULT={result!r} exited {proc.returncode}, expected {expected}: "
         f"{proc.stdout}{proc.stderr}")
 
 
-def test_the_verdict_waits_on_both_suites_and_they_share_the_fork_gate():
+def test_the_verdict_waits_on_both_suites_and_ci_speedup_stays_off_prs():
     """A suite the verdict does not `needs:` can be skipped or red unseen."""
     assert set(_job("verdict")["needs"]) == {"evals", "ci-speedup-evals"}
-    assert _squash(_job("ci-speedup-evals")["if"]) == _squash(_job("evals")["if"])
+    condition = _squash(_job("ci-speedup-evals")["if"])
+    assert "github.event_name == 'workflow_dispatch'" in condition
+    assert "github.event_name == 'schedule'" in condition
+    assert "pull_request" not in condition
+
+
+def test_the_live_agent_suites_have_a_scheduled_run():
+    triggers = _doc().get("on") or _doc()[True]
+    assert triggers.get("schedule"), "live agent coverage must not depend on a human dispatch"
+    assert "github.event_name == 'schedule'" in _squash(_job("evals")["if"])
+    assert "github.event_name == 'schedule'" in _squash(_job("ci-speedup-evals")["if"])
 
 
 @pytest.mark.parametrize("job_id,skill", [("evals", "ci-secure"),
@@ -255,22 +272,49 @@ def test_the_workflow_asks_for_no_more_than_read_access():
     assert _doc()["permissions"] == {"contents": "read"}
 
 
+def _pr_paths() -> list:
+    doc = _doc()
+    return (doc.get("on") or doc[True])["pull_request"]["paths"]
+
+
 @pytest.mark.parametrize("rel", [
+    "skills/ci-secure/SKILL.md",
+    "skills/ci-secure/references/ci-gate.md",
+    "maintainers/scripts/run_skill_evals.py",
+    "maintainers/scripts/eval_reading.py",  # the runner imports it; a break is exit 2
+])
+def test_the_path_filter_covers_the_pr_gated_ci_secure_inputs(rel):
+    """Pull requests still run the ci-secure sessions when its contract or the
+    shared harness changes."""
+    from fnmatch import fnmatch
+    assert (_REPO / rel).is_file(), rel
+    assert any(fnmatch(rel, p) for p in _pr_paths()), f"{rel} matches no filter path"
+
+
+@pytest.mark.parametrize("rel", [
+    "skills/ci-speedup/SKILL.md",
+    "skills/ci-speedup/references/before-after-verification-spec.md",
+    "skills/ci-speedup/scripts/blocking_path.py",
     "skills/ci-speedup/tests/verify_report.py",
     "skills/ci-speedup/tests/test_offline_pipeline_e2e.py",
     "skills/ci-speedup/tests/fixtures/gh_replay/"
     "repos_synthetic_repo_branches_main_protection_required_status_checks.json",
-    "maintainers/scripts/eval_reading.py",  # the runner imports it; a break is exit 2
 ])
-def test_the_path_filter_covers_the_ci_speedup_eval_inputs(rel):
-    """The session runs verify_report.py, and the synthetic fixture is built by
-    the e2e test's helpers from tests/fixtures/gh_replay/. A PR touching only
-    those files must still run the sessions."""
+def test_a_ci_speedup_only_change_starts_no_pr_sessions(rel):
+    """The ci-speedup suite never runs on pull requests, so a ci-speedup-only
+    change must not start the workflow: its only PR job would be the ci-secure
+    sessions, spending tokens on a skill the change did not touch."""
     from fnmatch import fnmatch
     assert (_REPO / rel).is_file(), rel
-    doc = _doc()
-    paths = (doc.get("on") or doc[True])["pull_request"]["paths"]
-    assert any(fnmatch(rel, p) for p in paths), f"{rel} matches no filter path"
+    hits = [p for p in _pr_paths() if fnmatch(rel, p)]
+    assert not hits, f"{rel} starts PR sessions via {hits}"
+
+
+def test_a_dispatch_does_not_cancel_the_nightly_run():
+    """cancel-in-progress is per group: keyed on the ref alone, a manual dispatch
+    on main would cancel a running nightly (and the reverse), wasting its tokens."""
+    group = _doc()["concurrency"]["group"]
+    assert "github.event_name" in group, group
 
 
 @pytest.mark.parametrize("job_id", ["evals", "ci-speedup-evals"])

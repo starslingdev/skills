@@ -1,0 +1,25 @@
+name: Reusable package tests
+on:
+  workflow_call:
+    inputs:
+      package-set:
+        type: string
+        required: true
+jobs:
+  test:
+    strategy:
+      matrix:
+        shardIndex: [1, 2, 3, 4]
+        shardTotal: [4]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Setup
+        run: echo ready
+      - name: Build
+        run: make build
+      - name: Install browser
+        run: pnpm exec playwright install chromium
+      - name: Tests
+        run: |
+          npx playwright test --shard=${{ matrix.shardIndex }}/${{ matrix.shardTotal }}
+          cargo test

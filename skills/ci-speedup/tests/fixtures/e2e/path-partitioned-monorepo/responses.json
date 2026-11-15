@@ -5,25 +5,25 @@
       {
         "completed_at": "2026-01-28T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (api-20)",
+        "name": "tests / test (api, 20)",
         "started_at": "2026-01-28T00:00:00Z"
       },
       {
         "completed_at": "2026-01-28T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (api-22)",
+        "name": "tests / test (api, 22)",
         "started_at": "2026-01-28T00:00:00Z"
       },
       {
         "completed_at": "2026-01-28T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (web-20)",
+        "name": "tests / test (web, 20)",
         "started_at": "2026-01-28T00:00:00Z"
       },
       {
         "completed_at": "2026-01-28T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (web-22)",
+        "name": "tests / test (web, 22)",
         "started_at": "2026-01-28T00:00:00Z"
       },
       {
@@ -37,25 +37,25 @@
       {
         "completed_at": "2026-01-27T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (api-20)",
+        "name": "tests / test (api, 20)",
         "started_at": "2026-01-27T00:00:00Z"
       },
       {
         "completed_at": "2026-01-27T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (api-22)",
+        "name": "tests / test (api, 22)",
         "started_at": "2026-01-27T00:00:00Z"
       },
       {
         "completed_at": "2026-01-27T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (web-20)",
+        "name": "tests / test (web, 20)",
         "started_at": "2026-01-27T00:00:00Z"
       },
       {
         "completed_at": "2026-01-27T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (web-22)",
+        "name": "tests / test (web, 22)",
         "started_at": "2026-01-27T00:00:00Z"
       },
       {
@@ -69,25 +69,25 @@
       {
         "completed_at": "2026-01-26T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (api-20)",
+        "name": "tests / test (api, 20)",
         "started_at": "2026-01-26T00:00:00Z"
       },
       {
         "completed_at": "2026-01-26T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (api-22)",
+        "name": "tests / test (api, 22)",
         "started_at": "2026-01-26T00:00:00Z"
       },
       {
         "completed_at": "2026-01-26T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (web-20)",
+        "name": "tests / test (web, 20)",
         "started_at": "2026-01-26T00:00:00Z"
       },
       {
         "completed_at": "2026-01-26T00:04:35Z",
         "conclusion": "success",
-        "name": "tests / test (web-22)",
+        "name": "tests / test (web, 22)",
         "started_at": "2026-01-26T00:00:00Z"
       },
       {
@@ -107,7 +107,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (api-20)",
+        "name": "tests / test (api, 20)",
         "started_at": "2026-01-28T00:00:00Z",
         "steps": [
           {
@@ -143,7 +143,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (api-22)",
+        "name": "tests / test (api, 22)",
         "started_at": "2026-01-28T00:00:00Z",
         "steps": [
           {
@@ -179,7 +179,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (web-20)",
+        "name": "tests / test (web, 20)",
         "started_at": "2026-01-28T00:00:00Z",
         "steps": [
           {
@@ -215,7 +215,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (web-22)",
+        "name": "tests / test (web, 22)",
         "started_at": "2026-01-28T00:00:00Z",
         "steps": [
           {
@@ -271,7 +271,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (api-20)",
+        "name": "tests / test (api, 20)",
         "started_at": "2026-01-27T00:00:00Z",
         "steps": [
           {
@@ -307,7 +307,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (api-22)",
+        "name": "tests / test (api, 22)",
         "started_at": "2026-01-27T00:00:00Z",
         "steps": [
           {
@@ -343,7 +343,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (web-20)",
+        "name": "tests / test (web, 20)",
         "started_at": "2026-01-27T00:00:00Z",
         "steps": [
           {
@@ -379,7 +379,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (web-22)",
+        "name": "tests / test (web, 22)",
         "started_at": "2026-01-27T00:00:00Z",
         "steps": [
           {
@@ -435,7 +435,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (api-20)",
+        "name": "tests / test (api, 20)",
         "started_at": "2026-01-26T00:00:00Z",
         "steps": [
           {
@@ -471,7 +471,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (api-22)",
+        "name": "tests / test (api, 22)",
         "started_at": "2026-01-26T00:00:00Z",
         "steps": [
           {
@@ -507,7 +507,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (web-20)",
+        "name": "tests / test (web, 20)",
         "started_at": "2026-01-26T00:00:00Z",
         "steps": [
           {
@@ -543,7 +543,7 @@
         "labels": [
           "ubuntu-latest"
         ],
-        "name": "tests / test (web-22)",
+        "name": "tests / test (web, 22)",
         "started_at": "2026-01-26T00:00:00Z",
         "steps": [
           {

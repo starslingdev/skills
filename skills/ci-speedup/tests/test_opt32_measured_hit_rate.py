@@ -19,9 +19,11 @@ from test_opt81_faster_runner import _CI, _COLLECT_YAML, _Opt81Client, _cts  # n
 
 
 class _PathFilterClient(_Opt81Client):
-    def __init__(self, paths_by_pr: dict[int, list[str]], *, yaml: str = _COLLECT_YAML):
+    def __init__(self, paths_by_pr: dict[int, list[str]], *, yaml: str = _COLLECT_YAML,
+                 missing_pr_numbers: set[int] | None = None):
         super().__init__([("ubuntu-latest", 197)] * 60, yaml)
         self.paths_by_pr = paths_by_pr
+        self.missing_pr_numbers = missing_pr_numbers or set()
         self.changed_file_calls = 0
 
     def json(self, endpoint, allow_missing=False):
@@ -29,7 +31,8 @@ class _PathFilterClient(_Opt81Client):
         if response is not None:
             if isinstance(response, dict) and "workflow_runs" in response:
                 for i, run in enumerate(response["workflow_runs"], 1):
-                    run["pull_requests"] = [{"number": i}]
+                    run["pull_requests"] = (
+                        [] if i in self.missing_pr_numbers else [{"number": i}])
             return response
         match = re.fullmatch(r"repos/o/r/pulls/(\d+)/files\?per_page=100(?:&page=(\d+))?", endpoint)
         if match:
@@ -146,6 +149,82 @@ def test_opt32_changed_files_fetch_rejects_the_api_ceiling_as_incomplete():
 
     assert cr._opt32_changed_files(client, "o/r", 1) is None
     assert client.changed_file_calls == cr._OPT32_CHANGED_FILES_MAX_PAGES
+
+
+def test_opt32_unmeasured_ceiling_stays_visible_through_collect_and_verifier(
+        monkeypatch, tmp_path):
+    paths = {n: [f"src/file{n}.py"] for n in range(1, 61)}
+    paths[1] = [f"docs/file-{i}.md" for i in range(3000)]
+
+    doc = _collect(monkeypatch, _PathFilterClient(paths))
+    finding = _opt32(doc)
+
+    assert finding.get("path_filter_measurement", {}).get("status") == "unmeasured"
+    assert finding["path_filter_measurement"]["sampled_prs"] == 60
+    report = _verify_full(doc, tmp_path)
+    assert "hit rate not measured (changed-file list unavailable or incomplete)" in report
+    assert "Add path filters" in report.split('<a id="also-noticed">', 1)[1]
+
+
+def test_opt32_without_pr_numbers_stays_visible_through_collect_and_verifier(
+        monkeypatch, tmp_path):
+    client = _PathFilterClient({}, missing_pr_numbers=set(range(1, 61)))
+
+    doc = _collect(monkeypatch, client)
+    measurement = next((
+        finding.get("path_filter_measurement")
+        for finding in doc["findings"] if finding.get("pattern") == "OPT32"
+    ), None)
+
+    assert measurement is not None
+    assert measurement["status"] == "unmeasured"
+    assert measurement["reason"] == "no PR number on sampled runs"
+    report = _verify_full(doc, tmp_path)
+    assert "hit rate not measured (no PR number on sampled runs)" in report
+
+
+def test_opt32_discloses_partial_pr_number_coverage_through_collect_and_verifier(
+        monkeypatch, tmp_path):
+    paths = {number: [f"src/file{number}.py"] for number in range(1, 31)}
+    client = _PathFilterClient(paths, missing_pr_numbers=set(range(31, 61)))
+
+    doc = _collect(monkeypatch, client)
+    finding = _opt32(doc)
+
+    assert finding["path_filter_measurement"]["sampled_runs"] == 60
+    assert finding["path_filter_measurement"]["runs_with_pr_number"] == 30
+    assert "Measured on 30 of 60 sampled runs" in finding["evidence"]
+    report = _verify_full(doc, tmp_path)
+    assert "Measured on 30 of 60 sampled runs" in report
+
+
+def test_opt32_unmeasured_disclosure_is_never_cut_by_the_appendix_cap():
+    billed = [
+        {"id": f"h{i}", "pattern": f"OPT{i + 1}", "title": f"Hygiene {i}",
+         "severity": "LOW", "workflow_file": ".github/workflows/ci.yml",
+         "line": 10 + i, "affected_jobs": [f"job{i}"], "evidence": "measured",
+         "runner_min_saving": 100.0 - i, "wall_clock_p50_s": 0.0}
+        for i in range(bp._ALSO_NOTICED_CAP + 1)
+    ]
+    unmeasured = {
+        "id": "path-filter", "pattern": "OPT32", "title": "Add path filters",
+        "severity": "LOW", "workflow_file": ".github/workflows/path.yml",
+        "line": 7, "affected_jobs": ["test"], "evidence": "pull requests run it",
+        "runner_min_saving": None, "wall_clock_p50_s": 0.0,
+        "path_filter_measurement": {
+            "status": "unmeasured",
+            "reason": "changed-file list unavailable or incomplete",
+            "sampled_prs": 60,
+        },
+    }
+
+    lines, _count, _has_wall_clock = bp._also_noticed_block(
+        billed + [unmeasured], "https://example.test/catalog")
+    report = "\n".join(lines)
+
+    assert "OPT32 - Add path filters" in report
+    assert "hit rate not measured (changed-file list unavailable or incomplete)" in report
+    assert "more hygiene pattern(s)" in report
 
 
 def test_opt32_unsupported_negative_glob_fails_closed():

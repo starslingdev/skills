@@ -24,6 +24,7 @@ raw log (`--log`), so level-2 and the drill stay on one coherent run. Without a
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import hashlib
 import json
 import re
@@ -40,6 +41,8 @@ import pr_lifecycle
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
+from pr_sample_contract import pr_sample_is_mostly_partial
+from shell_prefix import SHELL_PREFIX_SRC  # same-skill module; one source for three detectors
 from workflow_steps import (  # same-skill module; step walker
     parallel_steps_disclosure, parallel_steps_used, parallel_steps_used_for)
 
@@ -1726,6 +1729,173 @@ _ANDROID_CONNECTED_WALL_FLOOR_S = 120.0
 # unit-test build isn't worth forking).
 _GRADLE_TEST_WALL_FLOOR_S = 300.0
 
+# Lighthouse CI's collect phase (`lhci autorun` / `lhci collect`, also what the Lighthouse
+# CI actions drive) audits every configured URL `numberOfRuns` times. It prints one
+# `Running Lighthouse N time(s) on <url>` line per URL, `Run #k...done.` per run, and one
+# `Done running Lighthouse!` per completed pass. The runs are awaited one at a time, and a
+# job with one pass per device preset pays the whole product again per pass. Only a finding
+# when the audit count is a material gate (lhci's default, 3 runs over a couple of URLs, is
+# a smoke audit) AND it is a multiplier over the distinct URLs: at least two audits per URL,
+# from repeat runs or repeat passes. One run over many URLs is a different lever (the URL
+# list) and stays silent here.
+_LHCI_AUDITS_FLOOR = 20
+_LHCI_MIN_AUDITS_PER_URL = 2
+# Every repeat is bounded and every branch starts on a different character, so each line
+# has one parse (linear time).
+_LHCI_RUNNING_RE = re.compile(
+    r"^[ \t]{0,8}Running Lighthouse (\d{1,4}) time\(s\) on (\S{1,2048})")
+_LHCI_PASS_DONE_RE = re.compile(r"^[ \t]{0,8}Done running Lighthouse!")
+_LHCI_ASSERT_RE = re.compile(
+    r"^[ \t]{0,8}Checking assertions against \d{1,6} URL\(s\), \d{1,7} total run\(s\)")
+# The lhci invocation itself: `lhci autorun`, `npx @lhci/cli@0.15.x collect`. The flag tail
+# after the match names the pass.
+_LHCI_CMD_RE = re.compile(
+    r"(?:\blhci|@lhci/cli(?:@[\w.\-]{1,40})?)[ \t]{1,8}(?:autorun|collect)\b")
+_LHCI_PASS_NAME_RE = re.compile(
+    r"--(?:config|collect\.settings\.preset|settings\.preset)[= ]([^\s;&|]{1,200})")
+_LHCI_CONFIG_EXT_RE = re.compile(r"\.(?:json|js|cjs|mjs|yml|yaml)$")
+# `--static-dist-dir` serves the build on a random free port for each collect, so one
+# page prints as a different loopback URL in every pass. A loopback origin is dropped so
+# the page counts once.
+_LHCI_LOOPBACK_ORIGIN_RE = re.compile(
+    r"^https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?=/|$)", re.IGNORECASE)
+
+
+def _lhci_page_key(url: str) -> str:
+    """The page a `Running Lighthouse` URL audits: a loopback origin and its port removed."""
+    return _LHCI_LOOPBACK_ORIGIN_RE.sub("", url) or "/"
+
+
+def _lhci_pass_tag(flag_value: str) -> str:
+    """The part of an lhci `--config=` or preset value that tells one pass from another,
+    short enough for a drill row label: the basename without the conventional
+    `lighthouserc.` prefix and config extension (`lighthouserc.mobile.json` -> `mobile`,
+    `config/lhci.desktop.cjs` -> `lhci.desktop`, a `desktop` preset -> `desktop`). Empty
+    when nothing distinguishing is left (a bare `lighthouserc.json`)."""
+    tag = flag_value.strip("'\"").rsplit("/", 1)[-1].lstrip(".")
+    tag = _LHCI_CONFIG_EXT_RE.sub("", tag)
+    if tag.startswith("lighthouserc"):
+        tag = tag[len("lighthouserc"):].lstrip(".")
+    return tag
+
+
+def _lhci_section_commands(lines: list[str], start: int, end: int) -> list[str]:
+    """The distinct lhci invocations echoed inside one step section, in log order. A
+    single-line `run:` prints its command twice (the `##[group]Run` header, then the echo),
+    so a command equal to the one on the line before it is the same invocation."""
+    out: list[str] = []
+    prev_line, prev_cmd = -2, ""
+    for i in range(start, min(end, len(lines))):
+        line = lines[i]
+        cmd = line[len("##[group]Run "):] if line.startswith("##[group]Run ") else line
+        cmd = cmd.strip()
+        if not _LHCI_CMD_RE.search(cmd):
+            continue
+        if not (i == prev_line + 1 and cmd == prev_cmd):
+            out.append(cmd)
+        prev_line, prev_cmd = i, cmd
+    return out
+
+
+def _lighthouse_audit_leaf(lines: list[str]) -> dict[str, Any] | None:
+    """The `lighthouse-serial-audits` leaf (OPT103), or None. A pass is the block of
+    `Running Lighthouse` lines closed by `Done running Lighthouse!`. A block with no closing
+    marker (a cancelled or crashed collect) is not counted. The magnitude is the share of
+    audits beyond the first per distinct URL: the repeat runs and repeat passes."""
+    passes: list[dict[str, Any]] = []
+    cur: dict[str, Any] | None = None
+    for i, line in enumerate(lines):
+        if line.startswith("##[group]Run "):
+            # A new step: a pass still open never finished and is not counted.
+            cur = None
+            continue
+        if "Lighthouse" not in line:
+            continue
+        running = _LHCI_RUNNING_RE.match(line)
+        if running:
+            page = _lhci_page_key(running.group(2))
+            if cur is not None and any(url == page for url, _n, _i in cur["urls"]):
+                # A pass audits each URL once, so a URL the open pass already has means
+                # a new collect started and the open one never finished.
+                cur = None
+            if cur is None:
+                cur = {"urls": [], "start": i}
+            cur["urls"].append((page, int(running.group(1)), i))
+        elif _LHCI_PASS_DONE_RE.match(line):
+            if cur is not None:
+                cur["end"] = i
+                passes.append(cur)
+            cur = None
+    total = sum(n for p in passes for _url, n, _i in p["urls"])
+    urls = {url for p in passes for url, _n, _i in p["urls"]}
+    if (not passes or total < _LHCI_AUDITS_FLOOR
+            or total < _LHCI_MIN_AUDITS_PER_URL * len(urls)):
+        return None
+    # Name each pass from the config or preset flag of its own lhci command. The mapping is
+    # positional inside one step section, and is used only when that section echoes exactly
+    # one lhci command per pass; anything else leaves the passes untagged.
+    sections = [(s, e) for _cmd, s, e in _log_step_sections(lines)]
+    tags: dict[int, str] = {}
+    for s, e in sections:
+        inside = [k for k, p in enumerate(passes) if s <= p["start"] < e]
+        commands = _lhci_section_commands(lines, s, e)
+        if not inside or len(commands) != len(inside):
+            continue
+        for k, cmd in zip(inside, commands):
+            named = _LHCI_PASS_NAME_RE.search(cmd)
+            if named:
+                tags[k] = _lhci_pass_tag(named.group(1))
+    rows: list[tuple[str, float | None, str | None]] = []
+    for k, p in enumerate(passes):
+        audits = sum(n for _url, n, _i in p["urls"])
+        counts = sorted({n for _url, n, _i in p["urls"]})
+        runs_txt = str(counts[0]) if len(counts) == 1 else f"{counts[0]}-{counts[-1]}"
+        label = f"pass {k + 1}: {len(p['urls'])} URLs x {runs_txt} runs"
+        if tags.get(k):
+            label += f" ({tags[k]})"
+        rows.append((label, float(audits), str(audits)))
+    # Largest pass first: the lever marker hangs from row 0. The sort is stable and each
+    # label keeps its log-order pass number.
+    rows.sort(key=lambda row: -(row[1] or 0.0))
+    n_pass, n_url = len(passes), len(urls)
+    runs_all = sorted({n for p in passes for _url, n, _i in p["urls"]})
+    uniform = (len(runs_all) == 1
+               and all(len(p["urls"]) == n_url for p in passes)
+               and n_pass * n_url * runs_all[0] == total)
+    if uniform:
+        shape = f"{n_pass} collect pass(es) x {n_url} URL(s) x {runs_all[0]} run(s) per URL"
+    else:
+        shape = f"{n_pass} collect pass(es) over {n_url} distinct URL(s)"
+    repeat = total - n_url
+    # Evidence for the first two passes: the pass's first `Running Lighthouse` line, then
+    # lhci's own assert total for it, which states the audit count in the tool's words.
+    evidence: list[str] = []
+    for k, p in enumerate(passes[:2]):
+        evidence.append(lines[p["urls"][0][2]].strip())
+        nxt = passes[k + 1]["start"] if k + 1 < len(passes) else len(lines)
+        evidence += [lines[q].strip() for q in range(p["end"], nxt)
+                     if _LHCI_ASSERT_RE.match(lines[q])][:1]
+    evidence += [line.strip() for line in lines
+                 if not line.startswith("##[group]") and _LHCI_CMD_RE.search(line)][:1]
+    return {
+        "fix_key": "lighthouse-serial-audits",
+        "unit_label": f"Lighthouse CI runs {total} full page audits in this job, one "
+                      f"after another - {shape}",
+        "magnitude": {"label": "audits beyond the first per URL (repeat runs and repeat "
+                               "passes), as a share of all Lighthouse audits",
+                      "value": round(100 * repeat / total, 2), "unit": "%"},
+        "deeper": [
+            # The passes run in sequence, so each bar is a pass's share of the summed
+            # audit count the job pays for.
+            {"rows": rows,
+             "blocker_note": f"{total} full page audits ({shape}), one after another - "
+                             f"{repeat} re-audit an already-audited URL - BIGGEST LEVER",
+             "pct_of": "sum"},
+        ],
+        "evidence": evidence,
+        "search": ["Running Lighthouse", "Done running Lighthouse!", "numberOfRuns"],
+    }
+
 # An `eslint` invocation at a COMMAND position (detector G). Every alternative is a
 # REQUIRED, LINE-ANCHORED command marker (not `.search()`-anywhere) so prose / tool output
 # can't false-fire: a shell echo (`$`/`>`), a GHA `[command]` line, or a line-start JS
@@ -1879,6 +2049,48 @@ _CACHE_SAVE_SECONDS_RE = re.compile(
 # capture still run) and never holds back the runner advisory. OPT101's cache
 # save-path leaf is uncredited and says nothing about the job's dominant work.
 _OBSERVATION_ONLY_LEAVES = frozenset({"dependency-cache", "cache-effective-path-mismatch"})
+
+_GO_TEST_RESULT_RE = re.compile(
+    r"^(?:ok|FAIL)\s+\S+(?:\s+(?:\(cached\)|[0-9]+(?:\.[0-9]+)?s))?"
+    r"(?:\s+coverage:\s+(?:[0-9]+(?:\.[0-9]+)?%\s+of\s+statements|"
+    r"\[no statements\]))?$", re.I)
+_BAZEL_TEST_RESULT_RE = re.compile(
+    r"^\S.*\b(?:PASSED|FAILED)\b(?:\s+in\s+[0-9]+(?:\.[0-9]+)?s)?$", re.I)
+_GRADLE_TEST_RESULT_RE = re.compile(
+    r"^> Task \S*test(?:\s+(?:FROM-CACHE|UP-TO-DATE|SKIPPED|FAILED))?$", re.I)
+_TURBO_TEST_RESULT_RE = re.compile(
+    r"^(?:[^:\s]+:)*[^:\s]*test[^:\s]*:\s+cache\s+"
+    r"(?:hit, replaying logs|miss, executing)\b", re.I)
+
+
+def _test_result_replay_share(text: str | None) -> dict[str, Any] | None:
+    """Count narrowly recognized cached test-result lines in one job log."""
+    if not text:
+        return None
+    cached = total = 0
+    for line in _clean_log(text):
+        if _GO_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += "(cached)" in line.casefold()
+        elif _BAZEL_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += bool(re.search(
+                r"\(cached\)\s+(?:PASSED|FAILED)\b", line, re.I))
+        elif _GRADLE_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += "FROM-CACHE" in line.upper()
+        elif _TURBO_TEST_RESULT_RE.search(line):
+            total += 1
+            cached += "cache hit, replaying logs" in line.casefold()
+    if not total:
+        return None
+    share = cached / total
+    return {
+        "cached_lines": cached,
+        "test_result_lines": total,
+        "share": share,
+        "replayed": share > 0.5,
+    }
 
 
 def _catalog_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -2311,22 +2523,38 @@ def _cache_path_leaf(cache_path_sample: dict[str, Any] | None) -> dict[str, Any]
 
 
 def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
-    """Parse the Buildx node block, retaining nodes with unusable platforms."""
+    """Parse the last complete Buildx node block, including unusable platforms."""
     in_nodes = False
     nodes: list[dict[str, str]] = []
     nodes_header = ""
     awaiting_platform = False
+    complete_blocks: list[tuple[str, list[dict[str, str]]]] = []
+
+    def finish_block() -> None:
+        nonlocal in_nodes
+        if (in_nodes and nodes_header and nodes
+                and all(node["platforms"] for node in nodes)):
+            complete_blocks.append((nodes_header, [dict(node) for node in nodes]))
+        in_nodes = False
+
     for line in lines:
         if re.search(r"\bNodes:\s*$", line):
+            finish_block()
             in_nodes = True
             nodes_header = line
+            nodes = []
+            awaiting_platform = False
             continue
         if not in_nodes:
             continue
+        if re.search(r"##\[(?:group|endgroup)\]", line, re.IGNORECASE):
+            finish_block()
+            continue
         if re.search(r"#\d+\s+\[[^\]]+\]\s+(?:FROM|RUN|COPY|ADD)\b", line,
                      re.IGNORECASE):
+            finish_block()
             break
-        if re.search(r"\bName:\s+\S+", line):
+        if re.match(r"^Name:\s+\S+", line):
             nodes.append({"name": line, "platforms": "", "native": ""})
             awaiting_platform = True
             continue
@@ -2341,7 +2569,17 @@ def _buildx_nodes(lines: list[str]) -> tuple[str, list[dict[str, str]]]:
             nodes[-1]["platforms"] = line
             nodes[-1]["native"] = detected[0] if detected else ""
             awaiting_platform = False
-    return nodes_header, nodes
+            continue
+        if re.search(r"^\s*[A-Za-z][A-Za-z0-9 ._#/-]*:\s*.*$", line):
+            # Buildx adds fields over time, and BuildKit label entries are
+            # indented below `Labels:`. Any key/value row is node metadata;
+            # structural group or build-step boundaries above end the block.
+            continue
+        if not line.strip():
+            continue
+        finish_block()
+    finish_block()
+    return complete_blocks[-1] if complete_blocks else ("", [])
 
 
 def _buildx_single_node(
@@ -2374,18 +2612,23 @@ def _platform_family(platform: str) -> str:
     return arch.split("/", 1)[0]
 
 
+# A compile or install command inside a Dockerfile RUN body, after any `--mount=`
+# flags and shell prefixes (`KEY=value`, env, sudo, time: see shell_prefix.py).
+_EMULATED_COMPILE_RE = re.compile(
+    r"(?:^|&&|\|\||[;|]|\bthen\b|\bdo\b)\s*"
+    r"(?:--mount=[^\s;&|]+\s+)*"
+    + SHELL_PREFIX_SRC +
+    r"(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
+    r"cargo\s+chef\s+cook|xx-cargo\b|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
+    r"cmake\s+(?:--build|-G)|ninja(?:\s|$)|meson\s+compile|node-gyp\b|"
+    r"pip\s+wheel\b|(?:\./)?mvnw?\b[^\n;&|]*\b(?:compile|package|install)\b|"
+    r"dotnet\s+(?:build|publish)|"
+    r"gradle\w*\s+.*\bbuild|make(?:\s|$))", re.IGNORECASE | re.MULTILINE)
+
+
 def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
     """Measure foreign-platform compile/install work before generic cache advice."""
-    compile_re = re.compile(
-        r"(?:^|&&|\|\||[;|]|\bthen\b|\bdo\b)\s*"
-        r"(?:--mount=[^\s;&|]+\s+)*"
-        r"(?:(?:(?:[A-Za-z_][A-Za-z0-9_]*=(?:[^\s;&|]+|'[^']*'|\"[^\"]*\"))|"
-        r"(?:env|sudo|time))\s+)*(?:go\s+(?:build|install)|xx-go\b|cargo\s+(?:build|install)|"
-        r"cargo\s+chef\s+cook|xx-cargo\b|(?:npm|pnpm|yarn)\s+(?:run\s+)?build|"
-        r"cmake\s+(?:--build|-G)|ninja(?:\s|$)|meson\s+compile|node-gyp\b|"
-        r"pip\s+wheel\b|(?:\./)?mvnw?\b[^\n;&|]*\b(?:compile|package|install)\b|"
-        r"dotnet\s+(?:build|publish)|"
-        r"gradle\w*\s+.*\bbuild|make(?:\s|$))", re.IGNORECASE | re.MULTILINE)
+    compile_re = _EMULATED_COMPILE_RE
     source_install_re = re.compile(
         r"(?:SKIP\w*PREBUILT\w*\s*=\s*(?:1|true)|"
         r"npm_config_build_from_source\s*=\s*(?:1|true)).*\bnpm\s+(?:ci|install)\b",
@@ -3220,11 +3463,54 @@ def _parse_log(text: str,
             index += 1
         return tuple(sorted(context))
 
+    def _cargo_selected_packages(command: str) -> set[str] | None:
+        """Return explicit package selectors, or None when the command is unscoped."""
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return None
+        cargo_index = next((index for index, token in enumerate(tokens)
+                            if token == "cargo" or token.endswith("/cargo")), None)
+        if cargo_index is None:
+            return None
+        selected: set[str] = set()
+        tail = tokens[cargo_index + 1:]
+        index = 0
+        while index < len(tail):
+            token = tail[index]
+            if token == "--":
+                break
+            option, separator, inline = token.partition("=")
+            if option in {"-p", "--package"}:
+                if separator:
+                    value = inline
+                elif index + 1 < len(tail):
+                    index += 1
+                    value = tail[index]
+                else:
+                    return None
+                if value:
+                    selected.add(value.split("@", 1)[0])
+            elif token.startswith("-p") and not token.startswith("--"):
+                selected.add(token[2:].split("@", 1)[0])
+            index += 1
+        return selected or None
+
+    def _cargo_package_selected(name: str, selectors: set[str]) -> bool:
+        return any(fnmatch.fnmatchcase(name, selector) for selector in selectors)
+
+    def _cargo_builds_test_harness(context: tuple[str, ...]) -> bool:
+        return ("subcommand=test" in context
+                or any(axis in {"--tests", "--benches", "--all-targets"}
+                       or axis.startswith(("--test=", "--bench="))
+                       for axis in context))
+
     def _cargo_group(group: tuple[str, list[str]]) -> dict[str, Any] | None:
         command, group_lines = group
         context = _cargo_command_context(command)
         if context is None:
             return None
+        selected_packages = _cargo_selected_packages(command)
         crates: dict[tuple[str, str, str], str] = {}
         for group_line in group_lines:
             match = re.search(
@@ -3254,6 +3540,7 @@ def _parse_log(text: str,
         seconds = sum(float(value) * {"h": 3600, "m": 60, "s": 1}[unit.casefold()]
                       for value, unit in parts)
         return {"command": command, "context": context, "crates": crates,
+                "selected_packages": selected_packages,
                 "profile": (finished.group("quoted") or finished.group("plain")).casefold(),
                 "seconds": seconds,
                 "finished": next(line.strip() for line in group_lines
@@ -3261,9 +3548,19 @@ def _parse_log(text: str,
 
     compiled = [row for group in cargo_groups if (row := _cargo_group(group)) is not None]
     for later_index, later in enumerate(compiled[1:], 1):
+        if later["selected_packages"] is None:
+            continue
         for earlier in compiled[:later_index]:
-            repeated = sorted(set(earlier["crates"]) & set(later["crates"]))
-            if (not repeated or not set(later["crates"]) <= set(earlier["crates"])
+            earlier_selected = earlier["selected_packages"] or set()
+            later_crates = set(later["crates"])
+            if _cargo_builds_test_harness(later["context"]):
+                later_crates = {
+                    key for key in later_crates
+                    if (not _cargo_package_selected(key[0], later["selected_packages"])
+                        or _cargo_package_selected(key[0], earlier_selected))
+                }
+            repeated = sorted(set(earlier["crates"]) & later_crates)
+            if (not repeated or not later_crates <= set(earlier["crates"])
                     or earlier["profile"] != later["profile"]
                     or earlier["context"] != later["context"]):
                 continue
@@ -3463,6 +3760,14 @@ def _parse_log(text: str,
             "evidence": ev,
             "search": [":test", "BUILD SUCCESSFUL in", "maxParallelForks"],
         }
+
+    # --- K2: Lighthouse CI audits every URL N times per pass, one after another ----
+    # Stays ahead of the dependency-cache observation below: a cache line elsewhere in
+    # the job must not hide the audit count. `_offcategory_leaf` keeps it off a pole whose
+    # dominant step is not the Lighthouse step.
+    lighthouse_leaf = _lighthouse_audit_leaf(lines)
+    if lighthouse_leaf is not None:
+        return lighthouse_leaf
     dependency_state = _cache_state_of_log(text, "dependency-cache")
     vendored_build_leaf = _vendored_lib_build_leaf(text)
     dependency_hit_leaf = None
@@ -3493,7 +3798,7 @@ def _parse_log(text: str,
                 r"pytest\s+(?P<id>.+?)\s*$",
                 re.I,
             ),
-            re.compile(r"^collecting\b", re.I),
+            re.compile(r"^(?:collecting\b|collected\s+\d+\s+items?\b)", re.I),
             re.compile(
                 r"^(?:=+\s*)?\d+\s+(?:passed|failed|errors?|skipped)\b"
                 r".*\bin\s+\d",
@@ -3540,6 +3845,7 @@ def _parse_log(text: str,
         startups: list[float] = []
         iterations: list[float] = []
         measurements: list[tuple[str, str, str]] = []
+        work_messages: list[str] = []
         complete = True
         for pos, (line_i, started, identity, boundary_raw) in enumerate(boundaries):
             next_line = (boundaries[pos + 1][0]
@@ -3547,14 +3853,15 @@ def _parse_log(text: str,
             next_started = (boundaries[pos + 1][1]
                             if pos + 1 < len(boundaries) else None)
             window = timestamped[line_i + 1:next_line]
-            work_row = next(((when, raw, match) for when, message, raw in window
+            work_row = next(((when, message, raw, match)
+                             for when, message, raw in window
                              if (match := work_re.match(message))), None)
             done_row = next(((when, raw, match) for when, message, raw in window
                              if (match := done_re.match(message))), None)
             if work_row is None or done_row is None:
                 complete = False
                 break
-            work, work_raw, work_match = work_row
+            work, work_message, work_raw, work_match = work_row
             done, done_raw, done_match = done_row
             if (bind_identity
                     and (work_match.group("id") != identity
@@ -3569,6 +3876,7 @@ def _parse_log(text: str,
             startups.append((work - started).total_seconds())
             iterations.append((done - started).total_seconds())
             measurements.append((boundary_raw, work_raw, done_raw))
+            work_messages.append(work_message)
         if not complete:
             continue
         startup_median = _median(startups)
@@ -3578,15 +3886,24 @@ def _parse_log(text: str,
                 or count * startup_median < 20):
             continue
         modeled = round((count - 1) * startup_median, 2)
+        collection_completion_only = all(
+            re.match(r"^collected\s+\d+\s+items?\b", message, re.IGNORECASE)
+            for message in work_messages
+        )
         startup_leaf = {
             "fix_key": "per-invocation-startup",
-            "unit_label": (
+            "unit_label": ((
+                f"{count} serial {profile_name} iterations each launch a fresh "
+                "process; collection completion is the first observable work marker, "
+                "so removable startup is not separately measurable"
+            ) if collection_completion_only else (
                 f"{count} serial {profile_name} iterations each launch a fresh "
                 f"process; median startup is {startup_median:g}s of a "
                 f"{iteration_median:g}s iteration"
-            ),
-            "magnitude": {"label": "modeled repeated process startup",
-                          "value": modeled, "unit": "s"},
+            )),
+            "magnitude": (None if collection_completion_only else
+                          {"label": "modeled repeated process startup",
+                           "value": modeled, "unit": "s"}),
             "deeper": [],
             "evidence": [
                 *measurements[0],
@@ -3598,7 +3915,7 @@ def _parse_log(text: str,
             "iteration_count": count,
             "startup_median_s": round(startup_median, 2),
             "iteration_median_s": round(iteration_median, 2),
-            "modeled_saving_s": modeled,
+            "modeled_saving_s": None if collection_completion_only else modeled,
         }
         break
     if startup_leaf is not None:
@@ -3688,6 +4005,12 @@ def _parse_log(text: str,
         r"(?:PASSED|OK)\b(?:\s+\[\s*\d+%\])?",
         re.IGNORECASE,
     )
+    pytest_node = re.compile(
+        r"^(?P<node>(?P<file>\S+\.py)::\S+?)(?:\s+.*)?$",
+        re.IGNORECASE,
+    )
+    pytest_outcome = re.compile(
+        r"^PASSED(?:\s+\[\s*\d+%\])?\s*$", re.IGNORECASE)
     pytest_command = re.compile(r"(?:^|\s)(?:python\s+-m\s+)?pytest\b.*(?:^|\s)-v\b",
                                 re.IGNORECASE)
     completions = [
@@ -3695,6 +4018,49 @@ def _parse_log(text: str,
         for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
         if (m := pytest_done.match(message))
     ]
+    # With ``pytest -v -s``, a test's own stdout follows the node id and pytest
+    # writes the outcome on a later physical line. Pair that standalone outcome
+    # with the preceding node, stopping at the next node so unrelated output
+    # cannot be borrowed as proof of completion. A suite may contain both this
+    # split shape and ordinary one-line results, so merge the two sets by node.
+    # Failed summaries withhold the split path: untrusted test stdout can print
+    # ``PASSED`` and must not impersonate pytest's result after the test fails.
+    summary_failed = any(
+        re.search(r"\b\d+\s+(?:failed|errors?)\b", message, re.IGNORECASE)
+        for _when, message, _raw, _stamp in stamped_tests
+    )
+    passed_totals = [
+        int(match.group(1))
+        for _when, message, _raw, _stamp in stamped_tests
+        if (match := re.search(r"\b(\d+)\s+passed\b", message, re.IGNORECASE))
+    ]
+    if not summary_failed and passed_totals:
+        completed_nodes = {row[3] for row in completions}
+        split_completions: list[tuple[int, datetime, str, str, str]] = []
+        node_rows = [
+            (i, when, m.group("file"), m.group("node"), raw)
+            for i, (when, message, raw, _stamp) in enumerate(stamped_tests)
+            if (m := pytest_node.match(message))
+        ]
+        for pos, (line_i, _started, test_file, node, node_raw) in enumerate(node_rows):
+            if node in completed_nodes:
+                continue
+            stop = node_rows[pos + 1][0] if pos + 1 < len(node_rows) else len(stamped_tests)
+            outcomes = [
+                (i, when, raw) for i, (when, message, raw, _stamp)
+                in enumerate(stamped_tests[line_i + 1:stop], start=line_i + 1)
+                if pytest_outcome.match(message)
+            ]
+            outcome = outcomes[-1] if outcomes else None
+            if outcome is not None:
+                split_completions.append(
+                    (outcome[0], outcome[1], test_file, node,
+                     f"{node_raw} … {outcome[2]}")
+                )
+                completed_nodes.add(node)
+        if max(passed_totals) >= len(completions) + len(split_completions):
+            completions.extend(split_completions)
+    completions.sort(key=lambda row: row[0])
     if (len(completions) >= 4
             and len({row[2] for row in completions}) == 1
             and len({row[3] for row in completions}) == len(completions)):
@@ -3757,11 +4123,6 @@ def _parse_log(text: str,
         re.IGNORECASE,
     )
     vitest_rows: list[tuple[float, str, str, datetime, str]] = []
-    vitest_started = next(
-        (when for when, message, _raw, _stamp in stamped_tests
-         if re.match(r"^RUN\s+v?\d", message, re.IGNORECASE)),
-        None,
-    )
     for when, message, raw, _stamp in stamped_tests:
         match = vitest_done.match(message)
         if match is None:
@@ -3771,12 +4132,6 @@ def _parse_log(text: str,
             duration /= 1000.0
         test_name = match.group("title").rsplit(" > ", 1)[-1].strip()
         vitest_rows.append((duration, match.group("file"), raw, when, test_name))
-    count_matches = [
-        int(match.group(1))
-        for _when, message, _raw, _stamp in stamped_tests
-        if (match := re.search(r"\b(\d+)\s+tests?\s+passed\b", message,
-                               re.IGNORECASE))
-    ]
     by_file: dict[str, list[tuple[float, str, datetime, str]]] = {}
     for duration, test_file, raw, when, test_name in vitest_rows:
         by_file.setdefault(test_file, []).append((duration, raw, when, test_name))
@@ -3788,12 +4143,12 @@ def _parse_log(text: str,
                 or len(set(str(marker).casefold() for marker in matched_markers))
                 != len(rows)):
             continue
-        measured_span = ((max(row[2] for row in rows) - vitest_started).total_seconds()
-                         if vitest_started is not None else 0.0)
+        inferred_start = min(
+            row[2] - timedelta(seconds=row[0]) for row in rows)
+        measured_span = (
+            max(row[2] for row in rows) - inferred_start).total_seconds()
         summed_runtime = sum(row[0] for row in rows)
         if not (summed_runtime * 0.95 <= measured_span <= summed_runtime * 1.2 + 1):
-            continue
-        if count_matches and max(count_matches) != len(rows):
             continue
         completion_order = sorted(rows, key=lambda row: row[2])
         if any(
@@ -3819,7 +4174,7 @@ def _parse_log(text: str,
                     *(row[1] for row in cohort[:2]),
                 ],
                 "search": [test_file, "describe.concurrent", "maxConcurrency"],
-                "test_count": max(count_matches) if count_matches else len(rows),
+                "test_count": len(rows),
                 "isolation_basis": "test source",
             }
     if isolated_test_leaf is not None:
@@ -4657,6 +5012,60 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "independent tests land on different runners, each with an isolated "
                    "fixture; keep a full-suite fallback, confirm pass/fail parity, and "
                    "re-measure the step.",
+    },
+    # OPT103 - see references/patterns/opt103-*.md. Routed by the `lighthouse-serial-audits`
+    # log leaf. The three dials are the owner's; nothing here prescribes one. Not in
+    # `_JOB_EXPANDING_LEAVES`: its first line asks to fill the job's idle cores, and two
+    # Lighthouse audits must never share a runner.
+    "lighthouse-serial-audits": {
+        "cause": "The step runs Lighthouse CI's collect phase as full page audits, one "
+                 "after another. For every configured URL it runs Lighthouse `numberOfRuns` "
+                 "times, each run a complete page load plus the audit, and lhci waits for "
+                 "one run before it starts the next (its `Run #k...done.` lines appear in "
+                 "order). A job with several collect passes, one per device preset or "
+                 "config file, repeats that for each pass, so the audit count is passes x "
+                 "URLs x runs. The log shows the audits themselves, with no retry, stall or "
+                 "download, and most of them audit a page the job has already audited.",
+        "look": "`{wf}` - every `lhci autorun` / `lhci collect` step (or Lighthouse CI "
+                "action) and the `lighthouserc*` config it loads: `ci.collect.numberOfRuns` "
+                "(lhci's default is 3), `ci.collect.url` (the page list), `settings.preset` "
+                "(why there are several passes), and each `ci.assert` assertion's "
+                "`aggregationMethod` (`median`, `optimistic`, `pessimistic` or "
+                "`median-run`), which decides how many runs the check needs. Divide the "
+                "step's wall by the audit count for the per-audit cost. Check what consumes "
+                "the reports (an upload, a budget gate on PRs, a dashboard), and recover "
+                "from git history why these runs, URLs and presets were chosen before "
+                "changing any of them.",
+        "constraints": "Lighthouse scores are noisy. `numberOfRuns` exists so the "
+                       "assertions gate on a median, not on one jittery run, so cutting it "
+                       "toward 1 trades speed for a flakier or falsely green budget. Lower "
+                       "it only to what the assertion aggregation needs, and compare old "
+                       "and new medians side by side first. The device passes may be "
+                       "deliberate (mobile and desktop budgets differ), and every URL that "
+                       "carries a budget must keep one. Do NOT run two Lighthouse passes at "
+                       "the same time on one runner: concurrent audits compete for the same "
+                       "cores, which skews the scores the budget gates on, and each "
+                       "`lhci collect` clears the shared `.lighthouseci/` report folder "
+                       "when it starts. Parallelise across runners (a "
+                       "matrix leg per preset or URL shard), never within one. Each added "
+                       "leg repeats checkout, install and build, so runner minutes go up "
+                       "while the wait goes down. If you take that split-across-jobs path "
+                       "and this step is a required status check, add the new jobs to "
+                       "branch protection as required checks (or the ruleset equivalent), "
+                       "or the split-out audits silently stop gating merges (everything "
+                       "stays green) until that admin-only re-gating step is done.",
+        "docs": ["Lighthouse CI configuration (`collect.numberOfRuns`, `collect.url`, "
+                 "`settings.preset`, assertion `aggregationMethod`): "
+                 "https://googlechrome.github.io/lighthouse-ci/docs/configuration.html",
+                 "Lighthouse performance scoring (why scores fluctuate between runs): "
+                 "https://developer.chrome.com/docs/lighthouse/performance/performance-scoring"],
+        "deliver": "Cut the audit count to what the budget check needs: fewer runs per URL "
+                   "only where the assertion aggregation still holds (medians compared old "
+                   "against new), and a representative URL set per preset. Move the "
+                   "independent passes (device presets, URL shards) onto separate runners "
+                   "so they stop running one after another. Keep every budget and "
+                   "assertion gating, confirm a deliberately regressed page still fails "
+                   "the check, and re-measure the step.",
     },
 }
 
@@ -6328,6 +6737,17 @@ def _capture_relation(captured_at: str, scanned_at: str) -> str:
     return "newer than" if c > s else "older than"
 
 
+def _pr_sample_job_list_budget_line(doc: dict[str, Any]) -> str:
+    """Return the bounded PR-sample job-list read disclosure, when stamped."""
+    cp = doc.get("pr_critical_path") or {}
+    reads = cp.get("sample_job_list_reads")
+    cap = cp.get("sample_job_list_read_cap")
+    if not isinstance(reads, int) or not isinstance(cap, int):
+        return ""
+    cap_note = "; cap reached" if cp.get("sample_job_list_cap_hit") else ""
+    return f"> - **PR-sample job-list reads:** {reads} of at most {cap}{cap_note}."
+
+
 def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[str]:
     """Spell out WHERE the numbers come from: levels 1–2 are P50 from the committed
     ci-speedup audit (its own sample size + window + gate-sample completeness);
@@ -6454,15 +6874,44 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "figures are run-list-only, not job-level.")
     stop_reason = str(cp.get("sample_stop_reason") or (
         "target_met" if complete else "candidates_exhausted")).replace("_", " ")
-    gate = (f"> - **Which checks gate (the critical-path ordering):** measured from "
-            f"**{spr}/{tgt} sampled PRs** — **{spr} of {tgt} PRs sampled: "
-            f"{stop_reason}**")
+    partial_commits = cp.get("sample_partial_count")
+    distinct_days = cp.get("sample_distinct_days")
+    min_distinct_days = cp.get("sample_min_distinct_days")
+    unreliable = (
+        (isinstance(partial_commits, int) and isinstance(spr, int)
+         and pr_sample_is_mostly_partial(partial_commits, spr))
+        or (isinstance(distinct_days, int)
+            and isinstance(min_distinct_days, int)
+            and distinct_days < min_distinct_days))
+    heading = ("PR gate sample (ordering withheld)" if unreliable
+               else "Which checks gate (the critical-path ordering)")
+    overshoot = isinstance(spr, int) and isinstance(tgt, int) and spr > tgt
+    sample_population = (f"{spr} PRs sampled (minimum target {tgt})" if overshoot
+                         else f"{spr}/{tgt} sampled PRs")
+    sample_status = (f"{spr} PRs sampled (minimum target {tgt})" if overshoot
+                     else f"{spr} of {tgt} PRs sampled")
+    gate = (f"> - **{heading}:** measured from **{sample_population}** — "
+            f"**{sample_status}: {stop_reason}**")
+    if unreliable:
+        reasons = []
+        if (isinstance(partial_commits, int) and isinstance(spr, int)
+                and pr_sample_is_mostly_partial(partial_commits, spr)):
+            reasons.append(f"{partial_commits}/{spr} sampled commits are partial")
+        if (isinstance(distinct_days, int)
+                and isinstance(min_distinct_days, int)
+                and distinct_days < min_distinct_days):
+            reasons.append(f"the sample spans only {distinct_days} distinct day(s)")
+        gate += (" — ⚠️ **gate frequency and pole order are unreliable** because "
+                 + " and ".join(reasons))
     if not complete:
         short_reasons = {
             "fetch failures": "some candidate or check-run history was unreadable",
             "page cap": "the bounded candidate-page walk stopped before reaching the target",
+            "job list cap": "the bounded job-list read budget stopped before reaching the target",
             "era door": "older PRs from a different workflow configuration were excluded",
             "candidates exhausted": "the visible candidate history contained too few qualifying PRs",
+            "required suite empty": "no commit ran every observable required check",
+            "required checks unobservable": "the required checks were not present in Actions job lists",
         }
         gate += (f" — ⚠️ **short sample** ({short_reasons.get(stop_reason, 'the sample target was not reached')}), "
                  "so the gate ordering here is a floor, not the full picture")
@@ -6506,19 +6955,42 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
     # (the PR-floor fallback), vs. it couldn't be read at all (no admin / 404). Branch
     # on `required_suite_unsatisfiable` so an external-but-readable gate isn't reported
     # as a permissions failure.
-    if cp.get("required_suite_unsatisfiable"):
+    if cp.get("sample_stop_reason") == "required_suite_empty":
+        out.append("> - ⚠️ **No complete observable required suite** — completed PR "
+                   "commits were present, but no commit ran every observable required "
+                   "check. The sample stays empty rather than falling back to unrelated "
+                   "jobs while claiming required-suite scope.")
+    elif cp.get("required_suite_unsatisfiable"):
         out.append("> - ⚠️ **No file-backed required gate** — the required checks were "
-                   "read, but they're external/managed (a CLA bot, enterprise CI, "
-                   "label-gated e2e, a mergeability gate) and ran on **none** of the "
-                   "sampled PRs, so there's no required-check critical path. The spine "
+                   "read, but they were not observable in the sampled Actions job lists "
+                   "(a CLA bot, enterprise CI, label-gated e2e, or mergeability gate), "
+                   "so their per-commit presence and timing could not be established. The spine "
                    "is the measured **PR-floor** — the file-backed work a normal PR "
                    "runs — not the branch-protection gate.")
+    elif cp.get("sample_job_list_scoped"):
+        if cp.get("sample_partial_count"):
+            out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "
+                       "population excludes commits known to have skipped an observable "
+                       "required check. Commits with failed job-list reads remain partial "
+                       "and unverified rather than being called clean; the reliability "
+                       "label above reflects their share. Required checks absent from all "
+                       "job lists are named separately.")
+        else:
+            out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "
+                       "representative population avoids one check-run request per commit, "
+                       "and includes only completed PR commits where every observable "
+                       "required check ran. Required checks absent from the job lists are "
+                       "named separately and excluded from that suite test; gate frequency "
+                       "is observed from the resulting scoped population.")
     elif cp.get("required_suite_scoped") is False:
         out.append("> - ⚠️ **Required checks were unreadable** (no admin / branch "
                    "protection 404), so 'gate' here means the **slowest check on a "
                    "typical PR** (observed), not a *confirmed required* check. Slow "
                    "checks that run on only a minority of PRs are shown as a footnote, "
                    "not the headline.")
+    job_list_budget = _pr_sample_job_list_budget_line(doc)
+    if job_list_budget:
+        out.append(job_list_budget)
     dropped = cp.get("dropped_non_pr_checks") or []
     if dropped:
         shown = ", ".join(f"`{_clean_label(n)}`" for n in dropped[:4])
@@ -6549,8 +7021,9 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
         shown = ", ".join(f"`{_clean_label(n)}`" for n in unobs[:4])
         more = f" +{len(unobs) - 4} more" if len(unobs) > 4 else ""
         out.append(f"> - ⚠️ **Status-only required check(s) excluded from the suite test:** "
-                   f"{shown}{more} — never posted as a check-run in the sampled window (a "
-                   "GitHub-App commit status / external gate), so they can't be timed. The "
+                   f"{shown}{more} — absent from the sampled Actions job lists (for example "
+                   "a GitHub-App commit status or external gate), so this bounded job-list "
+                   "sample cannot establish their per-commit presence or timing. The "
                    "gate was measured on the **observable** required subset; these aren't on "
                    "the critical path and aren't confirmed satisfied here, just unmeasurable.")
     # Issue #119: a required status a workflow in THIS repo posts itself (an aggregate that
@@ -6870,6 +7343,8 @@ _LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "benchmark-serial-reruns": "test",
     "android-emulator-shard": "test",
     "gradle-test-parallelism": "test",
+    # `scan` by tool name; `test` when the step name also says so ("Lighthouse tests").
+    "lighthouse-serial-audits": frozenset({"scan", "test"}),
     "eslint-no-cache": "scan",
     "turbo-remote-cache": "build",
     "turbo-partial-cache": "build",
@@ -6888,6 +7363,10 @@ _HIGH_RISK_LEAVES: dict[str, str] = {
 }
 _LEAF_DOMINANT_STEP_TOKEN: dict[str, "re.Pattern[str]"] = {
     "eslint-no-cache": re.compile(r"lint", re.IGNORECASE),
+    # A Lighthouse step shares its bins with lint, type-check and test steps, so the same
+    # sibling rule applies: this leaf crowns a pole only when the dominant step names
+    # Lighthouse.
+    "lighthouse-serial-audits": re.compile(r"lighthouse|lhci", re.IGNORECASE),
 }
 # Machine markers (HTML comments, like `_CACHE_CONTEXT_MARKER`): the crown marker records
 # the fix_key of the leaf that crowned a pole's MEASURED CAUSE so verify_report can
@@ -7023,10 +7502,17 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
     finding) or fewer than 2 runs to compare."""
     if not mag or not isinstance(mag, dict):
         return []
+    excluded = mag.get("replayed_result_logs_excluded")
+    excluded_n = excluded if isinstance(excluded, int) and excluded > 0 else 0
+    exclusion = (
+        f"**Replayed-result exclusion:** {excluded_n} fetched sibling "
+        f"log{'s were' if excluded_n != 1 else ' was'} left out of this cross-run "
+        "magnitude baseline because most recognized test results were replayed from cache."
+    ) if excluded_n else ""
     entries = [x for x in (mag.get("values") or []) if _num(x.get("value")) is not None]
     vals = [_num(x.get("value")) for x in entries]
     if len(vals) < 2:
-        return []
+        return [exclusion, ""] if exclusion else []
     unit = str(mag.get("unit", ""))
     fmt = (lambda x: f"{x:.0f}%") if unit == "%" else (lambda x: _clock(x))
     # The median can land on a half (even sample -> mean of the two middles, e.g.
@@ -7068,6 +7554,8 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
             if x.get("fork"):
                 tag += " — fork PR (no repo secrets; can't reach upstream branch caches)"
             out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
+        if exclusion:
+            out += ["", exclusion]
         out.append("")
         return out
     if n >= 5:
@@ -7112,6 +7600,8 @@ def _mag_line(mag: dict[str, Any] | None, leaf: dict[str, Any] | None) -> list[s
         if x.get("fork"):
             tag += " — fork PR (no repo secrets; can't reach upstream branch caches)"
         out.append(f"- [run {rid}]({url}) — {fmt(_num(x.get('value')))}{tag}")
+    if exclusion:
+        out += ["", exclusion]
     out.append("")
     return out
 
@@ -8239,6 +8729,14 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
     if _par:
         rows.append(("Parallel steps", _par,
                      parallel_steps_used_for(doc.get("parallel_steps"))))
+    _jest_coverage = doc.get("jest_coverage_notes")
+    if isinstance(_jest_coverage, list):
+        _notes = sorted({str(row.get("note")) for row in _jest_coverage
+                         if isinstance(row, dict) and row.get("note")})
+        if _notes:
+            rows.append(("Jest coverage configuration", _flatten_cell("; ".join(_notes)),
+                         "Provider comparison guidance; no saving credited without "
+                         "matched measurements"))
     # Candidates a pattern measured and then HELD BACK because it could not
     # decide them — a candidate cache (OPT79), a group of small jobs sharing one
     # setup (OPT77), a checkout with a slow tail (OPT80). Without these rows the
@@ -8377,7 +8875,18 @@ def _metadata_table(doc: dict[str, Any], repo: str) -> list[str]:
         reason = str(cp.get("sample_stop_reason") or (
             "target_met" if cp.get("sample_complete", True)
             else "candidates_exhausted")).replace("_", " ")
-        rows.append(("PR gate sample", f"{spr} of {tgt} PRs sampled: {reason}"))
+        span_first = str(cp.get("sample_span_first") or "")[:10]
+        span_last = str(cp.get("sample_span_last") or "")[:10]
+        span = (f"; {span_first} to {span_last}"
+                if span_first and span_last else "")
+        sample_size = (f"{spr} PRs sampled (minimum target {tgt})"
+                       if spr > tgt else f"{spr} of {tgt} PRs sampled")
+        budget = ""
+        reads = cp.get("sample_job_list_reads")
+        cap = cp.get("sample_job_list_read_cap")
+        if isinstance(reads, int) and isinstance(cap, int):
+            budget = f"; {reads}/{cap} job-list reads"
+        rows.append(("PR gate sample", f"{sample_size}: {reason}{span}{budget}"))
     if skill.startswith("installed:"):
         # Content-hash provenance for an installed skill copy (issue #2): not a
         # commit, so a plain identity string with NO commit permalink to fabricate.
@@ -10644,6 +11153,74 @@ def _commit_wait_bottom_line(commit_clock: dict[str, Any],
     return bottom
 
 
+def _commit_wall_disclosure_lines(commit_clock: dict[str, Any]) -> list[str]:
+    """Render the verifier-pinned per-commit wait even when no pole resolves."""
+    p50 = _num(commit_clock.get("p50_s"))
+    p90 = _num(commit_clock.get("p90_s"))
+    facts = [f for f in (commit_clock.get("facts") or []) if isinstance(f, dict)]
+
+    def duration(seconds: float) -> str:
+        whole = max(0, round(seconds))
+        hours, rem = divmod(whole, 3600)
+        minutes, secs = divmod(rem, 60)
+        return (f"{hours}h {minutes:02d}m {secs:02d}s" if hours
+                else f"{minutes}m {secs:02d}s")
+
+    lines: list[str] = []
+    if p50 is not None and p90 is not None:
+        complete = [f for f in facts if _num(f.get("wall_s")) is not None]
+        basis = (min(complete, key=lambda f: abs(
+            (_num(f.get("wall_s")) or 0.0) - p50)) if complete else None)
+        p4 = basis.get("projection_4x") if isinstance(basis, dict) else None
+        clause = ""
+        if isinstance(p4, dict):
+            projected = _num(p4.get("projected_s"))
+            multiple = _num(p4.get("multiple"))
+            if projected is not None and multiple is not None:
+                clause = (
+                    " At the sampled p50 commit, a 4x speedup to its slowest job "
+                    f"projects to **{duration(projected)}** (**{multiple:.2f}x**).")
+                median = _num(commit_clock.get("median_projection_multiple"))
+                worst = commit_clock.get("worst_commit") or {}
+                worst_wall = _num(worst.get("wall_s")) if isinstance(worst, dict) else None
+                worst_sha = (str(worst.get("sha") or "")[:7]
+                             if isinstance(worst, dict) else "")
+                worst_wf = (str(worst.get("workflow_file") or "")
+                            if isinstance(worst, dict) else "")
+                if median is not None:
+                    clause += f" Across commits, the median projection is **{median:.2f}x**."
+                if worst_wall is not None and worst_sha:
+                    held = (f"; `{_wf_base(worst_wf)}` holds its slowest job"
+                            if median is not None and median < multiple / 2.0 and worst_wf
+                            else "")
+                    clause += (
+                        f" The worst sampled commit is `{worst_sha}` at "
+                        f"**{duration(worst_wall)}**{held}.")
+        lines.append(
+            "> **Per-commit PR wait:** p50 "
+            f"**{duration(p50)}**, p90 **{duration(p90)}**, from the earliest "
+            "workflow run created to the last job completed across every workflow "
+            "on that commit." + clause)
+    partial = [f for f in facts if f.get("partial") is True]
+    if partial:
+        missing = sorted({str(wf) for f in partial
+                          for wf in (f.get("missing_workflows") or []) if wf})
+        reruns = sorted({str(wf) for f in partial
+                         for wf in (f.get("rerun_workflows") or []) if wf})
+        reasons = []
+        if missing:
+            reasons.append("missing " + ", ".join(
+                f"`{_clean_label(wf)}`" for wf in missing))
+        if reruns:
+            reasons.append("re-run " + ", ".join(
+                f"`{_clean_label(wf)}`" for wf in reruns))
+        lines.append(
+            f"> {len(partial)} sampled commit(s) were partial"
+            + (f" ({'; '.join(reasons)})" if reasons else "")
+            + "; their observed spans were excluded from these percentiles.")
+    return lines
+
+
 _WORKFLOW_LANE_EVENTS = frozenset({
     "branch_protection_rule", "check_run", "check_suite", "create", "delete",
     "deployment", "deployment_status", "discussion", "discussion_comment",
@@ -11662,9 +12239,17 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # the valueless + all-pole test below excludes exactly those, mirroring
         # `check_pole_not_reframed_as_hygiene`. A finding that also touches a NON-pole job still
         # renders (the all-pole guard keeps it), so its signal is not lost off-path.
+        # The drilled poles describe the pull-request lane. A finding collected
+        # only from schedule/release/workflow-dispatch runs is not measured on
+        # that lane, so sharing the same job name does not make its disclosure
+        # redundant with the PR pole.
+        if f.get("non_pr_lane") is True:
+            return False
         if str(f.get("pattern") or "") == "OPT32":
             measurement = f.get("path_filter_measurement")
             if isinstance(measurement, dict):
+                if measurement.get("status") == "unmeasured":
+                    return False
                 sampled = measurement.get("sampled_prs")
                 skipped = measurement.get("would_skip_prs")
                 rate = measurement.get("hit_rate")
@@ -11719,13 +12304,20 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     # `_group_by_pattern_ranked`, so they survive this slice (they'd only be cut if there
     # were >_ALSO_NOTICED_CAP of them — not a case that arises today; see that docstring).
     shown, rest = ranked[:_ALSO_NOTICED_CAP], ranked[_ALSO_NOTICED_CAP:]
-    # OPT82 is exempt from the cap. It carries no bill saving BY DESIGN, so it ranks
-    # last and would be the first row the cap cuts — but its card is the only place
-    # its named rules, its benchmark and its ledger requirement reach the reader
-    # (the same reason `_on_pole_job` exempts it). The "+N more" tail is for rows
-    # whose substance is a smaller number; OPT82 has no number to be smaller.
-    shown += [g for g in rest if g[0] == "OPT82"]
-    rest = [g for g in rest if g[0] != "OPT82"]
+    # OPT82 and unmeasured OPT32 are exempt from the cap. OPT82 carries no bill saving
+    # BY DESIGN, while an unmeasured OPT32 has no number because GitHub did not return
+    # enough evidence to calculate one. In both cases the card is the only place the
+    # reader sees the substance that a numeric ranking cannot represent.
+    def _uncapped_group(group: tuple[str, list[dict[str, Any]]]) -> bool:
+        pat, members = group
+        return pat == "OPT82" or (
+            pat == "OPT32" and any(
+                isinstance(m.get("path_filter_measurement"), dict)
+                and m["path_filter_measurement"].get("status") == "unmeasured"
+                for m in members))
+
+    shown += [g for g in rest if _uncapped_group(g)]
+    rest = [g for g in rest if not _uncapped_group(g)]
     # A credited wall-clock lever (OPT24) can land in this appendix; it sorts first and
     # carries a per-row correction below. Qualify the blanket "off-path / ~0 wall-clock"
     # blurb when one is present, so the section header doesn't contradict that row.
@@ -11888,6 +12480,14 @@ def _also_noticed_block(findings: list[dict[str, Any]],
                          "**wall-clock-negative** (build-once-then-fan-out adds a serial "
                          "gate), so it lengthens the merge wait. Treat it as a bill "
                          "saving, not a speed win.")
+        if pat == "OPT32":
+            unmeasured = next((m.get("path_filter_measurement") for m in ms
+                               if isinstance(m.get("path_filter_measurement"), dict)
+                               and m["path_filter_measurement"].get("status") == "unmeasured"),
+                              None)
+            if isinstance(unmeasured, dict):
+                reason = str(unmeasured.get("reason") or "unknown reason")
+                lines.append(f"**Measurement:** hit rate not measured ({reason}).")
         if ev:
             lines.append(f"**Evidence:** {_flatten_cell(ev)}")
         lines += [f"**Catalog (background + fix recipe):** {url}", "",
@@ -13043,11 +13643,12 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     # row. A quiet repo with the stamp and nothing else collapsed to the
     # one-line note, dropping the footer and failing its own verifier.
     parallel_n = parallel_steps_used(doc.get("parallel_steps"))
+    jest_coverage_n = bool(doc.get("jest_coverage_notes"))
     if (not tier2_lines and not also_lines and not queue_lines
             and not incomplete and not broken and not uncredited_lines
             and not cache_guard_lines
             and not withheld_n and not opt79_off_pole and not opt81_n
-            and not parallel_n):
+            and not parallel_n and not jest_coverage_n):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
@@ -13088,6 +13689,23 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     out: list[str] = [_STATIC_ONLY_MARKER, "",
                       f"# {repo} — why is the merge slow?", ""]
     out += _metadata_table(doc, repo)
+    _static_stop = str(cp.get("sample_stop_reason") or "")
+    if _static_stop == "required_suite_empty" and not broken:
+        out += ["> [!IMPORTANT]",
+                "> **No complete observable required suite.** Completed PR commits "
+                "were present, but no commit ran every observable required check. "
+                "The report keeps the scoped population empty rather than ranking "
+                "unrelated jobs.", ""]
+    _static_unobservable = cp.get("required_checks_unobservable") or []
+    if _static_unobservable:
+        _shown = ", ".join(
+            f"`{_clean_label(str(name))}`" for name in _static_unobservable[:4])
+        _more = (f" +{len(_static_unobservable) - 4} more"
+                 if len(_static_unobservable) > 4 else "")
+        out += ["> [!IMPORTANT]",
+                "> **Required checks are unobservable in Actions job lists:** "
+                f"{_shown}{_more}. They remain required-check coverage gaps; the "
+                "report does not silently drop them or claim they were timed.", ""]
     # An unscanned file must never read as clean — keep the coverage warning on top.
     out += _coverage_gap_banner(doc.get("scan_incomplete"))
     out += _unresolved_gate_lines(doc.get("pr_critical_path") or {})
@@ -13128,6 +13746,11 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                 "**cloud bill** (runner-minutes), not measured developer wall-clock. "
                 "Re-run when the GitHub API is reachable again (e.g. once a rate limit "
                 "has reset) to get the measured wall-clock critical path.", ""]
+    elif _static_stop == "required_suite_empty":
+        # The specific banner above already explains why completed PR history produced
+        # no scoped population. Do not follow it with the generic no-run-history banner,
+        # which would falsely say that no PR-gating timing exists.
+        pass
     elif _static_commit_wall > 0:
         out += ["> [!IMPORTANT]",
                 "> **Commit-level developer wait was measured, but no per-check spine "
@@ -13201,6 +13824,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                   "pass failed), so this report can't rank what a PR waits on before "
                   "the merge — and that silence is a hole in the data, not a verdict "
                   "on your CI."]
+    elif _static_stop == "required_suite_empty":
+        bottom = ["> **Bottom line.** Completed PR timing was available, but no commit "
+                  "ran the whole observable required suite, so this report does not "
+                  "rank unrelated jobs as the merge gate."]
     elif no_pr_gating:
         bottom = ["> **Bottom line.** This repo's current workflows never run on PRs, "
                   "so there is no merge wait to rank — the findings below are about "
@@ -13240,6 +13867,10 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *queue_lines]
     if tier2_lines:
         out += ["---", "", *tier2_lines]
+    _commit_lines = _commit_wall_disclosure_lines(
+        cp.get("commit_wall_clock") or {})
+    if _commit_lines:
+        out += ["---", "", *_commit_lines]
     # No pole is drilled here, so every OPT80 tail line renders in the off-pole
     # section, after the runner-minute cards and before Also noticed. This is
     # the static-only path (no measured poles); the block is empty unless some
@@ -13279,7 +13910,8 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     _era_lines = _config_era_disclosure_lines(cp, captured_at)
     if _era_lines:
         out += ["---", "", *_era_lines]
-    out += _data_sources_footer(doc, repo)
+    _budget_line = _pr_sample_job_list_budget_line(doc)
+    out += _data_sources_footer(doc, repo, lead=[_budget_line] if _budget_line else None)
     out += _starsling_footer()
     return _strip_emdashes("\n".join(out))
 
@@ -13506,13 +14138,42 @@ def _default_branch_push_lane_block(doc: dict[str, Any]) -> list[str]:
     return lines
 
 
+def _record_analysis_disposition(doc: dict[str, Any], key: str, check: str,
+                                 status: str, reason: str) -> None:
+    """Record and report exactly one outcome for a supplied ``--analysis`` key."""
+    rows = doc.setdefault("analysis_dispositions", [])
+    if any(str(row.get("key") or "") == key for row in rows if isinstance(row, dict)):
+        return
+    rows.append({"key": key, "check": check, "status": status, "reason": reason})
+    print(f"ci-speedup: --analysis {key or '<unbound>'} {status}"
+          + (f" for {check}" if check else "") + f": {reason}", file=sys.stderr)
+
+
+def _report_unmatched_analysis_dispositions(doc: dict[str, Any],
+                                            analyses: dict[str, Any]) -> None:
+    """Make unbound and below-the-render-cap analysis keys loud after rendering."""
+    seen = {str(row.get("key") or "") for row in doc.get("analysis_dispositions", [])
+            if isinstance(row, dict)}
+    for key in analyses:
+        if key not in seen:
+            payload = analyses[key]
+            if not isinstance(payload, dict):
+                reason = "the analysis JSON is not an object"
+            elif payload.get("__analysis_parse_error__"):
+                reason = str(payload["__analysis_parse_error__"])
+            else:
+                reason = "no rendered pole matched this analysis key"
+            _record_analysis_disposition(
+                doc, key, "", "declined", reason)
+
+
 def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
            samples: dict[str, dict[str, Any]] | None = None,
            log_runs: dict[str, str] | None = None,
            captured_at: str = "",
            steps: dict[str, dict[str, Any]] | None = None,
            mags: dict[str, dict[str, Any]] | None = None,
-           analyses: dict[str, dict[str, Any]] | None = None) -> str:
+           analyses: dict[str, Any] | None = None) -> str:
     global _LAST_CLAIMS
     logs = logs or {}
     samples = samples or {}
@@ -13520,6 +14181,11 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     steps = steps or {}
     mags = mags or {}
     analyses = analyses or {}
+    if analyses:
+        # This is part of the findings object the renderer was handed, so callers that
+        # persist the enriched findings retain every explicit decision not to use a
+        # supplied analysis. Reset per render: a prior attempt must not leak into this one.
+        doc["analysis_dispositions"] = []
     cs = claims.ClaimSet()
     _LAST_CLAIMS = cs
     cp = doc.get("pr_critical_path") or {}
@@ -14440,6 +15106,27 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
                     " At the sampled p50 commit, a 4x speedup to its slowest job "
                     f"projects to **{_commit_duration(_projected)}** "
                     f"(**{_multiple:.2f}x**).")
+                _median_multiple = _num(
+                    _commit_wall.get("median_projection_multiple"))
+                _worst = _commit_wall.get("worst_commit") or {}
+                _worst_wall = (_num(_worst.get("wall_s"))
+                               if isinstance(_worst, dict) else None)
+                _worst_sha = (str(_worst.get("sha") or "")[:7]
+                              if isinstance(_worst, dict) else "")
+                _worst_wf = (str(_worst.get("workflow_file") or "")
+                             if isinstance(_worst, dict) else "")
+                if _median_multiple is not None:
+                    _projection_clause += (
+                        " Across commits, the median projection is "
+                        f"**{_median_multiple:.2f}x**.")
+                if _worst_wall is not None and _worst_sha:
+                    _held = ""
+                    if (_median_multiple is not None
+                            and _median_multiple < _multiple / 2.0 and _worst_wf):
+                        _held = f"; `{_wf_base(_worst_wf)}` holds its slowest job"
+                    _projection_clause += (
+                        f" The worst sampled commit is `{_worst_sha}` at "
+                        f"**{_commit_duration(_worst_wall)}**{_held}.")
         _commit_wall_block.append(
             "> **Per-commit PR wait:** p50 "
             f"**{_commit_duration(_commit_p50)}**, p90 "
@@ -14523,14 +15210,21 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         }
     # Stamp `_demoted_gate_framing` = "the header framed this pole 'Rarely the merge gate' /
     # 'Opt-in / rare' / 'Required · path-conditional'" — EXACTLY the per-pole header's demotion
-    # branch (npop present, NOT typical, NOT the blocker, NOT a chain member). The TOC row and the
+    # branch (npop present, NOT typical, NOT a chain member). A workflow-frequency blocker can
+    # still be a rarely-slowest check; blocker identity must not let its hand-off reclaim the
+    # typical-gate wording that its per-PR pole frequency disowns. The TOC row and the
     # agent-prompt gate line read this stamp so a demoted pole isn't handed the typical-gate framing
     # its own header disowns (caddy goreleaser-check). Stamped HERE, after `blocker`/`chain` exist
     # and before both the TOC and the per-pole loop, so all three render sites agree.
     _chain_set = set(_chain_modal) if chain_active else set()
     for p in pole_wfs:
+        _demoted_by_schema = (
+            not _typical_check(str(p.get("check", "")))
+            if _have_pole_n
+            else (not _pole_typical(p) and p is not blocker)
+        )
         p["_demoted_gate_framing"] = bool(
-            npop and not _pole_typical(p) and p is not blocker
+            npop and _demoted_by_schema
             and str(p.get("check", "")) not in _chain_set)
     # `top_is_gate` carries the removed Level-1 chart's ◀-is-the-gate condition to the
     # Contents' first row: the frequency gate is the slowest single check AND the gate is
@@ -15199,20 +15893,47 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # not pull an LLM gap-fill analysis (that path is for poles no detector recognized).
         _catalog_covered = bool(structural_specific or data_driven
                                 or _opt79_pole_covers(opt79_pole) or opt82_pole)
-        analysis = (_match(analyses)
-                    if (leaf is None and _catalog_leaf(offcat_leaf) is None
-                        and not _catalog_covered) else None)
-        if analysis and (
-                not isinstance(analysis, dict)
-                or not isinstance(analysis.get("cause"), str)
-                or not analysis["cause"].strip()
-                or not isinstance(analysis.get("prompt"), str)
-                or not analysis["prompt"].strip()
-                or not isinstance(analysis.get("evidence"), list)
-                or not analysis["evidence"]
-                or not all(isinstance(line, str) and line.strip()
-                           for line in analysis["evidence"])):
-            analysis = None
+        analysis_was_supplied = owner_key is not None and owner_key in analyses
+        offered_analysis = analyses.get(owner_key) if analysis_was_supplied else None
+        analysis = None
+        decline_reason = ""
+        if analysis_was_supplied:
+            if _agg:
+                decline_reason = "the pole is an aggregation gate with no analysis block"
+            elif leaf is not None:
+                decline_reason = "a log detector already names the root cause"
+            elif structural_specific:
+                decline_reason = (
+                    "a specific structural catalog pattern already names the root cause")
+            elif not generic_structural and _catalog_leaf(offcat_leaf) is not None:
+                decline_reason = "a log detector matched a secondary off-category cause"
+            elif not generic_structural and (
+                    _opt79_pole_covers(opt79_pole) or opt82_pole or data_driven):
+                decline_reason = "a specific catalog finding already names the root cause"
+            elif not isinstance(offered_analysis, dict):
+                decline_reason = "the analysis JSON is not an object"
+            elif offered_analysis.get("__analysis_parse_error__"):
+                decline_reason = str(offered_analysis["__analysis_parse_error__"])
+            elif not isinstance(offered_analysis.get("cause"), str) \
+                    or not offered_analysis["cause"].strip():
+                decline_reason = "the analysis has no non-empty cause"
+            elif not isinstance(offered_analysis.get("prompt"), str) \
+                    or not offered_analysis["prompt"].strip():
+                decline_reason = "the analysis has no non-empty prompt"
+            elif (not isinstance(offered_analysis.get("evidence"), list)
+                  or not offered_analysis["evidence"]
+                  or not all(isinstance(line, str) and line.strip()
+                             for line in offered_analysis["evidence"])):
+                decline_reason = "the analysis has no non-empty evidence lines"
+            else:
+                # Generic structural cards are the pole's primary match and name no cause
+                # inside the job. A secondary appendix finding must not make that supplied
+                # gap-fill disappear: the report still needs the captured-log explanation.
+                analysis = offered_analysis
+        if analysis_was_supplied and analysis is None:
+            _record_analysis_disposition(
+                doc, str(owner_key or ""), str(p.get("check") or ""), "declined",
+                decline_reason or "the pole is not eligible for gap-fill analysis")
         out.append(f'<a id="pole-{i}"></a>')
         out.append("")
         # `wf_base` (a workflow FILENAME) and `check` are BOTH arbitrary repo text dropped
@@ -15229,6 +15950,18 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         out.append("")
         out.append(f"_{role}_" if not role.startswith("**") else role)
         out.append("")
+        replay = p.get("replayed_test_results")
+        if isinstance(replay, dict):
+            cached = replay.get("cached_lines")
+            total = replay.get("test_result_lines")
+            if isinstance(cached, int) and isinstance(total, int) and total > 0:
+                out += [
+                    f"**Replayed test results:** {cached} of {total} recognized test-result "
+                    "lines came from a result cache. This fetched run is excluded from the "
+                    "log-derived pole drill and cross-run magnitude baseline; timing samples "
+                    "whose logs were not fetched remain in the jobs-API population.",
+                    "",
+                ]
         # Advisory-job disclosure. Sits directly under the role line, because it qualifies
         # what this pole's ranking MEANS before any drill, prompt or saving is read. Plain
         # prose, not a `Claim`: it asserts no framing-vocabulary phrase and no derived
@@ -15425,6 +16158,9 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             # captured log stands in for the measured cause (clearly labelled).
             out += _llm_analysis_block(analysis, cross_run_rendered=cross_run_rendered,
                                        generic_patterns=generic_structural)
+            _record_analysis_disposition(
+                doc, str(owner_key or ""), str(p.get("check") or ""), "rendered",
+                "the analysis block was added to this pole")
         # The structural-track finding(s) routed to this pole render LOUD here — the
         # pole IS the structural lever, and they're excluded from the hygiene appendix,
         # so this is the only place their risk/guardrail/rollout appears.
@@ -16201,7 +16937,7 @@ def main(argv: list[str] | None = None) -> int:
         except (OSError, json.JSONDecodeError) as e:
             print(f"--mag: cannot read/parse {kv[1]}: {e}", file=sys.stderr)
             return 1
-    analyses: dict[str, dict[str, Any]] = {}
+    analyses: dict[str, Any] = {}
     for spec in args.analyses:
         kv = _split(spec, "--analysis")
         if kv is None:
@@ -16209,10 +16945,14 @@ def main(argv: list[str] | None = None) -> int:
         try:
             analyses[kv[0]] = json.loads(Path(kv[1]).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as e:
-            print(f"--analysis: cannot read/parse {kv[1]}: {e}", file=sys.stderr)
-            return 1
+            # Keep rendering, but retain this key so the disposition sweep below can
+            # account for it instead of letting a malformed explicit input disappear.
+            analyses[kv[0]] = {
+                "__analysis_parse_error__": f"the analysis JSON could not be read or parsed: {e}"
+            }
     md = render(doc, logs, samples, log_runs, args.captured_at, steps, mags,
                 analyses=analyses)
+    _report_unmatched_analysis_dispositions(doc, analyses)
     if args.out_path:
         args.out_path.write_text(md + "\n", encoding="utf-8")
         # Claims layer manifest, written alongside the report (never in place of it - the
@@ -16233,7 +16973,12 @@ def main(argv: list[str] | None = None) -> int:
     # Strictly best-effort: the report is already written above, so a signal/capture
     # failure degrades to a warning rather than failing the render (its contract).
     try:
-        _emit_gap_signal(doc, logs, analyses)
+        rendered_keys = {
+            str(row.get("key") or "") for row in doc.get("analysis_dispositions", [])
+            if isinstance(row, dict) and row.get("status") == "rendered"
+        }
+        _emit_gap_signal(doc, logs, {key: value for key, value in analyses.items()
+                                     if key in rendered_keys})
     except Exception as e:  # noqa: BLE001 — never let the gap signal fail a written report
         print(f"ci-speedup: gap signal failed (report already written): {e}",
               file=sys.stderr)

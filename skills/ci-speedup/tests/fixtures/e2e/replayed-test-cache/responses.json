@@ -1,0 +1,138 @@
+{
+  "repo": "fixture/replayed-test-cache",
+  "captured_at": "2026-01-31T00:00:00Z",
+  "default_branch": "main",
+  "required_checks": [
+    "build"
+  ],
+  "workflows": [
+    {
+      "id": 101,
+      "path": ".github/workflows/ci.yml",
+      "name": "Replayed test cache",
+      "runs_30d": 3,
+      "runs": [
+        {
+          "id": 1001,
+          "event": "pull_request",
+          "head_branch": "feature-a",
+          "head_sha": "sha-a",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-28T00:00:00Z",
+          "run_started_at": "2026-01-28T00:00:00Z",
+          "updated_at": "2026-01-28T00:05:00Z"
+        },
+        {
+          "id": 1002,
+          "event": "pull_request",
+          "head_branch": "feature-b",
+          "head_sha": "sha-b",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-27T00:00:00Z",
+          "run_started_at": "2026-01-27T00:00:00Z",
+          "updated_at": "2026-01-27T00:05:00Z"
+        },
+        {
+          "id": 1003,
+          "event": "pull_request",
+          "head_branch": "feature-c",
+          "head_sha": "sha-c",
+          "status": "completed",
+          "conclusion": "success",
+          "created_at": "2026-01-26T00:00:00Z",
+          "run_started_at": "2026-01-26T00:00:00Z",
+          "updated_at": "2026-01-26T00:05:00Z"
+        }
+      ]
+    }
+  ],
+  "jobs": {
+    "1001": [
+      {
+        "id": 1101,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:05:00Z",
+        "steps": [
+          {
+            "name": "Run pytest verification cases",
+            "started_at": "2026-01-28T00:00:00Z",
+            "completed_at": "2026-01-28T00:05:00Z"
+          }
+        ],
+        "conclusion": "success"
+      }
+    ],
+    "1002": [
+      {
+        "id": 1201,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:05:00Z",
+        "steps": [
+          {
+            "name": "Run pytest verification cases",
+            "started_at": "2026-01-27T00:00:00Z",
+            "completed_at": "2026-01-27T00:05:00Z"
+          }
+        ],
+        "conclusion": "success"
+      }
+    ],
+    "1003": [
+      {
+        "id": 1301,
+        "name": "build",
+        "labels": [
+          "ubuntu-latest"
+        ],
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:05:00Z",
+        "steps": [
+          {
+            "name": "Run pytest verification cases",
+            "started_at": "2026-01-26T00:00:00Z",
+            "completed_at": "2026-01-26T00:05:00Z"
+          }
+        ],
+        "conclusion": "success"
+      }
+    ]
+  },
+  "checks": {
+    "sha-a": [
+      {
+        "name": "build",
+        "started_at": "2026-01-28T00:00:00Z",
+        "completed_at": "2026-01-28T00:05:00Z"
+      }
+    ],
+    "sha-b": [
+      {
+        "name": "build",
+        "started_at": "2026-01-27T00:00:00Z",
+        "completed_at": "2026-01-27T00:05:00Z"
+      }
+    ],
+    "sha-c": [
+      {
+        "name": "build",
+        "started_at": "2026-01-26T00:00:00Z",
+        "completed_at": "2026-01-26T00:05:00Z"
+      }
+    ]
+  },
+  "logs": {
+    "1101": "ok example/pkg0 (cached)\nok example/pkg1 (cached)\nok example/pkg2 (cached)\nok example/pkg3 (cached)\nok example/pkg4 (cached)\nok example/pkg5 (cached)\nok example/pkg6 (cached)\nok example/pkg7 (cached)\nok example/pkg8 (cached)\nok example/pkg9 (cached)\nok example/pkg10 (cached)\nok example/pkg11 (cached)\nok example/pkg12 (cached)\nok example/pkg13 (cached)\nok example/pkg14 (cached)\nok example/pkg15 (cached)\nok example/pkg16 (cached)\nok example/pkg17 (cached)\nok example/pkg18 (cached)\nok example/pkg19 (cached)\nok example/pkg20 (cached)\nok example/pkg21 (cached)\nok example/pkg22 (cached)\nok example/pkg23 (cached)\nok example/pkg24 (cached)\nok example/pkg25 (cached)\nok example/pkg26 (cached)\nok example/pkg27 (cached)\nok example/pkg28 (cached)\nok example/pkg29 (cached)\nok example/pkg30 (cached)\nok example/pkg31 (cached)\nok example/pkg32 (cached)\nok example/pkg33 (cached)\nok example/pkg34 (cached)\nok example/pkg35 (cached)\nok example/pkg36 (cached)\nok example/pkg37 (cached)\nok example/pkg38 (cached)\nok example/pkg39 (cached)\nok example/pkg40 (cached)\nok example/pkg41 (cached)\nok example/pkg42 (cached)\nok example/pkg43 (cached)\nok example/pkg44 (cached)\nok example/pkg45 (cached)\nok example/pkg46 (cached)\nok example/pkg47 (cached)\nok example/pkg48 (cached)\nok example/pkg49 (cached)\nok example/pkg50 (cached)\nok example/pkg51 (cached)\nok example/pkg52 (cached)\nok example/pkg53 (cached)\nok example/pkg54 (cached)\nok example/pkg55 (cached)\nok example/pkg56 (cached)\nok example/pkg57 (cached)\nok example/pkg58 (cached)\nok example/pkg59 (cached)\nok example/pkg60 (cached)\nok example/pkg61 (cached)\nok example/pkg62 (cached)\nok example/pkg63 (cached)\nok example/pkg64 (cached)\nok example/pkg65 (cached)\nok example/pkg66 (cached)\nok example/pkg67 (cached)\nok example/pkg68 (cached)\nok example/pkg69 (cached)\nok example/pkg70 (cached)\nok example/pkg71 (cached)\nok example/pkg72 (cached)\nok example/pkg73 (cached)\nok example/pkg74 (cached)\nok example/pkg75 (cached)\nok example/pkg76 (cached)\nok example/pkg77 (cached)\nok example/pkg78 (cached)\nok example/pkg79 (cached)\nok example/pkg80 (cached)\nok example/pkg81 (cached)\nok example/pkg82 (cached)\nok example/pkg83 (cached)\nok example/pkg84 (cached)\nok example/pkg85 (cached)\nok example/pkg86 (cached)\nok example/pkg87 (cached)\nok example/pkg88 (cached)\nok example/pkg89 (cached)\nok example/pkg90 (cached)\nok example/pkg91 (cached)\nok example/pkg92 (cached)\nok example/pkg93 (cached)\nok example/pkg94 (cached)\nok example/pkg95 (cached)\nok example/pkg96 (cached)\nok example/pkg97 (cached)\nok example/pkg98 (cached)\nok example/pkg99 (cached)\nok example/pkg100 (cached)\nok example/pkg101 (cached)\nok example/pkg102 (cached)\nok example/pkg103 (cached)\nok example/pkg104 (cached)\nok example/pkg105 (cached)\nok example/pkg106 (cached)\nok example/pkg107 (cached)\nok example/pkg108 (cached)\nok example/pkg109 (cached)\nok example/pkg110 (cached)\nok example/pkg111 (cached)\nok example/pkg112 (cached)\nok example/pkg113 (cached)\nok example/pkg114 (cached)\nok example/pkg115 (cached)\nok example/pkg116 (cached)\nok example/pkg117 (cached)\nok example/pkg118 (cached)\nok example/pkg119 (cached)\nok example/pkg120 (cached)\nok example/pkg121 (cached)\nok example/pkg122 (cached)\nok example/pkg123 (cached)\nok example/pkg124 (cached)\nok example/pkg125 (cached)\nok example/pkg126 (cached)\nok example/pkg127 (cached)\nok example/pkg128 (cached)\nok example/pkg129 (cached)\nok example/pkg130 (cached)\nok example/pkg131 (cached)\nok example/pkg132 (cached)\nok example/pkg133 (cached)\nok example/pkg134 (cached)\nok example/pkg135 (cached)\nok example/pkg136 (cached)\nok example/pkg137 (cached)\nok example/pkg138 (cached)\nok example/pkg139 (cached)\nok example/pkg140 (cached)\nok example/pkg141 (cached)\nok example/pkg142 (cached)\nok example/pkg143 (cached)\nok example/live 2.1s",
+    "1201": "ok example/pkg0 (cached)\nok example/pkg1 (cached)\nok example/pkg2 (cached)\nok example/pkg3 (cached)\nok example/pkg4 (cached)\nok example/pkg5 (cached)\nok example/pkg6 (cached)\nok example/pkg7 (cached)\nok example/pkg8 (cached)\nok example/pkg9 (cached)\nok example/pkg10 (cached)\nok example/pkg11 (cached)\nok example/pkg12 (cached)\nok example/pkg13 (cached)\nok example/pkg14 (cached)\nok example/pkg15 (cached)\nok example/pkg16 (cached)\nok example/pkg17 (cached)\nok example/pkg18 (cached)\nok example/pkg19 (cached)\nok example/pkg20 (cached)\nok example/pkg21 (cached)\nok example/pkg22 (cached)\nok example/pkg23 (cached)\nok example/pkg24 (cached)\nok example/pkg25 (cached)\nok example/pkg26 (cached)\nok example/pkg27 (cached)\nok example/pkg28 (cached)\nok example/pkg29 (cached)\nok example/pkg30 (cached)\nok example/pkg31 (cached)\nok example/pkg32 (cached)\nok example/pkg33 (cached)\nok example/pkg34 (cached)\nok example/pkg35 (cached)\nok example/pkg36 (cached)\nok example/pkg37 (cached)\nok example/pkg38 (cached)\nok example/pkg39 (cached)\nok example/pkg40 (cached)\nok example/pkg41 (cached)\nok example/pkg42 (cached)\nok example/pkg43 (cached)\nok example/pkg44 (cached)\nok example/pkg45 (cached)\nok example/pkg46 (cached)\nok example/pkg47 (cached)\nok example/pkg48 (cached)\nok example/pkg49 (cached)\nok example/pkg50 (cached)\nok example/pkg51 (cached)\nok example/pkg52 (cached)\nok example/pkg53 (cached)\nok example/pkg54 (cached)\nok example/pkg55 (cached)\nok example/pkg56 (cached)\nok example/pkg57 (cached)\nok example/pkg58 (cached)\nok example/pkg59 (cached)\nok example/pkg60 (cached)\nok example/pkg61 (cached)\nok example/pkg62 (cached)\nok example/pkg63 (cached)\nok example/pkg64 (cached)\nok example/pkg65 (cached)\nok example/pkg66 (cached)\nok example/pkg67 (cached)\nok example/pkg68 (cached)\nok example/pkg69 (cached)\nok example/pkg70 (cached)\nok example/pkg71 (cached)\nok example/pkg72 (cached)\nok example/pkg73 (cached)\nok example/pkg74 (cached)\nok example/pkg75 (cached)\nok example/pkg76 (cached)\nok example/pkg77 (cached)\nok example/pkg78 (cached)\nok example/pkg79 (cached)\nok example/pkg80 (cached)\nok example/pkg81 (cached)\nok example/pkg82 (cached)\nok example/pkg83 (cached)\nok example/pkg84 (cached)\nok example/pkg85 (cached)\nok example/pkg86 (cached)\nok example/pkg87 (cached)\nok example/pkg88 (cached)\nok example/pkg89 (cached)\nok example/pkg90 (cached)\nok example/pkg91 (cached)\nok example/pkg92 (cached)\nok example/pkg93 (cached)\nok example/pkg94 (cached)\nok example/pkg95 (cached)\nok example/pkg96 (cached)\nok example/pkg97 (cached)\nok example/pkg98 (cached)\nok example/pkg99 (cached)\nok example/pkg100 (cached)\nok example/pkg101 (cached)\nok example/pkg102 (cached)\nok example/pkg103 (cached)\nok example/pkg104 (cached)\nok example/pkg105 (cached)\nok example/pkg106 (cached)\nok example/pkg107 (cached)\nok example/pkg108 (cached)\nok example/pkg109 (cached)\nok example/pkg110 (cached)\nok example/pkg111 (cached)\nok example/pkg112 (cached)\nok example/pkg113 (cached)\nok example/pkg114 (cached)\nok example/pkg115 (cached)\nok example/pkg116 (cached)\nok example/pkg117 (cached)\nok example/pkg118 (cached)\nok example/pkg119 (cached)\nok example/pkg120 (cached)\nok example/pkg121 (cached)\nok example/pkg122 (cached)\nok example/pkg123 (cached)\nok example/pkg124 (cached)\nok example/pkg125 (cached)\nok example/pkg126 (cached)\nok example/pkg127 (cached)\nok example/pkg128 (cached)\nok example/pkg129 (cached)\nok example/pkg130 (cached)\nok example/pkg131 (cached)\nok example/pkg132 (cached)\nok example/pkg133 (cached)\nok example/pkg134 (cached)\nok example/pkg135 (cached)\nok example/pkg136 (cached)\nok example/pkg137 (cached)\nok example/pkg138 (cached)\nok example/pkg139 (cached)\nok example/pkg140 (cached)\nok example/pkg141 (cached)\nok example/pkg142 (cached)\nok example/pkg143 (cached)\nok example/live 2.1s",
+    "1301": "ok example/pkg0 (cached)\nok example/pkg1 (cached)\nok example/pkg2 (cached)\nok example/pkg3 (cached)\nok example/pkg4 (cached)\nok example/pkg5 (cached)\nok example/pkg6 (cached)\nok example/pkg7 (cached)\nok example/pkg8 (cached)\nok example/pkg9 (cached)\nok example/pkg10 (cached)\nok example/pkg11 (cached)\nok example/pkg12 (cached)\nok example/pkg13 (cached)\nok example/pkg14 (cached)\nok example/pkg15 (cached)\nok example/pkg16 (cached)\nok example/pkg17 (cached)\nok example/pkg18 (cached)\nok example/pkg19 (cached)\nok example/pkg20 (cached)\nok example/pkg21 (cached)\nok example/pkg22 (cached)\nok example/pkg23 (cached)\nok example/pkg24 (cached)\nok example/pkg25 (cached)\nok example/pkg26 (cached)\nok example/pkg27 (cached)\nok example/pkg28 (cached)\nok example/pkg29 (cached)\nok example/pkg30 (cached)\nok example/pkg31 (cached)\nok example/pkg32 (cached)\nok example/pkg33 (cached)\nok example/pkg34 (cached)\nok example/pkg35 (cached)\nok example/pkg36 (cached)\nok example/pkg37 (cached)\nok example/pkg38 (cached)\nok example/pkg39 (cached)\nok example/pkg40 (cached)\nok example/pkg41 (cached)\nok example/pkg42 (cached)\nok example/pkg43 (cached)\nok example/pkg44 (cached)\nok example/pkg45 (cached)\nok example/pkg46 (cached)\nok example/pkg47 (cached)\nok example/pkg48 (cached)\nok example/pkg49 (cached)\nok example/pkg50 (cached)\nok example/pkg51 (cached)\nok example/pkg52 (cached)\nok example/pkg53 (cached)\nok example/pkg54 (cached)\nok example/pkg55 (cached)\nok example/pkg56 (cached)\nok example/pkg57 (cached)\nok example/pkg58 (cached)\nok example/pkg59 (cached)\nok example/pkg60 (cached)\nok example/pkg61 (cached)\nok example/pkg62 (cached)\nok example/pkg63 (cached)\nok example/pkg64 (cached)\nok example/pkg65 (cached)\nok example/pkg66 (cached)\nok example/pkg67 (cached)\nok example/pkg68 (cached)\nok example/pkg69 (cached)\nok example/pkg70 (cached)\nok example/pkg71 (cached)\nok example/pkg72 (cached)\nok example/pkg73 (cached)\nok example/pkg74 (cached)\nok example/pkg75 (cached)\nok example/pkg76 (cached)\nok example/pkg77 (cached)\nok example/pkg78 (cached)\nok example/pkg79 (cached)\nok example/pkg80 (cached)\nok example/pkg81 (cached)\nok example/pkg82 (cached)\nok example/pkg83 (cached)\nok example/pkg84 (cached)\nok example/pkg85 (cached)\nok example/pkg86 (cached)\nok example/pkg87 (cached)\nok example/pkg88 (cached)\nok example/pkg89 (cached)\nok example/pkg90 (cached)\nok example/pkg91 (cached)\nok example/pkg92 (cached)\nok example/pkg93 (cached)\nok example/pkg94 (cached)\nok example/pkg95 (cached)\nok example/pkg96 (cached)\nok example/pkg97 (cached)\nok example/pkg98 (cached)\nok example/pkg99 (cached)\nok example/pkg100 (cached)\nok example/pkg101 (cached)\nok example/pkg102 (cached)\nok example/pkg103 (cached)\nok example/pkg104 (cached)\nok example/pkg105 (cached)\nok example/pkg106 (cached)\nok example/pkg107 (cached)\nok example/pkg108 (cached)\nok example/pkg109 (cached)\nok example/pkg110 (cached)\nok example/pkg111 (cached)\nok example/pkg112 (cached)\nok example/pkg113 (cached)\nok example/pkg114 (cached)\nok example/pkg115 (cached)\nok example/pkg116 (cached)\nok example/pkg117 (cached)\nok example/pkg118 (cached)\nok example/pkg119 (cached)\nok example/pkg120 (cached)\nok example/pkg121 (cached)\nok example/pkg122 (cached)\nok example/pkg123 (cached)\nok example/pkg124 (cached)\nok example/pkg125 (cached)\nok example/pkg126 (cached)\nok example/pkg127 (cached)\nok example/pkg128 (cached)\nok example/pkg129 (cached)\nok example/pkg130 (cached)\nok example/pkg131 (cached)\nok example/pkg132 (cached)\nok example/pkg133 (cached)\nok example/pkg134 (cached)\nok example/pkg135 (cached)\nok example/pkg136 (cached)\nok example/pkg137 (cached)\nok example/pkg138 (cached)\nok example/pkg139 (cached)\nok example/pkg140 (cached)\nok example/pkg141 (cached)\nok example/pkg142 (cached)\nok example/pkg143 (cached)\nok example/live 2.1s"
+  }
+}
