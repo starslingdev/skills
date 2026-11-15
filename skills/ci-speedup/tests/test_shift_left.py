@@ -415,7 +415,7 @@ def test_markdown_is_bounded_advisory_and_never_claims_no_slowdown():
     report = SHIFT.analyze_l3([])
     report["observations"].append({"kind": "step_change", "workflow": "ci.yml",
         "job": "test", "attribution": {"status": "unique", "pr_number": 42,
-                                          "sha": "abcdef1234567890"}})
+                                          "sha": "abcdef12ab34cd56"}})
     result = {"status": "measured", "l3": report}
     rendered = SHIFT.render_markdown(result, max_bytes=1024)
     assert len(rendered.encode()) <= 1024
