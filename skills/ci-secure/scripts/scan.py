@@ -446,7 +446,6 @@ class RawHit:
     fix_guidance: str | None = None
 
 
-_TEMPLATE_EXPRESSION_RE = re.compile(r"\$\{\{(?:(?!\}\}).)*\}\}", re.DOTALL)
 _CONTEXT_PATH_RE = re.compile(
     r"\b(?P<path>(?:inputs|client_payload|repository_dispatch\.client_payload|"
     r"github\.event)(?:(?:\.[A-Za-z_][A-Za-z0-9_-]*)|"
@@ -480,14 +479,28 @@ def _normalize_context_brackets(text: str) -> str:
         # still line up with the original workflow text.
         return " " * (len(path) - len(dotted)) + dotted
 
-    def _replace_expression(match: re.Match[str]) -> str:
-        return _CONTEXT_PATH_RE.sub(_replace_path, match.group(0))
-
     # Shell text may contain bracket-looking strings whose quoted key embeds a
     # template expression. Rewriting the whole shell scalar would consume that
     # expression and hide the injection, so only expression bodies are
-    # normalized.
-    return _TEMPLATE_EXPRESSION_RE.sub(_replace_expression, text)
+    # normalized. Walk once rather than searching from every `${{`: an
+    # unclosed expression is untrusted input too, and the old lookahead regex
+    # rescanned the remainder for every additional opener.
+    pieces: list[str] = []
+    cursor = 0
+    while True:
+        opening = text.find("${{", cursor)
+        if opening < 0:
+            pieces.append(text[cursor:])
+            break
+        closing = text.find("}}", opening + 3)
+        if closing < 0:
+            pieces.append(text[cursor:])
+            break
+        pieces.append(text[cursor:opening])
+        expression = text[opening:closing + 2]
+        pieces.append(_CONTEXT_PATH_RE.sub(_replace_path, expression))
+        cursor = closing + 2
+    return "".join(pieces)
 
 
 def detect_regex(file_path: Path, pattern: str, *,
@@ -5808,6 +5821,20 @@ _P1418_COSMETIC_CALL_RE = re.compile(
 )
 
 
+def _p1418_js_lstrip(line: str) -> str:
+    """Strip leading whitespace JavaScript accepts but Python may not.
+
+    Python's ``str.lstrip`` covers the ordinary JavaScript whitespace set but
+    not U+FEFF. JavaScript accepts U+FEFF before the line-leading ``-->``
+    comment token, so skipping it here would let executable text hide behind
+    what this narrow recognizer mistakes for an argument string.
+    """
+    stripped = line.lstrip()
+    while stripped.startswith("\ufeff"):
+        stripped = stripped[1:].lstrip()
+    return stripped
+
+
 def _p1418_is_one_cosmetic_call(script: str) -> bool:
     """Prove the narrow inline-script shape eligible for MEDIUM.
 
@@ -5817,6 +5844,9 @@ def _p1418_is_one_cosmetic_call(script: str) -> bool:
     intentionally a positive proof rather than a deny-list of dangerous JS.
     """
     if "${{" in script or "`" in script:
+        return False
+    if any(_p1418_js_lstrip(line).startswith("-->")
+           for line in script.splitlines()):
         return False
     match = _P1418_COSMETIC_CALL_RE.match(script)
     if match is None:
