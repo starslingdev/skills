@@ -18,8 +18,10 @@ Thanks for your interest in improving `ci-speedup`. Pull requests are welcome.
   PyYAML is not optional: without it, pytest aborts during collection with
   `INTERNALERROR` instead of a readable failure, and no tests run at all.
 
-  CI runs the full suite with four workers on every push and PR
-  (`python3 -m pytest -v -n 4 --dist worksteal` in `.github/workflows/ci.yml`).
+  CI runs the full suite on every push and PR, split into two parts on two
+  runners with four workers each
+  (`python3 -m pytest -v -n 4 --dist worksteal --shard K/2` in
+  `.github/workflows/ci.yml`; every test runs in exactly one part).
   Tests live under `skills/ci-speedup/tests/`, `maintainers/ci-speedup/tests/`,
   and the repo-root `tests/`; the root `pyproject.toml` wires the paths so one
   `pytest -v` finds them all. A pre-commit hook (`.githooks/pre-commit`, enable
@@ -58,7 +60,8 @@ External contributions are welcome and follow the standard fork flow:
   passed — so a fork PR cannot merge without a green suite.
 - **Reproduce the full CI suite locally.** Install the dev dependencies with
   `pip install -e ".[dev]"`, then run `python3 -m pytest -v -n 4 --dist worksteal`
-  to match CI. Use `python3 -m pytest -v` for sequential debugging. Both run
+  to match CI's workers (CI also adds `--shard K/2` to split the suite across two
+  runners). Use `python3 -m pytest -v` for sequential debugging. Both run
   every test; parallel execution changes scheduling only. Missing PyYAML
   fails at collection rather than reproducing anything.
 

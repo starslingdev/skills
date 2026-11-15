@@ -78,6 +78,9 @@ def test_verdict_needs_both_suite_jobs():
         f"the verdict must depend on both suite jobs, got {needs}")
 
 
+_SHARDS = 2
+_SUITE_COMMAND = f'pytest -v -n 4 --dist worksteal --shard "${{SHARD}}/{_SHARDS}"'
+
 _RESULTS = ("success", "failure", "cancelled", "skipped", "")
 # The only two states in which a suite that was supposed to run actually ran and
 # passed. Every other pair is a non-pass — including both-skipped.
@@ -144,8 +147,10 @@ def test_suite_jobs_split_by_fork_and_runner():
     # step is `echo ok`, or is skipped, still reports success and goes green.
     for job_id, job in (("test-self", self_hosted), ("test-fork", fork)):
         last = job["steps"][-1]
-        assert last.get("run", "").strip() == "pytest -v -n 4 --dist worksteal", (
+        assert last.get("run", "").strip() == _SUITE_COMMAND, (
             f"{job_id}'s last step must be the suite itself, got {last!r}")
+        assert last.get("env") == {"SHARD": "${{ matrix.shard }}"}, (
+            f"{job_id}'s suite step must take its part number from the matrix")
         assert "if" not in last, (
             f"{job_id}'s suite step must not carry a step-level `if:` — it would "
             "skip the tests while the job still reports success to the verdict")
@@ -177,3 +182,28 @@ def test_no_other_workflow_forges_the_required_check_name():
                 offenders.append(f"{wf.name}:{jid}")
     assert not offenders, (
         f"job(s) outside ci.yml carry the required check name 'test': {offenders}")
+
+
+@pytest.mark.parametrize("job_id", ["test-self", "test-fork"])
+def test_every_suite_part_runs(job_id):
+    """The suite is split into parts that run as one matrix job. A part that is
+    never scheduled is a set of tests that never runs while the job still reports
+    success: the matrix must list exactly parts 1..N for the N the command divides
+    by, with no include/exclude that could add or drop a leg."""
+    job = _jobs()[job_id]
+    matrix = (job.get("strategy") or {}).get("matrix") or {}
+    assert set(matrix) == {"shard"}, (
+        f"{job_id}'s matrix must carry only `shard` (no include/exclude): {matrix}")
+    assert matrix["shard"] == list(range(1, _SHARDS + 1)), (
+        f"{job_id} must run every part 1..{_SHARDS} of the suite, got {matrix['shard']}")
+
+
+@pytest.mark.parametrize("job_id", ["test-self", "test-fork"])
+def test_no_suite_part_may_fail_quietly(job_id):
+    """`continue-on-error` on a matrix job lets a failing part report success to
+    `needs.<job>.result`, so the verdict would pass a suite with failing tests."""
+    job = _jobs()[job_id]
+    assert "continue-on-error" not in job, (
+        f"{job_id} must not set continue-on-error: a failed part would read as a pass")
+    assert all("continue-on-error" not in step for step in job["steps"]), (
+        f"{job_id}'s steps must not set continue-on-error")

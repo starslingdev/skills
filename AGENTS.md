@@ -48,9 +48,11 @@ python3 -m pytest -v
 
 This runs every suite — the root `pyproject.toml` wires the paths so one command
 finds tests under `tests/`, `skills/ci-speedup/tests/`, and
-`maintainers/ci-speedup/tests/`. CI runs the same full suite with four workers:
-`python3 -m pytest -v -n 4 --dist worksteal`. Use that command to reproduce
-parallel execution locally; the command above runs sequentially.
+`maintainers/ci-speedup/tests/`. CI runs the same full suite split into two parts
+on two runners, each with four workers:
+`python3 -m pytest -v -n 4 --dist worksteal --shard K/2` (K = 1, 2). Drop
+`--shard` to reproduce parallel execution of the whole suite locally; the command
+above runs sequentially.
 Without PyYAML, pytest aborts at collection with `INTERNALERROR` and runs nothing.
 Enable the local pre-commit hook to run the same suite before each commit:
 
