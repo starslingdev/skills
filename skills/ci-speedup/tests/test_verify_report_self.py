@@ -1967,6 +1967,8 @@ def test_same_matrix_stays_coupled_to_the_engine():
         ("Python 3.9", "Python 3.13", wf, wf),               # space-variant, shared job
         ("test (22.x)", "test (24.x)", wf, wf),              # paren matrix base
         ("integration-test (3.1.1, 3.12)", "integration-test (3.1.1, 3.13)", wf, wf),
+        ("test prod (6/10) / build", "test dev (8/10) / build", wf, wf),
+        ("test prod (6/10) / build", "test prod (1/10, 18.3.1) / build", wf, wf),
         ("prisma-adapter Integration Test", "drizzle-adapter Integration Test", wf, wf),  # prefix/suffix
         ("build", "test", wf, wf),                            # distinct, never a matrix
         ("build", "build", wf, wf),                           # identical

@@ -2658,11 +2658,12 @@ def test_provenance_omits_deep_scan_note_for_a_shallow_walk():
     block = "\n".join(bp._provenance_block(
         _prov_doc(sampled_pr_count=20, sample_fetched=50), "o/r", "2026-06-08"))
     assert "recent PRs**" not in block
-    assert "20/20 sampled PRs" in block          # the plain honest baseline
+    assert "20 of 20 PRs sampled" in block       # the plain honest baseline
 
 
 def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():
-    # P2 regression: an external required suite that was READ but ran on no sampled PR
+    # P2 regression: an external required suite that was READ but was not observable
+    # in the sampled Actions job lists
     # sets required_suite_scoped=False AND required_suite_unsatisfiable=True. The
     # provenance must report the PR-floor cause, NOT the "unreadable (no admin / 404)"
     # cause — the two share the scoped=False flag but are different failures.
@@ -2670,7 +2671,8 @@ def test_provenance_unsatisfiable_suite_is_not_reported_as_unreadable():
         _prov_doc(required_suite_scoped=False, required_suite_unsatisfiable=True),
         "o/r", "2026-06-08"))
     assert "No file-backed required gate" in block
-    assert "ran on **none** of the sampled PRs" in block
+    assert "per-commit presence and timing could not be established" in block
+    assert "ran on **none** of the sampled PRs" not in block
     assert "Required checks were unreadable" not in block      # the wrong cause
 
 
@@ -2882,6 +2884,23 @@ def test_demoted_frequency_pole_prompt_and_toc_drop_typical_gate_framing():
     # The demoted row must not carry a "gates N/NN PRs" tail (the sibling `test`'s frequency).
     gore_row = next(l for l in toc.splitlines() if "goreleaser-check](#pole-2)" in l)
     assert "gates" not in gore_row
+
+
+def test_rarely_slowest_first_pole_is_not_framed_as_the_typical_gate():
+    # The first ordered pole is the frequency `blocker`, but under the `pole_n` schema that
+    # identity must not reclaim the typical-gate wording: `test` is the slowest check on only
+    # 1/20 sampled PRs (below the recurring floor), so its drill says "Rarely the merge pole",
+    # matching the verifier's spine-demoted rule (Next.js `Wait for preview tarball` shape).
+    doc = _doc_demoted_frequency_pole()
+    cp = doc["pr_critical_path"]
+    cp["checks"][0]["pole_n"] = 1
+    cp["checks"][1]["pole_n"] = 0
+    md = bp.render(doc, {"ci": _IMPORT_BOUND_LOG}, {},
+                   {"ci": "https://example.invalid/actions/runs/1"}, "2026-06-08")
+    start = md.index("Long pole 1:")
+    first = md[start:md.index("Long pole 2:", start)]
+    assert "Slowest check a typical PR waits on" not in first
+    assert "Rarely the merge pole" in first
 
 
 def test_bimodal_note_surfaces_a_fast_median_check_but_not_a_slow_median_one():
@@ -7407,7 +7426,60 @@ def test_poles_render_in_two_duration_ordered_groups_and_bottom_names_pole_one()
     assert "**Frequency group:** Long but rarely the last to finish." in _pole_section(
         report, "D")
     bottom = next(line for line in report.splitlines() if line.startswith("> **Bottom line.**"))
-    assert bottom.startswith("> **Bottom line.** Long pole 1, `A`,")
+    assert bottom.startswith(
+        "> **Bottom line.** Long pole 1, `A`, has P50 **4m 10s** and is the longest "
+        "check in **Checks that hold up most PRs**."
+    )
+
+
+def test_bottom_line_long_pole_one_cost_and_group_are_verified(tmp_path):
+    doc = _pole_order_agreement_doc()
+    clean = bp.render(doc)
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+
+    variants = [
+        clean.replace("has P50 **4m 10s**", "has P50 **9m 10s**", 1),
+        clean.replace(
+            "is the longest check in **Checks that hold up most PRs**",
+            "is the longest check in **Long but rarely the last to finish**",
+            1,
+        ),
+    ]
+    for report in variants:
+        check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+        assert not check.ok, check.detail
+
+
+def test_all_rare_poles_are_not_introduced_as_checks_that_gate_your_merge():
+    doc = _pole_order_agreement_doc()
+    for row in doc["pr_critical_path"]["checks"]:
+        row["pole_n"] = 1 if row["name"] in {"A", "B", "C", "D"} else 0
+
+    report = bp.render(doc)
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+
+    assert "the checks that gate your merge" not in contents
+    assert "measured conditional last-finishers" in contents
+
+
+def test_needs_chain_member_is_not_said_to_run_alongside_a_slower_check(tmp_path):
+    doc = _pole_order_agreement_doc()
+    for row in doc["pr_critical_path"]["checks"]:
+        if row["name"] == "B":
+            row["pole_n"] = 1
+
+    report = bp.render(doc)
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+    b_row = next(line for line in contents.splitlines() if "[B]" in line)
+    assert "runs in the measured `needs:` chain" in b_row
+    assert "a slower check usually ran alongside" not in b_row
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+    assert check.ok, check.detail
 
 
 def test_phase_six_handoff_uses_the_report_frequency_groups():
@@ -7514,6 +7586,8 @@ def test_verifier_rejects_pole_group_order_bottom_disagreement_and_missing_rare_
             "Long pole 1, `A`", "Long pole 1, `Z`"),
         clean.replace("at least 2 sampled PRs", "at least 3 sampled PRs").replace(
             "fewer than 2 sampled PRs", "fewer than 3 sampled PRs"),
+        clean.replace("at least 2 sampled PRs", "at least 9 sampled PRs"),
+        clean.replace("fewer than 2 sampled PRs", "fewer than 9 sampled PRs"),
     ]
     vr = _load_verify_report()
     findings = tmp_path / "findings.json"
@@ -8496,6 +8570,46 @@ def test_aggregation_upstream_names_its_terminal_gate_reason():
                         if "[stable - x86_64-linux]" in line)
     assert "feeds the terminal `needs:` gate" in upstream_row
     assert "a slower check usually ran alongside" not in upstream_row
+
+
+def test_aggregation_frequency_and_reason_follow_the_retained_matrix_representative(tmp_path):
+    doc = _agg_gate_doc()
+    for check in doc["pr_critical_path"]["checks"]:
+        check["pole_n"] = 1 if check["name"] == "thank you, build" else 0
+    slow_median = {
+        "low_p50_s": 300.0, "high_p50_s": 560.0, "slow_frac": 0.6,
+    }
+    fast_median = {
+        "low_p50_s": 180.0, "high_p50_s": 900.0, "slow_frac": 0.4,
+    }
+    x86 = next(row for row in doc["pr_critical_path"]["checks"]
+               if row["name"] == "stable - x86_64-linux")
+    x86.update(name="stable - linux-x86", p50_s=500.0, pole_n=0,
+               bimodal=slow_median)
+    doc["pr_critical_path"]["checks"].append({
+        "name": "stable - linux-arm", "p50_s": 300.0, "present_on": 20,
+        "pole_n": 0, "workflow_file": _AGG_DEPLOY, "bimodal": fast_median,
+    })
+    doc["pr_critical_path"]["poles"].extend([
+        {"check": "stable - linux-x86", "p50_s": 500.0,
+         "workflow_file": _AGG_DEPLOY, "job": "native", "bimodal": slow_median,
+         "steps": [{"step": "Build", "p50_s": 400.0}]},
+        {"check": "stable - linux-arm", "p50_s": 300.0,
+         "workflow_file": _AGG_DEPLOY, "job": "native", "bimodal": fast_median,
+         "steps": [{"step": "Build", "p50_s": 250.0}]},
+    ])
+
+    report = bp.render(doc, {}, {}, {}, "2026-07-28T00:00:00Z", {})
+    contents = report.split("## 📋 Contents", 1)[1].split(
+        '<a id="long-pole-map"', 1)[0]
+    representative = next(line for line in contents.splitlines()
+                          if "[stable - linux-x86]" in line)
+    assert "finishes last on 1/20 PRs" in representative
+    assert "feeds the terminal `needs:` gate" in representative
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    check = _load_vr().check_pole_groups_and_bottom_agree(report, findings)
+    assert check.ok, check.detail
 
 
 def test_aggregation_gate_pole_role_line_is_a_registered_claim():

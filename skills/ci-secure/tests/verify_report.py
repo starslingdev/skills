@@ -817,40 +817,77 @@ def check_every_group_rendered(report: str, findings_path: Path | None) -> Check
                  else f"groups missing from the report: {missing}")
 
 
+# The plain sections report.py renders at the top of every finding, in order
+# (report.py `SCENARIO_SECTIONS`). Kept as an independent copy on purpose: a
+# heading renamed in the renderer must go red here, not follow silently.
+_SCENARIO_HEADINGS = (
+    "What this workflow does",
+    "Why ci-secure flagged it",
+    "What would have to go wrong first",
+    "What an attacker could do then",
+    "Verdict",
+    "How to close it",
+)
+_ATTACKER_HEADING = "What an attacker could do then"
+
+
+def _finding_section_bodies(report: str) -> list[str]:
+    """Each `## Finding N` section on its own (heading line included)."""
+    joined = _rendered_finding_sections(report)
+    starts = [m.start() for m in _FINDING_HEADING_RE.finditer(joined)]
+    return [joined[a:b] for a, b in zip(starts, starts[1:] + [len(joined)])]
+
+
+def _h4_body(section: str, heading: str) -> str | None:
+    """The text under `#### {heading}` up to the next heading, or None."""
+    m = re.search(rf"^#### {re.escape(heading)}[ \t]*$", section, re.M)
+    if not m:
+        return None
+    rest = section[m.end():]
+    nxt = re.search(r"^#{2,4} ", rest, re.M)
+    return (rest[: nxt.start()] if nxt else rest).strip()
+
+
 def check_scenarios_on_rendered_findings(report: str) -> Check:
-    """Every rendered finding carries its comprehension mechanism."""
-    name = "every rendered finding has a 'What an attacker could do' row"
-    # Heading shape: `## 🟥 Finding N: title — N sites / M workflows` (severity
-    # emoji varies), with an optional `FIXED — ` / `PARTIALLY FIXED — ` prefix
-    # after the `## `.
-    n_findings = len(_FINDING_HEADING_RE.findall(report))
-    # Strict rows only. The old `len(rows) or len(re.findall(<bare phrase>))`
-    # fallback said: when nothing matched the real shape, count the bare phrase
-    # instead — turning "the mechanism is missing on every finding" into a
-    # pass. Zero strict matches with findings on the page is red, not a cue to
-    # count differently.
-    rows = re.findall(r"What an attacker could do:\*\*\s*(.*)", report)
-    n_scenarios = len(rows)
+    """Every rendered finding carries its comprehension mechanism: the plain
+    sections, written against this repo."""
+    name = "every rendered finding has a repo-specific scenario"
+    sections = _finding_section_bodies(report)
+    n_findings = len(sections)
     if n_findings == 0:
         return Check(name, True, "zero findings (first-class clean report)", skipped=True)
-    # An authored, repo-grounded scenario and the catalog's generic capability
-    # line are not the same claim. The fallback carries a visible marker, so
-    # this check reports the split instead of counting both as "a scenario" —
-    # and when EVERY row is the marker, the comprehension layer did not run at
-    # all and the report fails rather than reporting a split.
-    n_fallback = sum(1 for r in rows if "catalog description" in r)
-    if n_scenarios and n_fallback == n_scenarios:
+    # Strict headings only. A bare phrase elsewhere (the methodology, an
+    # appendix) is not a scenario; a finding whose attacker heading is missing
+    # or empty has no comprehension mechanism at all, and that is red.
+    missing = 0
+    not_specific = 0
+    for sec in sections:
+        bodies = [_h4_body(sec, h) for h in _SCENARIO_HEADINGS]
+        attacker = bodies[_SCENARIO_HEADINGS.index(_ATTACKER_HEADING)]
+        if not attacker:
+            missing += 1
+            continue
+        # Repo-specific = every plain section written. The catalog's generic
+        # capability line (which carries a visible marker) and an older
+        # one-paragraph scenario both fill only the attacker section, so both
+        # count here: neither says what THIS workflow does, nor gives a verdict.
+        if "catalog description" in attacker or not all(bodies):
+            not_specific += 1
+    if missing:
         return Check(name, False,
-                     f"all {n_scenarios} scenario row(s) for {n_findings} "
-                     "finding(s) are the catalog's generic description — not "
-                     "one repo-specific scenario was written")
-    ok = n_scenarios >= n_findings
-    detail_tail = (f" ({n_fallback} are the catalog's generic description, "
-                   f"not repo-specific)" if n_fallback else "")
-    return Check(name, ok,
-                 f"{n_scenarios} scenario row(s) for {n_findings} finding(s)"
-                 f"{detail_tail}" if ok
-                 else f"only {n_scenarios} scenario row(s) for {n_findings} finding(s)")
+                     f"{missing} of {n_findings} finding(s) have no "
+                     f"'{_ATTACKER_HEADING}' section")
+    if not_specific == n_findings:
+        return Check(name, False,
+                     f"all {n_findings} finding(s) lack the repo-specific "
+                     "sections (the catalog's generic description, or a "
+                     "scenario without every plain section) — not one "
+                     "repo-specific scenario was written")
+    tail = (f" ({not_specific} lack the repo-specific sections)"
+            if not_specific else "")
+    return Check(name, True,
+                 f"{n_findings - not_specific} of {n_findings} finding(s) "
+                 f"carry every plain section{tail}")
 
 
 def _cell_text(value: object) -> str:

@@ -126,6 +126,23 @@ def _load_untrusted_wrap():
 uw = _load_untrusted_wrap()
 
 
+def _load_pr_sample_contract():
+    """Load the shipped pure PR-sample defaults without importing the renderer."""
+    path = Path(__file__).resolve().parents[1] / "scripts" / "pr_sample_contract.py"
+    if not path.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "ci_speedup_pr_sample_contract_for_verify", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("PR-sample contract module is unavailable")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_PR_SAMPLE_CONTRACT = _load_pr_sample_contract()
+
+
 @dataclass(frozen=True)
 class Check:
     name: str
@@ -2184,10 +2201,17 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     cp = _as_dict(data.get("pr_critical_path"))
     if "sample_stop_reason" not in cp:
         return Check(name, True, "artifact predates the stop-reason contract", skipped=True)
+    if _PR_SAMPLE_CONTRACT is None:
+        return Check(name, False, "PR-sample contract module is unavailable")
     required = (
         "sample_candidate_pages_fetched", "sample_candidate_page_cap",
+        "sample_job_list_reads", "sample_job_list_read_cap",
+        "sample_job_list_cap_hit",
         "sample_candidate_pages_exhausted", "sample_candidate_page_fetch_failures",
         "sample_candidate_era_door", "sample_candidate_selection_limited",
+        "sample_distinct_days", "sample_min_distinct_days",
+        "sample_span_first", "sample_span_last",
+        "sample_partial_count",
     )
     missing = [key for key in required if key not in cp]
     if missing:
@@ -2203,26 +2227,60 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     page_failures = cp.get("sample_candidate_page_fetch_failures")
     pages = cp.get("sample_candidate_pages_fetched")
     cap = cp.get("sample_candidate_page_cap")
+    job_reads = cp.get("sample_job_list_reads")
+    job_cap = cp.get("sample_job_list_read_cap")
+    job_cap_hit = cp.get("sample_job_list_cap_hit")
     exhausted = cp.get("sample_candidate_pages_exhausted")
     era_door = cp.get("sample_candidate_era_door")
     selection_limited = cp.get("sample_candidate_selection_limited")
+    distinct_days = cp.get("sample_distinct_days")
+    min_distinct_days = cp.get("sample_min_distinct_days")
+    span_first = cp.get("sample_span_first")
+    span_last = cp.get("sample_span_last")
+    partial_count = cp.get("sample_partial_count")
     if (not isinstance(failures, int) or failures < 0
             or not isinstance(page_failures, int) or page_failures < 0
             or not isinstance(pages, int) or pages < 1
             or not isinstance(cap, int) or cap < 1
+            or not isinstance(job_reads, int) or job_reads < 0
+            or not isinstance(job_cap, int) or job_cap < 1
+            or not isinstance(job_cap_hit, bool)
             or not isinstance(exhausted, bool) or not isinstance(era_door, bool)
-            or not isinstance(selection_limited, bool)):
+            or not isinstance(selection_limited, bool)
+            or not isinstance(distinct_days, int) or distinct_days < 0
+            or not isinstance(min_distinct_days, int)
+            or min_distinct_days != _PR_SAMPLE_CONTRACT.PR_SAMPLE_MIN_DISTINCT_DAYS
+            or not isinstance(span_first, str) or not isinstance(span_last, str)
+            or not isinstance(partial_count, int) or partial_count < 0
+            or partial_count > sampled):
         return Check(name, False, "candidate-page stop facts are malformed")
+    if (target != _PR_SAMPLE_CONTRACT.PR_SAMPLE_TARGET
+            or cap != _PR_SAMPLE_CONTRACT.PR_SAMPLE_CANDIDATE_PAGE_CAP
+            or job_cap != _PR_SAMPLE_CONTRACT.PR_SAMPLE_JOB_LIST_READ_CAP):
+        return Check(name, False, "sample contract target, page cap, or job-read cap drifted")
+    if pages > cap:
+        return Check(name, False, "candidate pages exceed the page cap")
+    if job_reads > job_cap or (job_cap_hit and job_reads != job_cap):
+        return Check(name, False, "PR-sample job-list reads disagree with their cap")
     strict_complete = (
-        sampled >= target and not cp.get("required_suite_unsatisfiable"))
+        sampled >= target and distinct_days >= min_distinct_days
+        and not cp.get("required_suite_unsatisfiable") and not job_cap_hit)
     if complete != strict_complete:
         return Check(
             name, False,
             "sample_complete does not match the strict required-suite target")
-    if strict_complete:
+    if job_cap_hit:
+        expected = "job_list_cap"
+    elif strict_complete:
         expected = "target_met"
     elif failures or page_failures:
         expected = "fetch_failures"
+    elif cp.get("required_suite_unsatisfiable"):
+        expected = (
+            "required_checks_unobservable"
+            if cp.get("required_checks_unobservable")
+            and cp.get("required_suite_scoped") is False
+            else "required_suite_empty")
     elif era_door:
         expected = "era_door"
     elif selection_limited or (not exhausted and pages >= cap):
@@ -2233,9 +2291,38 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
     problems: list[str] = []
     if actual != expected:
         problems.append(f"sample_stop_reason={actual!r}, expected {expected!r}")
-    rendered = f"{sampled} of {target} PRs sampled: {expected.replace('_', ' ')}"
+    sample_size = (f"{sampled} PRs sampled (minimum target {target})"
+                   if sampled > target else f"{sampled} of {target} PRs sampled")
+    rendered = f"{sample_size}: {expected.replace('_', ' ')}"
     if rendered not in report:
         problems.append("rendered report omits or changes the re-derived sample statement")
+    budget = f"{job_reads} of at most {job_cap}"
+    if budget not in report:
+        problems.append("rendered report omits the PR-sample job-list read cap")
+    if sampled and (not span_first or not span_last):
+        problems.append("nonempty sample omits its first-to-last commit span")
+    elif span_first and span_last:
+        try:
+            from datetime import datetime as _sample_datetime
+            first_dt = _sample_datetime.fromisoformat(span_first.replace("Z", "+00:00"))
+            last_dt = _sample_datetime.fromisoformat(span_last.replace("Z", "+00:00"))
+            if first_dt > last_dt:
+                problems.append("sample commit span is reversed")
+        except ValueError:
+            problems.append("sample commit span is not ISO-8601")
+        rendered_span = f"{span_first[:10]} to {span_last[:10]}"
+        if rendered_span not in report:
+            problems.append("rendered report omits the sampled commit span")
+    unreliable = sampled and (
+        _PR_SAMPLE_CONTRACT.pr_sample_is_mostly_partial(partial_count, sampled)
+        or distinct_days < min_distinct_days)
+    if unreliable:
+        if "gate frequency and pole order are unreliable" not in report:
+            problems.append("thin sample omits the gate-frequency reliability warning")
+        if "Which checks gate (the critical-path ordering)" in report:
+            problems.append("thin sample still headlines gate frequency and pole order")
+        if "PR gate sample (ordering withheld)" not in report:
+            problems.append("thin sample omits the neutral gate-sample heading")
     return Check(name, not problems, "; ".join(problems) if problems else rendered)
 
 
@@ -2924,13 +3011,11 @@ def _wf_base(wf: str) -> str:
 
 
 def _matrix_paren_base(name: str) -> str | None:
-    """Mirror of `blocking_path._matrix_base`: the job name BEFORE its `(matrix params)`,
-    lowercased; None when the name carries no parenthesised params. Uses `_strip_scope`
-    (the verifier's `_clean_label` twin) so a monorepo `@scope/` prefix is dropped first,
-    exactly as the engine does. Named `_matrix_paren_base` (not `_matrix_base`) because this
-    file already defines a DIFFERENT `_matrix_base` (a trailing-`(variant)` strip over an
-    already-`_cmp_name`'d floor name) — these are distinct helpers; do not merge them."""
-    m = re.match(r"(.+?)\s*\(", _strip_scope(name))
+    """Mirror `blocking_path._matrix_base`'s trailing matrix-parameter reduction."""
+    m = re.match(
+        r"^(.*\S)\s*\((?:[^()]|\([^()]*\))*\)\s*$",
+        _strip_scope(name),
+    )
     return m.group(1).strip().lower() if m and m.group(1).strip() else None
 
 
@@ -4203,12 +4288,11 @@ def _verify_per_pr_floor_split(
             if isinstance(check, dict) and _cmp_name(str(check.get("name") or "")) == target:
                 stamp_wf = str(check.get("workflow_file") or "")
                 break
-        base = re.sub(r"\s*\([^)]*\)\s*$", "", target)
         for check in _as_list(cp.get("checks")):
             if not isinstance(check, dict) or str(check.get("workflow_file") or "") != stamp_wf:
                 continue
             candidate = _cmp_name(str(check.get("name") or ""))
-            if re.sub(r"\s*\([^)]*\)\s*$", "", candidate) == base:
+            if _same_matrix(candidate, target, stamp_wf, stamp_wf):
                 targets.add(candidate)
     rows: list[tuple[float, str, bool, bool]] = []
     unknown_n = 0
@@ -12773,6 +12857,12 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
         pat = str(f.get("pattern", ""))
         if pat not in block_keys:
             continue   # this pattern isn't rendered in the appendix
+        if f.get("non_pr_lane") is True:
+            # The pole is measured on the pull-request lane. A finding stamped
+            # as non-PR-only is a separate lane disclosure even when its static
+            # job name matches, and the lane-isolation check independently
+            # requires zero merge-gate wall-clock credit and a rendered tag.
+            continue
         if pat == "OPT82":
             # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
             # keeps an OPT82 card on a drilled-pole lint job (its card is the only
@@ -12948,6 +13038,18 @@ _VR_POLE_HOLDS_UP_MIN_COUNT = 2
 _VR_POLE_LABEL_WIDTH = 33
 
 
+def _vr_pole_headline_s(row: dict) -> float:
+    """Mirror the renderer's bimodal headline duration for ranking upstreams."""
+    p50 = _num(row.get("p50_s")) or 0.0
+    bimodal = _as_dict(row.get("bimodal"))
+    high = _num(bimodal.get("high_p50_s"))
+    low = _num(bimodal.get("low_p50_s"))
+    if (high is not None and low is not None and high > p50 * 1.15
+            and p50 <= (low + high) / 2):
+        return high
+    return p50
+
+
 def _aggregation_upstream_gate_counts(data: dict) -> dict[str, int]:
     """Effective gate frequency inherited by an aggregation verdict's slowest upstream."""
     graph = _as_dict(data.get("workflow_job_graph"))
@@ -13010,14 +13112,16 @@ def _aggregation_upstream_gate_counts(data: dict) -> dict[str, int]:
         ]
         if not upstreams:
             continue
-        slowest = max(
-            upstreams,
-            key=lambda row: max(
-                _num(row.get("p50_s")) or 0.0,
-                _num(_as_dict(row.get("bimodal")).get("high_p50_s")) or 0.0))
+        slowest = max(upstreams, key=_vr_pole_headline_s)
         upstream_name = _cmp_name(str(slowest.get("name") or slowest.get("check") or ""))
         sink_count = counts.get(_cmp_name(sink_name), 0)
-        inherited[upstream_name] = max(inherited.get(upstream_name, 0), sink_count)
+        for row in checks:
+            row_name = str(row.get("name") or row.get("check") or "")
+            row_workflow = str(row.get("workflow_file") or "")
+            if row_workflow == workflow and _same_matrix(
+                    row_name, upstream_name, row_workflow, workflow):
+                normalized = _cmp_name(row_name)
+                inherited[normalized] = max(inherited.get(normalized, 0), sink_count)
     return inherited
 
 
@@ -13039,22 +13143,25 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
     frequent_heading = "Checks that hold up most PRs"
     rare_heading = "Long but rarely the last to finish"
     unconfirmed_heading = "Could not confirm these checks block merging"
-    threshold_match = re.search(
-        r"(?:Checks that hold up most PRs.*?at least|"
-        r"Long but rarely the last to finish.*?fewer than)\s+(\d+)\s+sampled PRs",
-        contents)
+    frequent_threshold = re.search(
+        r"Checks that hold up most PRs.*?at least\s+(\d+)\s+sampled PRs", contents)
+    rare_threshold = re.search(
+        r"Long but rarely the last to finish.*?fewer than\s+(\d+)\s+sampled PRs", contents)
     rows = list(_POLE_GROUP_ROW_RE.finditer(contents))
     pole_sections = _pole_header_sections(report)
-    if not threshold_match or len(rows) != len(pole_sections):
+    if (not frequent_threshold and not rare_threshold) or len(rows) != len(pole_sections):
         return Check(name, False,
                      "every modern pole must appear under one of the two labelled groups with "
                      "its P50 and finishes-last count")
 
-    threshold = int(threshold_match.group(1))
-    if threshold != _VR_POLE_HOLDS_UP_MIN_COUNT:
+    rendered_thresholds = [
+        int(match.group(1)) for match in (frequent_threshold, rare_threshold) if match
+    ]
+    threshold = rendered_thresholds[0]
+    if any(value != _VR_POLE_HOLDS_UP_MIN_COUNT for value in rendered_thresholds):
         return Check(name, False,
-                     f"rendered group threshold {threshold} differs from the verifier contract "
-                     f"{_VR_POLE_HOLDS_UP_MIN_COUNT}")
+                     f"rendered group thresholds {rendered_thresholds} differ from the "
+                     f"verifier contract {_VR_POLE_HOLDS_UP_MIN_COUNT}")
     rare_at = contents.find(rare_heading)
     unconfirmed_at = contents.find(unconfirmed_heading)
     failures: list[str] = []
@@ -13067,11 +13174,17 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
     }
     by_name = {_cmp_name(str(row.get("name") or row.get("check") or "")): row
                for row in checks}
+    chain_names = {
+        _cmp_name(str(value))
+        for value in _as_list(_as_dict(cp.get("chain_summary")).get("modal_chain"))
+    }
     inherited_counts = _aggregation_upstream_gate_counts(data)
     _population_counts, population_n, _dropped = _populations_pole_counts(cp)
     expected_denominator = population_n or int(_num(cp.get("check_present_n_pr")) or 0)
     first_name = ""
     first_full_name = ""
+    first_p50_s: float | None = None
+    first_group = ""
     for index, match in enumerate(rows, 1):
         number, label, anchor, p50_text, count_text, total_text, tail = match.groups()
         if int(number) != index or int(anchor) != index:
@@ -13092,6 +13205,9 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
                 f"`{label}` drill frequency group {rendered_drill_groups!r} differs from "
                 f"Contents group `{expected_drill_group}`")
         seconds = _parse_clock_to_s(p50_text)
+        if index == 1:
+            first_p50_s = seconds
+            first_group = group
         if seconds is None:
             failures.append(f"`{label}` has an unreadable P50 {p50_text!r}")
         else:
@@ -13099,7 +13215,8 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
         if group == "rare-last" and not (
                 "ran on few PRs" in tail
                 or "a slower check usually ran alongside" in tail
-                or "feeds the terminal `needs:` gate" in tail):
+                or "feeds the terminal `needs:` gate" in tail
+                or "runs in the measured `needs:` chain" in tail):
             failures.append(f"`{label}` has no reason in the rare-last group")
         # Contents labels are deliberately width-limited for readability.  Join
         # through the corresponding full drill heading before looking up the
@@ -13107,9 +13224,13 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
         full_label = pole_sections[index - 1][1]
         inherited_upstream = _cmp_name(full_label) in inherited_counts
         claims_terminal_gate = "feeds the terminal `needs:` gate" in tail
+        claims_chain = "runs in the measured `needs:` chain" in tail
         if group == "rare-last" and claims_terminal_gate != inherited_upstream:
             failures.append(
                 f"`{label}` terminal-needs reason does not match aggregation-gate topology")
+        if group == "rare-last" and claims_chain != (_cmp_name(full_label) in chain_names):
+            failures.append(
+                f"`{label}` chain reason does not match the measured modal chain")
         expected_label = (full_label if len(full_label) <= _VR_POLE_LABEL_WIDTH
                           else full_label[:_VR_POLE_LABEL_WIDTH - 1] + "…")
         if label != expected_label:
@@ -13151,7 +13272,15 @@ def check_pole_groups_and_bottom_agree(report: str, findings_path: Path | None) 
 
     bottom = next((line for line in report.splitlines()
                    if line.startswith("> **Bottom line.**")), "")
-    expected_open = f"> **Bottom line.** Long pole 1, `{first_name}`,"
+    group_labels = {
+        "holds-up": "Checks that hold up most PRs",
+        "rare-last": "Long but rarely the last to finish",
+    }
+    expected_open = (
+        f"> **Bottom line.** Long pole 1, `{first_name}`, has P50 "
+        f"**{_fmt_clock(first_p50_s or 0.0)}** and is the longest check in "
+        f"**{group_labels.get(first_group, '')}**."
+    )
     if not first_name or not bottom.startswith(expected_open):
         failures.append(f"Bottom line does not open with Long pole 1 `{first_name}`")
     if not first_full_name:

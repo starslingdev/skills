@@ -12,19 +12,19 @@ not measured: lifecycle data was not collected
 | **PR gate sample** | 20 of 20 PRs sampled: target met |
 | **Audit** | ran 2026-07-25 · ci-speedup skill commit [`2f048be`](https://github.com/starslingdev/skills/commit/2f048be) |
 
-> **Bottom line.** Long pole 1, `Windows (firefox)`, is the longest check in **Checks that hold up most PRs**. A typical PR waits **41m 12s** for all checks to finish. The biggest single measured win is **~13m 24s** off the slowest fixable check, `Windows (firefox)` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
+> **Bottom line.** Long pole 1, `Windows (firefox)`, has P50 **72m 57s** and is the longest check in **Checks that hold up most PRs**. A typical PR waits **41m 12s** for all checks to finish. The biggest single measured win is **~13m 24s** off the slowest fixable check, `Windows (firefox)` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
 >
 > **41m 12s until all checks finish** - `Windows (firefox)` is the slowest check a typical PR waits on (~72m 57s), but it ran on only 4/20 sampled PRs, so a typical PR finishes in 41m 12s. 
 >
-> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~127 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
+> **⚠️ `.github/workflows/tests_webview_simulator.yml` changed ~130 days ago - this audit measures ONLY the new configuration on a thin sample.** Only 1 sampled run have run on the new configuration (the gate-bearing PRs are all post-change, so there is no pre-change gate run to measure the old config) - treat these numbers as provisional; re-run as post-change history accumulates for stable numbers.
 >
-> **`.github/workflows/fix-flakes.yml` changed ~117 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/fix-flakes.yml` changed ~120 days ago - narrowed to the current configuration.** This audit measures only the 11 runs since that change; the 8 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/publish_release.yml` changed ~119 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/publish_release.yml` changed ~122 days ago - narrowed to the current configuration.** This audit measures only the 14 runs since that change; the 6 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_bidi.yml` changed ~124 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_bidi.yml` changed ~127 days ago - narrowed to the current configuration.** This audit measures only the 8 runs since that change; the 12 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/tests_secondary.yml` changed ~131 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests_secondary.yml` changed ~134 days ago - narrowed to the current configuration.** This audit measures only the 18 runs since that change; the 2 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **What gates next:** After this fix, CI is gated by `tests_secondary.yml / Test chrome on macos-latest` at ~3573 s.
 > This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.
@@ -1584,7 +1584,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `ebcb369`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `ebcb369-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

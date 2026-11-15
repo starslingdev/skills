@@ -110,8 +110,10 @@ _CO_ENFORCED = lambda repo: (True, "a ruleset on branch `main`")  # noqa: E731
 
 
 class _ClosedEnvironmentsGh:
-    """A recorded `gh` for the two environment facts: one environment that
-    requires a reviewer and blocks self-review, and no readable secret.
+    """A recorded `gh` for the environment facts and the default-branch
+    review fact: one environment that requires a reviewer and blocks
+    self-review, no readable secret, and a default branch whose ruleset needs
+    one approval that a new push dismisses.
 
     Every test in this file that names a repository reaches the environment
     facts' default fetcher, so it is answered here instead of by the real
@@ -137,6 +139,15 @@ class _ClosedEnvironmentsGh:
                                    "reviewer": {"slug": "release"}}]}]}]})
         if path.endswith("secrets?per_page=100"):
             return json.dumps({"total_count": 0, "secrets": []})
+        if path.endswith("/rules/branches/main?per_page=100"):
+            return json.dumps([{
+                "type": "pull_request", "ruleset_id": 1,
+                "parameters": {"required_approving_review_count": 1,
+                               "dismiss_stale_reviews_on_push": True,
+                               "require_last_push_approval": False}}])
+        if path.endswith("/rulesets/1?includes_parents=true"):
+            return json.dumps({"id": 1, "name": "main",
+                               "enforcement": "active", "bypass_actors": []})
         if path == base:
             return json.dumps({"default_branch": "main"})
         raise AssertionError(f"unexpected endpoint {path}")
@@ -184,13 +195,13 @@ def test_a_well_configured_repo_passes_every_fact(tmp_path):
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("all_external_contributors", "x"))
     assert out["score"] == 100.0
-    assert out["passed"] == out["scored_count"] == 13
+    assert out["passed"] == out["scored_count"] == 14
     for f in out["facts"]:
         assert f["outcome"] == "pass", f"{f['fact_id']} failed: {f['evidence']}"
 
 
 def test_the_api_gated_facts_are_the_only_unmeasured_ones_offline(tmp_path):
-    """Offline, the YAML facts still resolve and the six API-gated ones
+    """Offline, the YAML facts still resolve and the seven API-gated ones
     disclose that they did not — a scan with no token is a smaller
     measurement, not a cleaner repo. The CODEOWNERS fact is API-gated only
     once a rule covers workflows (this fixture's does): whether the branch
@@ -198,12 +209,13 @@ def test_the_api_gated_facts_are_the_only_unmeasured_ones_offline(tmp_path):
     root, files = _repo(tmp_path, {"ci.yml": _SAFE_WF})
     out = cf.compute_config_facts(root, files, [])
     assert sorted(out["unmeasured"]) == ["sec.codeowners.workflows",
+                                         "sec.default-branch.review-required",
                                          "sec.environments.approval-holds",
                                          "sec.environments.branch-restricted",
                                          "sec.fork-approval.effective",
                                          "sec.required-checks.skippable",
                                          "sec.secrets.environment-scoped"]
-    assert out["scored_count"] == 6 and out["applicable_count"] == 12
+    assert out["scored_count"] == 6 and out["applicable_count"] == 13
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -608,9 +620,9 @@ def test_codeowners_undecodable_file_is_unmeasured_not_a_fail(tmp_path):
     assert "unmeasured" in f["evidence"], f
     assert "sec.codeowners.workflows" in out["unmeasured"]
     # ...and it is a coverage gap, not a silent pass. `applicable_count` stays
-    # 12 — every fact is still applicable — while only 6 score: this one
-    # plus the five other API-gated facts, which are unmeasured offline too.
-    assert out["scored_count"] == 6 and out["applicable_count"] == 12
+    # 13 — every fact is still applicable — while only 6 score: this one
+    # plus the six other API-gated facts, which are unmeasured offline too.
+    assert out["scored_count"] == 6 and out["applicable_count"] == 13
     assert "COVERAGE GAP" in out["caveat"]
 
 
@@ -1076,9 +1088,10 @@ def test_unscannable_workflow_forces_workflow_facts_to_unmeasured(tmp_path):
             # Reads update-tool configs, not workflow YAML; this repo has none.
             assert f["outcome"] == "not_applicable"
         elif f["fact_id"].startswith("sec.environments.") or \
-                f["fact_id"] == "sec.secrets.environment-scoped":
+                f["fact_id"] in ("sec.secrets.environment-scoped",
+                                 "sec.default-branch.review-required"):
             # Read from environment settings over the API, not workflow
-            # YAML; the recorded environment passes both.
+            # YAML; the recorded settings pass all of them.
             assert f["outcome"] == "pass", f
         else:
             assert f["outcome"] == "unmeasured", (
@@ -1086,13 +1099,13 @@ def test_unscannable_workflow_forces_workflow_facts_to_unmeasured(tmp_path):
                 "that is a silent pass over a coverage hole"
             )
             assert "broken.yml" in f["evidence"]
-    assert out["scored_count"] == 4
-    assert out["applicable_count"] == 12
+    assert out["scored_count"] == 5
+    assert out["applicable_count"] == 13
     assert "COVERAGE GAP" in out["caveat"]
     # The ratio must be over RESOLVED facts only. If unmeasured facts leaked
     # into the numerator, 5 unmeasured + 1 pass over scored=1 would read 600 —
     # so pin the value, not just the counts.
-    assert out["passed"] == 4
+    assert out["passed"] == 5
     assert out["score"] == pytest.approx(100.0)
 
 
@@ -1119,9 +1132,9 @@ def test_score_is_the_registered_ratio_with_no_weights(tmp_path):
         codeowner_review_fetcher=_CO_ENFORCED,
         required_contexts_fetcher=lambda repo: ([], "branch `main`"),
         fork_approval_fetcher=lambda repo: ("first_time_contributors", "x"))
-    # bad.yml fails exactly one fact (permissions-declares); 11/12 pass.
-    assert out["passed"] == 11 and out["scored_count"] == 12
-    assert out["score"] == pytest.approx(round(100 * 11 / 12, 1))
+    # bad.yml fails exactly one fact (permissions-declares); 12/13 pass.
+    assert out["passed"] == 12 and out["scored_count"] == 13
+    assert out["score"] == pytest.approx(round(100 * 12 / 13, 1))
     assert out["registered"]
     assert "no weights" in out["constants"]["rule"]
 
@@ -1541,8 +1554,8 @@ def test_a_scan_gap_forces_the_fact_unmeasured(tmp_path):
 
 def test_the_fact_table_carries_every_api_gated_fact(tmp_path):
     out = _facts_with(tmp_path, {"ci.yml": _VERDICT_PATTERN}, ["test"])
-    assert out["applicable_count"] == 12
-    assert out["scored_count"] == 12
+    assert out["applicable_count"] == 13
+    assert out["scored_count"] == 13
 
 
 # --- F8: sec.fork-approval.effective -----------------------------------------
@@ -1628,11 +1641,11 @@ def test_a_scan_gap_does_not_unmeasure_the_fork_approval_fact(tmp_path):
 
 
 def test_the_fact_table_carries_twelve_applicable_facts(tmp_path):
-    # Thirteen facts; the update-cooldown fact does not apply (no update
-    # tool).
+    # Fourteen facts; the update-cooldown fact does not apply (no update
+    # tool), so thirteen are applicable (the name predates the fourteenth).
     out = _fork_facts(tmp_path, "all_external_contributors")
-    assert out["applicable_count"] == 12
-    assert out["scored_count"] == 12
+    assert out["applicable_count"] == 13
+    assert out["scored_count"] == 13
 
 
 # ---------------------------------------------------------------------------
@@ -2118,6 +2131,16 @@ def test_a_partially_read_protection_is_never_reported_as_complete():
     so a consumer blends it as clean and fully measured."""
     for label, rulesets, classic in (
         ("classic errors", _RULESET_WITH_TEST, RuntimeError("HTTP 500")),
+        ("classic times out", _RULESET_WITH_TEST,
+         RuntimeError("request timed out")),
+        ("classic unavailable", _RULESET_WITH_TEST,
+         RuntimeError("HTTP 503 Service Unavailable")),
+        ("classic 5xx quotes a 404", _RULESET_WITH_TEST,
+         RuntimeError(
+             "HTTP 503 Service Unavailable: upstream returned "
+             "Not Found (HTTP 404)")),
+        ("classic rate limited with 403", _RULESET_WITH_TEST,
+         RuntimeError("gh: API rate limit exceeded (HTTP 403)")),
         ("rulesets errors", RuntimeError("HTTP 429 rate limit"),
          {"contexts": ["test"]}),
     ):
@@ -2436,7 +2459,7 @@ def test_a_branch_protection_fetcher_that_raises_becomes_one_unmeasured_row(
     assert "gh subprocess died" in f["evidence"], f["evidence"]
     assert _FACT in out["unmeasured"]
     # The rest of the table still resolved — the failure is contained.
-    assert out["scored_count"] == 11 and out["applicable_count"] == 12
+    assert out["scored_count"] == 12 and out["applicable_count"] == 13
 
 
 def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
@@ -2455,7 +2478,7 @@ def test_a_fork_approval_fetcher_that_raises_becomes_one_unmeasured_row(
     assert f["outcome"] == "unmeasured", f
     assert "gh subprocess died" in f["evidence"], f["evidence"]
     assert _FORK_FACT in out["unmeasured"]
-    assert out["scored_count"] == 11 and out["applicable_count"] == 12
+    assert out["scored_count"] == 12 and out["applicable_count"] == 13
 
 
 # ---------------------------------------------------------------------------
@@ -4020,6 +4043,41 @@ def test_an_admin_only_403_discloses_the_source_it_could_not_read():
     assert "read from rulesets only" in detail, detail
 
 
+def test_a_plain_classic_not_found_uses_the_rulesets_answer():
+    """GitHub hides classic protection from a non-admin reader as a plain
+    404, even when the readable rulesets source fully answers the question.
+    Keep the contexts and disclose that classic protection was unread."""
+    rules = [{
+        "type": "required_status_checks",
+        "parameters": {"required_status_checks": [
+            {"context": "build"},
+            {"context": "lint"},
+            {"context": "test"},
+        ]},
+    }]
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(
+            rules,
+            RuntimeError("gh: Not Found (HTTP 404)"))):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts == ["build", "lint", "test"], (contexts, detail)
+    assert "read from rulesets only" in detail, detail
+    assert "classic branch protection could not be read" in detail, detail
+
+
+def test_a_plain_rulesets_not_found_is_not_an_ordinary_partial_read():
+    """The exception is scoped to the admin-only classic endpoint."""
+    with mock.patch.object(
+        cf, "_gh_utils",
+        lambda: _protection_gh(
+            RuntimeError("gh: Not Found (HTTP 404)"),
+            {"contexts": ["test"], "checks": []})):
+        contexts, detail = cf._required_contexts_via_gh("owner/repo")
+    assert contexts is None, (contexts, detail)
+    assert "rulesets" in detail, detail
+
+
 def test_a_branch_filtered_push_workflow_cannot_veto_the_real_producer(tmp_path):
     """The tag-only shape was rejected; `on: push: branches: [main]` was not —
     and it is far commoner. A deploy workflow with a job named `test` never
@@ -4291,8 +4349,7 @@ def test_a_404_for_a_reason_other_than_unprotected_is_still_unread():
     `\\b404\\b`, so a branch renamed between the two calls, a plan-gated
     endpoint, even a 502 mentioning 404 in its body, all became "nothing
     required here" — a measured PASS over a source never read."""
-    for message in ("HTTP 404: Not Found",
-                    "Upgrade to GitHub Pro to use this feature (HTTP 404)",
+    for message in ("Upgrade to GitHub Pro to use this feature (HTTP 404)",
                     "HTTP 502: upstream returned 404 for 1 of 3 shards"):
         with mock.patch.object(
             cf, "_gh_utils",
@@ -5389,11 +5446,11 @@ def test_not_applicable_leaves_the_applicable_count(tmp_path):
     in as a named coverage gap."""
     root, files = _repo(tmp_path, {"ci.yml": _wf("      - run: echo hello\n")})
     out = cf.compute_config_facts(root, files, [])
-    # Twelve other facts: five measurable offline, six API-gated and
+    # Thirteen other facts: five measurable offline, seven API-gated and
     # unmeasured (the covering CODEOWNERS fixture cannot be confirmed enforced
     # without a repository), and the update-cooldown fact, also n/a here (no
     # update tool).
-    assert out["applicable_count"] == 11
+    assert out["applicable_count"] == 12
     assert out["scored_count"] == 5
 
 
@@ -5654,7 +5711,7 @@ def test_a_non_list_package_rules_does_not_crash_the_fact_table(tmp_path):
     the fact table and blank every hygiene row."""
     f, out = _cooldown(tmp_path, {"renovate.json": '{"packageRules": 5}'})
     assert f["outcome"] == "fail", f["evidence"]
-    assert len(out["facts"]) == 13
+    assert len(out["facts"]) == 14
 
 
 def test_semver_keys_are_ignored_where_dependabot_ignores_them(tmp_path):

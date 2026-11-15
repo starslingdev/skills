@@ -11,8 +11,69 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Changed
+
+- P14.18 now keeps `pull_request_target` automation HIGH when it checks out
+  attacker-head code, executes PR-controlled text, or calls review/merge APIs,
+  while classifying label/comment-only jobs with none of those paths as MEDIUM
+  hygiene and recommending that their cosmetic scope stay narrow. Its
+  fail-closed script proof now rejects comments and regex literals, recognizes
+  effective `write-all` grants, and gives cosmetic jobs a completion check that
+  permits a still-required `pull-requests: write` grant.
+
 ### Added
 
+- **2026-11-12** (#346) — P14.18 findings carry GitHub's "Allow GitHub Actions to
+  create and approve pull requests" repository setting as
+  `actions_can_approve_prs` (`state` `true`, `false` or `unread`, with a
+  `detail`), read once per scan from
+  `repos/{owner}/{repo}/actions/permissions/workflow` when a P14.18 finding
+  exists and the scan has `--repo` and a signed-in gh. It is never guessed:
+  the reference block says yes, no or not checked, and an unread setting adds
+  a sentence under "What an attacker could do then" saying it could not be
+  checked. The render plan (`report.py --render-plan`) now carries each
+  group's `verdict`, which the terminal summary prints as one line per finding.
+
+- **2026-11-12** (#341) — ci-secure: a new API-gated config hygiene check,
+  `sec.default-branch.review-required`, and the incident that grounds it.
+  The check passes when the default branch, through an active ruleset or
+  classic branch protection, needs a pull request with at least one approval
+  and either dismisses stale approvals on a new push or requires approval of
+  the most recent push; it fails when no pull request is required, the
+  approval count is 0, or neither stale-approval setting is on, naming which.
+  Anyone short of an admin who can skip the review fails it, named in the
+  evidence: a ruleset bypass actor that is an app, a deploy key, a team, a
+  user or a non-admin role (including "For pull requests only" bypass,
+  which still lets them merge without the approval), and classic
+  protection's bypass allowances; repositories with such bypassers fail
+  this check. Admins qualify a pass in its evidence. An unreadable bypass
+  list, like any unreadable setting, is unmeasured, never a pass. The
+  environment checks and this one share one reading of a bypass actor. It reads the rules endpoint first (read access)
+  and classic protection only when the rules alone do not hold. Fourteen
+  facts now; up to seven are API-gated. The catalog's Reference incidents
+  records the November 2026 compromised GitHub accounts CI secret stealer
+  campaign as the grounding for this check and for
+  `sec.secrets.environment-scoped`; it is not cited as a vector incident,
+  because the attacker already held a push credential. The environment
+  secrets checks now say what is at stake: a failing
+  `sec.secrets.environment-scoped` states that any workflow pushed to any
+  branch can read its N secrets, so one leaked push credential exposes them
+  all with no review and no merge, and that the fix is an environment only
+  protected branches can use (one that passes the branch-restriction check); it names them (never values), up to 10 per
+  list and then `and N more`. A failing `sec.environments.branch-restricted`
+  says an environment any branch can use protects nothing from a pushed
+  workflow. When the secrets check fails, the report also puts a short
+  **Secrets reachable from any branch** callout under its headline (a
+  blockquote linking to the "If a push credential leaks" section; it adds
+  nothing to the vector count), and the terminal summary leads its hygiene
+  clause with it. The findings JSON shape is unchanged. The new check also
+  recognizes a plain `Not Found (HTTP 404)` from classic branch protection
+  as GitHub's ordinary hide from a non-admin reader (the same reading as the
+  required-checks fix below, #327). Hidden classic protection can only add
+  review rules, so rulesets that hold on their own still pass, and rulesets
+  that fall short are unmeasured, never a fail: the evidence says classic
+  protection is hidden from this reader and an admin can confirm. A 5xx
+  quoting a 404, a rate limit or a timeout stays unmeasured.
 - ci-secure: "If a push credential leaks" — three new config hygiene checks,
   read over the GitHub API the way the required-checks and fork-approval
   checks already are. A credential that can push workflow files (GitHub's
@@ -184,6 +245,43 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-11-15** (#346) — The plain sections now follow #336's per-profile
+  scenarios: a group's sections come from its most exposed (worst-severity)
+  member rather than whichever sorted first, Phase 2.5 writes one six-field
+  object per `(pattern, severity, fix_strategy)` profile, and the scanner's
+  one-line scenario for a MEDIUM cosmetic P14.18 job becomes that object's
+  "What an attacker could do then" text instead of being kept as a lone
+  string that `verify_report.py` counts as not repo-specific. The P14.18
+  TL;DR states the HIGH/MEDIUM split in plain words, and its catalog note no
+  longer says no check can see the "Allow GitHub Actions to create and
+  approve pull requests" setting.
+- **2026-11-12** (#346) — Every finding now opens with six plain-English sections
+  written for a reader who is not an engineer: What this workflow does, Why
+  ci-secure flagged it, What would have to go wrong first, What an attacker
+  could do then, Verdict, and How to close it. The catalog material (pattern
+  link, severity of this kind of setup, occurrences, activity, fix strategy,
+  platform note, TL;DR) moves below them into a compact "Catalog reference"
+  block, followed by the evidence and the catalog's fix recipe (now headed
+  "Fix recipe (catalog)"). The bold one-line lead is gone. Anchors, pattern
+  ids and catalog links are unchanged. The agent-written `attacker_scenario`
+  is now an object with one field per section (`what_it_does`, `why_flagged`,
+  `what_must_go_wrong`, `attacker_could`, `verdict`, `how_to_close`); an
+  older one-paragraph scenario still renders, under "What an attacker could
+  do then". The verdict may honestly say low. `verify_report.py`'s scenario
+  check now reads the sections: a finding without every section counts as
+  not repo-specific, as the catalog stand-in always has, and a report where
+  no finding has them fails. SKILL.md Phase 2.5 and
+  `references/scenario-authoring.md` describe the fields, and Phase 3 prints
+  one verdict line per finding.
+- **2026-11-12** (#346) — The P14.18 finding reads in plain English. Its title is now
+  "Workflow That Outside Activity Can Start Has `pull-requests: write`" (the
+  catalog anchor tail changes with it; the `P14.18` ID and the in-report
+  `finding-N` anchors do not); its TL;DR no longer names an internal variable
+  or source file; its platform note says GitHub added opt-in settings that are
+  off by default; and every finding's severity row is labelled "Severity of
+  this kind of setup", so it no longer reads as a verdict on the specific
+  workflow assessed by the attacker scenario. Wording only, the check is
+  unchanged. A test now fails if any pattern renders an internal identifier.
 - 2026-10-27: Required-summary coverage now reads strict jq assertions, resolves
   verdict-action tags only to the reviewed commit, and proves large strict
   aggregates without enumerating every result combination. Scores can move
@@ -304,6 +402,36 @@ entries are dated (UTC). Format loosely follows
   no detector, catalog entry, pattern id or count changes.
 
 ### Fixed
+
+- **2026-11-12** (#332) — Optional GitHub checks now distinguish a missing
+  `gh` executable from an installed CLI that is not authenticated, so the
+  skip guidance tells users whether to install or log in. The README count is
+  updated to the two network lookups plus seven API-gated config facts.
+
+- **2026-11-12** (#324) — P14.10 and P14.15 now treat quoted bracket-indexed
+  attacker inputs like their dotted equivalents, including hyphenated input
+  names and mixed dotted/bracket `github.event` / `client_payload` lookups.
+  Normalization stays inside template expressions and preserves multiline
+  source attribution; bracket access on non-source contexts remains silent.
+
+- **2026-11-12** (#345) — ci-secure: the default-branch review check, when it
+  fails on the rule's own settings, now also names anyone short of an admin
+  on a bypass list (with the classic or ruleset setting to change) and any
+  bypass list it could not read, so one report lists every fix instead of a
+  second fail or unmeasured after the first fix.
+
+- **2026-11-12** (#341, closes #327) — Required-check auditing now keeps a readable ruleset
+  answer when GitHub hides classic branch protection from a non-admin reader
+  behind a plain `404 Not Found`. The fact remains measured, names that classic
+  protection was unread, and still fails closed on rate limits, timeouts and
+  server errors.
+
+- **2026-11-12** (#332) — P14.11 now sends every repository, commit and tag
+  lookup to github.com explicitly. Workflow action references resolve there,
+  so a caller whose `GH_HOST` points at GitHub Enterprise Server can no longer
+  verify a same-named repository on the wrong server. The config-fact verdict
+  action resolver uses the same host pin, while audited-repository API calls
+  continue to follow the repository's selected host.
 
 - **2026-11-11** (#331) — A GitHub CLI extension pinned to a tag on a
   release GitHub has locked as immutable is no longer reported (P14.24). That

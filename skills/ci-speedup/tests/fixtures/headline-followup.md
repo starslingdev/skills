@@ -11,7 +11,7 @@ not measured: lifecycle data was not collected
 | **PR gate sample** | 4 of 4 PRs sampled: target met |
 | **Audit** | ran 2026-11-02 · ci-speedup skill commit [`abcdef1`](https://github.com/starslingdev/skills/commit/abcdef1234567890) |
 
-> **Bottom line.** Long pole 1, `tests`, is the longest check in **Checks that hold up most PRs**. A typical PR waits **10m 00s** for all checks to finish. The biggest single measured win is **~4m 10s** off the slowest fixable check, `tests` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
+> **Bottom line.** Long pole 1, `tests`, has P50 **10m 00s** and is the longest check in **Checks that hold up most PRs**. A typical PR waits **10m 00s** for all checks to finish. The biggest single measured win is **~4m 10s** off the slowest fixable check, `tests` - see [Long pole 1](#pole-1) for the drill-down to the biggest lever.
 >
 > **10m 00s until all checks finish** - `tests` is the slowest check a typical PR waits on.
 >

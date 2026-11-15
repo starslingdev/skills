@@ -11,6 +11,7 @@ before printing the summary.
 - [Where each line comes from](#where-each-line-comes-from)
 - [The push-credential rows](#the-push-credential-rows)
 - [The vector-map receipt format](#the-vector-map-receipt-format)
+- [The per-finding verdict lines](#the-per-finding-verdict-lines)
 
 ---
 
@@ -63,12 +64,24 @@ sub-heading holding three hygiene rows (`sec.environments.branch-restricted`,
 are hygiene checks like the rest: name a failed one in the hygiene clause, in
 one short clause each (`3 environments accept a branch any push credential
 can make`, `3 environments let the requester approve their own run`,
-`11 repo/org secrets sit outside every environment`), and an unmeasured one
+`any workflow pushed to any branch can read 11 secrets`), and an unmeasured one
 as unmeasured with its reason — never `0 secrets` over a list that could not
 be read. Say what must be done in plain words, as the row does; there is no
 prompt to hand to another agent. Never claim these rows would have stopped
 an attack by an admin or org owner; they do not, and the report does not say
 so either.
+
+**When `sec.secrets.environment-scoped` fails, it leads the hygiene clause.**
+The report then carries a `> [!CAUTION]` **Secrets reachable from any
+branch** callout right under the headline; take the count from it and say
+the consequence, not the bookkeeping: `Hygiene: any workflow pushed to any
+branch can read 11 secrets, so one leaked push credential exposes them all
+with no review and no merge; move them into an environment only protected
+branches can use (one that passes the branch-restriction check).` When the
+callout says "at least", say "at least 11" too. Name secrets only as the report names them (names, never values),
+and never call this an attack-vector hit: the vector count is unchanged. No
+callout means the row did not fail; an unmeasured row is still said as
+unmeasured, never as this sentence.
 
 ## The vector-map receipt format
 
@@ -93,3 +106,32 @@ and is never promoted to ✅.
 Plain text only, in the receipt and in the question text that carries it — no
 `**bold**`, no headings, no code fences. The question UI supplies its own
 emphasis, and bolding the whole block made a close unreadable.
+
+## The per-finding verdict lines
+
+After the vector map, print one verdict line per finding, so the user sees
+how worried to be about each one without opening the report. Take them from
+the render plan, which carries the report's own order and each group's
+`verdict` (the agent's Phase 2.5 judgment, flattened to one line):
+
+```bash
+SLUG="$(printf '%s' "$(git rev-parse --show-toplevel)" | shasum | cut -c1-12)"; FINDINGS="${TMPDIR:-/tmp}/ci-secure-findings-${SLUG}.json"
+<ci-secure>/scripts/report.py --render-plan --in "$FINDINGS"
+# [{"pattern": "P14.18", "dormant": false, "verdict": "Real in principle but low in practice. ..."}, ...]
+```
+
+List position is the finding number (index 0 is `Finding 1`). Print the
+verdict's first sentence, and add `(dormant)` for a dormant group:
+
+```
+Verdicts:
+  Finding 1 (P14.18): Real in principle but low in practice.
+  Finding 2 (P14.10): High: anyone who opens a pull request reaches it today.
+```
+
+An empty `verdict` means Phase 2.5 did not write one for that group: say
+`Finding N (P14.x): no verdict written`, never invent one here. The verdict
+is the agent's judgment of THIS workflow and may be lower than the catalog
+severity printed in the vector map; say it as written, without softening or
+raising it. Plain text only, and inside the question text whenever the next
+act is a structured question (SKILL.md Phase 3's delivery caveat).
