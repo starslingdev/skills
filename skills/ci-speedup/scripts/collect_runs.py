@@ -7643,9 +7643,8 @@ def _own_workflow_billable(
     """`(measured, matched, distinct)` over `wf`'s OWN spine rows only, each
     affected job resolved through `_own_workflow_job_identities`. No cross-workflow
     fallback: a namesake in another file is a different job. The not-derivable cap
-    uses this, and only when matched == distinct — a cap LOWERS a credited figure,
-    so an understated sum (a foreign namesake, a subset of the jobs) would cut a
-    correct saving."""
+    uses this whenever at least one affected job resolves; on partial coverage the
+    sum is the resolved subset's compute, the same subset the verifier bounds by."""
     measured = 0.0
     matched = 0
     seen: set[str] = set()
@@ -7891,11 +7890,11 @@ def _reground_runner_minute_savings(
          - NOT-DERIVABLE patterns → retained, stamped `not_spine_derivable` with the
            whitelist reason recorded in `runner_min_door_note` (visible, never a
            silent bypass) — but a figure the verifier does not re-derive is CAPPED
-           at the affected jobs' measured billable when EVERY affected job resolves
-           to its own workflow's rows and the estimate exceeds it
-           (`measured_spine_clamped`, cap disclosed in `size_note`; see
-           `_cap_at_measured_compute`). Anything less (no join, a partial join, a
-           foreign namesake) → kept, and the guard reports the gap. curl's OPT16
+           at the measured billable of the affected jobs that resolve to their own
+           workflow's rows when the estimate exceeds it (`measured_spine_clamped`,
+           cap and any partial coverage disclosed in `size_note`; see
+           `_cap_at_measured_compute`). No own-workflow join (or only a foreign
+           namesake) → kept, and the guard reports the gap. curl's OPT16
            (a flat ~10 s x 1463 runs = 243.8 min/mo) is NOT a cap case: its job's
            name is templated, so it resolves to no rows and stays a coverage gap.
          - a pattern with NO declared policy → stamped `UNCLASSIFIED_door_policy`
@@ -8032,10 +8031,16 @@ def _cap_at_measured_compute(
         (`verify_report.check_tier2_neutrality_derived` re-derives OPT57, OPT65,
         OPT77, OPT79 and OPT80 and their inner blocks). Capping those would fail
         the verifier and refuse the report.
-      - WHOLE TRUTH ONLY: the sum must cover EVERY affected job, each resolved in
-        its OWN workflow (`_own_workflow_billable`). A foreign namesake or a subset
-        understates the jobs' compute and would cut a correct saving, so either
-        leaves the estimate as is (the guard reports the gap)."""
+      - OWN ROWS ONLY: each affected job is resolved in its OWN workflow
+        (`_own_workflow_billable`). A foreign namesake is a different job and never
+        sets the cap; a finding with no own-workflow row at all is left as is (the
+        guard reports the gap).
+
+    PARTIAL COVERAGE (#355, issue #349). When only SOME affected jobs resolve, the
+    verifier still bounds the credit by the resolved subset's compute
+    (`check_saving_within_measured_compute`), so the cap uses that same subset and
+    discloses the coverage (`matched/distinct affected jobs measured`), exactly
+    as the CLAMP path does. Leaving the estimate would refuse the report."""
     if index is None:
         return
     if f.get("sizing_basis") == "measured":
@@ -8054,7 +8059,7 @@ def _cap_at_measured_compute(
     figure = ("of every sampled run" if every_run else "of completed job runs")
     # UNROUNDED, exactly as the verifier's twin test: a completed figure that is tiny but
     # positive (one short success among many killed runs) is a real completed bound.
-    if (not every_run and all_index is not None and distinct and matched == distinct
+    if (not every_run and all_index is not None and matched > 0
             and measured <= 0):
         # Every sampled run of these jobs was timed out, cancelled or killed: there
         # is no completed basis, which is NOT "the jobs used no compute" either. Owner
@@ -8064,26 +8069,26 @@ def _cap_at_measured_compute(
         # refuses a sized modeled saving on such a job.)
         every, a_matched, a_distinct = _own_workflow_billable(
             wf, jobs, all_index[0], job_graph)
-        if a_matched == a_distinct and every > 0:
+        if a_matched > 0 and every > 0:
             _mark_all_runs_excluded(f)
             return
-    # Every affected job joined its own rows, so a ZERO sum (or one that rounds to
-    # 0) is a real bound, not a missing one: the jobs measured no billable compute
-    # in the sample, and the saving clamps to 0.0. Leaving the estimate would fail
-    # the guard against that zero bound and refuse the report. "No match" is the
-    # separate, not-bounded path above (matched != distinct).
+    # At least one affected job joined its own rows, so a ZERO sum (or one that
+    # rounds to 0) is a real bound, not a missing one: the resolved jobs measured
+    # no billable compute in the sample, and the saving clamps to 0.0. Leaving the
+    # estimate would fail the guard against that zero bound and refuse the report.
+    # "No match" (matched == 0) is the separate, not-bounded path.
     measured = max(round(measured, 1), 0.0)
-    if (distinct == 0 or matched != distinct
-            or float(saving) <= measured + 1e-9):
+    if matched == 0 or float(saving) <= measured + 1e-9:
         return
     f["runner_min_saving"] = measured
     f["runner_min_basis"] = "measured_spine_clamped"
+    cov = "" if matched == distinct else f" ({matched}/{distinct} affected jobs measured)"
     cap = (f"MEASURED monthly billable compute {figure} ({measured:g} min/mo from the "
-           "cost spine) — a fix cannot save more minutes than the jobs consume"
+           f"cost spine){cov} — a fix cannot save more minutes than the jobs consume"
            ) if measured > 0 else (
            f"MEASURED monthly billable compute {figure}, which rounds to 0 min/mo: the "
            "affected jobs measured no billable compute in the sample to that precision, so "
-           "there is no bill saving")
+           f"there is no bill saving{cov}")
     f["size_note"] = (
         (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
         + f"estimate of {float(saving):g} min/mo capped at the affected jobs' " + cap)
