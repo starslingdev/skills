@@ -10273,17 +10273,18 @@ def _detect_opt25_shard_imbalance(
             r"save cache|install (?:dependencies|deps|packages)(?:\s|$))",
             name.strip()))
 
-    def _is_universal_housekeeping_step(name: str) -> bool:
-        return not name.strip() or bool(_re.search(
-            r"(?i)(?:\b(?:artifact|cleanup|tear\s*down|upload)\b|"
-            r"^run\s+[\w.-]+/setup-[\w.-]+@)", name.strip()))
+    def _step_identity(step: dict[str, Any], position: int) -> tuple[str, int]:
+        """Identify the workflow step across matrix legs, independent of its name."""
+        number = step.get("number")
+        return (("number", number) if isinstance(number, int) and not isinstance(number, bool)
+                else ("position", position))
 
     dominant_step_by_base: dict[str, str] = {}
     step_seconds_by_base: dict[str, dict[str, float]] = {}
-    always_run_by_run: list[dict[str, set[str]]] = []
+    always_run_by_run: list[dict[str, set[tuple[str, int]]]] = []
     non_universal_names_by_base: dict[str, set[str]] = {}
     for run_jobs in jobs_per_run:
-        active_names_by_base: dict[str, list[set[str]]] = {}
+        active_steps_by_base: dict[str, list[dict[tuple[str, int], str]]] = {}
         for job in run_jobs:
             if str(job.get("conclusion") or "").lower() == "skipped":
                 continue
@@ -10295,20 +10296,21 @@ def _detect_opt25_shard_imbalance(
                 base = suffix_base[job_name]
             else:
                 continue
-            active_names_by_base.setdefault(base, []).append({
-                str(step.get("name") or "")
-                for step in job.get("steps") or []
+            active_steps_by_base.setdefault(base, []).append({
+                _step_identity(step, position): str(step.get("name") or "")
+                for position, step in enumerate(job.get("steps") or [])
                 if (isinstance(step, dict)
                     and not _is_preparation_step(str(step.get("name") or ""))
                     and str(step.get("conclusion") or "").lower() != "skipped")
             })
-        always_run_by_base: dict[str, set[str]] = {}
-        for base, active_names in active_names_by_base.items():
-            universal = set.intersection(*active_names) if active_names else set()
+        always_run_by_base: dict[str, set[tuple[str, int]]] = {}
+        for base, active_steps in active_steps_by_base.items():
+            universal = (set.intersection(*(set(steps) for steps in active_steps))
+                         if active_steps else set())
             always_run_by_base[base] = universal
-            for names in active_names:
+            for steps in active_steps:
                 non_universal_names_by_base.setdefault(base, set()).update(
-                    names - universal)
+                    name for identity, name in steps.items() if identity not in universal)
         always_run_by_run.append(always_run_by_base)
 
     for run_jobs in jobs_per_run:
@@ -10356,27 +10358,26 @@ def _detect_opt25_shard_imbalance(
                 sharded = False  # prefix varies → distinct packages, not shards
             else:
                 continue  # neither convention matched → not a matrix job
-            steps = [step for step in j.get("steps") or [] if isinstance(step, dict)]
+            steps = [(position, step) for position, step in enumerate(j.get("steps") or [])
+                     if isinstance(step, dict)]
             work_steps = [
-                step for step in steps
+                (position, step) for position, step in steps
                 if not _is_preparation_step(str(step.get("name") or ""))]
             active_work_steps = [
-                step for step in work_steps
+                (position, step) for position, step in work_steps
                 if str(step.get("conclusion") or "").lower() != "skipped"]
             dominant_name = dominant_step_by_base.get(base)
             distinctive_active_steps = [
-                step for step in active_work_steps
+                step for position, step in active_work_steps
                 if (str(step.get("name") or "") == dominant_name
-                    or str(step.get("name") or "")
-                    not in always_run_by_base.get(base, set())
-                    or not _is_universal_housekeeping_step(
-                        str(step.get("name") or "")))]
-            dominant_steps = [step for step in work_steps
+                    or _step_identity(step, position)
+                    not in always_run_by_base.get(base, set()))]
+            dominant_steps = [step for _position, step in work_steps
                               if str(step.get("name") or "") == dominant_name]
-            # A differently named active step is positive evidence that this
-            # leg did real work (for example platform-specific test steps).
-            # Only use the dominant sibling step to confirm an otherwise
-            # workless leg; never discard that alternate work.
+            # An active step identity that did not run on every leg is positive
+            # evidence that this leg did real work (for example platform-specific
+            # test steps). Only use the dominant sibling step to confirm an
+            # otherwise workless leg; never discard that alternate work.
             skipped_dominant = bool(dominant_name) and not distinctive_active_steps and (
                 not dominant_steps or all(
                     str(step.get("conclusion") or "").lower() == "skipped"
