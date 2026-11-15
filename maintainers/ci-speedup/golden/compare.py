@@ -259,6 +259,53 @@ def load(path: Path) -> dict[str, Any]:
     return value
 
 
+def _recorded_required_checks(recording: Path) -> set[str]:
+    """Read required-check names from recorded classic protection/rulesets."""
+    api = recording / "api"
+    if not api.is_dir():
+        return set()
+    names: set[str] = set()
+    candidates = [
+        path for path in api.iterdir()
+        if path.is_file()
+        and ("_protection" in path.name or "_rulesets_" in path.name)
+        and (path.name.endswith(".json") or path.name.endswith(".json.gz"))
+    ]
+    for path in candidates:
+        try:
+            if path.suffix == ".gz":
+                with gzip.open(path, "rt", encoding="utf-8") as stream:
+                    payload = json.load(stream)
+            else:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("enforcement") == "disabled":
+            continue
+        classic = payload.get("required_status_checks")
+        if isinstance(classic, dict):
+            names.update(
+                str(name) for name in classic.get("contexts") or [] if name)
+            names.update(
+                str(row.get("context") or "")
+                for row in classic.get("checks") or [] if isinstance(row, dict)
+            )
+        for rule in payload.get("rules") or []:
+            if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+                continue
+            parameters = rule.get("parameters") or {}
+            if not isinstance(parameters, dict):
+                continue
+            names.update(
+                str(row.get("context") or "")
+                for row in parameters.get("required_status_checks") or []
+                if isinstance(row, dict)
+            )
+    return {name for name in names if name}
+
+
 def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[str, Any]:
     """Recompute independent facts over the same public sample definition.
 
@@ -326,14 +373,7 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
         row["jobs"] = [job for index in chosen for job in jobs_by_run[index]]
         return row
 
-    required_names = {
-        str(name) for name in findings.get("required_checks") or [] if name
-    }
-    gate_definition = {
-        str(row.get("name") or "")
-        for row in critical.get("checks") or []
-        if isinstance(row, dict) and row.get("required_reachable") is not False
-    }
+    required_names = _recorded_required_checks(recording)
     in_span = []
     for source in month.get("pr_commits") or []:
         if not isinstance(source, dict):
@@ -361,13 +401,18 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     # supply its requested complete population; a four-commit release gate
     # must not replace an 86-commit ordinary-PR sample.  Re-derive that choice
     # from recording jobs rather than accepting the engine's selected SHAs.
-    representative_required = {
-        name for name in required_names
-        if sum(
+    required_counts = {
+        name: sum(
             any(matches_required(job, name)
                 for job in source.get("jobs") or [] if isinstance(job, dict))
             for source in in_span
-        ) >= int(critical.get("check_present_n_pr") or sample_count)
+        )
+        for name in required_names
+    }
+    representative_count = max(required_counts.values(), default=0)
+    representative_required = {
+        name for name, count in required_counts.items()
+        if count and count == representative_count
     }
     eligible = []
     for source in in_span:
@@ -380,21 +425,7 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
                 and any(any(matches_required(job, name) for job in jobs)
                         for name in required_names - representative_required)):
             continue
-        row = dict(source)
-        if required_names and gate_definition:
-            row["jobs"] = [
-                job for job in jobs
-                if any(matches_required(job, name) for name in gate_definition)
-            ]
-            included_workflows = {
-                str(job.get("workflow") or "") for job in row["jobs"]
-            }
-            row["runs"] = [
-                run for run in source.get("runs") or []
-                if isinstance(run, dict)
-                and str(run.get("workflow") or "") in included_workflows
-            ]
-        eligible.append(row)
+        eligible.append(dict(source))
     commits = sorted(
         eligible, key=lambda row: str(row.get("created_at") or ""), reverse=True
     )[:sample_count or None]
@@ -406,15 +437,11 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # The comparison aligns only the public timestamp span. Commit identities,
-    # check names, and each commit's last-finishing gate all come from the
-    # recording so the engine cannot provide its own answer to the oracle.
-    gate_caps = {
-        str(row.get("name") or ""): float(row.get("p50_s") or 0.0)
-        for row in critical.get("checks") or [] if isinstance(row, dict)
-    }
-    return module.compute(
-        scoped, bookkeeping_cutoff_s=0, gate_caps=gate_caps)
+    # The comparison aligns only the public timestamp span and bounded sample
+    # size. Commit identities, eligible jobs, check names, durations, and each
+    # commit's last-finishing gate all come from the recording, so the engine
+    # cannot provide its own answer to the oracle.
+    return module.compute(scoped, bookkeeping_cutoff_s=0)
 
 
 def _fixture_name(endpoint: str) -> str:

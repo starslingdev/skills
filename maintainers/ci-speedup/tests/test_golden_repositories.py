@@ -500,6 +500,7 @@ def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
         },
     }
 
+    assert compare._recorded_required_checks(recording) == {"lint"}
     differences = compare.compare(
         findings,
         {"human_review": {}},
@@ -510,7 +511,7 @@ def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
                for row in differences), differences
 
 
-def test_engine_span_oracle_matches_the_most_specific_nested_gate_cap(
+def test_engine_span_oracle_ignores_engine_nested_gate_caps(
         tmp_path: Path) -> None:
     compare = _load("compare")
     recording = tmp_path / "recording"
@@ -545,14 +546,28 @@ def test_engine_span_oracle_matches_the_most_specific_nested_gate_cap(
 
     oracle = compare._oracle_for_engine_span(recording, findings)
 
-    assert oracle["gate_order"][0] == "CI / lint"
+    assert oracle["gate_order"][0] == "CI / test / build"
 
 
 def test_engine_span_oracle_rederives_the_representative_required_pr_type(
         tmp_path: Path) -> None:
     compare = _load("compare")
     recording = tmp_path / "recording"
-    recording.mkdir()
+    api = recording / "api"
+    api.mkdir(parents=True)
+    with gzip.open(
+        api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [
+                    {"context": "common gate"},
+                    {"context": "release gate"},
+                ]},
+            }],
+        }, stream)
     commits = []
     for index in range(4):
         jobs = [
@@ -575,7 +590,7 @@ def test_engine_span_oracle_rederives_the_representative_required_pr_type(
     with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
         json.dump({"schema_version": 1, "pr_commits": commits}, stream)
     findings = {
-        "required_checks": ["common gate", "release gate"],
+        "required_checks": ["engine-only gate"],
         "pr_critical_path": {
             "sample_span_first": "2026-11-01T00:00:00Z",
             "sample_span_last": "2026-11-04T00:00:00Z",
