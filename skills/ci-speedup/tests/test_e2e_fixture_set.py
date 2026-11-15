@@ -7,7 +7,7 @@ import json
 import re
 import shutil
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qs
 
@@ -1015,6 +1015,177 @@ def _pr_commit_tail_fixture(root: Path) -> Path:
     (fixture / "responses.json").write_text(
         json.dumps(recorded), encoding="utf-8")
     return fixture
+
+
+def _bimodal_gate_fixture(root: Path, *, durations: list[int] | None = None) -> Path:
+    """Twenty PRs where a required gate has distinct fast and slow modes."""
+    fixture = root / "bimodal-gate"
+    workflows = fixture / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        """name: CI
+on: pull_request
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  next:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+""",
+        encoding="utf-8",
+    )
+    base = datetime(2026, 1, 24, tzinfo=timezone.utc)
+    durations = durations or [
+        28, 29, 29, 30, 30, 30, 31, 31, 31, 32, 32, 33,
+        315, 325, 335, 345, 355, 365, 375, 382,
+    ]
+    runs = []
+    jobs: dict[str, list[dict]] = {}
+    checks: dict[str, list[dict]] = {}
+
+    def stamp(moment: datetime) -> str:
+        return moment.isoformat().replace("+00:00", "Z")
+
+    for index, duration in enumerate(durations):
+        started = base + timedelta(days=index % 5, hours=index // 5)
+        completed = started + timedelta(seconds=duration)
+        next_completed = started + timedelta(seconds=58)
+        run_id = 4000 + index
+        job_id = 5000 + index
+        sha = f"sha-{index:02d}"
+        runs.append({
+            "id": run_id,
+            "event": "pull_request",
+            "head_branch": f"feature-{index}",
+            "head_sha": sha,
+            "pull_requests": [{"number": index + 1}],
+            "status": "completed",
+            "conclusion": "success",
+            "created_at": stamp(started),
+            "run_started_at": stamp(started),
+            "updated_at": stamp(max(completed, next_completed)),
+        })
+        jobs[str(run_id)] = [
+            {
+                "id": job_id,
+                "name": "gate",
+                "labels": ["ubuntu-latest"],
+                "started_at": stamp(started),
+                "completed_at": stamp(completed),
+                "steps": [{
+                    "name": "Run tests",
+                    "started_at": stamp(started),
+                    "completed_at": stamp(completed),
+                }],
+            },
+            {
+                "id": 6000 + index,
+                "name": "next",
+                "labels": ["ubuntu-latest"],
+                "started_at": stamp(started),
+                "completed_at": stamp(next_completed),
+                "steps": [{
+                    "name": "Run lint",
+                    "started_at": stamp(started),
+                    "completed_at": stamp(next_completed),
+                }],
+            },
+        ]
+        checks[sha] = [
+            {"name": "gate", "started_at": stamp(started),
+             "completed_at": stamp(completed), "conclusion": "success"},
+            {"name": "next", "started_at": stamp(started),
+             "completed_at": stamp(next_completed), "conclusion": "success"},
+        ]
+    recorded = {
+        "repo": "fixture/bimodal-gate",
+        "captured_at": "2026-01-31T00:00:00Z",
+        "default_branch": "main",
+        "required_checks": ["gate", "next"],
+        "workflows": [{
+            "id": 204,
+            "path": ".github/workflows/ci.yml",
+            "name": "CI",
+            "runs_30d": 20,
+            "runs": runs,
+        }],
+        "jobs": jobs,
+        "checks": checks,
+        "logs": {
+            **{str(5000 + index): "npm test\n20 passed\n"
+               for index in range(len(durations))},
+            **{str(6000 + index): "npm run lint\n0 problems\n"
+               for index in range(len(durations))},
+        },
+    }
+    (fixture / "responses.json").write_text(
+        json.dumps(recorded), encoding="utf-8")
+    return fixture
+
+
+def test_bimodal_gate_headline_sizes_the_slow_mode_and_full_report_verifies(
+        monkeypatch, tmp_path):
+    fixture = _bimodal_gate_fixture(tmp_path)
+    run_root = tmp_path / "run-bimodal"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    gate = next(row for row in doc["pr_critical_path"]["checks"]
+                if row["name"] == "gate")
+    assert gate["bimodal"]["slow_frac"] == 0.4
+    assert "40% of sampled PRs wait about **5m 50s** on this check" in report
+    assert "the other 60% wait about **30s**" in report
+    assert "slow-mode win is about **4m 50s**" in report
+    assert report.count("40% of sampled PRs wait about **5m 50s** on this check") == 2
+    contents = report.split("## 📋 Contents", 1)[1].split("<a id=\"long-pole-map\"", 1)[0]
+    gate_row = next(line for line in contents.splitlines() if "[gate]" in line)
+    assert "Slow mode 5m 50s (P50 " in gate_row
+    bottom = next(line for line in report.splitlines()
+                  if line.startswith("> **Bottom line.**"))
+    assert "has slow mode **5m 50s** (P50 **" in bottom
+    assert "is the longest check" in bottom
+    callout = next(line for line in report.splitlines()
+                   if line.startswith("> - `gate`"))
+    assert "Contents displays slow mode **~5m 50s**" in callout
+    assert "P50 is **32s**" in callout
+    assert "ranks low" not in callout and "below the gate" not in callout
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    story = (
+        "40% of sampled PRs wait about **5m 50s** on this check; the other 60% "
+        "wait about **30s**. The slow-mode win is about **4m 50s** (median of the "
+        "measured per-PR ceilings)."
+    )
+    p50_only_headline = report.replace(story, "", 1)
+    report_path = run_root / fixture.name / "report.md"
+    findings_path = run_root / fixture.name / "findings.json"
+    rejected = vr.run_checks(
+        p50_only_headline, report_path, findings_path, skill_repo=None)
+    assert any(
+        check.name == "bimodal Long pole 1 states both modes and its slow-share win"
+        and not check.ok
+        for check in rejected
+    )
+
+
+def test_always_active_bimodal_gate_persists_populations_for_full_verification(
+        monkeypatch, tmp_path):
+    fixture = _bimodal_gate_fixture(
+        tmp_path, durations=[180] * 12 + [350] * 8)
+    run_root = tmp_path / "run-always-active-bimodal"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    assert len(doc["pr_critical_path"]["populations"]) == 20
+    assert "40% of sampled PRs wait about **5m 50s** on this check" in report
+    assert "the other 60% wait about **3m 00s**" in report
+    assert "slow-mode win is about **4m 52s**" in report
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
 
 
 def test_pr_commit_projection_discloses_the_population_and_slow_tail(
