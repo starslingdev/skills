@@ -354,8 +354,8 @@ def test_a_failing_rule_also_names_its_bypassers(tmp_path):
 
 def test_a_failing_rule_names_bypassers_from_every_source(tmp_path):
     """A ruleset and classic protection that both fall short: bypassers of
-    each are named, and a "For pull requests only" one is named as such and
-    told that mode is not enough."""
+    each are named, a "For pull requests only" one is labelled with its
+    mode, and the fix text warns that this mode is not enough."""
     f, _ = _run(tmp_path, _responses(
         rules=[_pr_rule()],
         rulesets=[_ruleset(bypass=[_actor("Integration", 303,
@@ -376,6 +376,7 @@ def test_a_failing_rule_names_a_single_bypasser_in_the_singular(tmp_path):
     ev = f["evidence"]
     assert "app 101 can skip this rule from a bypass list" in ev, ev
     assert "a leaked credential of this actor" in ev, ev
+    assert "then remove it from that bypass list" in ev, ev
 
 
 def test_a_failing_rule_with_no_bypassers_names_none(tmp_path):
