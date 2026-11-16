@@ -1,6 +1,6 @@
 # Changelog
 
-- **2026-11-15** — Keep real-repository golden gate comparisons independent of engine findings: recorded default-branch protection selects the representative PR shape, while recorded workflow dependencies, jobs and durations define the eligible oracle gate. (#358)
+- **2026-11-15** — Keep real-repository golden gate comparisons independent of engine findings: recorded default-branch and all-branch protection select the representative PR shape, while expanded matrix requirements, recorded workflow dependencies, jobs and durations define the eligible oracle gate. (#358)
 - **2026-11-15** — Preserve full commit identities in public golden recordings, mark comparisons that share normalized replay data, compare low-share gate counts within their uncertainty, pin rendered pole order and completed-sample spread to run creation dates, and keep incomplete recordings useful by replaying only run/job pairs whose evidence was captured, including copied runs whose jobs come from the normalized recording. (#352)
 - **2026-11-15** — Cache check-name tokenizing and job-name template patterns in `collect_runs.py`. Output is unchanged; the run-measurement step no longer redoes this work on every check-to-job comparison (millions of repeats on a large repository).
 - Keep schedule-, release-, and workflow-dispatch-only findings visible with their lane disclosure when their job also appears as a pull-request long pole.
