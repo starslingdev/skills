@@ -342,6 +342,93 @@ def fixture_facts(doc: dict, checks: list) -> dict:
     }
 
 
+def test_opt14_credit_is_capped_by_measured_completed_compute_through_collect(
+        monkeypatch, tmp_path):
+    fixture = tmp_path / "opt14-compute-cap"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", fixture)
+
+    workflow_path = fixture / "workflows" / "ci.yml"
+    workflow_path.write_text(
+        workflow_path.read_text(encoding="utf-8")
+        + """
+  evals:
+    name: Quality checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+  ci-speedup-evals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm ci
+""",
+        encoding="utf-8",
+    )
+
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    template_run = recorded["workflows"][0]["runs"][0]
+    template_jobs = recorded["jobs"][str(template_run["id"])]
+    template_checks = recorded["checks"][template_run["head_sha"]]
+    runs = []
+    jobs = {}
+    checks = {}
+    start = datetime(2026, 1, 31, 10, 0, tzinfo=timezone.utc)
+    for index in range(573):
+        stamp = start - timedelta(hours=index)
+        started = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+        sha = f"sha-{index:04d}"
+        run = dict(template_run)
+        run.update(
+            id=30_000 + index,
+            head_sha=sha,
+            created_at=started,
+            run_started_at=started,
+            updated_at=(stamp + timedelta(minutes=12)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ"),
+        )
+        runs.append(run)
+        run_jobs = []
+        for offset, source in enumerate(template_jobs):
+            job = dict(source)
+            job.update(id=40_000 + index * 10 + offset)
+            run_jobs.append(job)
+        if index % 20 < 7:
+            run_jobs.append({
+                "id": 50_000 + index,
+                "name": "Quality checks",
+                "status": "completed",
+                "conclusion": "success",
+                "labels": ["self-hosted", "linux"],
+                "started_at": started,
+                "completed_at": (stamp + timedelta(seconds=21)).strftime(
+                    "%Y-%m-%dT%H:%M:%SZ"),
+                "steps": [],
+            })
+        jobs[str(run["id"])] = run_jobs
+        checks[sha] = [dict(row) for row in template_checks]
+
+    recorded["workflows"][0]["runs"] = runs
+    recorded["jobs"] = jobs
+    recorded["checks"] = checks
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+
+    run_root = tmp_path / "run-opt14-compute-cap"
+    run_root.mkdir()
+    doc, _report, full_checks = run_fixture(
+        fixture, monkeypatch, run_root, max_runs=20)
+
+    finding = next(
+        row for row in doc["findings"] if row.get("pattern") == "OPT14")
+    assert finding["affected_jobs"] == ["ci-speedup-evals", "evals"]
+    assert finding["workflow_runs_30d"] == 573
+    assert finding["runner_min_saving"] == 200.6
+    assert finding["runner_min_basis"] == "measured_spine_clamped"
+    assert "cannot save more minutes than the jobs consume" in finding["size_note"]
+    assert [check for check in full_checks if not check.skipped and not check.ok] == []
+
+
 def test_pr_sample_day_floor_stays_coupled_through_the_findings_contract(
         monkeypatch, tmp_path):
     fixture = _busy_pr_sample_fixture(tmp_path)

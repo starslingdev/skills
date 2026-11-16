@@ -1896,7 +1896,20 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # One uncredited finding whose ceiling is the step's own p50, its card once
     # inside the `style` pole's section, nowhere else, and no total moves (the
     # credited totals asserted above are unchanged by it).
-    o84 = [f for f in data["findings"] if f.get("pattern") == "OPT84"]
+    _o84_all = [f for f in data["findings"] if f.get("pattern") == "OPT84"]
+    # The install row (npm ci -> bun install) fires on the two poles whose
+    # measured `npm ci` is a heavy share: `test` (40s of 197s) and `style`
+    # (36s of 92s). Each is its own uncredited finding with the install row only.
+    _o84_inst = [f for f in _o84_all
+                 if [t["row"] for t in f["tool_swap"]["tools"]] == ["install"]]
+    assert sorted((f["tool_swap"]["job"], f["tool_swap"]["step"],
+                   f["tool_swap"]["ceiling_s"]) for f in _o84_inst) == [
+        ("style", "Run npm ci", 36.0), ("test", "Install dependencies", 40.0)], _o84_inst
+    for _fi in _o84_inst:
+        assert _fi["sizing_basis"] == "uncredited" and _fi["wall_clock_p50_s"] is None
+        assert _fi["tool_swap"]["tools"][0]["fit"] == "dual-run", _fi
+        assert f'<a id="opt84-{_fi["id"]}"></a>' in report, _fi["id"]
+    o84 = [f for f in _o84_all if f not in _o84_inst]
     assert len(o84) == 1, (data.get("opt84_withheld_by_gate"),
                            data.get("opt84_withheld_candidates"))
     f84 = o84[0]
@@ -1928,10 +1941,11 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     # does not declare and `quality`'s `npx tsc --noEmit` sits in a package that
     # declares no `typescript` (both HELD BACK, listed with job and step);
     # `quality`'s Biome lint is not in the table, and `verify` / `test` have no
-    # heavy scan or build step (verdicts, counted only).
+    # heavy scan or build step (verdicts, counted only); `test`'s heavy `npm ci`
+    # is now the install row's finding above, so only `verify` stays a verdict.
     assert data.get("opt84_withheld_by_gate") == {
         "script_unresolvable": 1, "typescript_version_unreadable": 1,
-        "tool_not_in_table": 1, "no_candidate_step": 2}, data.get("opt84_withheld_by_gate")
+        "tool_not_in_table": 1, "no_candidate_step": 1}, data.get("opt84_withheld_by_gate")
     assert data.get("opt84_withheld_candidates") == [
         {"workflow_file": ".github/workflows/chained.yml", "job": "prep",
          "gate": "script_unresolvable", "step": "Build artifact"},
@@ -1959,7 +1973,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert "tool-swap findings re-derive from the pole" in verify.stdout, verify.stdout[-2000:]
     # A tampered ceiling must redden the report's own self-check.
     _bad84 = json.loads(findings_path.read_text(encoding="utf-8"))
-    [f for f in _bad84["findings"] if f.get("pattern") == "OPT84"][0][
+    [f for f in _bad84["findings"] if f.get("id") == f84["id"]][0][
         "tool_swap"]["ceiling_s"] = 60.0
     _bad84_path = tmp_path / "findings_tampered_opt84.json"
     _bad84_path.write_text(json.dumps(_bad84), encoding="utf-8")
