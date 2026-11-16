@@ -16,15 +16,25 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1] / "golden"
 _REPOSITORIES = {
     "home-assistant-core": (
-        "issue #305 remains open after PR #318's ordering fix",
+        "PR #318 covers the headline follow-up; issue #365 tracks gate share",
         (
+            # Issue #365 tracks the independent 0.909 versus 0.747 share mismatch.
+            "gate share differs for 'CI / Check hassfest'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
     ),
     "vercel-nextjs": (
-        "issue #305 remains open after PR #318's ordering fix",
+        "PR #318 covers the headline follow-up; issue #363 tracks gate comparison",
         (
+            # Issue #363 tracks the independently recorded missing prod gate.
+            "frequent gate absent: 'build-and-test / test prod (4/10) / build'",
+            # Issue #363 tracks the independently recorded missing dev gate.
+            "frequent gate absent: 'build-and-test / test dev (4/10) / build'",
+            # Issue #363 tracks the independently recorded missing optimizer gate.
+            "frequent gate absent: 'build-and-test / optimize-ci / PR Stack CI Gate'",
+            # Issue #363 tracks the 0.250 versus 0.036 turbopack share mismatch.
+            "gate share differs for 'build-and-test / test turbopack production (7/7) / build'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -39,8 +49,10 @@ _REPOSITORIES = {
         ),
     ),
     "microsoft-playwright": (
-        "issue #305 remains open after PR #318's ordering fix",
+        "PR #318 covers the headline follow-up; issue #364 tracks the MCP gate",
         (
+            # Issue #364 tracks the independently recorded missing MCP gate.
+            "frequent gate absent: 'MCP / ubuntu-latest - chrome'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -126,9 +138,14 @@ def test_reference_oracle_does_not_import_the_engine() -> None:
 
 
 def test_known_red_reasons_name_the_public_issue_and_fix_pr() -> None:
-    for name in ("home-assistant-core", "vercel-nextjs", "microsoft-playwright"):
+    issue_by_name = {
+        "home-assistant-core": "#365",
+        "vercel-nextjs": "#363",
+        "microsoft-playwright": "#364",
+    }
+    for name, issue in issue_by_name.items():
         reason, _markers = _REPOSITORIES[name]
-        assert "#305" in reason
+        assert issue in reason
         assert "#318" in reason
 
 
