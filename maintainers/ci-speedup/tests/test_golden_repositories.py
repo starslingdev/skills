@@ -645,6 +645,111 @@ def test_recorded_required_checks_read_classic_protection_response(
     assert compare._recorded_required_checks(recording) == {"lint", "tests"}
 
 
+def test_recorded_required_checks_apply_all_branch_rulesets(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
+    with gzip.open(
+        api / "repos_public_example.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({"default_branch": "main"}, stream)
+    for page, refs, context in (
+        (1, {"include": ["~ALL"]}, "tests"),
+        (2, {"include": ["~DEFAULT_BRANCH"], "exclude": ["~ALL"]},
+         "excluded"),
+    ):
+        with gzip.open(
+            api / f"repos_public_example_rulesets_{page}.json.gz",
+            "wt", encoding="utf-8",
+        ) as stream:
+            json.dump({
+                "enforcement": "active",
+                "conditions": {"ref_name": refs},
+                "rules": [{
+                    "type": "required_status_checks",
+                    "parameters": {"required_status_checks": [
+                        {"context": context},
+                    ]},
+                }],
+            }, stream)
+
+    assert compare._recorded_required_checks(recording) == {"tests"}
+
+
+def test_engine_span_oracle_keeps_expanded_required_matrix_jobs(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    workflows = recording / "checkout" / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
+    (workflows / "ci.yml").write_text(
+        "name: CI\njobs:\n"
+        "  lint:\n    name: lint\n"
+        "  tests:\n    name: tests (${{ matrix.os }})\n"
+        "  unrelated:\n    name: unrelated\n",
+        encoding="utf-8",
+    )
+    with gzip.open(
+        api / "repos_public_example.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({"default_branch": "main"}, stream)
+    with gzip.open(
+        api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [
+                    {"context": "lint"},
+                    {"context": "tests (ubuntu-latest)"},
+                ]},
+            }],
+        }, stream)
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({
+            "schema_version": 1,
+            "pr_commits": [{
+                "sha": "commit-1",
+                "created_at": "2026-11-01T00:00:00Z",
+                "completed": True,
+                "jobs": [
+                    {"workflow": "CI", "name": "lint", "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:01:00Z"},
+                    {"workflow": "CI", "name": "tests (ubuntu-latest)",
+                     "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:10:00Z"},
+                    {"workflow": "CI", "name": "unrelated", "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:20:00Z"},
+                ],
+            }],
+        }, stream)
+    findings = {"pr_critical_path": {
+        "sample_span_first": "2026-11-01T00:00:00Z",
+        "sample_span_last": "2026-11-01T00:00:00Z",
+        "sampled_pr_count": 1,
+    }}
+
+    oracle = compare._oracle_for_engine_span(recording, findings)
+
+    assert oracle["gate_order"][0] == "CI / tests (ubuntu-latest)"
+    assert all(row["check"] != "CI / unrelated" for row in oracle["gates"])
+
+
 def test_engine_span_oracle_prefers_a_complete_required_suite(
         tmp_path: Path) -> None:
     compare = _load("compare")
