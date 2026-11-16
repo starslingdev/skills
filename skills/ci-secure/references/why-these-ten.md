@@ -61,11 +61,11 @@ rejection record).
 Full incident citations live in the catalog's
 [Reference incidents](security-patterns.md#reference-incidents) section.
 
-### P14.24's two arms, and which one the incident evidences
+### P14.24's three shapes, and which one the incident evidences
 
-P14.24 detects two shapes, and only one of them is carried by the incident
+P14.24 detects three shapes, and only one of them is carried by the incident
 cited beside it. Saying so is the point of the incident test — an entry that
-lets a second shape ride quietly on the first shape's breach has not passed it.
+lets another shape ride quietly on the first shape's breach has not passed it.
 
 - **The piped installer** (`curl … | bash` and friends) is evidenced directly.
   The Codecov bash-uploader breach (2021) IS this shape: an altered script
@@ -75,11 +75,17 @@ lets a second shape ride quietly on the first shape's breach has not passed it.
   abbreviated commit, and then executed out of) is **not** evidenced by
   Codecov, and this document does not claim a breach for it. It is in the
   catalog on the strength of the SHARED TRUST MODEL rather than a named
-  incident: both shapes execute code the repo never pinned, re-resolved live on
+  incident: all three shapes execute code the repo never pinned, re-resolved live on
   every run, at full job privilege — and a branch or tag is *designed* to move,
   so it needs no host compromise at all, only push access on the other side.
-  The mitigation is identical (pin to a full 40-character commit), which is why
-  it is one vector with two arms rather than two entries.
+  Its mitigation is a full 40-character commit.
+- **The GitHub CLI extension** (an extension installed at a mutable ref and
+  then invoked) has that same shared trust model and is likewise not evidenced
+  by Codecov. Pin a script extension to a full 40-character commit, or pin a
+  binary extension to a tag on a release GitHub publishes as immutable. A
+  numeric spelling does not prove a commit: `20261111` is a date-style tag, not
+  an abbreviated commit id. These are three shapes of one vector because each
+  executes remote code whose identity the repository did not make immutable.
 
 If a public incident of the mutable-fetch shape is later cited, it belongs in
 the catalog's Reference incidents section and in this row — until then, the

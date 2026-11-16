@@ -7602,12 +7602,132 @@ def _tal_block(**overrides: Any) -> dict[str, Any]:
         # package.json `"prettier"` key naming a shared config. Any of them may
         # load plugins, so OPT84 reads the dir as "plugins unknown".
         "prettier_config_unreadable": {},
+        # OPT84's install row (npm / pnpm / Yarn install -> `bun install`):
+        # what the repo ROOT says about its package manager, or None when it
+        # was not read (the row then holds back). `_tal_package_manager_read`:
+        # {"lockfiles": the lockfile names present, "package_manager_field":
+        # the root package.json `packageManager` string or None,
+        # "pnpm_workspace": a root `pnpm-workspace.yaml` exists, "pnpmfile":
+        # the pnpm hook files present, "yarn_pnp": Yarn Plug'n'Play is on,
+        # "unreadable": the files that exist and could not be read,
+        # "node_linker": the `.yarnrc.yml` `nodeLinker` set here or None,
+        # "pnp_files": a PnP loader file is committed here}.
+        "package_manager": None,
+        # The same read for every other directory whose package.json the
+        # manifest walk found, keyed by its repo-relative directory: a nested
+        # install is judged by its own directory and those above it.
+        "package_manager_dirs": {},
     }
     unknown = set(overrides) - set(block)
     if unknown:
         raise KeyError(f"_tal_block: not a type_aware_lint key: {sorted(unknown)}")
     block.update(overrides)
     return block
+
+
+# The root files OPT84's install row reads (npm / pnpm / Yarn -> `bun install`).
+# Lockfiles: bun's own two mean the repo already uses bun.
+_TAL_LOCKFILES = ("bun.lock", "bun.lockb", "package-lock.json", "npm-shrinkwrap.json",
+                  "pnpm-lock.yaml", "yarn.lock")
+# pnpm's install-time hook files (pnpm's `.pnpmfile.cjs`, and the ESM form).
+_TAL_PNPMFILES = (".pnpmfile.cjs", ".pnpmfile.mjs")
+# Yarn Plug'n'Play's generated loader files.
+_TAL_PNP_FILES = (".pnp.cjs", ".pnp.js", ".pnp.loader.mjs")
+
+
+def _tal_npmrc_pnpmfile(text: str) -> "str | None":
+    """The `pnpmfile` setting of an `.npmrc` (pnpm reads its settings there
+    too), or None. Only that one key is read: an `.npmrc` may hold tokens."""
+    for line in text.splitlines():
+        ln = line.strip()
+        if not ln or ln[0] in "#;" or "=" not in ln:
+            continue
+        key, _eq, val = ln.partition("=")
+        if key.strip() == "pnpmfile" and val.strip():
+            return val.strip().strip("'\"")
+    return None
+
+
+def _tal_package_manager_read(root: Path) -> dict[str, Any]:
+    """What one directory says about its package manager, for OPT84's install
+    row. Yarn Plug'n'Play is on when a PnP loader file is committed, when
+    `nodeLinker` is `pnp`, or when it is unset (Yarn 2+'s documented default)
+    and Yarn 2+ is in use: `packageManager` pins `yarn@2` or later, or a
+    `.yarnrc.yml` sits beside a `yarn.lock` or sets `yarnPath`. A file that exists and cannot be read (or a `nodeLinker` given
+    through `${...}` interpolation) is listed in `unreadable`, so the row holds
+    back instead of guessing."""
+    lockfiles = sorted(n for n in _TAL_LOCKFILES if (root / n).is_file())
+    pnpmfile = sorted(n for n in _TAL_PNPMFILES if (root / n).is_file())
+    unreadable: list[str] = []
+    pm_field: "str | None" = None
+    pkg = root / "package.json"
+    if pkg.is_file():
+        try:
+            text = _read_config_text(pkg)
+            data = json.loads(text) if text is not None else None
+        except (OSError, ValueError):
+            data = None
+        if not isinstance(data, dict):
+            unreadable.append("package.json")
+        elif isinstance(data.get("packageManager"), str):
+            pm_field = data["packageManager"].strip()
+    pnp_files = any((root / n).is_file() for n in _TAL_PNP_FILES)
+    m = re.match(r"yarn@(\d+)", pm_field or "")
+    berry = bool(m and int(m.group(1)) >= 2)
+    linker: "str | None" = None
+    yrc = root / ".yarnrc.yml"
+    if yrc.is_file():
+        try:
+            text = _read_config_text(yrc)
+            data = yaml.safe_load(text) if text is not None else None
+            ok = text is not None
+        except (OSError, yaml.YAMLError):
+            data, ok = None, False
+        if not ok or (data is not None and not isinstance(data, dict)):
+            unreadable.append(".yarnrc.yml")
+        else:
+            raw = (data or {}).get("nodeLinker")
+            if raw is not None and (not isinstance(raw, str) or "${" in raw):
+                unreadable.append(".yarnrc.yml")
+            elif isinstance(raw, str):
+                linker = raw.strip()
+            # A `.yarnrc.yml` is Yarn 2+'s config, but it means Yarn 2+ is in
+            # use only beside a `yarn.lock` or a `yarnPath` (a stray one in an
+            # npm or pnpm repo is not Plug'n'Play); Yarn 1 ignores the file.
+            if ((("yarn.lock" in lockfiles)
+                 or (isinstance(data, dict) and data.get("yarnPath")))
+                    and not (m and int(m.group(1)) < 2)):
+                berry = True
+    yarn_pnp = pnp_files or linker == "pnp" or (berry and linker is None)
+    npmrc = root / ".npmrc"
+    if npmrc.is_file():
+        try:
+            text = _read_config_text(npmrc)
+        except OSError:
+            text = None
+        if text is None:
+            unreadable.append(".npmrc")
+        else:
+            hook = _tal_npmrc_pnpmfile(text)
+            if hook:
+                pnpmfile.append(f".npmrc pnpmfile: {hook}")
+    ws = root / "pnpm-workspace.yaml"
+    pnpm_workspace = ws.is_file()
+    if pnpm_workspace:
+        try:
+            text = _read_config_text(ws)
+            data = yaml.safe_load(text) if text is not None else None
+        except (OSError, yaml.YAMLError):
+            text, data = None, None
+        if text is None:
+            unreadable.append("pnpm-workspace.yaml")
+        elif isinstance(data, dict) and data.get("pnpmfile"):
+            # a hook file set in the workspace settings, wherever it lives
+            pnpmfile.append(f"pnpm-workspace.yaml pnpmfile: {data.get('pnpmfile')}")
+    return {"lockfiles": lockfiles, "package_manager_field": pm_field,
+            "pnpm_workspace": pnpm_workspace, "pnpmfile": pnpmfile,
+            "yarn_pnp": yarn_pnp, "node_linker": linker, "pnp_files": pnp_files,
+            "unreadable": sorted(unreadable)}
 
 
 def _tal_pnpm_catalogs(root: Path) -> dict[str, dict[str, str]]:
@@ -7983,8 +8103,11 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
             path, text, root, _rel, flat, read["extends"])
         _finish(rel, "flat" if flat else "eslintrc", _tal_merge(read, base_reads),
                 typed, imp_unresolved)
+    pm_dirs: dict[str, dict[str, Any]] = {}
     for path in manifests:
         rel = _rel(path)
+        if _dir(rel):
+            pm_dirs[_dir(rel)] = _tal_package_manager_read(path.parent)
         try:
             text = _read_config_text(path)
             data = json.loads(text) if text is not None else None
@@ -8065,6 +8188,8 @@ def _read_type_aware_lint_unguarded(root: Path) -> dict[str, Any]:
         prettier_plugins=prettier_plugins,
         prettier_plugin_files=prettier_plugin_files,
         prettier_config_unreadable=prettier_config_unreadable,
+        package_manager=_tal_package_manager_read(root),
+        package_manager_dirs=pm_dirs,
     )
 
 

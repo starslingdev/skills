@@ -581,7 +581,8 @@ runs; OPT79: 3 hits, 3 misses, 5 seconds and 20% waste, a 25% tail share, and
 gap, and at most 4 log probes;
 OPT81: 8 samples per label, a 30-second and 25% gap, 50% covered time, and a
 30-second cache-lever floor; OPT82: 60 seconds; OPT83: 15% and 20 seconds;
-OPT84: 0% minimum share and 20 seconds.
+OPT84: 0% minimum share and 20 seconds, and 15% of the pole for its
+install row (npm, pnpm or Yarn install to `bun install`).
 
 **Report statements:** whether each named pattern is promoted, withheld, or
 uncredited, plus its evidence and saving.
@@ -837,7 +838,9 @@ implementation lands.
       "collect_runs.py:_OPT84_MIN_SHARE": 0.0,
       "collect_runs.py:_OPT84_MIN_STEP_S": 20.0,
       "verify_report.py:_VR_OPT84_MIN_SHARE": 0.0,
-      "verify_report.py:_VR_OPT84_MIN_STEP_S": 20.0
+      "verify_report.py:_VR_OPT84_MIN_STEP_S": 20.0,
+      "collect_runs.py:_OPT84_INSTALL_MIN_SHARE": 0.15,
+      "verify_report.py:_VR_OPT84_INSTALL_MIN_SHARE": 0.15
     }
   },
   "partial-majority-rule": {

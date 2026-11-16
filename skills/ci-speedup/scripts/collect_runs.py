@@ -7500,20 +7500,21 @@ def _reground_whole_run_cancel_saving(
 
 
 def _all_runs_excluded(wf: str, jobs: "list[str]", all_index: Any,
-                       completed: float) -> bool:
+                       completed: float, job_graph: Any = None) -> bool:
     """True when the affected jobs measure NO completed-run compute but DO have
     compute across every sampled run: every sampled run of them was timed out,
     cancelled or killed. A distinct state, never "no compute" or a coverage gap."""
     if completed > 0 or all_index is None:
         return False
     a_wf_job, a_job = all_index
-    every, matched, _distinct = _measured_billable_for_jobs(wf, jobs, a_wf_job, a_job)
+    every, matched, _distinct = _measured_billable_for_jobs(
+        wf, jobs, a_wf_job, a_job, job_graph=job_graph)
     return matched > 0 and every > 0
 
 
 def _mark_all_runs_excluded(f: dict[str, Any]) -> None:
     """A saving DERIVED from completed-run compute (OPT45/OPT29), clamped to it
-    (OPT73) or capped at it (a modeled estimate) has no basis when every sampled run
+    (the serial gates / OPT73) or capped at it (a modeled estimate) has no basis when every sampled run
     of its jobs was excluded: it renders unsized and not derivable, with the reason,
     never as a coverage gap and never sized against the excluded minutes."""
     f["runner_min_saving"] = None
@@ -7642,9 +7643,8 @@ def _own_workflow_billable(
     """`(measured, matched, distinct)` over `wf`'s OWN spine rows only, each
     affected job resolved through `_own_workflow_job_identities`. No cross-workflow
     fallback: a namesake in another file is a different job. The not-derivable cap
-    uses this, and only when matched == distinct — a cap LOWERS a credited figure,
-    so an understated sum (a foreign namesake, a subset of the jobs) would cut a
-    correct saving."""
+    uses this whenever at least one affected job resolves; on partial coverage the
+    sum is the resolved subset's compute, the same subset the verifier bounds by."""
     measured = 0.0
     matched = 0
     seen: set[str] = set()
@@ -7667,13 +7667,17 @@ def _measured_billable_for_jobs(
         wf: str, jobs: "list[str]",
         by_wf_job: dict[tuple[str, str], float],
         by_job: dict[str, list[float]],
-        templated: frozenset[str] = frozenset()) -> tuple[float, int, int]:
+        templated: frozenset[str] = frozenset(),
+        job_graph: Any = None) -> tuple[float, int, int]:
     """Sum the measured monthly billable compute of a finding's affected `jobs`
     against the shared index. Returns
     `(measured_min_per_month, matched_jobs, distinct_jobs)` — matched < distinct
     means partial coverage (the sum is an understatement, the safe direction).
-    Prefers the exact (workflow_file, base) row; falls back to the workflow-agnostic
-    `by_job` max for a reusable-workflow caller that lost the callee's file.
+    Prefers an own-workflow row after resolving the YAML key ↔ declared display
+    name through `job_graph`; only then falls back to the workflow-agnostic
+    literal-key `by_job` max for a reusable-workflow caller that lost the callee's
+    file. A graph-derived alias never enters that fallback, so a foreign job with
+    the same display name cannot set the bound.
 
     EXACT JOB IDENTITY (issue #52). The affected jobs are first reduced to their
     DISTINCT (workflow_file, base-job) identities — a base-job being the full job
@@ -7700,9 +7704,14 @@ def _measured_billable_for_jobs(
         base = _whole_run_cancel_base_key(j)
         if not base or base in seen:
             continue
-        seen.add(base)
-        key = (wf, base)
-        if key in by_wf_job:
+        cands = _own_workflow_job_identities(job_graph, wf, j)
+        key = next(((wf, cand) for cand in cands
+                    if (wf, cand) in by_wf_job), None)
+        ident = key[1] if key else base
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if key is not None:
             matched += 1
             measured += by_wf_job[key]
         elif base not in templated:
@@ -7730,7 +7739,7 @@ def _measured_billable_for_jobs(
 # shared, in one place.
 # =============================================================================
 _RM_DOOR_DERIVE = "derive"                  # saving = rate x measured (OPT45 cancel model)
-_RM_DOOR_CLAMP = "clamp"                    # saving = min(modeled, measured) (OPT73 cluster model)
+_RM_DOOR_CLAMP = "clamp"                    # saving = min(modeled, measured) (serial gates / OPT73)
 _RM_DOOR_NOT_DERIVABLE = "not_spine_derivable"  # visible whitelist — retained, stamped, reasoned
 _RM_DOOR_UNCLASSIFIED = "unclassified"      # loud sentinel — a pattern with no declared policy
 
@@ -7739,6 +7748,18 @@ _RM_DOOR_UNCLASSIFIED = "unclassified"      # loud sentinel — a pattern with n
 # detectors (OPT70-OPT75). This table is the VISIBLE, reviewable whitelist the
 # thesis requires: no pattern skips the door silently.
 _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
+    # CLAMP — serial-gate savings are flat per-run setup estimates multiplied by
+    # the workflow's monthly volume.  A finding can name more jobs than the cost
+    # spine measured (for example a schedule-only sibling), while the verifier
+    # still bounds the credit by the resolved subset.  Route both serial-gate
+    # patterns through the same partial-coverage-aware clamp as OPT73 so the
+    # producer and verifier enforce one physical ceiling.
+    "OPT14": (_RM_DOOR_CLAMP,
+              "repeated setup — per-run modeled credit clamped to the affected "
+              "jobs' measured cost-spine billable"),
+    "OPT15": (_RM_DOOR_CLAMP,
+              "cross-workflow repeated build — per-run modeled credit clamped to "
+              "the affected jobs' measured cost-spine billable"),
     # DERIVE — whole-run cancel re-derives hit_rate x the affected jobs' measured
     # billable (implemented by `_reground_whole_run_cancel_saving`, run first).
     "OPT45": (_RM_DOOR_DERIVE,
@@ -7860,7 +7881,8 @@ def _reground_runner_minute_savings(
 
       1. OPT45 whole-run-cancel DERIVES from the spine first (unchanged path).
       2. Every remaining positive-rm finding gets a `runner_min_basis` stamp:
-         - CLAMP patterns (OPT73) whose affected jobs join the spine → saving is
+         - CLAMP patterns (the serial gates and OPT73) whose affected jobs join
+           the spine → saving is
            clamped to their measured billable (`measured_spine_clamped`, or
            `measured_spine_billable` when already within it); no join → UNSIZED at
            the source (`unmeasured_no_spine_match`, saving None — the #38
@@ -7868,11 +7890,11 @@ def _reground_runner_minute_savings(
          - NOT-DERIVABLE patterns → retained, stamped `not_spine_derivable` with the
            whitelist reason recorded in `runner_min_door_note` (visible, never a
            silent bypass) — but a figure the verifier does not re-derive is CAPPED
-           at the affected jobs' measured billable when EVERY affected job resolves
-           to its own workflow's rows and the estimate exceeds it
-           (`measured_spine_clamped`, cap disclosed in `size_note`; see
-           `_cap_at_measured_compute`). Anything less (no join, a partial join, a
-           foreign namesake) → kept, and the guard reports the gap. curl's OPT16
+           at the measured billable of the affected jobs that resolve to their own
+           workflow's rows when the estimate exceeds it (`measured_spine_clamped`,
+           cap and any partial coverage disclosed in `size_note`; see
+           `_cap_at_measured_compute`). No own-workflow join (or only a foreign
+           namesake) → kept, and the guard reports the gap. curl's OPT16
            (a flat ~10 s x 1463 runs = 243.8 min/mo) is NOT a cap case: its job's
            name is templated, so it resolves to no rows and stays a coverage gap.
          - a pattern with NO declared policy → stamped `UNCLASSIFIED_door_policy`
@@ -7946,10 +7968,11 @@ def _reground_runner_minute_savings(
         wf = str(f.get("workflow_file") or "")
         jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j).strip()]
         measured, matched, distinct = (_measured_billable_for_jobs(
-            wf, jobs, by_wf_job, by_job, _templated_job_bases(job_graph, wf))
+            wf, jobs, by_wf_job, by_job, _templated_job_bases(job_graph, wf),
+            job_graph)
                                        if jobs else (0.0, 0, 0))
         if matched > 0 and measured <= 0 and _all_runs_excluded(
-                wf, jobs, all_index, measured):
+                wf, jobs, all_index, measured, job_graph):
             _mark_all_runs_excluded(f)
             continue
         if matched == 0 or measured <= 0:
@@ -8008,10 +8031,16 @@ def _cap_at_measured_compute(
         (`verify_report.check_tier2_neutrality_derived` re-derives OPT57, OPT65,
         OPT77, OPT79 and OPT80 and their inner blocks). Capping those would fail
         the verifier and refuse the report.
-      - WHOLE TRUTH ONLY: the sum must cover EVERY affected job, each resolved in
-        its OWN workflow (`_own_workflow_billable`). A foreign namesake or a subset
-        understates the jobs' compute and would cut a correct saving, so either
-        leaves the estimate as is (the guard reports the gap)."""
+      - OWN ROWS ONLY: each affected job is resolved in its OWN workflow
+        (`_own_workflow_billable`). A foreign namesake is a different job and never
+        sets the cap; a finding with no own-workflow row at all is left as is (the
+        guard reports the gap).
+
+    PARTIAL COVERAGE (#355, issue #349). When only SOME affected jobs resolve, the
+    verifier still bounds the credit by the resolved subset's compute
+    (`check_saving_within_measured_compute`), so the cap uses that same subset and
+    discloses the coverage (`matched/distinct affected jobs measured`), exactly
+    as the CLAMP path does. Leaving the estimate would refuse the report."""
     if index is None:
         return
     if f.get("sizing_basis") == "measured":
@@ -8030,7 +8059,7 @@ def _cap_at_measured_compute(
     figure = ("of every sampled run" if every_run else "of completed job runs")
     # UNROUNDED, exactly as the verifier's twin test: a completed figure that is tiny but
     # positive (one short success among many killed runs) is a real completed bound.
-    if (not every_run and all_index is not None and distinct and matched == distinct
+    if (not every_run and all_index is not None and matched > 0
             and measured <= 0):
         # Every sampled run of these jobs was timed out, cancelled or killed: there
         # is no completed basis, which is NOT "the jobs used no compute" either. Owner
@@ -8040,26 +8069,26 @@ def _cap_at_measured_compute(
         # refuses a sized modeled saving on such a job.)
         every, a_matched, a_distinct = _own_workflow_billable(
             wf, jobs, all_index[0], job_graph)
-        if a_matched == a_distinct and every > 0:
+        if a_matched > 0 and every > 0:
             _mark_all_runs_excluded(f)
             return
-    # Every affected job joined its own rows, so a ZERO sum (or one that rounds to
-    # 0) is a real bound, not a missing one: the jobs measured no billable compute
-    # in the sample, and the saving clamps to 0.0. Leaving the estimate would fail
-    # the guard against that zero bound and refuse the report. "No match" is the
-    # separate, not-bounded path above (matched != distinct).
+    # At least one affected job joined its own rows, so a ZERO sum (or one that
+    # rounds to 0) is a real bound, not a missing one: the resolved jobs measured
+    # no billable compute in the sample, and the saving clamps to 0.0. Leaving the
+    # estimate would fail the guard against that zero bound and refuse the report.
+    # "No match" (matched == 0) is the separate, not-bounded path.
     measured = max(round(measured, 1), 0.0)
-    if (distinct == 0 or matched != distinct
-            or float(saving) <= measured + 1e-9):
+    if matched == 0 or float(saving) <= measured + 1e-9:
         return
     f["runner_min_saving"] = measured
     f["runner_min_basis"] = "measured_spine_clamped"
+    cov = "" if matched == distinct else f" ({matched}/{distinct} affected jobs measured)"
     cap = (f"MEASURED monthly billable compute {figure} ({measured:g} min/mo from the "
-           "cost spine) — a fix cannot save more minutes than the jobs consume"
+           f"cost spine){cov} — a fix cannot save more minutes than the jobs consume"
            ) if measured > 0 else (
            f"MEASURED monthly billable compute {figure}, which rounds to 0 min/mo: the "
            "affected jobs measured no billable compute in the sample to that precision, so "
-           "there is no bill saving")
+           f"there is no bill saving{cov}")
     f["size_note"] = (
         (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
         + f"estimate of {float(saving):g} min/mo capped at the affected jobs' " + cap)
@@ -20771,6 +20800,14 @@ _OPT84_FIX_STRATEGY = "slow-tool-on-pole-has-native-drop-in"
 _OPT84_MIN_SHARE = 0.0
 _OPT84_MIN_STEP_S = 20.0
 _OPT84_CATEGORIES = frozenset({"scan", "build"})
+# The install row (npm / pnpm / Yarn install -> `bun install`). Unlike the lint
+# rows it has a share-of-pole floor: an install is on every job, so only one
+# that is a heavy share of the pole's own measured time is the lever. The
+# floor is OPT83's (`_OPT83_MIN_SHARE`), on top of the 20s absolute floor. An
+# `install`-category step is a candidate only for this row; a `scan` / `build`
+# step that installs first reports the row only when its p50 clears the floor.
+_OPT84_INSTALL_CATEGORY = "install"
+_OPT84_INSTALL_MIN_SHARE = 0.15
 _OPT84_CEILING_BASIS = (
     "the step's own measured p50: the most swapping its tool can remove from this "
     "pole, not a forecast of the saving")
@@ -20786,6 +20823,10 @@ _OPT84_VERDICT_GATES = frozenset({
     "target_already_in_use",
     "tsc_emits_not_in_v1",
     "eslint_reported_by_opt82",
+    # The install row's swap is blocked by a caveat the read can see: Yarn
+    # Plug'n'Play (bun's linkers are hoisted or isolated, no PnP mode) or a
+    # pnpm install-time hook file bun's pnpm migration does not carry.
+    "install_swap_blocked",
 })
 # Exits where the audit could not decide: counted AND listed with job + step.
 _OPT84_HELD_BACK_GATES = frozenset({
@@ -20809,6 +20850,11 @@ _OPT84_HELD_BACK_GATES = frozenset({
     # (the block carries `error`). Nothing the read needs can be trusted.
     "type_aware_lint_scan_missing",
     "type_aware_config_reader_failed",
+    # The install row found, but the scan carries no package-manager read of
+    # the repo root, or a file it needs (`package.json`, `.yarnrc.yml`,
+    # `pnpm-workspace.yaml`) could not be read: whether bun is already in use
+    # or a caveat blocks the swap is unknown.
+    "install_layout_unreadable",
 })
 # The held-back gates decided on one STEP: their listing names the step. Every
 # other held-back gate is pole-level and is listed with the job only. A STRING
@@ -20819,6 +20865,7 @@ _OPT84_STEP_GATES = frozenset({
     "delegated_script_unresolved", "package_json_unreadable",
     "candidate_is_an_action", "eslint_config_unreadable",
     "typescript_version_unreadable", "working_directory_unknown",
+    "install_layout_unreadable",
 })
 
 
@@ -20862,6 +20909,12 @@ _OPT84_DOCS: dict[str, dict[str, "str | None"]] = {
         "docs_url": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
         "migration_docs_url": None,
     },
+    # Checked 2026-11-15: `bun install`'s own page, and its lockfile page,
+    # which covers migrating package-lock.json, yarn.lock and pnpm-lock.yaml.
+    "install": {
+        "docs_url": "https://bun.com/docs/pm/cli/install",
+        "migration_docs_url": "https://bun.com/docs/pm/lockfile",
+    },
 }
 # The swap table's DETECTED rows, as data. `binaries`: {leaf binary: flags of
 # which at least one must be present (empty = any invocation)}. `targets`: leaf
@@ -20879,7 +20932,106 @@ _OPT84_TABLE: dict[str, dict[str, Any]] = {
     "tsc": {"source_tool": "tsc", "package": "typescript", "target": "typescript@7",
             "binaries": {"tsc": ("--noEmit",)}, "targets": (), "target_major": 7,
             "published_range": "8-12× (vendor-stated)"},
+    # Matched by `_opt84_install_kind`, not by `binaries`: an install is a
+    # package-manager subcommand, and `bun` alone is not the target (`bun
+    # test` is not an install). `published_range` is bun's own CI numbers
+    # (https://bun.com/package-manager: "CI without a cache" 5-19×, "CI with a
+    # warm cache" 8-21×, one Next.js app), never this repo's.
+    "install": {"source_tool": "npm / pnpm / Yarn install", "package": "",
+                "target": "bun install", "binaries": {}, "targets": (),
+                "target_major": None,
+                "published_range": "5-21× in CI (vendor-stated)"},
 }
+# npm / pnpm / Yarn install flags that take a separate value (never a package).
+_OPT84_INSTALL_VALUE_FLAGS = frozenset({
+    "--network-timeout", "--registry", "--cache-folder", "--cache", "--cache-dir",
+    "--modules-folder", "--store-dir", "--filter", "-F", "--mutex", "--loglevel",
+    "--reporter", "--workspace", "-w", "--network-concurrency",
+    "--child-concurrency", "--omit", "--include", "--prefer-offline-dir",
+    "--fetch-timeout", "--fetch-retries"})
+_OPT84_INSTALL_SUBCOMMANDS = {"npm": ("ci", "clean-install", "install", "i"),
+                              "pnpm": ("install", "i")}
+# A `run:` that names an npm / pnpm / Yarn install somewhere in its text: on an
+# `install` step whose command the read cannot follow, only this keeps the
+# exit a held-back listing (an install may hide behind it) rather than the
+# `tool_not_in_table` verdict.
+_OPT84_INSTALL_HINT_RE = re.compile(
+    r"(?<![\w.-])(?:npm\s+(?:ci|clean-install|install|i)|pnpm\s+(?:install|i)"
+    r"|yarn)(?![\w.-])")
+
+
+def _opt84_install_kind(tokens: list[str]) -> "str | None":
+    """"row" when the leaf installs the repo's dependencies with npm, pnpm or
+    Yarn (`npm ci`, `npm install`, `pnpm install`, `yarn`, `yarn install`,
+    flags only), "target" when it is `bun install` / `bun i` / `bun ci`, None
+    otherwise. A global install (`-g`) or one naming packages (`npm install
+    foo`) is not the repo's dependency install."""
+    t = list(tokens)
+    if not t:
+        return None
+    b = t[0].rsplit("/", 1)[-1].split("@", 1)[0]
+    args = t[1:]
+    if b == "bun":
+        return "target" if args[:1] and args[0] in ("install", "i", "ci") else None
+    if b in _OPT84_INSTALL_SUBCOMMANDS:
+        if not args or args[0] not in _OPT84_INSTALL_SUBCOMMANDS[b]:
+            return None
+        rest = args[1:]
+    elif b == "yarn":
+        rest = args[1:] if args[:1] == ["install"] else args
+    else:
+        return None
+    if any(a in ("-v", "--version", "-h", "--help") for a in rest):
+        return None                         # prints, installs nothing
+    skip = False
+    for a in rest:
+        if skip:
+            skip = False
+            continue
+        flag = a.split("=", 1)[0]
+        if flag in ("-g", "--global", "--location"):
+            return None
+        if a in _OPT84_INSTALL_VALUE_FLAGS:
+            skip = True
+            continue
+        if not a.startswith("-"):
+            return None                     # names a package, or is a script
+    return "row"
+
+
+def _opt84_bun_install_flags(tokens: list[str]) -> list[str]:
+    """The `bun install` flags matching the npm / pnpm / Yarn install's flags
+    that change which dependencies are installed or whether their scripts run
+    (`--omit=dev` / `--production` / `--prod` -> `--production`; optional
+    dependencies omitted -> `--omit optional`; `--ignore-scripts`). Network,
+    cache, reporter and lockfile flags do not change the dependency set and are
+    not carried."""
+    out: list[str] = []
+    args = list(tokens[1:])
+    i = 0
+    while i < len(args):
+        a = args[i]
+        flag, eq, val = a.partition("=")
+        if flag == "--omit" and not eq and i + 1 < len(args):
+            val, eq = args[i + 1], "="
+            i += 1
+        if (a in ("--production", "--prod", "-P", "--production=true")
+                or (flag == "--omit" and val == "dev")
+                or (flag == "--only" and val in ("prod", "production"))):
+            want = ["--production"]
+        elif (a in ("--no-optional", "--ignore-optional")
+              or (flag == "--omit" and val == "optional")):
+            want = ["--omit", "optional"]
+        elif flag == "--omit" and val == "peer":
+            want = ["--omit", "peer"]
+        elif a == "--ignore-scripts":
+            want = ["--ignore-scripts"]
+        else:
+            want = []
+        if want and not any(out[j:j + len(want)] == want for j in range(len(out))):
+            out += want
+        i += 1
+    return out
 # `published_range` is the catalog's published range for the swap: OTHER repos'
 # numbers, rendered as such, never this repo's saving.
 # ESLint plugins whose rules oxlint may not carry one for one: any of these on
@@ -21401,6 +21553,9 @@ def _opt84_classify(tokens: list[str]) -> "tuple[str | None, str | None]":
     """(row, kind) for one leaf: kind "row" (a table tool this row swaps),
     "target" (the row's target already runs), "emits" (a `tsc` that is not a
     `--noEmit` type-check), or (None, None) when the leaf is not in the table."""
+    k = _opt84_install_kind(tokens)
+    if k is not None:
+        return "install", k
     t = _opt84_leaf_tokens(tokens)
     b = _opt84_binary(t)
     args = t[1:]
@@ -21555,6 +21710,14 @@ def _opt84_benchmark_commands(row: str, tokens: list[str], runner: str,
     ESLint row both are cold (`--cache` and its cache flags dropped); the
     Prettier and tsc rows keep the command's flags as CI runs them."""
     import shlex
+    pre = f"cd {shlex.quote(wd)} && " if wd else ""
+    if row == "install":
+        # Both from a fresh `node_modules`; the first `bun install` migrates the
+        # lockfile and leaves the old one in place (bun's lockfile docs). The
+        # bun side carries the flags that change WHAT is installed, so both
+        # install the same dependency set.
+        bun = shlex.join(["bun", "install", *_opt84_bun_install_flags(tokens)])
+        return [f"({pre}time {shlex.join(tokens)})", f"({pre}time {bun})"]
     t = _opt84_leaf_tokens(tokens)
     args = t[1:]
     if row == "eslint":
@@ -21774,6 +21937,147 @@ def _opt84_prettier_fit(block: dict[str, Any], leaves: "list[dict[str, Any]]",
     return reasons
 
 
+def _opt84_install_leaves(leaves: list[dict[str, Any]], run: str,
+                          wd: str) -> list[dict[str, Any]]:
+    """The leaves with Yarn installs made readable: the shared resolver reads
+    `yarn install ...` as the binary `install` under the `yarn` runner, and a
+    bare `yarn` / `yarn --frozen-lockfile` (Yarn's install) as no leaf at all.
+    Both come back as `yarn ...` leaves; a bare one only when it is written in
+    the step's own `run:` (one a package script runs is not seen: a residual)."""
+    import shlex
+    out: list[dict[str, Any]] = []
+    for lf in leaves:
+        t = list(lf.get("tokens") or [])
+        if lf.get("runner") == "yarn" and t[:1] == ["install"]:
+            t = ["yarn", *t]
+            lf = {**lf, "tokens": t, "command": shlex.join(t)}
+        out.append(lf)
+    have = {str(lf.get("command") or "") for lf in out}
+    for seg in _OPT82_SEGMENT_SPLIT_RE.split(run or ""):
+        toks = _opt82_tokens(seg.strip())
+        if (toks[:1] == ["yarn"] and toks[1:2] != ["install"]
+                and _opt84_install_kind(toks) == "row"
+                and shlex.join(toks) not in have):
+            out.append({"command": shlex.join(toks), "tokens": toks,
+                        "runner": "yarn", "wd": wd, "chain": []})
+            have.add(shlex.join(toks))
+    return out
+
+
+def _opt84_install_layout(block: dict[str, Any],
+                          wd: str) -> "dict[str, Any] | None":
+    """The package-manager facts that govern an install run in `wd`: the
+    scan's reads of `wd` and every directory above it (`package_manager` for
+    the root, `package_manager_dirs` for the others), merged nearest first.
+    None when one of them is missing, unreadable, or ground the scan never
+    looked at. Lockfiles come from the nearest directory that has any (named
+    from the repo root); the `packageManager` field from the nearest that sets
+    it; Yarn's `nodeLinker` from the nearest `.yarnrc.yml` that sets it, as
+    Yarn's own nearer-wins config does; hooks, PnP loader files and a pnpm
+    workspace from any of them."""
+    dirs = block.get("package_manager_dirs")
+    reads: list[tuple[str, dict[str, Any]]] = []
+    for d, state in _opt84_walk_up(block, wd or ""):
+        if d == "":
+            pm = block.get("package_manager")
+        elif state == "read":
+            pm = dirs.get(d) if isinstance(dirs, dict) else None
+        elif state == "none":
+            continue
+        else:
+            return None
+        if not isinstance(pm, dict) or pm.get("unreadable"):
+            return None
+        reads.append((d, pm))
+    locks: list[str] = []
+    for d, pm in reads:
+        got = [str(x) for x in pm.get("lockfiles") or []]
+        if got:
+            locks = [f"{d}/{x}" if d else x for x in got]
+            break
+    field = next((str(pm["package_manager_field"]) for _d, pm in reads
+                  if pm.get("package_manager_field")), "")
+    linker = next((pm["node_linker"] for _d, pm in reads
+                   if isinstance(pm.get("node_linker"), str)), None)
+    if any(pm.get("pnp_files") for _d, pm in reads):
+        pnp = True
+    elif linker is not None:
+        pnp = linker == "pnp"
+    else:
+        pnp = any(pm.get("yarn_pnp") for _d, pm in reads)
+    return {"lockfiles": locks, "package_manager_field": field, "yarn_pnp": pnp,
+            "pnpmfile": [h for _d, pm in reads for h in pm.get("pnpmfile") or []],
+            "pnpm_workspace": any(pm.get("pnpm_workspace") for _d, pm in reads)}
+
+
+def _opt84_install_fit(block: dict[str, Any], runs_on: Any,
+                       wd: str = "") -> "tuple[str, list[str]]":
+    """The install row's verdict from the scan's package-manager reads of the
+    install's directory and those above it (`_opt84_install_layout`):
+    ("held", []) when one was not read or a file it needs could not be;
+    ("in_use", []) when bun is already the package manager (a `bun.lock` /
+    `bun.lockb`, or `packageManager: bun@...`); ("blocked", reasons) when a
+    caveat bun cannot carry is present; else ("dual-run", reasons): the
+    side-by-side run is always the recipe, and the reasons are the caveats it
+    must check, each from bun's own docs."""
+    pm = _opt84_install_layout(block, wd)
+    if pm is None:
+        return "held", []
+    locks = [str(x) for x in pm.get("lockfiles") or []]
+    field = str(pm.get("package_manager_field") or "")
+    if (any(x.rsplit("/", 1)[-1] in ("bun.lock", "bun.lockb") for x in locks)
+            or field.startswith("bun@")):
+        return "in_use", []
+    blocked: list[str] = []
+    if pm.get("yarn_pnp"):
+        blocked.append("Yarn Plug'n'Play is on, and bun installs only into "
+                       "`node_modules` (its hoisted or isolated linker)")
+    for h in pm.get("pnpmfile") or []:
+        blocked.append(f"a pnpm install hook (`{h}`) rewrites packages at install "
+                       "time, and bun's pnpm migration does not carry it")
+    if blocked:
+        return "blocked", blocked
+    # bun migrates ONE lockfile, the first it can in this order (its lockfile
+    # docs), and not an npm 6 (`lockfileVersion` 1) one.
+    order = ("npm-shrinkwrap.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml")
+    old = sorted(locks, key=lambda x: (order.index(x.rsplit("/", 1)[-1])
+                                      if x.rsplit("/", 1)[-1] in order else 99, x))
+    if old:
+        first = old[0]
+        mig = (f"the first `bun install` migrates `{first}` to `bun.lock` and keeps "
+               "the old lockfile")
+        if len(old) > 1:
+            mig += (f" (bun migrates one lockfile; `{'`, `'.join(old[1:])}` "
+                    "stay as they are)")
+        if first.rsplit("/", 1)[-1] in order[:2]:
+            mig += ("; an npm 6 lockfile (`lockfileVersion` 1) is not migrated, "
+                    "and bun then resolves versions afresh")
+        mig += ": delete the old lockfile only after both installs pass the tests"
+    else:
+        mig = ("no lockfile was found for this install: commit the `bun.lock` the "
+               "first install writes, so CI can install with `bun ci` "
+               "(`--frozen-lockfile`)")
+    reasons = [
+        mig,
+        ("bun runs a dependency's install scripts (a native addon's node-gyp build, "
+         "for example) only for packages on its default trusted list or in "
+         "`trustedDependencies`: compare the scripts `bun pm untrusted` lists as "
+         "blocked with those the current installer runs (pnpm 10 runs none by "
+         "default, npm and Yarn run them all), since a skipped build may fail only "
+         "at runtime, not in the tests"),
+        ("bun replaces the installer only: the scripts and tests keep running on "
+         "Node unless the repo moves its runtime on purpose"),
+    ]
+    if pm.get("pnpm_workspace"):
+        reasons.append("bun moves the `pnpm-workspace.yaml` package list and "
+                       "catalogs into the root `package.json` `workspaces` field")
+    ro = json.dumps(runs_on, default=str).lower() if runs_on is not None else ""
+    if "windows" in ro:
+        reasons.append("this job runs on Windows: bun supports Windows 10 version "
+                       "1809 or later; confirm the install and tests on this runner")
+    return "dual-run", reasons
+
+
 def _detect_opt84_tool_swap(
     poles: list[dict[str, Any]],
     wf_docs: dict[str, Any],
@@ -21804,13 +22108,26 @@ def _detect_opt84_tool_swap(
         if (no_js_manifest and gate in _OPT84_HELD_BACK_GATES
                 and not ctx.pop("table_tool_seen", False)):
             gate = "tool_not_in_table"
+        # An `install` step is a candidate for the install row only: an exit the
+        # read could not follow there (a setup script, `make`, an action) can
+        # never become an install finding unless an install was seen, so it is
+        # the verdict, not a held-back listing.
+        if (step is not None and step_ctx["install"]
+                and gate in _OPT84_HELD_BACK_GATES
+                and gate != "install_layout_unreadable"
+                and not ctx.pop("install_seen", step_ctx["hint"])):
+            gate = "tool_not_in_table"
         ctx.pop("table_tool_seen", None)
+        ctx.pop("install_seen", None)
         _opt84_count(withheld, withheld_candidates, gate, wf, job, step)
         logger.debug("OPT84 %s %s %s: withheld by %s%s", wf, job, step or "", gate,
                      (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
 
     import shlex
 
+    # The step being read: whether it is an `install` step, and whether its own
+    # `run:` text names an npm / pnpm / Yarn install (`_OPT84_INSTALL_HINT_RE`).
+    step_ctx: dict[str, bool] = {"install": False, "hint": False}
     tal: dict[str, Any] = block if isinstance(block, dict) else {}
     scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
                       if isinstance(v, dict)}
@@ -21923,8 +22240,10 @@ def _detect_opt84_tool_swap(
                 else "pole_step_timings_unavailable", wf, job)
             continue
         cands = [(n, c, d) for n, c, d in measured
-                 if c in _OPT84_CATEGORIES and d >= _OPT84_MIN_STEP_S
-                 and d >= _OPT84_MIN_SHARE * job_p50]
+                 if d >= _OPT84_MIN_STEP_S and d >= _OPT84_MIN_SHARE * job_p50
+                 and (c in _OPT84_CATEGORIES
+                      or (c == _OPT84_INSTALL_CATEGORY
+                          and d >= _OPT84_INSTALL_MIN_SHARE * job_p50))]
         if not cands:
             _no("no_candidate_step", wf, job)
             continue
@@ -21986,6 +22305,8 @@ def _detect_opt84_tool_swap(
             return r.get("working-directory") if isinstance(r, dict) else None
 
         for name, category, p50 in cands:
+            step_ctx["install"] = category == _OPT84_INSTALL_CATEGORY
+            step_ctx["hint"] = False
             idx = by_name.get(name, [])
             if len(idx) != 1:
                 _no("measured_step_not_matched_in_yaml", wf, job, name)
@@ -21996,6 +22317,7 @@ def _detect_opt84_tool_swap(
                     else "tool_not_in_table", wf, job, name)
                 continue
             run = str(st["run"])
+            step_ctx["hint"] = bool(_OPT84_INSTALL_HINT_RE.search(run))
             raw_wd = st.get("working-directory",
                             _defaults_wd(spec) if _defaults_wd(spec) is not None
                             else _defaults_wd(doc))
@@ -22036,11 +22358,15 @@ def _detect_opt84_tool_swap(
             leaves, opaque = _opt84_expand_leaves(res.leaves, scripts_by_dir,
                                                   scripts_unreadable, walk_complete)
             if opaque:
-                _no(opaque, wf, job, name, table_tool_seen=_opt84_any_row(leaves))
+                _no(opaque, wf, job, name, table_tool_seen=_opt84_any_row(leaves),
+                    install_seen=any(_opt84_classify(lf["tokens"])[0] == "install"
+                                     for lf in _opt84_install_leaves(leaves, run, wd)))
                 continue
+            leaves = _opt84_install_leaves(leaves, run, wd)
             found: list[tuple[str, dict[str, Any]]] = []
             targets: set[str] = set()
             emits = False
+            install_blocked: list[str] = []
             for lf in leaves:
                 row, kind = _opt84_classify(lf["tokens"])
                 if kind == "target":
@@ -22059,12 +22385,20 @@ def _detect_opt84_tool_swap(
                                  for g in grp["group"]):
                         grp["group"].append(lf)
             silenced = [r for r, _lf in found if r in targets]
+            if ("install" in targets and p50 >= _OPT84_INSTALL_MIN_SHARE * job_p50
+                    and not any(r == "install" for r, _lf in found)):
+                silenced.append("install")      # a heavy `bun install` already
             found = [(r, lf) for r, lf in found if r not in targets]
             deferred = (wf, yaml_key, " ".join(name.split())) in opt82_steps
             tools: list[dict[str, Any]] = []
             held: "str | None" = None
+            install_held = False
             for row, lf in found:
                 spec_row = _OPT84_TABLE[row]
+                if category == _OPT84_INSTALL_CATEGORY and row != "install":
+                    continue        # an install step is a candidate for that row only
+                if row == "install" and p50 < _OPT84_INSTALL_MIN_SHARE * job_p50:
+                    continue        # an install inside a quick scan / build step
                 group = lf.get("group") or [lf]
                 lwds = list(dict.fromkeys(str(g["wd"] or "") for g in group))
                 lwd = str(lf["wd"] or "")
@@ -22072,7 +22406,29 @@ def _detect_opt84_tool_swap(
                 if version is _OPT84_VERSION_UNREADABLE:
                     version = None              # informational here; tsc reads majors
                 fit, reasons = "drop-in", []
-                if row == "tsc":
+                if row == "install":
+                    verdict, why = _opt84_install_fit(tal, spec.get("runs-on"), lwd)
+                    if verdict == "held":
+                        install_held = True     # drops this row only
+                        continue
+                    if verdict == "in_use":
+                        silenced.append(row)
+                        continue
+                    if verdict == "blocked":
+                        install_blocked += why
+                        continue
+                    fit, reasons, version = "dual-run", list(why), None
+                    rest = list(dict.fromkeys(
+                        str(o.get("command") or "") for o in leaves
+                        if _opt84_classify(o["tokens"])[0] != "install"))
+                    if rest:
+                        reasons.append(
+                            f"this step also runs `{'`, `'.join(rest[:3])}`"
+                            + (" and more" if len(rest) > 3 else "")
+                            + ": the ceiling and the share floor are the whole "
+                            "step's time, and how much of it the install takes is "
+                            "unknown until measured")
+                elif row == "tsc":
                     majors = [(g, _opt84_major(_opt84_version(
                         tal, str(g["wd"] or ""), spec_row["package"]))) for g in group]
                     if any(m is None for _g, m in majors):
@@ -22162,9 +22518,16 @@ def _detect_opt84_tool_swap(
                      "migration_docs_url": _OPT84_DOCS[row]["migration_docs_url"]}
                 if row == "tsc":
                     t["typescript6_alias_needed"] = alias_needed
+                if row == "install":
+                    t["install_dir"] = lwd      # the verifier walks up from here
                 if expanded:
                     t["packages"] = len(lwds)
                 tools.append(t)
+            if held is None and install_held and not tools:
+                # The install row could not be decided and nothing else on the
+                # step was reported: the step is held back for it. A lint row
+                # beside it still reports on its own.
+                held = "install_layout_unreadable"
             if held:
                 _no(held, wf, job, name, table_tool_seen=True)
                 continue
@@ -22173,6 +22536,9 @@ def _detect_opt84_tool_swap(
                     _no("eslint_reported_by_opt82", wf, job, name)
                 elif silenced:
                     _no("target_already_in_use", wf, job, name)
+                elif install_blocked:
+                    _no("install_swap_blocked", wf, job, name,
+                        why="; ".join(install_blocked))
                 elif emits:
                     _no("tsc_emits_not_in_v1", wf, job, name)
                 else:
