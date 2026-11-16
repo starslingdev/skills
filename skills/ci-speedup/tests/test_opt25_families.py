@@ -289,6 +289,40 @@ def test_dominant_step_identity_survives_matrix_name_interpolation():
     assert findings[0]["legs_excluded_no_work"] == 0
 
 
+def test_common_suffix_jobs_keep_their_distinct_work_steps():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for database, duration in (("Postgres", 900), ("MySQL", 100), ("SQLite", 90)):
+        steps = [{
+            "number": 2,
+            "name": f"Run {database} tests",
+            "conclusion": "success",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=min(duration, 100))).isoformat(),
+        }]
+        if database == "Postgres":
+            steps.append({
+                "number": 3,
+                "name": "Run extended integration tests",
+                "conclusion": "success",
+                "started_at": (start + timedelta(seconds=100)).isoformat(),
+                "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            })
+        jobs.append({
+            "name": f"{database} Integration Test",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": steps,
+        })
+
+    findings = cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900})
+
+    assert findings
+    assert findings[0]["legs_excluded_no_work"] == 0
+
+
 def test_a_working_leg_with_a_different_step_name_is_not_discarded():
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     jobs = []

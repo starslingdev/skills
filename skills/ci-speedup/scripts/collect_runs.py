@@ -10382,9 +10382,11 @@ def _detect_opt25_shard_imbalance(
                 base = mbase
                 variant = name[len(mbase):].strip().strip("()")
                 sharded = bool(_SHARD_NAME_RE.search(variant))  # explicit shard/partition axis
+                inferred_suffix_group = False
             elif name in suffix_base:
                 base = suffix_base[name]
                 sharded = False  # prefix varies → distinct packages, not shards
+                inferred_suffix_group = True
             else:
                 continue  # neither convention matched → not a matrix job
             steps = [(position, step) for position, step in enumerate(j.get("steps") or [])
@@ -10407,10 +10409,16 @@ def _detect_opt25_shard_imbalance(
             # evidence that this leg did real work (for example platform-specific
             # test steps). Only use the dominant sibling step to confirm an
             # otherwise workless leg; never discard that alternate work.
-            skipped_dominant = dominant_identity is not None and not distinctive_active_steps and (
-                not dominant_steps or all(
+            # Common-suffix groups are inferred from names and can combine
+            # separate workflow job definitions. Their step numbers are local,
+            # so a matching identity cannot prove that the jobs share one step.
+            skipped_dominant = (
+                not inferred_suffix_group
+                and dominant_identity is not None
+                and not distinctive_active_steps
+                and (not dominant_steps or all(
                     str(step.get("conclusion") or "").lower() == "skipped"
-                    for step in dominant_steps))
+                    for step in dominant_steps)))
             if (str(j.get("conclusion") or "").lower() == "skipped"
                     or skipped_dominant
                     or (work_steps and not active_work_steps)):
