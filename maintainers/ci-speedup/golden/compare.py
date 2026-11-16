@@ -573,7 +573,7 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     spec.loader.exec_module(module)
     # The comparison aligns only the public timestamp span and bounded sample
     # size. Commit identities, eligible jobs, check names, durations, and each
-    # commit's last-finishing gate all come from the recording, so the engine
+    # commit's slowest eligible gate all come from the recording, so the engine
     # cannot provide its own answer to the oracle.
     return module.compute(scoped, bookkeeping_cutoff_s=0)
 
