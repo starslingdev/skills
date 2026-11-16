@@ -36,6 +36,7 @@ import shlex
 import subprocess
 import sys
 import time
+import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1075,6 +1076,61 @@ def _read_repo_file(root: Path, name: str) -> str:
         return (root / name).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+
+
+_RUST_COVERAGE_COMMAND_RE = re.compile(
+    r"(?:^|[\s;&|])cargo\s+(?:llvm-cov|tarpaulin)\b", re.IGNORECASE)
+
+
+def _read_rust_coverage_profile(
+    root: Path, parsed: list[tuple[str, dict, str]],
+) -> dict[str, Any] | None:
+    """Config fact for measured Rust-coverage routing; never a finding by itself."""
+    jobs: dict[str, dict[str, dict[str, Any]]] = {}
+    for rel, doc, _raw in parsed:
+        workflow_jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        if not isinstance(workflow_jobs, dict):
+            continue
+        for job_key, job in workflow_jobs.items():
+            if not isinstance(job, dict):
+                continue
+            coverage_steps = [
+                str(step.get("name") or "").strip()
+                for step in _steps(job)
+                if isinstance(step.get("run"), str)
+                and _RUST_COVERAGE_COMMAND_RE.search(str(step["run"]))
+            ]
+            if coverage_steps:
+                jobs.setdefault(rel, {})[str(job_key)] = {
+                    "job_name": str(job.get("name") or job_key),
+                    "steps": coverage_steps,
+                }
+    if not jobs:
+        return None
+
+    cargo_text = _read_repo_file(root, "Cargo.toml")
+    try:
+        cargo = tomllib.loads(cargo_text)
+    except (tomllib.TOMLDecodeError, TypeError):
+        return {"status": "unreadable", "eligible": False, "jobs": jobs}
+    profiles = cargo.get("profile") if isinstance(cargo, dict) else None
+    profiles = profiles if isinstance(profiles, dict) else {}
+    dev = profiles.get("dev") if isinstance(profiles.get("dev"), dict) else {}
+    test = profiles.get("test") if isinstance(profiles.get("test"), dict) else {}
+
+    debug = test.get("debug", dev.get("debug"))
+    opt_level = test.get("opt-level", dev.get("opt-level"))
+    debug_disabled = debug is False or debug == 0 or (
+        isinstance(debug, str) and debug.casefold() in {"0", "false", "none"})
+    optimized = opt_level not in (None, 0, "0")
+    return {
+        "status": "configured" if (debug is not None or opt_level is not None) else "defaults",
+        "eligible": not (debug_disabled or optimized),
+        "effective_profile": "test",
+        "debug": debug,
+        "opt_level": opt_level,
+        "jobs": jobs,
+    }
 
 
 def _parse_gitmodules(text: str) -> list[str]:
@@ -9520,7 +9576,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # pole step runs a tool with a native drop-in) is routed the same way, from
     # the pole's step decomposition plus the workflow YAML and package scripts.
     structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75", "OPT83",
-                           "OPT84", "OPT85"}
+                           "OPT84", "OPT85", "OPT104"}
     structural_without_detector = sorted(
         c.pattern for c in catalog
         if c.finding_class == "structural" and c.pattern not in structural_detected)
@@ -9721,6 +9777,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     if held_back:
         parallel_stats["held_back"] = held_back
     extra: dict[str, Any] = dict(extra_opt96)
+    rust_coverage_profile = _read_rust_coverage_profile(root, parsed)
+    if rust_coverage_profile:
+        extra["rust_coverage_profile"] = rust_coverage_profile
     jest_coverage = _jest_coverage_notes(parsed)
     if jest_coverage:
         extra["jest_coverage_notes"] = jest_coverage
