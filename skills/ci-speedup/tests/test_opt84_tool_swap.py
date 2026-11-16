@@ -41,10 +41,13 @@ def _doc(step, *, job_defaults=None, wf_defaults=None, wrap_parallel=False):
 
 
 def _pole(step_p50=52.0, job_p50=162.0, category="scan", step=_STEP):
-    rest = round(job_p50 - step_p50 - 5.0, 1)
+    # The install step stays under the 20s floor: the install row (pinned in
+    # test_opt84_bun_install.py) is not what these fixtures exercise.
+    rest = round(job_p50 - step_p50 - 5.0 - 15.0, 1)
     return {"check": "Lint", "workflow_file": _WF, "job": "Lint", "job_p50_s": job_p50,
             "steps": [{"step": step, "category": category, "p50_s": step_p50},
-                      {"step": "Run pnpm install", "category": "install", "p50_s": rest},
+                      {"step": "Run pnpm install", "category": "install", "p50_s": 15.0},
+                      {"step": "Wait for runner", "category": "other", "p50_s": rest},
                       {"step": "Set up job", "category": "setup", "p50_s": 5.0}]}
 
 
@@ -282,7 +285,8 @@ def test_published_range_is_stamped_per_tool_as_the_catalog_states_it():
 
 def test_docs_table_points_at_the_target_tools_own_pages():
     d = cr._OPT84_DOCS
-    assert set(d) == {"prettier", "eslint", "tsc"}
+    assert set(d) == {"prettier", "eslint", "tsc", "install"}
+    assert d["install"]["docs_url"].startswith("https://bun.com/docs/")
     assert d["prettier"]["docs_url"].startswith("https://oxc.rs/")
     assert d["eslint"]["docs_url"].startswith("https://oxc.rs/")
     assert d["tsc"]["docs_url"].startswith("https://devblogs.microsoft.com/typescript/")
@@ -606,10 +610,17 @@ def test_the_floors_are_inclusive(p50, job, fires):
     assert bool(out) is fires
 
 
-@pytest.mark.parametrize("cat", ["test", "install", "package", "other"])
+@pytest.mark.parametrize("cat", ["test", "package", "other"])
 def test_only_scan_and_build_steps_are_candidates(cat):
     out, withheld, _c = _run({"run": "npx eslint ."}, pole=_pole(category=cat))
     assert out == [] and withheld == {"no_candidate_step": 1}
+
+
+def test_an_install_step_is_read_for_the_install_row_only():
+    # A heavy `install` step is a candidate (the bun install row), but a lint
+    # tool it runs is not reported from it.
+    out, withheld, _c = _run({"run": "npx eslint ."}, pole=_pole(category="install"))
+    assert out == [] and withheld == {"tool_not_in_table": 1}
 
 
 def test_build_category_is_a_candidate():
@@ -658,7 +669,8 @@ def test_one_finding_per_pole_step_even_when_the_pole_is_listed_twice():
 def test_gate_sets_are_pinned():
     assert cr._OPT84_VERDICT_GATES == frozenset({
         "pole_not_file_backed", "no_candidate_step", "tool_not_in_table",
-        "target_already_in_use", "tsc_emits_not_in_v1", "eslint_reported_by_opt82"})
+        "target_already_in_use", "tsc_emits_not_in_v1", "eslint_reported_by_opt82",
+        "install_swap_blocked"})
     assert cr._OPT84_HELD_BACK_GATES == frozenset({
         "pole_workflow_ambiguous", "pole_step_entries_unreadable",
         "pole_step_timings_unavailable", "workflow_yaml_unavailable",
@@ -667,7 +679,8 @@ def test_gate_sets_are_pinned():
         "delegated_script_unresolved", "package_json_unreadable",
         "candidate_is_an_action", "eslint_config_unreadable",
         "typescript_version_unreadable", "working_directory_unknown",
-        "type_aware_lint_scan_missing", "type_aware_config_reader_failed"})
+        "type_aware_lint_scan_missing", "type_aware_config_reader_failed",
+        "install_layout_unreadable"})
     assert not cr._OPT84_VERDICT_GATES & cr._OPT84_HELD_BACK_GATES
 
 

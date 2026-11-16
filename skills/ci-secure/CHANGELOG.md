@@ -13,6 +13,16 @@ entries are dated (UTC). Format loosely follows
 
 ### Changed
 
+- **2026-11-15** (#354) — P14.24 now follows command substitutions in shell
+  execution order for both mutable git fetches and GitHub CLI extensions,
+  keeps each substitution's working directory isolated from its parent shell,
+  ignores substitutions inside single quotes and ones whose `$(` or backtick is
+  escaped with a backslash, reads backtick substitutions as commands for
+  extensions as it does for git fetches, and stays silent when an extension
+  name collides with a built-in `gh` command. Its references now distinguish all
+  three supported shapes and describe full commit pins, immutable releases, and
+  date-style release tags precisely.
+
 - **2026-11-15** (#351) — ci-secure's narrow label/comment script proof now
   fails closed on a line-leading HTML close-comment marker. Bracket-index
   normalization uses a linear forward walk and stops at the first unclosed

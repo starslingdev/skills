@@ -18,6 +18,8 @@ Run from the repo root:
 
 from __future__ import annotations
 
+import pytest
+
 from collect_runs import (
     _bimodal_split,
     _cap_wall_clock_cross_workflow,
@@ -2054,6 +2056,143 @@ def test_opt73_within_measured_is_confirmed_not_clamped():
     assert f["runner_min_basis"] == "measured_spine_billable"
 
 
+def test_opt14_saving_is_capped_at_resolved_jobs_measured_compute(tmp_path):
+    """A partially measured serial-gate finding still obeys the physical bound."""
+    from collect_runs import _reground_runner_minute_savings
+
+    wf = ".github/workflows/skill-evals.yml"
+    f = {
+        "pattern": "OPT14",
+        "workflow_file": wf,
+        "affected_jobs": ["evals", "ci-speedup-evals"],
+    }
+    _size_finding(f, {}, monthly_volume=573)
+    assert f["runner_min_saving"] == 429.8
+
+    doc = {
+        "findings": [f],
+        "runner_minute_spine": _door_spine({"evals": 200.6}, wf=wf),
+    }
+    assert _bounds_tag(doc, tmp_path) == "FAIL"
+
+    _reground_runner_minute_savings(doc["findings"], doc["runner_minute_spine"])
+
+    assert f["runner_min_saving"] == 200.6
+    assert f["runner_min_basis"] == "measured_spine_clamped"
+    assert "cannot save more minutes than the jobs consume" in f["size_note"]
+    assert _bounds_tag(doc, tmp_path) == "PASS"
+
+
+def test_every_serial_gate_per_run_model_uses_the_measured_clamp():
+    """Both per-run-times-volume serial models share the physical ceiling."""
+    from collect_runs import _rm_door_policy
+
+    assert _SERIAL_GATE_PATTERNS == {"OPT14", "OPT15"}
+    assert {_rm_door_policy(pattern)[0] for pattern in _SERIAL_GATE_PATTERNS} == {
+        "clamp"
+    }
+
+
+_PARTIAL_WF = ".github/workflows/skill-evals.yml"
+
+
+def _partial_coverage_doc(f: dict) -> dict:
+    # Two affected jobs, only `evals` has a cost-spine row (50 min/mo).
+    return {"findings": [f],
+            "runner_minute_spine": _door_spine({"evals": 50.0}, wf=_PARTIAL_WF)}
+
+
+def _direct_model_patterns() -> list[str]:
+    # Every per-run x monthly-volume ("direct" model) pattern whose saving the
+    # door retains as not-derivable and caps at measured compute.
+    from collect_runs import _SIZING, _rm_door_policy
+    return sorted(p for p, cfg in _SIZING.items()
+                  if cfg.get("model") == "direct"
+                  and _rm_door_policy(p)[0] == "not_spine_derivable")
+
+
+@pytest.mark.parametrize("pattern", ["OPT13", "OPT16", "OPT4", "OPT22"])
+def test_direct_model_partial_coverage_capped_at_measured_subset(tmp_path, pattern):
+    """Issue #349 shape for the non-serial direct models: only one of two
+    affected jobs is measured, so the verifier bounds the credit by that job's
+    compute, and the door must cap at the same figure."""
+    from collect_runs import _reground_runner_minute_savings
+    f = {"pattern": pattern, "workflow_file": _PARTIAL_WF,
+         "affected_jobs": ["evals", "ci-speedup-evals"]}
+    _size_finding(f, {}, monthly_volume=573)
+    assert f["runner_min_saving"] > 50.0
+    doc = _partial_coverage_doc(f)
+    assert _bounds_tag(doc, tmp_path) == "FAIL"
+    _reground_runner_minute_savings(doc["findings"], doc["runner_minute_spine"])
+    assert f["runner_min_saving"] == 50.0
+    assert f["runner_min_basis"] == "measured_spine_clamped"
+    assert "(1/2 affected jobs measured)" in f["size_note"]
+    assert _bounds_tag(doc, tmp_path) == "PASS"
+
+
+@pytest.mark.parametrize("pattern", _direct_model_patterns())
+def test_every_direct_model_partial_coverage_passes_verifier(tmp_path, pattern):
+    from collect_runs import _reground_runner_minute_savings
+    f = {"pattern": pattern, "workflow_file": _PARTIAL_WF,
+         "affected_jobs": ["evals", "ci-speedup-evals"],
+         "runner_min_saving": 429.8, "sizing_basis": "modeled"}
+    doc = _partial_coverage_doc(f)
+    _reground_runner_minute_savings(doc["findings"], doc["runner_minute_spine"])
+    assert f["runner_min_saving"] <= 50.0
+    assert _bounds_tag(doc, tmp_path) == "PASS"
+
+
+@pytest.mark.parametrize("pattern", sorted(_SERIAL_GATE_PATTERNS))
+def test_serial_gate_unsized_when_no_affected_job_is_measured(pattern):
+    """A render-ready spine with no row for any affected job leaves no measured
+    basis: OPT14/OPT15 render not sized rather than keep the modeled figure."""
+    from collect_runs import _reground_runner_minute_savings
+    f = {"pattern": pattern, "workflow_file": _PARTIAL_WF,
+         "affected_jobs": ["evals"], "runner_min_saving": 429.8}
+    _reground_runner_minute_savings([f], _door_spine({"other": 50.0}, wf=_PARTIAL_WF))
+    assert f["runner_min_saving"] is None
+    assert f["runner_min_basis"] == "unmeasured_no_spine_match"
+    assert "runner-minutes not sized" in f["size_note"]
+
+
+def test_opt14_within_measured_compute_is_unchanged():
+    from collect_runs import _reground_runner_minute_savings
+    f = {"pattern": "OPT14", "workflow_file": _PARTIAL_WF, "affected_jobs": ["evals"],
+         "runner_min_saving": 100.0}
+    _reground_runner_minute_savings([f], _door_spine({"evals": 200.6}, wf=_PARTIAL_WF))
+    assert f["runner_min_saving"] == 100.0
+    assert f["runner_min_basis"] == "measured_spine_billable"
+    assert "size_note" not in f
+
+
+def test_opt14_matrix_legs_sum_into_the_clamp(tmp_path):
+    from collect_runs import _reground_runner_minute_savings
+    f = {"pattern": "OPT14", "workflow_file": _PARTIAL_WF,
+         "affected_jobs": ["evals (a)", "evals (b)"], "runner_min_saving": 429.8}
+    doc = {"findings": [f], "runner_minute_spine":
+           _door_spine({"evals (a)": 100.0, "evals (b)": 100.6}, wf=_PARTIAL_WF)}
+    _reground_runner_minute_savings(doc["findings"], doc["runner_minute_spine"])
+    assert f["runner_min_saving"] == 200.6
+    assert _bounds_tag(doc, tmp_path) == "PASS"
+
+
+def test_opt15_partial_coverage_clamped_and_passes_verifier(tmp_path):
+    """Issue #349 shape for OPT15: two affected jobs, one measured."""
+    from collect_runs import _reground_runner_minute_savings
+    f = {"pattern": "OPT15", "workflow_file": _PARTIAL_WF,
+         "affected_jobs": ["build", "build-docs"]}
+    _size_finding(f, {}, monthly_volume=573)
+    assert f["runner_min_saving"] > 200.6
+    doc = {"findings": [f],
+           "runner_minute_spine": _door_spine({"build": 200.6}, wf=_PARTIAL_WF)}
+    assert _bounds_tag(doc, tmp_path) == "FAIL"
+    _reground_runner_minute_savings(doc["findings"], doc["runner_minute_spine"])
+    assert f["runner_min_saving"] == 200.6
+    assert f["runner_min_basis"] == "measured_spine_clamped"
+    assert "(1/2 affected jobs measured)" in f["size_note"]
+    assert _bounds_tag(doc, tmp_path) == "PASS"
+
+
 # --- issue #52: exact job identity — matrix legs of one job counted ONCE ------
 # mastodon round-5: build-push-pr.yml's OPT73 named its cluster as the two matrix
 # legs of ONE reusable-workflow job (base `build-image / build-image`), and the
@@ -2366,19 +2505,35 @@ def test_cap_resolves_a_name_override_to_its_own_rows():
     assert f["runner_min_basis"] == "measured_spine_clamped"
 
 
-def test_cap_needs_every_affected_job_measured():
-    # Three affected jobs, only one found in the cost data: the measured sum is
-    # a floor, not a ceiling, so the 120 min/mo estimate stands uncapped.
+def test_serial_gate_clamp_resolves_name_override_before_foreign_fallback():
+    """The partial clamp binds the affected job's display name in its workflow."""
+    from collect_runs import _reground_runner_minute_savings
+
+    f = {"pattern": "OPT14", "workflow_file": _ALIAS_A,
+         "affected_jobs": ["lint"], "runner_min_saving": 20000.0,
+         "sizing_basis": "modeled"}
+    _reground_runner_minute_savings([f], _alias_spine(), job_graph=_ALIAS_GRAPH)
+
+    assert f["runner_min_saving"] == 13381.6
+    assert f["runner_min_basis"] == "measured_spine_clamped"
+
+
+def test_cap_bounds_partial_coverage_at_the_measured_subset(tmp_path):
+    # Three affected jobs, only one found in the cost data. The verifier bounds
+    # the credit by the resolved subset, so the 120 min/mo estimate is capped at
+    # that job's 50 min/mo and the partial coverage is disclosed.
     from collect_runs import _reground_runner_minute_savings
     spine = {"render_ready": True, "rows": [
         {"workflow_file": _ALIAS_A, "job_name": "a", "billable_equiv_min_per_month": 50.0}]}
     graph = {_ALIAS_A: {"a": {}, "b": {}, "c": {"name": "${{ matrix.x }}"}}}
     g = {"pattern": "OPT16", "workflow_file": _ALIAS_A, "affected_jobs": ["a", "b", "c"],
          "runner_min_saving": 120.0, "sizing_basis": "modeled"}
+    doc = {"findings": [g], "runner_minute_spine": spine, "workflow_job_graph": graph}
     _reground_runner_minute_savings([g], spine, job_graph=graph)
-    assert g["runner_min_saving"] == 120.0
-    assert g["runner_min_basis"] == "not_spine_derivable"
-    assert "size_note" not in g
+    assert g["runner_min_saving"] == 50.0
+    assert g["runner_min_basis"] == "measured_spine_clamped"
+    assert "(1/3 affected jobs measured)" in g["size_note"]
+    assert _bounds_tag(doc, tmp_path) == "PASS"
 
 
 def test_cap_skips_a_figure_the_verifier_rederives():
