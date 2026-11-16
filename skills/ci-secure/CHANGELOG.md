@@ -11,6 +11,19 @@ entries are dated (UTC). Format loosely follows
 
 ## [Unreleased]
 
+### Fixed
+
+- **2026-11-16** (#33) — P14.25's `packageManager` pin is now read from the
+  installed package's own directory: the step's `working-directory:`, the
+  job's or workflow's `defaults.run.working-directory`, and any static `cd`
+  above the install in the same `run:` scalar are resolved, and the repo
+  root remains the fallback when the directory is unknowable (an expression,
+  an unreadable `cd`) or the nested package carries no pin. The per-manager
+  condition note names the nested directory when the pin comes from one, and
+  the build-allowlist suppression now asks whether THIS install's pin is
+  pnpm >= 10: a root pnpm-10 pin no longer covers a nested package pinned
+  at 9, and a nested pnpm-10 package is covered even when the root pins 9.
+
 ### Changed
 
 - **2026-11-15** (#354) — P14.24 now follows command substitutions in shell
