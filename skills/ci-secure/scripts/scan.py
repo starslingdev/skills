@@ -3098,7 +3098,9 @@ def _segments_before_install(
     carry its directory change: `cd apps/web && pnpm install`. The candidate's
     install is the line's FIRST unprotected-install segment (the same
     predicate `_is_unprotected_install` applies); segments before it ran
-    before it, segments after it did not.
+    before it, segments after it did not. Lines with no install are split
+    into their commands for the same reason: a `cd` after an `&&` on such a
+    line still moves the install's directory.
     """
     lines = text.splitlines()
     shell_lines = _run_scalar_line_numbers(text)
@@ -3111,7 +3113,12 @@ def _segments_before_install(
         if line_no not in shell_lines:
             continue
         if not _is_unprotected_install(cmd):
-            out.append((line_no, cmd))
+            # Split here too, not only on lines that carry an install:
+            # `echo preparing && cd apps/web` is one LINE whose directory
+            # change lives in a later command, and keeping the line whole hid
+            # that `cd` from the install's directory reader.
+            out.extend(
+                (line_no, seg) for seg in _install_command_segments(cmd))
             continue
         counted = False
         for seg in _install_command_segments(cmd):
@@ -3149,21 +3156,31 @@ def _install_pin_directory(
     the caller falls back to the repo root, the historical reading, which is
     right for the single-package repos the check was written against.
     """
-    base = _default_working_directory(doc, job)
-    if base.startswith(_OPAQUE_DIR) or os.path.isabs(base):
-        return None
     install_line = candidates[ordinal][0]
-    step = next(
+    # A step mark's end_line is the parser's node end — it can spill one line
+    # into the NEXT step, so a single-line step's range also "contains" its
+    # successor's first line. The install belongs to the matching step whose
+    # run scalar starts latest.
+    step = max(
         (m for m in (marks or [])
          if m.job == job_name and m.run_line is not None
          and m.start_line <= install_line <= m.end_line),
-        None,
+        key=lambda m: m.run_line,
+        default=None,
     )
     if step is not None and step.working_directory:
+        # The step's own `working-directory:` wins GitHub's precedence over
+        # the job/workflow default, so it also wins the KNOWABILITY check:
+        # an unknowable default (an expression, an absolute path) says
+        # nothing about a step that names its own directory.
         if _EXPRESSION_TOKEN_RE.search(step.working_directory):
             return None
         base = _resolve_path(".", step.working_directory)
         if os.path.isabs(base):
+            return None
+    else:
+        base = _default_working_directory(doc, job)
+        if base.startswith(_OPAQUE_DIR) or os.path.isabs(base):
             return None
     if step is not None:
         for cmd_line, cmd in _segments_before_install(
@@ -3212,7 +3229,13 @@ def _package_manager_pin_at(
     if rel_dir and rel_dir != ".":
         root_res = root.resolve()
         candidate = (root_res / rel_dir).resolve()
-        if candidate != root_res and root_res in candidate.parents:
+        # Contain the MANIFEST, not just its directory: a package.json that
+        # is itself a symlink out of the checkout would otherwise be read
+        # through, feeding the note (and the suppression gate) a file the
+        # repo does not carry — the symlink class of issue #37.
+        manifest = (candidate / "package.json").resolve()
+        if (candidate != root_res and root_res in candidate.parents
+                and manifest != root_res and root_res in manifest.parents):
             pin = _package_manager_pin(candidate)
             if pin is not None:
                 return pin, rel_dir
@@ -3299,7 +3322,7 @@ def _allowlist_writes(
     text: str, job_range: tuple[int, int] | None
 ) -> list[tuple[int, bool, str]]:
     """Every EXECUTED write to the build allowlist in this job, in order:
-    ``(line_no, disables, verbatim line)``.
+    ``(line_no, disables, verbatim line, matched segment)``.
 
     This is the one thing that suppresses a P14.25 finding OUTRIGHT, so the
     line has to be an executed mutation of the package manager's build
@@ -3364,15 +3387,117 @@ def _allowlist_writes(
                     "a mitigation: %s", idx, raw.strip(),
                 )
                 continue
-            # A write that is not a disable re-opens the allowlist.
+            # A write that is not a disable re-opens the allowlist. The
+            # matched SEGMENT travels with the row: the caller resolves the
+            # write's target file from it (the verbatim line can carry other
+            # config-looking tokens in inert text around the real write).
             writes.append(
-                (idx, bool(_ALLOWLIST_DISABLE_RE.search(seg)), raw.strip())
+                (idx, bool(_ALLOWLIST_DISABLE_RE.search(seg)), raw.strip(),
+                 seg)
             )
     return writes
 
 
+def _allowlist_write_rel_target(
+    seg: str,
+    line_no: int,
+    doc: dict,
+    job: Any,
+    job_name: str,
+    marks: list[Any] | None,
+) -> str | None:
+    """The repo-relative config path an allowlist write lands on, or None.
+
+    `yq … -i pnpm-workspace.yaml` writes the file IN THE STEP'S working
+    directory — the same command protects the root config in one job and a
+    nested package's own workspace file in another, so the target cannot be
+    matched to an install without placing it. `pnpm config set` writes the
+    project's `.npmrc`. None when the directory is unknowable (an
+    expression, an absolute path) — the caller then treats the write as
+    covering nothing outside the root.
+    """
+    if _ALLOWLIST_WRITE_RES[2].search(seg):
+        raw_target = ".npmrc"
+    else:
+        m = re.search(_ALLOWLIST_TARGET, seg)
+        if m is None:
+            return None
+        raw_target = m.group(0)
+    step = max(
+        (mk for mk in (marks or [])
+         if mk.job == job_name and mk.run_line is not None
+         and mk.start_line <= line_no <= mk.end_line),
+        key=lambda mk: mk.run_line,
+        default=None,
+    )
+    if step is not None and step.working_directory:
+        if _EXPRESSION_TOKEN_RE.search(step.working_directory):
+            return None
+        base = _resolve_path(".", step.working_directory)
+        if os.path.isabs(base):
+            return None
+    else:
+        base = _default_working_directory(doc, job)
+        if base.startswith(_OPAQUE_DIR) or os.path.isabs(base):
+            return None
+    rel = _resolve_path(base, raw_target)
+    if os.path.isabs(rel) or rel == ".." or rel.startswith("../"):
+        return None
+    return rel
+
+
+def _install_workspace_config_dir(root: Path | None, install_rel: str) -> str:
+    """The directory whose build-allowlist file a pnpm install in
+    `install_rel` actually reads: the nearest ancestor-or-self carrying a
+    pnpm-workspace file (pnpm honors only the workspace root's allowlist),
+    else the install's own directory — a package outside any workspace
+    answers to its own config."""
+    if root is None:
+        return install_rel
+    root_res = root.resolve()
+    d = install_rel
+    while True:
+        cand = root_res if d == "." else (root_res / d).resolve()
+        if (cand == root_res or root_res in cand.parents) and any(
+                (cand / n).is_file()
+                for n in ("pnpm-workspace.yaml", "pnpm-workspace.yml")):
+            return d
+        if d == ".":
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent or "."
+    return install_rel
+
+
+def _allowlist_write_covers(
+    target_rel: str | None, install_rel: str, config_dir: str
+) -> bool:
+    """Does a write to `target_rel` change the allowlist an install in
+    `install_rel` resolves? A write aimed at the ROOT's pnpm-workspace.yaml
+    says nothing about a nested package that is its own workspace — the
+    root write never touches the config that install reads. A write INTO
+    the install's own directory counts even before the file exists:
+    creating `apps/web/pnpm-workspace.yaml` makes the install its own
+    workspace root with exactly the allowlist the write set.
+    """
+    if target_rel is None:
+        return False
+    parent, _, name = target_rel.rpartition("/")
+    parent = parent or "."
+    if name in ("pnpm-workspace.yaml", "pnpm-workspace.yml", ".npmrc"):
+        return parent in (install_rel, config_dir)
+    if name == "package.json":
+        # pnpm reads the pnpm.onlyBuiltDependencies field from the workspace
+        # root's manifest; editing a member package's own package.json
+        # changes nothing the install resolves.
+        return parent == config_dir
+    return False
+
+
 def _builds_disabled_at(
-    writes: list[tuple[int, bool, str]], install_line: int,
+    writes: list[tuple[int, bool, str, ...]], install_line: int,
     concurrent: Callable[[int, int], bool] | None = None,
 ) -> str | None:
     """The verbatim line that leaves builds disabled at `install_line`, if the
@@ -3381,7 +3506,7 @@ def _builds_disabled_at(
     A write in a step that may run at the same time as the install (see
     `_StepTiming`) is not known to land before it: it never counts as the
     protecting write, and if it re-enables builds the install is exposed."""
-    def _racing(w: tuple[int, bool, str]) -> bool:
+    def _racing(w: tuple[int, bool, str, ...]) -> bool:
         return concurrent is not None and concurrent(w[0], install_line)
     if any(_racing(w) and not w[1] for w in writes):
         return None
@@ -3626,6 +3751,27 @@ def _correlation_install_scripts_in_privileged_job(
             # build allowlist says nothing about an `npm ci` in the same job,
             # and it does not exist below pnpm 10, so a root pin of pnpm 10
             # cannot lend its cover to a nested package pinned at 9 (#33).
+            # A disable write covers an install only if it lands on the
+            # config file THAT install reads: `yq … -i pnpm-workspace.yaml`
+            # at the root mitigates a root install, but a nested package
+            # that is its own workspace resolves its own allowlist, and the
+            # root write never touches it.
+            placed_writes = [
+                (ln, dis, verb,
+                 _allowlist_write_rel_target(
+                     seg, ln, doc, job, job_name, marks))
+                for ln, dis, verb, seg in allowlist_writes
+            ]
+
+            def _covering_writes(install_rel: str | None) -> list:
+                if install_rel is None or install_rel == ".":
+                    # A root install reads the root config — the pre-#33
+                    # semantics, where every in-job write counts.
+                    return placed_writes
+                cfg_dir = _install_workspace_config_dir(root, install_rel)
+                return [w for w in placed_writes
+                        if _allowlist_write_covers(w[3], install_rel, cfg_dir)]
+
             exposed = next(
                 ((i, c) for i, c in enumerate(candidates)
                  if _install_manager(c[2]) != "pnpm"
@@ -3635,7 +3781,10 @@ def _correlation_install_scripts_in_privileged_job(
                      and p[0][1] >= 10
                  )
                  or _builds_disabled_at(
-                     allowlist_writes, c[0],
+                     _covering_writes(_install_pin_directory(
+                         text, doc, job, job_name, ranges.get(job_name),
+                         candidates, i, marks)),
+                     c[0],
                      lambda a, b: _lines_concurrent(spans, a, b)) is None),
                 None,
             )
