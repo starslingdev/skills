@@ -13,6 +13,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import textwrap
 from pathlib import Path
 from unittest import mock
@@ -1921,6 +1922,150 @@ def test_p1425_a_nested_pnpm10_pin_carries_the_mechanism(tmp_path):
                   yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
                   pnpm install
     """) == []
+
+
+def test_p1425_a_step_override_applies_when_the_job_default_is_unknowable(
+    tmp_path,
+):
+    """Greptile review on #366: the knowability check on the job/workflow
+    default ran BEFORE the step's own `working-directory:` was read, so an
+    absolute job default (`/tmp`) discarded a step directory that is known
+    exactly — and GitHub's precedence gives the step's directory the win
+    anyway."""
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            defaults:
+              run:
+                working-directory: /tmp
+            steps:
+              - run: pnpm install
+                working-directory: apps/web
+              - run: pnpm publish
+                env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "pnpm@9.15.0" in note
+    assert "apps/web" in note
+
+
+def test_p1425_a_cd_after_an_unrelated_command_still_places_the_install(
+    tmp_path,
+):
+    """Greptile review on #366: `echo preparing && cd apps/web` carries no
+    install, so the line was kept whole and the `cd` behind the `&&` was
+    never seen — the pin fell back to the root's."""
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: |
+                  echo preparing && cd apps/web
+                  pnpm install
+                env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "pnpm@9.15.0" in note
+    assert "apps/web" in note
+
+
+def test_p1425_a_root_config_write_covers_no_separate_nested_workspace(
+    tmp_path,
+):
+    """Greptile review on #366: the disable write was matched by ORDER
+    alone, so `yq … -i pnpm-workspace.yaml` at the ROOT suppressed a finding
+    for an install in `apps/web` — a separate workspace whose own allowlist
+    the root write never touches."""
+    _pkg(tmp_path, "pnpm@9.15.0", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.34.5")
+    (tmp_path / "apps/web/pnpm-workspace.yaml").write_text(
+        "allowBuilds:\n  core-js: true\n")
+    hits = _install_hits(tmp_path, """        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+              - run: pnpm install
+                working-directory: apps/web
+    """)
+    assert len(hits) == 1
+    assert "apps/web" in (hits[0].derived_note or "")
+
+
+def test_p1425_a_write_to_the_installs_own_config_covers_it(tmp_path):
+    """The counter-guard for the rule above: the same disable write aimed at
+    the nested workspace's OWN pnpm-workspace.yaml is a real mitigation for
+    that install."""
+    _pkg(tmp_path, "pnpm@9.15.0", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.34.5")
+    (tmp_path / "apps/web/pnpm-workspace.yaml").write_text(
+        "allowBuilds:\n  core-js: true\n")
+    assert _install_hits(tmp_path, """        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: yq '.allowBuilds[]=false' -i apps/web/pnpm-workspace.yaml
+              - run: pnpm install
+                working-directory: apps/web
+    """) == []
+
+
+def test_p1425_a_nested_manifest_symlinked_out_of_the_checkout_is_not_read(
+    tmp_path,
+):
+    """Greptile review on #366: containment was checked on the nested
+    DIRECTORY, but `_package_manager_pin` follows a package.json that is
+    itself a symlink — a manifest escaping the checkout fed the note (and
+    the suppression gate) a file the repo does not carry. The reading falls
+    back to the root pin instead."""
+    _pkg(tmp_path, "pnpm@10.25.0")
+    outside = Path(tempfile.mkdtemp())
+    (outside / "package.json").write_text(
+        '{"name": "x", "packageManager": "pnpm@9.15.0"}\n')
+    d = tmp_path / "apps/web"
+    d.mkdir(parents=True)
+    (d / "package.json").symlink_to(outside / "package.json")
+    hits = _install_hits(tmp_path, """        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            defaults:
+              run:
+                working-directory: apps/web
+            steps:
+              - run: pnpm install
+                env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    """)
+    assert len(hits) == 1
+    assert "this repo pins `pnpm@10.25.0`" in (hits[0].derived_note or "")
 
 
 @pytest.mark.parametrize("command", [
