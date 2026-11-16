@@ -23,6 +23,16 @@ entries are dated (UTC). Format loosely follows
   the build-allowlist suppression now asks whether THIS install's pin is
   pnpm >= 10: a root pnpm-10 pin no longer covers a nested package pinned
   at 9, and a nested pnpm-10 package is covered even when the root pins 9.
+  Review on the fix hardened four edges it exposed: a step's own
+  `working-directory:` now wins the knowability check even when the job
+  default is unresolvable (an absolute path, an expression); a `cd` sharing
+  a line with unrelated commands (`echo ok && cd apps/web`) still moves the
+  install's directory; the allowlist suppression also matches the disable
+  write's TARGET file to the config the install reads, so mutating the
+  root's `pnpm-workspace.yaml` no longer silences an install in a nested
+  package that is its own workspace; and a nested `package.json` that is a
+  symlink out of the checkout is never read through — the reading falls
+  back to the root pin.
 
 ### Changed
 
