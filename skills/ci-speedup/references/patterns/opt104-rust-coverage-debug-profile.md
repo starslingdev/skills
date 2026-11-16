@@ -21,11 +21,15 @@ unchanged.
 
 **Detection heuristic**: route from a measured critical-path job, never a flat
 repository grep. The job's dominant measured step must be the workflow step that
-directly runs `cargo llvm-cov` or `cargo tarpaulin`. The repository `Cargo.toml`
+directly runs `cargo llvm-cov` or `cargo tarpaulin` (including a pinned Cargo
+toolchain such as `cargo +nightly llvm-cov`). The repository-root `Cargo.toml`
 must leave the effective test profile at its debug/unoptimized defaults. Stay
 quiet when `[profile.test]` (including values inherited from `[profile.dev]`)
-disables debug information or enables optimization, and fail closed when the
-manifest cannot be read.
+disables debug information or enables optimization. V1 fails closed when the
+manifest cannot be read, the step selects another working directory or manifest,
+the command selects `--release` / `--profile`, a `CARGO_PROFILE_*` environment
+override applies, or package-specific profile overrides make the loaded
+artifact's effective settings ambiguous.
 
 **Fix recipe**: identify the library or plugin artifact loaded by the coverage
 tests and use a package-scoped Cargo profile override (or equivalent harness

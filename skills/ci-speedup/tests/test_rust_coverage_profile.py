@@ -8,6 +8,8 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 
 SKILL = Path(__file__).resolve().parents[1]
 SCRIPTS = SKILL / "scripts"
@@ -48,6 +50,8 @@ jobs:
 
 class _Client:
     gave_up = False
+    workflow_text = _WORKFLOW_TEXT
+    coverage_step_name = "Run coverage"
 
     def __init__(self) -> None:
         self.queries = 0
@@ -95,7 +99,7 @@ class _Client:
                 "steps": [
                     {"name": "Checkout", "conclusion": "success",
                      "started_at": _iso(0), "completed_at": _iso(20)},
-                    {"name": "Run coverage", "conclusion": "success",
+                    {"name": self.coverage_step_name, "conclusion": "success",
                      "started_at": _iso(20), "completed_at": _iso(620)},
                 ],
             }]}
@@ -111,7 +115,7 @@ class _Client:
         if endpoint == "repos/o/r/branches/main/protection/required_status_checks":
             return {"contexts": ["Rust coverage"]}
         if endpoint == f"repos/o/r/contents/{_WORKFLOW}":
-            return {"content": base64.b64encode(_WORKFLOW_TEXT.encode()).decode()}
+            return {"content": base64.b64encode(self.workflow_text.encode()).decode()}
         return None
 
     def text(self, endpoint: str, allow_missing: bool = False):
@@ -119,17 +123,23 @@ class _Client:
         return ""
 
 
-def _scan_doc(tmp_path: Path, cargo: str = "[package]\nname = 'demo'\nversion = '0.1.0'\n") -> dict:
+_DEFAULT_CARGO = "[package]\nname = 'demo'\nversion = '0.1.0'\n"
+
+
+def _scan_doc(tmp_path: Path, cargo: str | None = _DEFAULT_CARGO,
+              workflow_text: str = _WORKFLOW_TEXT) -> dict:
     workflow = tmp_path / _WORKFLOW
     workflow.parent.mkdir(parents=True)
-    workflow.write_text(_WORKFLOW_TEXT, encoding="utf-8")
-    (tmp_path / "Cargo.toml").write_text(cargo, encoding="utf-8")
+    workflow.write_text(workflow_text, encoding="utf-8")
+    if cargo is not None:
+        (tmp_path / "Cargo.toml").write_text(cargo, encoding="utf-8")
     return scan_mod.scan(tmp_path, SKILL / "references" / "patterns")
 
 
-def _collect(monkeypatch, tmp_path: Path, cargo: str | None = None) -> tuple[dict, str]:
-    monkeypatch.setattr(cr, "GhClient", _Client)
-    doc = _scan_doc(tmp_path, cargo or "[package]\nname = 'demo'\nversion = '0.1.0'\n")
+def _collect(monkeypatch, tmp_path: Path, cargo: str | None = _DEFAULT_CARGO,
+             client_type: type[_Client] = _Client) -> tuple[dict, str]:
+    monkeypatch.setattr(cr, "GhClient", client_type)
+    doc = _scan_doc(tmp_path, cargo, client_type.workflow_text)
     doc["repo"] = "o/r"
     doc["skill_commit_sha"] = "installed:unversioned"
     out = cr.collect(doc, "o/r", max_runs=2, shallow_runs=2)
@@ -160,15 +170,90 @@ def test_measured_rust_coverage_pole_reports_unoptimized_debug_profile(
     assert "covered-line count" in report
 
 
-def test_explicit_rust_test_profile_stays_quiet(monkeypatch, tmp_path: Path) -> None:
-    cargo = """\
+@pytest.mark.parametrize("profile", [
+    "[profile.test]\ndebug = 0\n",
+    "[profile.test]\nopt-level = 1\n",
+    "[profile.dev]\ndebug = false\n",
+    "[profile.dev]\nopt-level = 's'\n",
+])
+def test_explicit_rust_test_profile_stays_quiet(
+        monkeypatch, tmp_path: Path, profile: str) -> None:
+    cargo = f"""\
 [package]
 name = "demo"
 version = "0.1.0"
 
-[profile.test]
+{profile}
+"""
+    doc, _report = _collect(monkeypatch, tmp_path, cargo)
+    assert not any(f.get("pattern") == "OPT104" for f in doc["findings"])
+
+
+def test_missing_root_manifest_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    doc, _report = _collect(monkeypatch, tmp_path, cargo=None)
+    assert not any(f.get("pattern") == "OPT104" for f in doc["findings"])
+
+
+def test_package_profile_override_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    cargo = _DEFAULT_CARGO + """\
+
+[profile.test.package.demo]
 debug = 0
 opt-level = 1
 """
     doc, _report = _collect(monkeypatch, tmp_path, cargo)
     assert not any(f.get("pattern") == "OPT104" for f in doc["findings"])
+
+
+class _UnnamedNightlyClient(_Client):
+    workflow_text = _WORKFLOW_TEXT.replace(
+        "      - name: Run coverage\n        run: cargo llvm-cov --workspace --lcov",
+        "      - run: cargo +nightly llvm-cov --workspace --lcov")
+    coverage_step_name = "Run cargo +nightly llvm-cov --workspace --lcov"
+
+
+def test_unnamed_nightly_coverage_step_uses_its_implicit_name(
+        monkeypatch, tmp_path: Path) -> None:
+    doc, _report = _collect(monkeypatch, tmp_path, client_type=_UnnamedNightlyClient)
+    assert [f["pattern"] for f in doc["findings"] if f.get("pattern") == "OPT104"] == [
+        "OPT104"]
+
+
+class _NestedManifestClient(_Client):
+    workflow_text = _WORKFLOW_TEXT.replace(
+        "        run: cargo llvm-cov --workspace --lcov",
+        "        working-directory: rust\n        run: cargo llvm-cov --workspace --lcov")
+
+
+def test_nested_manifest_command_fails_closed(monkeypatch, tmp_path: Path) -> None:
+    doc, _report = _collect(monkeypatch, tmp_path, cargo=_DEFAULT_CARGO,
+                            client_type=_NestedManifestClient)
+    assert not any(f.get("pattern") == "OPT104" for f in doc["findings"])
+
+
+class _ReleaseClient(_Client):
+    workflow_text = _WORKFLOW_TEXT.replace(
+        "cargo llvm-cov --workspace --lcov",
+        "cargo llvm-cov --release --workspace --lcov")
+
+
+class _ProfileEnvClient(_Client):
+    workflow_text = _WORKFLOW_TEXT.replace(
+        "    runs-on: ubuntu-latest",
+        "    runs-on: ubuntu-latest\n    env:\n      CARGO_PROFILE_TEST_DEBUG: 0")
+
+
+@pytest.mark.parametrize("client_type", [_ReleaseClient, _ProfileEnvClient])
+def test_nondefault_profile_command_stays_quiet(
+        monkeypatch, tmp_path: Path, client_type: type[_Client]) -> None:
+    doc, _report = _collect(monkeypatch, tmp_path, client_type=client_type)
+    assert not any(f.get("pattern") == "OPT104" for f in doc["findings"])
+
+
+def test_python_floor_profile_parser_keeps_the_same_quiet_facts() -> None:
+    assert scan_mod._fallback_cargo_profiles(
+        "[profile.dev]\ndebug = false\nopt-level = 's'\n") == {
+            "dev": {"debug": False, "opt-level": "s"}, "test": {}}
+    assert scan_mod._fallback_cargo_profiles(
+        "[profile.test.package.demo]\ndebug = 0\n") == {
+            "dev": {}, "test": {}, "package_override": True}

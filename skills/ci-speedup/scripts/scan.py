@@ -36,7 +36,6 @@ import shlex
 import subprocess
 import sys
 import time
-import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1079,7 +1078,63 @@ def _read_repo_file(root: Path, name: str) -> str:
 
 
 _RUST_COVERAGE_COMMAND_RE = re.compile(
-    r"(?:^|[\s;&|])cargo\s+(?:llvm-cov|tarpaulin)\b", re.IGNORECASE)
+    r"(?:^|[\s;&|])cargo\s+(?:\+[^\s;&|]+\s+)?(?:llvm-cov|tarpaulin)\b",
+    re.IGNORECASE)
+
+
+def _fallback_cargo_profiles(text: str) -> dict[str, Any] | None:
+    """Read the tiny profile subset on Python 3.9/3.10; ambiguity fails closed."""
+    profiles: dict[str, Any] = {"dev": {}, "test": {}}
+    section: str | None = None
+    for raw_line in text.splitlines():
+        # Profile scalar values used here cannot contain a meaningful `#`.
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        header = re.fullmatch(r"\[\s*([^]]+)\s*\]", line)
+        if header:
+            name = header.group(1).strip()
+            if name in {"profile.dev", "profile.test"}:
+                section = name.rsplit(".", 1)[-1]
+            elif name.startswith(("profile.dev.", "profile.test.")):
+                profiles.setdefault("package_override", True)
+                section = None
+            else:
+                section = None
+            continue
+        if section is None:
+            continue
+        assignment = re.fullmatch(r"([\w-]+)\s*=\s*(.+)", line)
+        if assignment is None:
+            return None
+        key, raw_value = assignment.groups()
+        if key not in {"debug", "opt-level"}:
+            continue
+        value = raw_value.strip()
+        if value in {"false", "true"}:
+            parsed: Any = value == "true"
+        elif re.fullmatch(r"\d+", value):
+            parsed = int(value)
+        elif re.fullmatch(r"(['\"])(?:0|1|2|3|s|z|none|false)\1", value,
+                          re.IGNORECASE):
+            parsed = value[1:-1]
+        else:
+            return None
+        profiles[section][key] = parsed
+    return profiles
+
+
+def _cargo_profiles(text: str) -> dict[str, Any] | None:
+    try:
+        import tomllib
+    except ImportError:  # Python 3.9/3.10: keep the shipped scanner dependency-free.
+        return _fallback_cargo_profiles(text)
+    try:
+        cargo = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, TypeError):
+        return None
+    profiles = cargo.get("profile") if isinstance(cargo, dict) else None
+    return profiles if isinstance(profiles, dict) else {}
 
 
 def _read_rust_coverage_profile(
@@ -1094,12 +1149,42 @@ def _read_rust_coverage_profile(
         for job_key, job in workflow_jobs.items():
             if not isinstance(job, dict):
                 continue
-            coverage_steps = [
-                str(step.get("name") or "").strip()
-                for step in _steps(job)
-                if isinstance(step.get("run"), str)
-                and _RUST_COVERAGE_COMMAND_RE.search(str(step["run"]))
-            ]
+            workflow_defaults = doc.get("defaults") if isinstance(doc.get("defaults"), dict) else {}
+            workflow_run_defaults = (workflow_defaults.get("run")
+                                     if isinstance(workflow_defaults.get("run"), dict) else {})
+            job_defaults = job.get("defaults") if isinstance(job.get("defaults"), dict) else {}
+            job_run_defaults = (job_defaults.get("run")
+                                if isinstance(job_defaults.get("run"), dict) else {})
+            workflow_env = doc.get("env") if isinstance(doc.get("env"), dict) else {}
+            job_env = job.get("env") if isinstance(job.get("env"), dict) else {}
+            coverage_steps = []
+            for step in _steps(job):
+                command = step.get("run")
+                if not isinstance(command, str) or not _RUST_COVERAGE_COMMAND_RE.search(command):
+                    continue
+                step_env = step.get("env") if isinstance(step.get("env"), dict) else {}
+                profile_env = {
+                    str(key).upper() for env in (workflow_env, job_env, step_env)
+                    for key in env if str(key).upper().startswith("CARGO_PROFILE_")}
+                # V1 reads only the repository-root manifest. A literal or dynamic
+                # directory/manifest hop is unknown, never assumed to mean root.
+                if (step.get("working-directory")
+                        or job_run_defaults.get("working-directory")
+                        or workflow_run_defaults.get("working-directory")
+                        or re.search(r"(?:^|\s)--manifest-path(?:=|\s)", command)
+                        or re.search(r"(?:^|\s)(?:--release|--profile(?:=|\s))", command)
+                        or re.search(r"(?:^|[\n;&|])\s*cd\s+", command)
+                        or "${{" in command
+                        or profile_env
+                        or re.search(r"\bCARGO_PROFILE_[A-Z0-9_]+\s*=", command)):
+                    continue
+                name = str(step.get("name") or "").strip()
+                if not name:
+                    first_line = next((line.strip() for line in command.splitlines()
+                                       if line.strip()), "")
+                    name = f"Run {first_line}" if first_line else ""
+                if name:
+                    coverage_steps.append(name)
             if coverage_steps:
                 jobs.setdefault(rel, {})[str(job_key)] = {
                     "job_name": str(job.get("name") or job_key),
@@ -1108,15 +1193,27 @@ def _read_rust_coverage_profile(
     if not jobs:
         return None
 
-    cargo_text = _read_repo_file(root, "Cargo.toml")
-    try:
-        cargo = tomllib.loads(cargo_text)
-    except (tomllib.TOMLDecodeError, TypeError):
+    cargo_path = root / "Cargo.toml"
+    if not _inside_scan_root(cargo_path) or not cargo_path.is_file():
         return {"status": "unreadable", "eligible": False, "jobs": jobs}
-    profiles = cargo.get("profile") if isinstance(cargo, dict) else None
-    profiles = profiles if isinstance(profiles, dict) else {}
+    cargo_text = _read_repo_file(root, "Cargo.toml")
+    if not cargo_text.strip():
+        return {"status": "unreadable", "eligible": False, "jobs": jobs}
+    profiles = _cargo_profiles(cargo_text)
+    if profiles is None:
+        return {"status": "unreadable", "eligible": False, "jobs": jobs}
     dev = profiles.get("dev") if isinstance(profiles.get("dev"), dict) else {}
     test = profiles.get("test") if isinstance(profiles.get("test"), dict) else {}
+
+    # Without a measured loaded-package identity, a package override may already
+    # be the requested remedy (or may make the selected artifact debug-heavy).
+    # Either direction is ambiguous, so withhold instead of guessing.
+    package_overrides = bool(
+        profiles.get("package_override")
+        or (isinstance(dev.get("package"), dict) and dev["package"])
+        or (isinstance(test.get("package"), dict) and test["package"]))
+    if package_overrides:
+        return {"status": "package-overrides", "eligible": False, "jobs": jobs}
 
     debug = test.get("debug", dev.get("debug"))
     opt_level = test.get("opt-level", dev.get("opt-level"))
