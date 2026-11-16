@@ -7500,20 +7500,21 @@ def _reground_whole_run_cancel_saving(
 
 
 def _all_runs_excluded(wf: str, jobs: "list[str]", all_index: Any,
-                       completed: float) -> bool:
+                       completed: float, job_graph: Any = None) -> bool:
     """True when the affected jobs measure NO completed-run compute but DO have
     compute across every sampled run: every sampled run of them was timed out,
     cancelled or killed. A distinct state, never "no compute" or a coverage gap."""
     if completed > 0 or all_index is None:
         return False
     a_wf_job, a_job = all_index
-    every, matched, _distinct = _measured_billable_for_jobs(wf, jobs, a_wf_job, a_job)
+    every, matched, _distinct = _measured_billable_for_jobs(
+        wf, jobs, a_wf_job, a_job, job_graph=job_graph)
     return matched > 0 and every > 0
 
 
 def _mark_all_runs_excluded(f: dict[str, Any]) -> None:
     """A saving DERIVED from completed-run compute (OPT45/OPT29), clamped to it
-    (OPT73) or capped at it (a modeled estimate) has no basis when every sampled run
+    (the serial gates / OPT73) or capped at it (a modeled estimate) has no basis when every sampled run
     of its jobs was excluded: it renders unsized and not derivable, with the reason,
     never as a coverage gap and never sized against the excluded minutes."""
     f["runner_min_saving"] = None
@@ -7642,9 +7643,8 @@ def _own_workflow_billable(
     """`(measured, matched, distinct)` over `wf`'s OWN spine rows only, each
     affected job resolved through `_own_workflow_job_identities`. No cross-workflow
     fallback: a namesake in another file is a different job. The not-derivable cap
-    uses this, and only when matched == distinct — a cap LOWERS a credited figure,
-    so an understated sum (a foreign namesake, a subset of the jobs) would cut a
-    correct saving."""
+    uses this whenever at least one affected job resolves; on partial coverage the
+    sum is the resolved subset's compute, the same subset the verifier bounds by."""
     measured = 0.0
     matched = 0
     seen: set[str] = set()
@@ -7667,13 +7667,17 @@ def _measured_billable_for_jobs(
         wf: str, jobs: "list[str]",
         by_wf_job: dict[tuple[str, str], float],
         by_job: dict[str, list[float]],
-        templated: frozenset[str] = frozenset()) -> tuple[float, int, int]:
+        templated: frozenset[str] = frozenset(),
+        job_graph: Any = None) -> tuple[float, int, int]:
     """Sum the measured monthly billable compute of a finding's affected `jobs`
     against the shared index. Returns
     `(measured_min_per_month, matched_jobs, distinct_jobs)` — matched < distinct
     means partial coverage (the sum is an understatement, the safe direction).
-    Prefers the exact (workflow_file, base) row; falls back to the workflow-agnostic
-    `by_job` max for a reusable-workflow caller that lost the callee's file.
+    Prefers an own-workflow row after resolving the YAML key ↔ declared display
+    name through `job_graph`; only then falls back to the workflow-agnostic
+    literal-key `by_job` max for a reusable-workflow caller that lost the callee's
+    file. A graph-derived alias never enters that fallback, so a foreign job with
+    the same display name cannot set the bound.
 
     EXACT JOB IDENTITY (issue #52). The affected jobs are first reduced to their
     DISTINCT (workflow_file, base-job) identities — a base-job being the full job
@@ -7700,9 +7704,14 @@ def _measured_billable_for_jobs(
         base = _whole_run_cancel_base_key(j)
         if not base or base in seen:
             continue
-        seen.add(base)
-        key = (wf, base)
-        if key in by_wf_job:
+        cands = _own_workflow_job_identities(job_graph, wf, j)
+        key = next(((wf, cand) for cand in cands
+                    if (wf, cand) in by_wf_job), None)
+        ident = key[1] if key else base
+        if ident in seen:
+            continue
+        seen.add(ident)
+        if key is not None:
             matched += 1
             measured += by_wf_job[key]
         elif base not in templated:
@@ -7730,7 +7739,7 @@ def _measured_billable_for_jobs(
 # shared, in one place.
 # =============================================================================
 _RM_DOOR_DERIVE = "derive"                  # saving = rate x measured (OPT45 cancel model)
-_RM_DOOR_CLAMP = "clamp"                    # saving = min(modeled, measured) (OPT73 cluster model)
+_RM_DOOR_CLAMP = "clamp"                    # saving = min(modeled, measured) (serial gates / OPT73)
 _RM_DOOR_NOT_DERIVABLE = "not_spine_derivable"  # visible whitelist — retained, stamped, reasoned
 _RM_DOOR_UNCLASSIFIED = "unclassified"      # loud sentinel — a pattern with no declared policy
 
@@ -7739,6 +7748,18 @@ _RM_DOOR_UNCLASSIFIED = "unclassified"      # loud sentinel — a pattern with n
 # detectors (OPT70-OPT75). This table is the VISIBLE, reviewable whitelist the
 # thesis requires: no pattern skips the door silently.
 _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
+    # CLAMP — serial-gate savings are flat per-run setup estimates multiplied by
+    # the workflow's monthly volume.  A finding can name more jobs than the cost
+    # spine measured (for example a schedule-only sibling), while the verifier
+    # still bounds the credit by the resolved subset.  Route both serial-gate
+    # patterns through the same partial-coverage-aware clamp as OPT73 so the
+    # producer and verifier enforce one physical ceiling.
+    "OPT14": (_RM_DOOR_CLAMP,
+              "repeated setup — per-run modeled credit clamped to the affected "
+              "jobs' measured cost-spine billable"),
+    "OPT15": (_RM_DOOR_CLAMP,
+              "cross-workflow repeated build — per-run modeled credit clamped to "
+              "the affected jobs' measured cost-spine billable"),
     # DERIVE — whole-run cancel re-derives hit_rate x the affected jobs' measured
     # billable (implemented by `_reground_whole_run_cancel_saving`, run first).
     "OPT45": (_RM_DOOR_DERIVE,
@@ -7860,7 +7881,8 @@ def _reground_runner_minute_savings(
 
       1. OPT45 whole-run-cancel DERIVES from the spine first (unchanged path).
       2. Every remaining positive-rm finding gets a `runner_min_basis` stamp:
-         - CLAMP patterns (OPT73) whose affected jobs join the spine → saving is
+         - CLAMP patterns (the serial gates and OPT73) whose affected jobs join
+           the spine → saving is
            clamped to their measured billable (`measured_spine_clamped`, or
            `measured_spine_billable` when already within it); no join → UNSIZED at
            the source (`unmeasured_no_spine_match`, saving None — the #38
@@ -7868,11 +7890,11 @@ def _reground_runner_minute_savings(
          - NOT-DERIVABLE patterns → retained, stamped `not_spine_derivable` with the
            whitelist reason recorded in `runner_min_door_note` (visible, never a
            silent bypass) — but a figure the verifier does not re-derive is CAPPED
-           at the affected jobs' measured billable when EVERY affected job resolves
-           to its own workflow's rows and the estimate exceeds it
-           (`measured_spine_clamped`, cap disclosed in `size_note`; see
-           `_cap_at_measured_compute`). Anything less (no join, a partial join, a
-           foreign namesake) → kept, and the guard reports the gap. curl's OPT16
+           at the measured billable of the affected jobs that resolve to their own
+           workflow's rows when the estimate exceeds it (`measured_spine_clamped`,
+           cap and any partial coverage disclosed in `size_note`; see
+           `_cap_at_measured_compute`). No own-workflow join (or only a foreign
+           namesake) → kept, and the guard reports the gap. curl's OPT16
            (a flat ~10 s x 1463 runs = 243.8 min/mo) is NOT a cap case: its job's
            name is templated, so it resolves to no rows and stays a coverage gap.
          - a pattern with NO declared policy → stamped `UNCLASSIFIED_door_policy`
@@ -7946,10 +7968,11 @@ def _reground_runner_minute_savings(
         wf = str(f.get("workflow_file") or "")
         jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j).strip()]
         measured, matched, distinct = (_measured_billable_for_jobs(
-            wf, jobs, by_wf_job, by_job, _templated_job_bases(job_graph, wf))
+            wf, jobs, by_wf_job, by_job, _templated_job_bases(job_graph, wf),
+            job_graph)
                                        if jobs else (0.0, 0, 0))
         if matched > 0 and measured <= 0 and _all_runs_excluded(
-                wf, jobs, all_index, measured):
+                wf, jobs, all_index, measured, job_graph):
             _mark_all_runs_excluded(f)
             continue
         if matched == 0 or measured <= 0:
@@ -8008,10 +8031,16 @@ def _cap_at_measured_compute(
         (`verify_report.check_tier2_neutrality_derived` re-derives OPT57, OPT65,
         OPT77, OPT79 and OPT80 and their inner blocks). Capping those would fail
         the verifier and refuse the report.
-      - WHOLE TRUTH ONLY: the sum must cover EVERY affected job, each resolved in
-        its OWN workflow (`_own_workflow_billable`). A foreign namesake or a subset
-        understates the jobs' compute and would cut a correct saving, so either
-        leaves the estimate as is (the guard reports the gap)."""
+      - OWN ROWS ONLY: each affected job is resolved in its OWN workflow
+        (`_own_workflow_billable`). A foreign namesake is a different job and never
+        sets the cap; a finding with no own-workflow row at all is left as is (the
+        guard reports the gap).
+
+    PARTIAL COVERAGE (#355, issue #349). When only SOME affected jobs resolve, the
+    verifier still bounds the credit by the resolved subset's compute
+    (`check_saving_within_measured_compute`), so the cap uses that same subset and
+    discloses the coverage (`matched/distinct affected jobs measured`), exactly
+    as the CLAMP path does. Leaving the estimate would refuse the report."""
     if index is None:
         return
     if f.get("sizing_basis") == "measured":
@@ -8030,7 +8059,7 @@ def _cap_at_measured_compute(
     figure = ("of every sampled run" if every_run else "of completed job runs")
     # UNROUNDED, exactly as the verifier's twin test: a completed figure that is tiny but
     # positive (one short success among many killed runs) is a real completed bound.
-    if (not every_run and all_index is not None and distinct and matched == distinct
+    if (not every_run and all_index is not None and matched > 0
             and measured <= 0):
         # Every sampled run of these jobs was timed out, cancelled or killed: there
         # is no completed basis, which is NOT "the jobs used no compute" either. Owner
@@ -8040,26 +8069,26 @@ def _cap_at_measured_compute(
         # refuses a sized modeled saving on such a job.)
         every, a_matched, a_distinct = _own_workflow_billable(
             wf, jobs, all_index[0], job_graph)
-        if a_matched == a_distinct and every > 0:
+        if a_matched > 0 and every > 0:
             _mark_all_runs_excluded(f)
             return
-    # Every affected job joined its own rows, so a ZERO sum (or one that rounds to
-    # 0) is a real bound, not a missing one: the jobs measured no billable compute
-    # in the sample, and the saving clamps to 0.0. Leaving the estimate would fail
-    # the guard against that zero bound and refuse the report. "No match" is the
-    # separate, not-bounded path above (matched != distinct).
+    # At least one affected job joined its own rows, so a ZERO sum (or one that
+    # rounds to 0) is a real bound, not a missing one: the resolved jobs measured
+    # no billable compute in the sample, and the saving clamps to 0.0. Leaving the
+    # estimate would fail the guard against that zero bound and refuse the report.
+    # "No match" (matched == 0) is the separate, not-bounded path.
     measured = max(round(measured, 1), 0.0)
-    if (distinct == 0 or matched != distinct
-            or float(saving) <= measured + 1e-9):
+    if matched == 0 or float(saving) <= measured + 1e-9:
         return
     f["runner_min_saving"] = measured
     f["runner_min_basis"] = "measured_spine_clamped"
+    cov = "" if matched == distinct else f" ({matched}/{distinct} affected jobs measured)"
     cap = (f"MEASURED monthly billable compute {figure} ({measured:g} min/mo from the "
-           "cost spine) — a fix cannot save more minutes than the jobs consume"
+           f"cost spine){cov} — a fix cannot save more minutes than the jobs consume"
            ) if measured > 0 else (
            f"MEASURED monthly billable compute {figure}, which rounds to 0 min/mo: the "
            "affected jobs measured no billable compute in the sample to that precision, so "
-           "there is no bill saving")
+           f"there is no bill saving{cov}")
     f["size_note"] = (
         (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
         + f"estimate of {float(saving):g} min/mo capped at the affected jobs' " + cap)

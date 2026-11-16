@@ -3654,24 +3654,6 @@ _EXPRESSION_TOKEN_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
 _COMMAND_SUBSTITUTION_RE = re.compile(r"\$\((?:[^()]|\([^()]*\))*\)", re.S)
 
 
-def _substitution_command_bodies(command: str) -> list[str]:
-    """Every command run INSIDE a `$( … )` substitution, at any nesting depth.
-
-    `$(…)` runs its body and its OUTPUT becomes a word, so the body is a command
-    in its own right. A body can itself hold a substitution —
-    `OUT=$(echo $(tools/setup.sh))` — and reading only the outer level left the
-    inner `tools/setup.sh` unscanned: no finding, no gap, a silent false clean.
-    Each body is recursed into before it is split, so an execution nested one or
-    more levels deep is still seen.
-    """
-    out: list[str] = []
-    for match in _COMMAND_SUBSTITUTION_RE.finditer(command):
-        inner = match.group(0)[2:-1]
-        out.extend(_substitution_command_bodies(inner))
-        out.extend(_install_command_segments(inner))
-    return out
-
-
 def _shell_tokens(segment: str) -> list[str]:
     """`segment` split the way a shell would, or `[]` when it cannot be.
 
@@ -4527,12 +4509,18 @@ def _mutable_fetch_executions(
         # Collapsing alone lost them: `OUT=$(tools/setup.sh)` after a mutable
         # clone produced no finding, no gap and no suppression, while the
         # backtick spelling of the same construct still recorded one.
-        bodies = _substitution_command_bodies(command)
-        for segment in bodies + _install_command_segments(
-                _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
+        scope_cwds: dict[tuple[int, ...], str] = {(): cwd}
+
+        def _cwd_for_scope(scope: tuple[int, ...]) -> str:
+            if scope not in scope_cwds:
+                scope_cwds[scope] = _cwd_for_scope(scope[:-1])
+            return scope_cwds[scope]
+
+        for segment, scope in _commands_in_execution_order(command):
             pos += 1
             if not segment.strip():
                 continue
+            segment_cwd = _cwd_for_scope(scope)
             command_lines.append((pos, line_no))
             tokens = _strip_command_prefix(_shell_tokens(segment))
             if not tokens:
@@ -4548,7 +4536,7 @@ def _mutable_fetch_executions(
                         gap(f"a command on line {line_no} could not be parsed "
                             f"as shell and mentions a fetch or an execution, "
                             f"so it was NOT checked — review it by hand")
-                    if _UNPARSED_CD_RE.search(segment):
+                    if not scope and _UNPARSED_CD_RE.search(segment):
                         # A `cd` nobody could read leaves the working directory
                         # stale, so every path resolved after it in this step
                         # would be wrong. That half-read step is abandoned.
@@ -4556,11 +4544,14 @@ def _mutable_fetch_executions(
                         break
                 continue
             if tokens[0] == "cd" and len(tokens) > 1 and not tokens[1].startswith("-"):
-                cwd = _resolve_path(cwd, tokens[1])
+                scope_cwds[scope] = _resolve_path(segment_cwd, tokens[1])
+                if not scope:
+                    cwd = scope_cwds[scope]
                 continue
             if tokens[0] == "git":
                 sub, gdir, args = _git_subcommand(tokens)
-                base = _resolve_path(cwd, gdir) if gdir else cwd
+                base = (_resolve_path(segment_cwd, gdir)
+                        if gdir else segment_cwd)
                 if sub == "remote" and args[:1] == ["add"]:
                     positionals = [a for a in args[1:] if not a.startswith("-")]
                     if (len(positionals) >= 2
@@ -4640,7 +4631,8 @@ def _mutable_fetch_executions(
                 if _leading_unresolved_var(path):
                     unresolved_execs.append((line_no, path))
                     continue
-                executions.append((pos, line_no, _resolve_path(cwd, path), path))
+                executions.append((pos, line_no,
+                                   _resolve_path(segment_cwd, path), path))
 
     # A path led by an unresolvable shell variable is a coverage gap ONLY where
     # there is a fetched tree it might have run out of — otherwise every
@@ -4744,6 +4736,15 @@ def _mutable_fetch_executions(
 # (`gh extension install .`) is the repository's own code.
 _GH_EXTENSION_GROUPS = frozenset({"extension", "extensions", "ext"})
 _GH_EXTENSION_VALUE_OPTS = frozenset({"--pin"})
+# `gh extension install` refuses names that shadow one of gh's built-in
+# commands. Treating a later `gh pr` as an invocation of `OWNER/gh-pr` invents
+# an execution which the CLI itself makes impossible.
+_GH_BUILTIN_COMMANDS = frozenset({
+    "alias", "api", "attestation", "auth", "browse", "cache", "codespace",
+    "completion", "config", "extension", "gist", "gpg-key", "help", "issue",
+    "label", "org", "pr", "project", "release", "repo", "ruleset", "run",
+    "search", "secret", "ssh-key", "status", "variable", "version", "workflow",
+})
 
 
 @dataclass(frozen=True)
@@ -4800,16 +4801,21 @@ def _gh_extension_name(target: str) -> str | None:
     return base or None
 
 
-def _single_quoted_flags(text: str) -> list[bool]:
-    """Per character of `text`: is it inside single quotes? (`_shell_scan`'s
-    quoting rules, which do not say WHICH quote a data character sits in.)"""
+def _inert_flags(text: str) -> list[bool]:
+    """Per character of `text`: is it printed text the shell never expands?
+
+    True inside single quotes, and for the character a backslash escapes
+    outside them: a backslash before `$(` or a backtick makes it literal text,
+    both unquoted and inside double quotes. `_shell_scan`'s quoting rules do
+    not say WHICH quote a data character sits in, nor whether a backslash made
+    it literal."""
     flags: list[bool] = []
     quote: str | None = None
     i, n = 0, len(text)
     while i < n:
         ch = text[i]
         if quote != "'" and ch == "\\" and i + 1 < n:
-            flags += [False, False]
+            flags += [False, True]
             i += 2
             continue
         if quote:
@@ -4824,26 +4830,64 @@ def _single_quoted_flags(text: str) -> list[bool]:
     return flags
 
 
-def _commands_in_execution_order(command: str) -> list[str]:
-    """Each command of `command`, preceded by the commands its `$( … )`
-    substitutions run, in the order the shell runs them.
+# A `$( … )` substitution, or a backtick one (its body may escape a backtick).
+_ANY_SUBSTITUTION_RE = re.compile(
+    _COMMAND_SUBSTITUTION_RE.pattern + r"|`(?:[^`\\]|\\.)*`", re.S)
+
+
+def _commands_in_execution_order(
+    command: str,
+) -> list[tuple[str, tuple[int, ...]]]:
+    """Each command of `command`, preceded by the commands its `$( … )` and
+    backtick substitutions run, in the order the shell runs them.
 
     `install && out=$(gh <name>)` installs first and then runs: reading every
     substitution body ahead of the whole line put the run before the install.
-    A substitution inside single quotes is printed text, never run, so its body
-    is not a command at all.
+    A substitution inside single quotes, or one whose `$` or backtick is
+    escaped with a backslash, is printed text, never run, so its body is not a
+    command at all. The scope tuple keeps each substitution's shell state
+    separate from its parent while preserving their shared filesystem.
     """
-    flags = _single_quoted_flags(command)
-    subs = iter(_COMMAND_SUBSTITUTION_RE.finditer(command))
-    out: list[str] = []
-    for segment in _install_command_segments(
-            _COMMAND_SUBSTITUTION_RE.sub("$SUBST", command)):
-        for _ in range(segment.count("$SUBST")):
-            match = next(subs, None)
-            if match is not None and not flags[match.start()]:
-                out.extend(_commands_in_execution_order(match.group(0)[2:-1]))
-        out.append(segment)
-    return out
+    def _ordered(
+        text: str,
+        scope: tuple[int, ...],
+    ) -> list[tuple[str, tuple[int, ...]]]:
+        inert = _inert_flags(text)
+        # (body, runs?) per collapsed substitution, left to right. A `$( … )`
+        # is collapsed even when inert, so a `|` inside it never splits the
+        # line; an inert backtick is plain text and stays as written.
+        subs: list[tuple[str, bool]] = []
+        pieces: list[str] = []
+        at = 0
+        while True:
+            match = _ANY_SUBSTITUTION_RE.search(text, at)
+            if match is None:
+                break
+            runs = not inert[match.start()]
+            backtick = match.group(0).startswith("`")
+            if backtick and not runs:
+                pieces.append(text[at:match.start() + 1])
+                at = match.start() + 1
+                continue
+            pieces.append(text[at:match.start()] + "$SUBST")
+            subs.append((match.group(0)[1:-1] if backtick
+                         else match.group(0)[2:-1], runs))
+            at = match.end()
+        pieces.append(text[at:])
+        collapsed = "".join(pieces)
+        pending = iter(subs)
+        out: list[tuple[str, tuple[int, ...]]] = []
+        child = 0
+        for segment in _install_command_segments(collapsed):
+            for _ in range(segment.count("$SUBST")):
+                sub = next(pending, None)
+                if sub is not None and sub[1]:
+                    child += 1
+                    out.extend(_ordered(sub[0], scope + (child,)))
+            out.append((segment, scope))
+        return out
+
+    return _ordered(command, ())
 
 
 def _gh_extension_executions(
@@ -4864,7 +4908,7 @@ def _gh_extension_executions(
     invocations: list[tuple[int, int, str, str]] = []
     pos = 0
     for line_no, raw, command, _new_step in _job_shell_commands(text, job_range):
-        for segment in _commands_in_execution_order(command):
+        for segment, _scope in _commands_in_execution_order(command):
             pos += 1
             tokens = _strip_command_prefix(_shell_tokens(segment))
             if not tokens or tokens[0] != "gh" or len(tokens) < 2:
@@ -4901,8 +4945,11 @@ def _gh_extension_executions(
                         f"line {line_no} is pinned to a full commit id, so it "
                         f"is deliberately not reported", kind=_KIND_SUPPRESSED)
                 continue
+            name = _gh_extension_name(target)
+            if name in _GH_BUILTIN_COMMANDS:
+                continue
             installs.append(_GhExtensionInstall(
-                line_no, raw, target, _gh_extension_name(target), pin, pos))
+                line_no, raw, target, name, pin, pos))
 
     spans = _step_spans(text)
     pairs: list[tuple[_GhExtensionInstall, int, str]] = []
@@ -4936,7 +4983,7 @@ def _gh_extension_ref_description(ref: str | None) -> str:
     extension reads it as a release TAG name."""
     if ref is None:
         return "its latest release (no `--pin`)"
-    if _ABBREV_SHA_RE.match(ref):
+    if _ABBREV_SHA_RE.match(ref) and not ref.isdigit():
         return (f"`{ref}` (an ABBREVIATED commit id: the GitHub CLI resolves "
                 f"it when the job installs the extension, and a binary "
                 f"extension reads it as a release tag name, so it names no "

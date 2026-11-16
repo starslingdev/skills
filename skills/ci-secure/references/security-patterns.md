@@ -612,7 +612,7 @@ title_template: "Unverified remote code execution in {basename}"
 
 **What an attacker can do.** Whoever controls the fetched code — the upstream host, a hijacked CDN, a maintainer account on the cloned repository — runs arbitrary code on your runner with the job's secrets and `GITHUB_TOKEN`. The mutable-fetch shape needs no host compromise at all: a branch or tag is *designed* to move, so anyone who can push to (or re-point a tag on) that repository changes what your next CI run executes, and nothing in your repo has to change for it to happen. Unlike a SHA-pinned action, both shapes re-resolve live on every run, so a one-time compromise hits every subsequent run until someone notices.
 
-**Anti-pattern**: executing code the repo never pinned, in either of two shapes.
+**Anti-pattern**: executing code the repo never pinned, in any of three shapes.
 
 *Shape 1 — the piped installer*: a `run:` scalar that fetches and executes in one step without verifying integrity. The detector only inspects `run:` scalars (not comments or `env:`), and matches:
 
@@ -632,7 +632,7 @@ what makes those unsafe is the pipe into a shell, not the address being
 fetched; the `deno run` form is the exception — it has no pipe, so that arm
 does key on a literal URL.)
 
-*Shape 2 — the mutable fetch*: within ONE job, a `git clone` / `git fetch` / `actions/checkout` of another repository, or a `gh extension install`, at a mutable reference, followed by a command that executes out of the directory it landed in.
+*Shape 2 — the mutable git fetch*: within ONE job, a `git clone` / `git fetch` / `actions/checkout` of another repository at a mutable reference, followed by a command that executes out of the directory it landed in.
 
 ```yaml
 # WRONG — `main` is whatever that branch points at when the job runs
@@ -641,6 +641,8 @@ does key on a literal URL.)
 ```
 
 Execution shapes matched: an interpreter running a fetched file (`python3`/`node`/`bash`/`sh`/`ruby`/`perl`/`pwsh` …), `source`ing a fetched script, `pip install <fetched-dir>` (including `-e`, but never a flag's value — `--target` names a destination and `-r` names a file pip reads), and a fetched path invoked directly (`./tools/install`). `cd` into the fetched directory is followed within the step that ran it, so `cd tools && ./install` connects — and, because `cd` dies with its step, a later step is read from the workspace root again.
+
+*Shape 3 — the GitHub CLI extension*: within ONE job, a `gh extension install` at a mutable reference followed by an invocation of that extension. A script extension is immutable at a full 40-hex commit. A binary extension is immutable at a tag only when GitHub publishes that release as immutable; a date-style tag such as `20261111` is a tag, not an abbreviated commit id.
 
 **Detection**, and where it deliberately stops short. The pairing must be VISIBLE: the fetch's destination directory and the executed path have to connect inside the same job, which the scanner reads off the shell text. Its consequences, stated rather than implied:
 
