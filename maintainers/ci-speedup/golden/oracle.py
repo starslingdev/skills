@@ -78,8 +78,7 @@ def _eligible_jobs(commit: dict[str, Any], cutoff_s: int) -> tuple[list[dict[str
 
 def compute(recording: dict[str, Any], *,
             bookkeeping_cutoff_s: int = DEFAULT_BOOKKEEPING_CUTOFF_S,
-            gate_by_sha: dict[str, str] | None = None,
-            gate_caps: dict[str, float] | None = None) -> dict[str, Any]:
+            gate_by_sha: dict[str, str] | None = None) -> dict[str, Any]:
     """Compute month-wide gate shares and wait facts from normalized data."""
     if recording.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unsupported golden recording schema")
@@ -129,43 +128,21 @@ def compute(recording: dict[str, Any], *,
         for name, durations in gate_durations.items() if durations
     }
 
-    def gate_cap(name: str) -> float:
-        if not gate_caps:
-            return p50_by_check[name]
-        if name in gate_caps:
-            return float(gate_caps[name])
-        candidates = [
-            (candidate, value) for candidate, value in gate_caps.items()
-            if name.endswith(" / " + candidate)
-            or candidate.endswith(" / " + name)
-        ]
-        if candidates:
-            depth = max(candidate.count(" / ") for candidate, _value in candidates)
-            most_specific = [
-                value for candidate, value in candidates
-                if candidate.count(" / ") == depth
-            ]
-            if len(most_specific) == 1:
-                return float(most_specific[0])
-        return p50_by_check[name]
-
     for commit, jobs in eligible_by_commit:
         forced_gate = (gate_by_sha or {}).get(str(commit.get("sha") or ""))
-        capped = {
-            _check_name(job): min(
-                _seconds(job.get("started_at"), job.get("completed_at")) or 0.0,
-                gate_cap(_check_name(job)),
-            )
+        durations = {
+            _check_name(job):
+            _seconds(job.get("started_at"), job.get("completed_at")) or 0.0
             for job in jobs
         }
-        longest = max(capped.values(), default=0.0)
+        longest = max(durations.values(), default=0.0)
         for job in jobs:
             job_name = _check_name(job)
             leaf_name = str(job.get("name") or "")
             if forced_gate:
                 is_gate = forced_gate in {job_name, leaf_name}
             else:
-                is_gate = capped.get(job_name) == longest
+                is_gate = durations.get(job_name) == longest
             if not is_gate:
                 continue
             name = job_name
@@ -183,7 +160,7 @@ def compute(recording: dict[str, Any], *,
         for name, count in gate_counts.items()
     ]
     gates.sort(key=lambda row: (
-        -row["last_on"], -gate_cap(str(row["check"])), row["check"]))
+        -row["last_on"], -float(row["p50_s"]), row["check"]))
     return {
         "schema_version": SCHEMA_VERSION,
         "repository": str(recording.get("repository") or ""),

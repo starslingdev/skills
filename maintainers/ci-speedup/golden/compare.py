@@ -18,6 +18,8 @@ from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 
 def engine_facts(findings: dict[str, Any]) -> dict[str, Any]:
     critical = findings.get("pr_critical_path") or {}
@@ -339,6 +341,82 @@ def _recorded_required_checks(recording: Path) -> set[str]:
     return {name for name in names if name}
 
 
+def _matches_required_job(job: dict[str, Any], required: str) -> bool:
+    name = str(job.get("name") or "").strip()
+    workflow = str(job.get("workflow") or "").strip()
+    qualified = f"{workflow} / {name}" if workflow and name else name or workflow
+    return (required in {name, qualified}
+            or qualified.endswith(" / " + required)
+            or required.endswith(" / " + name))
+
+
+def _job_name_pattern(template: str) -> re.Pattern[str]:
+    expression = re.compile(r"\$\{\{[^}]+\}\}")
+    pieces: list[str] = []
+    cursor = 0
+    for match in expression.finditer(template):
+        pieces.append(re.escape(template[cursor:match.start()]))
+        pieces.append(r".+?")
+        cursor = match.end()
+    pieces.append(re.escape(template[cursor:]))
+    return re.compile(
+        r"^" + "".join(pieces) + r"(?: \([^)]*\))?(?: / .+)?$")
+
+
+def _recorded_gate_job_patterns(
+        recording: Path,
+        required_names: set[str],
+) -> dict[str, list[re.Pattern[str]]]:
+    """Derive required jobs and their `needs:` ancestors from the snapshot."""
+    workflows = recording / "checkout" / ".github" / "workflows"
+    patterns: dict[str, list[re.Pattern[str]]] = {}
+    if not workflows.is_dir():
+        return patterns
+    paths = sorted([*workflows.glob("*.yml"), *workflows.glob("*.yaml")])
+    for path in paths:
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), dict):
+            continue
+        workflow = str(payload.get("name") or path.relative_to(
+            recording / "checkout").as_posix())
+        jobs = payload["jobs"]
+        displays = {
+            str(job_id): str(row.get("name") or job_id)
+            for job_id, row in jobs.items() if isinstance(row, dict)
+        }
+        needed_by: dict[str, list[str]] = {}
+        for job_id, row in jobs.items():
+            if not isinstance(row, dict):
+                continue
+            needs = row.get("needs")
+            needed_by[str(job_id)] = (
+                [str(value) for value in needs]
+                if isinstance(needs, list)
+                else [str(needs)] if needs else []
+            )
+        selected = {
+            job_id for job_id, display in displays.items()
+            if any(_matches_required_job(
+                {"workflow": workflow, "name": display}, required)
+                for required in required_names)
+        }
+        pending = list(selected)
+        while pending:
+            job_id = pending.pop()
+            for dependency in needed_by.get(job_id, []):
+                if dependency in displays and dependency not in selected:
+                    selected.add(dependency)
+                    pending.append(dependency)
+        if selected:
+            patterns[workflow] = [
+                _job_name_pattern(displays[job_id]) for job_id in sorted(selected)
+            ]
+    return patterns
+
+
 def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[str, Any]:
     """Recompute independent facts over the same public sample definition.
 
@@ -416,14 +494,6 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
             continue
         in_span.append(latest_attempt_view(source))
 
-    def matches_required(job: dict[str, Any], required: str) -> bool:
-        name = str(job.get("name") or "").strip()
-        workflow = str(job.get("workflow") or "").strip()
-        qualified = f"{workflow} / {name}" if workflow and name else name or workflow
-        return (required in {name, qualified}
-                or qualified.endswith(" / " + required)
-                or required.endswith(" / " + name))
-
     sample_count = int(critical.get("sampled_pr_count") or 0)
     if critical.get("sample_job_list_cap_hit"):
         sample_count = max(
@@ -436,7 +506,7 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     # from recording jobs rather than accepting the engine's selected SHAs.
     required_counts = {
         name: sum(
-            any(matches_required(job, name)
+            any(_matches_required_job(job, name)
                 for job in source.get("jobs") or [] if isinstance(job, dict))
             for source in in_span
         )
@@ -450,25 +520,46 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
             required_counts.items(), key=lambda item: (-item[1], item[0])):
         candidates = [
             source for source in representative_sources
-            if any(matches_required(job, name)
+            if any(_matches_required_job(job, name)
                    for job in source.get("jobs") or [] if isinstance(job, dict))
         ]
         if len(candidates) < requested_count:
             continue
         representative_required.add(name)
         representative_sources = candidates
+    gate_patterns = _recorded_gate_job_patterns(
+        recording, representative_required)
     eligible = []
     for source in in_span:
         jobs = [job for job in source.get("jobs") or [] if isinstance(job, dict)]
         if (representative_required
-                and not all(any(matches_required(job, name) for job in jobs)
+                and not all(any(_matches_required_job(job, name) for job in jobs)
                             for name in representative_required)):
             continue
         if (representative_required
-                and any(any(matches_required(job, name) for job in jobs)
+                and any(any(_matches_required_job(job, name) for job in jobs)
                         for name in required_names - representative_required)):
             continue
-        eligible.append(dict(source))
+        row = dict(source)
+        if representative_required:
+            row["jobs"] = [
+                job for job in jobs
+                if (any(pattern.fullmatch(str(job.get("name") or ""))
+                        for pattern in gate_patterns.get(
+                            str(job.get("workflow") or ""), []))
+                    or (str(job.get("workflow") or "") not in gate_patterns
+                        and any(_matches_required_job(job, name)
+                                for name in representative_required)))
+            ]
+            included_workflows = {
+                str(job.get("workflow") or "") for job in row["jobs"]
+            }
+            row["runs"] = [
+                run for run in source.get("runs") or []
+                if isinstance(run, dict)
+                and str(run.get("workflow") or "") in included_workflows
+            ]
+        eligible.append(row)
     commits = sorted(
         eligible, key=lambda row: str(row.get("created_at") or ""), reverse=True
     )[:sample_count or None]
