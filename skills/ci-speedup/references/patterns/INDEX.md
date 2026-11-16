@@ -115,6 +115,6 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT75 — Long Pole: Optimize or Relocate the Dominant Step (HIGH, structural) — one step dominates the long pole
 - OPT78 — Per-File Test Isolation Rebuilding Shared Module State (HIGH, structural) — per-file isolation re-imports the app
 - OPT83 — Independent Steps on the Long Pole Run One After Another (MEDIUM, structural) — independent steps run serially
-- OPT84 — A Slow Step on the Long Pole Runs a Tool That Has a Native Drop-in (MEDIUM, structural) — Prettier/ESLint/tsc with native drop-ins
+- OPT84 — A Slow Step on the Long Pole Runs a Tool That Has a Native Drop-in (MEDIUM, structural) — Prettier/ESLint/tsc with native drop-ins; npm/pnpm/Yarn install → bun install
 - OPT85 — Tests Run in Many Processes Instead of One (HIGH, structural) — a process per test case
 - OPT87 — Tests Wait on a Slow Dependency They Do Not Verify (HIGH, structural) — tests call a slow real dependency

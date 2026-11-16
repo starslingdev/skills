@@ -3333,6 +3333,28 @@ unwrapping runner calls; the leaves are matched against the v1 rows of the
 catalog's swap table (Prettier, ESLint, `tsc --noEmit`; Babel and Webpack are
 recipe only).
 
+The table's install row (npm / pnpm / Yarn install → `bun install`) is the one
+row with a share floor: an `install`-category step is a candidate, for that row
+only, when it is also at least `_OPT84_INSTALL_MIN_SHARE` (0.15, OPT83's floor)
+of the pole, and an install inside a `scan` / `build` step reports the row only
+when that step clears the same floor. Its verdict comes from the scan's
+package-manager reads (`scan._tal_package_manager_read`: lockfiles,
+`packageManager`, `pnpm-workspace.yaml`, `.npmrc`, pnpm hook files, Yarn's
+`nodeLinker` and Plug'n'Play loader) of the install's directory and every
+directory above it: `package_manager` for the root, `package_manager_dirs` for
+each other directory with a `package.json`. `_opt84_install_layout` merges them
+nearest first (the nearest lockfile, `packageManager` and `nodeLinker` win, as
+Yarn's own config does), and `_opt84_install_fit` decides: already on bun is
+`target_already_in_use`; Yarn Plug'n'Play or a pnpm hook is the
+`install_swap_blocked` verdict; a missing or unreadable read drops the install
+row, and holds the step back (`install_layout_unreadable`) only when nothing
+else on it reports. On an `install` step, an exit the read cannot follow is the
+`tool_not_in_table` verdict unless the step's `run:` names an install
+(`_OPT84_INSTALL_HINT_RE`). Otherwise the row is always a
+dual-run whose reasons are the caveats to check, and the card adds the
+side-by-side install recipe (`_OPT84_INSTALL_RECIPE`, pinned against the
+verifier's copy).
+
 Verdicts, counted only: a pole not backed by a workflow file
 (`pole_not_file_backed`), no candidate (checked first; a pole whose check maps
 to more than one workflow carries no measured steps today, so it reaches the

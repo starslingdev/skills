@@ -1788,6 +1788,11 @@ _VR_OPT84_WITHHOLD_PHRASES = {
     "working_directory_unknown":
         "the slow step's working directory could not be placed inside the "
         "checkout, so which package.json applies is unknown",
+    "install_layout_unreadable":
+        "the package-manager files (package.json, .yarnrc.yml, .npmrc or "
+        "pnpm-workspace.yaml) of the install's directory or one above it were not "
+        "read, so whether bun is already in use or can replace the installer is "
+        "unknown",
     "type_aware_lint_scan_missing":
         "the scan that wrote this findings file recorded no lint-tooling read, so "
         "the step's tools could not be checked",
@@ -11073,7 +11078,12 @@ _VR_OPT84_MIN_SHARE = 0.0
 _VR_OPT84_MIN_STEP_S = 20.0
 # The step categories a candidate may carry (collect_runs `_OPT84_CATEGORIES`).
 _VR_OPT84_CATEGORIES = frozenset({"scan", "build"})
-_VR_OPT84_ROWS = frozenset({"prettier", "eslint", "tsc"})
+# The install row (collect_runs `_OPT84_INSTALL_CATEGORY` / `_MIN_SHARE`): an
+# `install` step carries only that row, and the row needs the step to be at
+# least this share of the pole.
+_VR_OPT84_INSTALL_CATEGORY = "install"
+_VR_OPT84_INSTALL_MIN_SHARE = 0.15
+_VR_OPT84_ROWS = frozenset({"prettier", "eslint", "tsc", "install"})
 _VR_OPT84_FITS = frozenset({"drop-in", "dual-run", "deferred_to_opt82"})
 # The ESLint fits that raise severity and risk to HIGH (collect_runs'
 # `_opt84_finding`: a live ESLint row, i.e. one not deferred to OPT82).
@@ -11082,6 +11092,7 @@ _VR_OPT84_HELD_BACK_GATES = frozenset(_VR_OPT84_WITHHOLD_PHRASES)
 _VR_OPT84_VERDICT_GATES = frozenset({
     "pole_not_file_backed", "no_candidate_step", "tool_not_in_table",
     "target_already_in_use", "tsc_emits_not_in_v1", "eslint_reported_by_opt82",
+    "install_swap_blocked",
 })
 _VR_OPT84_SIZING_LABEL = (
     "a CEILING, not a forecast: the step's own measured p50 is the most the swap "
@@ -11107,24 +11118,45 @@ _VR_OPT84_TS6_ALIAS = (
     "TypeScript 7.0 does not ship: keep the `@typescript/typescript6` alias beside "
     "it for those tools")
 _VR_OPT84_SUMMARY = "uncredited, benchmark first"
+# The install row's side-by-side recipe: rendered on the card exactly when an
+# install row is (the verifier holds the card to it). Bun's own docs back each
+# clause: the first `bun install` migrates the old lockfile and keeps it, and
+# `bun ci` is the frozen-lockfile install.
+_VR_OPT84_INSTALL_RECIPE = (
+    "Install swap, side by side: on the same commit and runner class, install once "
+    "with the current package manager and once with `bun install` (set up with "
+    "`oven-sh/setup-bun` at a pinned `bun-version`, 1.2 or later for the text "
+    "`bun.lock`), each into a fresh `node_modules` (every workspace package's "
+    "too), and run the test suite against each install, in whichever job runs it; "
+    "keep the old lockfile until both pass. Before the old installer goes, list "
+    "what else still uses it (`actions/setup-node` `cache:`, `pnpm/action-setup`, "
+    "other workflows, the `packageManager` field, Dockerfiles and deploy settings, "
+    "the dependency-update bot) and move each one; then commit `bun.lock` with the "
+    "`package.json` changes the migration made, switch CI to `bun ci`, and delete "
+    "the old lockfile in its own commit")
 _VR_OPT84_REPLACEMENT = "is the native replacement"
-_VR_OPT84_SOURCE_NAME = {"prettier": "Prettier", "eslint": "ESLint", "tsc": "tsc"}
+_VR_OPT84_SOURCE_NAME = {"prettier": "Prettier", "eslint": "ESLint", "tsc": "tsc",
+                         "install": "npm / pnpm / Yarn install"}
 _VR_OPT84_TARGET_NAME = {"prettier": "oxfmt", "eslint": "oxlint",
-                         "tsc": "TypeScript 7 (`typescript@^7`)"}
+                         "tsc": "TypeScript 7 (`typescript@^7`)",
+                         "install": "`bun install`"}
 _VR_OPT84_PUBLISHED_RANGE = {
     "prettier": "~4-30×",
     "eslint": "~8-20×",
     "tsc": "8-12× (vendor-stated)",
+    "install": "5-21× in CI (vendor-stated)",
 }
 _VR_OPT84_DOCS_URLS = {
     "prettier": "https://oxc.rs/docs/guide/usage/formatter.html",
     "eslint": "https://oxc.rs/docs/guide/usage/linter.html",
     "tsc": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
+    "install": "https://bun.com/docs/pm/cli/install",
 }
 _VR_OPT84_MIGRATION_DOCS_URLS = {
     "prettier": "https://oxc.rs/docs/guide/usage/formatter/migrate-from-prettier.html",
     "eslint": "https://oxc.rs/docs/guide/usage/linter/migrate-from-eslint.html",
     "tsc": None,
+    "install": "https://bun.com/docs/pm/lockfile",
 }
 _VR_OPT84_CARD_RE = re.compile(r'<a id="opt84-([^"]+)"></a>')
 _VR_OPT84_OWN_SECTION = "Tool swaps on other long poles"
@@ -11415,6 +11447,39 @@ def _vr_opt84_prettier_dual_run_reasons(block: dict, t: dict) -> list[str]:
     return why
 
 
+def _vr_opt84_runs_bun_install(leaf: Any) -> bool:
+    """Whether a resolved leaf command is `bun install` / `bun i` / `bun ci`."""
+    toks = str(leaf or "").split()
+    return (bool(toks) and toks[0].rsplit("/", 1)[-1] == "bun"
+            and toks[1:2] in (["install"], ["i"], ["ci"]))
+
+
+def _vr_opt84_install_reads(block: dict[str, Any],
+                            wd: str) -> "list[tuple[str, dict[str, Any]]] | None":
+    """The scan's package-manager reads governing an install run in `wd`, from
+    `wd` up to the repo root, nearest first (the root's is `package_manager`,
+    the others `package_manager_dirs`). None when the root read, or the read
+    of a directory whose package.json the scan found, is missing or lists an
+    unreadable file."""
+    dirs = block.get("package_manager_dirs")
+    dirs = dirs if isinstance(dirs, dict) else {}
+    scripts = block.get("package_scripts")
+    scripts = scripts if isinstance(scripts, dict) else {}
+    out: list[tuple[str, dict[str, Any]]] = []
+    d = wd.strip("/") if wd not in (".", "./") else ""
+    while True:
+        pmf = block.get("package_manager") if not d else dirs.get(d)
+        if d and pmf is None and d not in scripts:
+            pass                                    # no package.json there
+        elif not isinstance(pmf, dict) or pmf.get("unreadable"):
+            return None
+        else:
+            out.append((d, pmf))
+        if not d:
+            return out
+        d = d.rsplit("/", 1)[0] if "/" in d else ""
+
+
 def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
     """Every OPT84 finding sits on a drilled long pole, re-derives its step, share
     and ceiling from that pole's stamped step p50s, names only table rows with
@@ -11535,9 +11600,14 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             continue
         d = _num(ps.get("p50_s")) or 0.0
         cat = ts.get("category")
-        if cat not in _VR_OPT84_CATEGORIES:
+        rows0 = [str(_as_dict(t).get("row") or "") for t in _as_list(ts.get("tools"))]
+        has_install = "install" in rows0
+        if cat == _VR_OPT84_INSTALL_CATEGORY and rows0 and set(rows0) != {"install"}:
+            bad.append(f"{fid}: an `install` step carries rows {rows0}; the engine "
+                       "reads an install step for the install row only")
+        elif cat not in _VR_OPT84_CATEGORIES and cat != _VR_OPT84_INSTALL_CATEGORY:
             bad.append(f"{fid}: step category {cat!r} is not one of "
-                       f"{sorted(_VR_OPT84_CATEGORIES)}")
+                       f"{sorted(_VR_OPT84_CATEGORIES | {_VR_OPT84_INSTALL_CATEGORY})}")
         elif cat != str(ps.get("category") or ""):
             bad.append(f"{fid}: step category {cat!r} != the pole step's "
                        f"{ps.get('category')!r}")
@@ -11550,7 +11620,9 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
             bad.append(f"{fid}: job_p50_s {ts.get('job_p50_s')!r} != the pole's "
                        f"{job_p50}")
         if not (job_p50 > 0 and d >= _VR_OPT84_MIN_STEP_S
-                and d >= _VR_OPT84_MIN_SHARE * job_p50):
+                and d >= _VR_OPT84_MIN_SHARE * job_p50
+                and (not (has_install or cat == _VR_OPT84_INSTALL_CATEGORY)
+                     or d >= _VR_OPT84_INSTALL_MIN_SHARE * job_p50)):
             bad.append(f"{fid}: step `{step}` ({d}s of {job_p50}s) does not qualify "
                        "as a candidate")
         share = _num(ts.get("share"))
@@ -11608,6 +11680,38 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
                     bad.append(f"{fid}: tsc row source_version "
                                f"{t.get('source_version')!r} is already TypeScript "
                                f"{major}, the native compiler; nothing to swap")
+            # The install row: always the side-by-side recipe, and never in a
+            # repo the scan's root read shows already on bun or blocked.
+            if row == "install":
+                if fit != "dual-run":
+                    bad.append(f"{fid}: install row fit {fit!r}; the engine stamps "
+                               "the install row a dual-run (the side-by-side run)")
+                if any(_vr_opt84_runs_bun_install(lf)
+                       for lf in _as_list(ts.get("resolved_leaves"))):
+                    bad.append(f"{fid}: install row on a step that already runs "
+                               "`bun install`")
+                reads = _vr_opt84_install_reads(block, str(t.get("install_dir") or ""))
+                if reads is None:
+                    bad.append(f"{fid}: install row stamped without a readable "
+                               "package-manager read of its directory and those "
+                               "above it")
+                else:
+                    locks = [str(x) for _d, pmf in reads
+                             for x in _as_list(pmf.get("lockfiles"))]
+                    fields = [str(pmf.get("package_manager_field") or "")
+                              for _d, pmf in reads]
+                    if (any(x in ("bun.lock", "bun.lockb") for x in locks)
+                            or any(f.startswith("bun@") for f in fields)):
+                        bad.append(f"{fid}: install row in a repo already on bun "
+                                   f"({locks}, packageManager {fields!r})")
+                    linker = next((pmf["node_linker"] for _d, pmf in reads
+                                   if isinstance(pmf.get("node_linker"), str)), None)
+                    pnp = (any(pmf.get("pnp_files") for _d, pmf in reads)
+                           or (linker == "pnp") or (linker is None and any(
+                               pmf.get("yarn_pnp") for _d, pmf in reads)))
+                    if pnp or any(_as_list(pmf.get("pnpmfile")) for _d, pmf in reads):
+                        bad.append(f"{fid}: install row in a repo whose Yarn "
+                                   "Plug'n'Play or pnpm hook blocks the swap")
             # A drop-in is re-derived from the scan facts the engine read: any
             # fact that makes the swap lossy contradicts it.
             if fit == "drop-in" and isinstance(tal, dict):
@@ -11725,6 +11829,10 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
                            (_VR_OPT84_SUMMARY, "its summary")):
             if need not in flat:
                 bad.append(f"{fid}: card is missing {what}")
+        if (" ".join(_VR_OPT84_INSTALL_RECIPE.split()) in flat) != has_install:
+            bad.append(f"{fid}: card's install recipe is "
+                       + ("missing beside its install row" if has_install
+                          else "present without an install row"))
         card_lines = [" ".join(ln.split()) for ln in body.splitlines()]
         for t in tools:
             row = str(t.get("row") or "")

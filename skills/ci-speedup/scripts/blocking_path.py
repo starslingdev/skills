@@ -8530,6 +8530,11 @@ _OPT84_WITHHOLD_PHRASES: dict[str, str] = {
     "working_directory_unknown":
         "the slow step's working directory could not be placed inside the "
         "checkout, so which package.json applies is unknown",
+    "install_layout_unreadable":
+        "the package-manager files (package.json, .yarnrc.yml, .npmrc or "
+        "pnpm-workspace.yaml) of the install's directory or one above it were not "
+        "read, so whether bun is already in use or can replace the installer is "
+        "unknown",
     # Pole-level: the findings file's own lint-tooling read is missing or failed,
     # so no candidate step on the pole could be checked.
     "type_aware_lint_scan_missing":
@@ -12124,6 +12129,22 @@ _OPT84_TS6_ALIAS = (
     "TypeScript 7.0 does not ship: keep the `@typescript/typescript6` alias beside "
     "it for those tools")
 _OPT84_SUMMARY = "uncredited, benchmark first"
+# The install row's side-by-side recipe: rendered on the card exactly when an
+# install row is (the verifier holds the card to it). Bun's own docs back each
+# clause: the first `bun install` migrates the old lockfile and keeps it, and
+# `bun ci` is the frozen-lockfile install.
+_OPT84_INSTALL_RECIPE = (
+    "Install swap, side by side: on the same commit and runner class, install once "
+    "with the current package manager and once with `bun install` (set up with "
+    "`oven-sh/setup-bun` at a pinned `bun-version`, 1.2 or later for the text "
+    "`bun.lock`), each into a fresh `node_modules` (every workspace package's "
+    "too), and run the test suite against each install, in whichever job runs it; "
+    "keep the old lockfile until both pass. Before the old installer goes, list "
+    "what else still uses it (`actions/setup-node` `cache:`, `pnpm/action-setup`, "
+    "other workflows, the `packageManager` field, Dockerfiles and deploy settings, "
+    "the dependency-update bot) and move each one; then commit `bun.lock` with the "
+    "`package.json` changes the migration made, switch CI to `bun ci`, and delete "
+    "the old lockfile in its own commit")
 # What each tool row says the target is. Never "a drop-in": that is a fit, and
 # the row's own `fit:` says whether this repo's use of the tool is one (a
 # dual-run or an OPT82-first row is not).
@@ -12139,6 +12160,7 @@ _OPT84_DOCS_URLS: dict[str, str] = {
     "prettier": "https://oxc.rs/docs/guide/usage/formatter.html",
     "eslint": "https://oxc.rs/docs/guide/usage/linter.html",
     "tsc": "https://devblogs.microsoft.com/typescript/announcing-typescript-7-0/",
+    "install": "https://bun.com/docs/pm/cli/install",
 }
 # The target's migration guide, per row (None: the row has none). The engine
 # stamps `migration_docs_url` from the same `_OPT84_DOCS` table; when the stamp
@@ -12147,10 +12169,13 @@ _OPT84_MIGRATION_DOCS_URLS: dict[str, "str | None"] = {
     "prettier": "https://oxc.rs/docs/guide/usage/formatter/migrate-from-prettier.html",
     "eslint": "https://oxc.rs/docs/guide/usage/linter/migrate-from-eslint.html",
     "tsc": None,
+    "install": "https://bun.com/docs/pm/lockfile",
 }
-_OPT84_SOURCE_NAME = {"prettier": "Prettier", "eslint": "ESLint", "tsc": "tsc"}
+_OPT84_SOURCE_NAME = {"prettier": "Prettier", "eslint": "ESLint", "tsc": "tsc",
+                      "install": "npm / pnpm / Yarn install"}
 _OPT84_TARGET_NAME = {"prettier": "oxfmt", "eslint": "oxlint",
-                      "tsc": "TypeScript 7 (`typescript@^7`)"}
+                      "tsc": "TypeScript 7 (`typescript@^7`)",
+                      "install": "`bun install`"}
 
 
 def _opt84_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -12276,6 +12301,8 @@ def _opt84_card(f: dict[str, Any], catalog_url: str) -> list[str]:
     if len(tools) > 1:
         ceil_line += f" {_OPT84_SPLIT_UNKNOWN}."
     bench = _opt84_bench_pairs(tools)
+    if any(str(t.get("row") or "") == "install" for t in tools):
+        out.append(f"- **{_OPT84_INSTALL_RECIPE}.**")
     out += [ceil_line,
             f"- **Rail:** {_OPT84_RAIL}.",
             f"- **{_OPT84_BENCHMARK}.**" + (f" {'; '.join(bench)}." if bench else ""),
