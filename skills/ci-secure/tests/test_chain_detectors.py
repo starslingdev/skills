@@ -1686,6 +1686,243 @@ def test_p1425_an_appended_allowlist_disable_still_silences(tmp_path):
     """) == []
 
 
+# ---------------------------------------------------------------------------
+# P14.25 — issue #33: the `packageManager` pin belongs to the INSTALLED
+# package, which in a monorepo is not the repo root.
+# ---------------------------------------------------------------------------
+
+
+def _nested_pkg(tmp_path: Path, rel: str, package_manager: str | None) -> None:
+    """Write a nested package manifest the way a monorepo carries one."""
+    d = tmp_path / rel
+    d.mkdir(parents=True, exist_ok=True)
+    body = '{"name": "nested"'
+    if package_manager:
+        body += f', "packageManager": "{package_manager}"'
+    body += "}\n"
+    (d / "package.json").write_text(body)
+
+
+def test_p1425_monorepo_pin_comes_from_the_install_directory(tmp_path):
+    """Issue #33: the root pins pnpm 10 but the job installs `apps/web`,
+    which pins pnpm 9 — the condition sentence must name the major the job
+    actually resolves, not reassure about one it does not."""
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            defaults:
+              run:
+                working-directory: apps/web
+            steps:
+              - run: pnpm install
+              - run: pnpm publish
+                env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "pnpm@9.15.0" in note
+    assert "apps/web" in note
+    assert "pnpm@10.25.0" not in note
+
+
+def test_p1425_a_step_working_directory_wins_over_the_job_default(tmp_path):
+    """GitHub's own precedence: a step's `working-directory:` replaces the
+    job's `defaults.run.working-directory`; composing them would read a
+    package.json from a directory that exists in neither."""
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/api", None)
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            defaults:
+              run:
+                working-directory: apps/api
+            steps:
+              - run: pnpm install
+                working-directory: apps/web
+              - run: pnpm publish
+                env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "pnpm@9.15.0" in note
+    assert "apps/web" in note
+
+
+def test_p1425_a_static_cd_places_the_install(tmp_path):
+    """The `cd` spelling of the same monorepo shape, both as a one-liner and
+    as lines of a block scalar."""
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: cd apps/web && pnpm install
+              - run: |
+                  cd apps/web
+                  pnpm install --frozen-lockfile
+                env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "pnpm@9.15.0" in note
+    assert "apps/web" in note
+
+
+def test_p1425_a_nested_package_without_a_pin_falls_back_to_root(tmp_path):
+    """The fallback the issue specifies: no pin in the installed package
+    means the root's pin is the best in-repo evidence, named as such."""
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", None)
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            defaults:
+              run:
+                working-directory: apps/web
+            steps:
+              - run: pnpm install
+                env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "this repo pins `pnpm@10.25.0`" in note
+
+
+def test_p1425_an_expression_working_directory_falls_back_to_root(tmp_path):
+    """`apps/${{ matrix.app }}` is not knowable from the YAML; the root pin
+    is the fallback, and the note keeps the root wording rather than naming
+    a directory the scanner cannot see."""
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            strategy:
+              matrix:
+                app: [web]
+            defaults:
+              run:
+                working-directory: apps/${{ matrix.app }}
+            steps:
+              - run: pnpm install
+                env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "this repo pins `pnpm@10.25.0`" in note
+
+
+def test_p1425_an_unreadable_cd_falls_back_to_root(tmp_path):
+    """A `cd` through a variable makes the install's directory unknowable —
+    the root pin is the fallback, not a guess at the variable's value."""
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: |
+                  cd "$APP_DIR"
+                  pnpm install
+                env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "this repo pins `pnpm@10.25.0`" in note
+
+
+def test_p1425_a_root_pnpm10_pin_lends_no_cover_to_a_nested_pnpm9(tmp_path):
+    """The allowlist mechanism does not exist below pnpm 10: a disable write
+    in a job that installs a pnpm-9 package mitigates nothing, however the
+    ROOT is pinned. Before #33 the root's pnpm-10 pin suppressed this
+    finding outright."""
+    _pkg(tmp_path, "pnpm@10.34.5", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            defaults:
+              run:
+                working-directory: apps/web
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  pnpm install
+    """)
+    assert len(hits) == 1
+    assert "pnpm@9.15.0" in (hits[0].derived_note or "")
+
+
+def test_p1425_a_nested_pnpm10_pin_carries_the_mechanism(tmp_path):
+    """The mirror: the same disable write DOES cover a nested package pinned
+    at pnpm 10 — the mechanism the allowlist drives exists there, even when
+    the root's own pin is below it."""
+    _pkg(tmp_path, "pnpm@9.15.0", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.34.5")
+    assert _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            defaults:
+              run:
+                working-directory: apps/web
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  pnpm install
+    """) == []
+
+
 @pytest.mark.parametrize("command", [
     "npm ci --maxsockets 3",
     "pnpm install --fetch-timeout 60000",
