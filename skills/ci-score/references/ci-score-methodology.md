@@ -14,6 +14,7 @@ single source of truth is `ci-score-spec.json`, linked from SKILL.md. If the two
 - Each check, explained (one anchored section per check)
 - What a high score means — and what it does not (score vs. speed, measured)
 - Evidence, and the measured report beside the score
+- Pinned engine constants and read bounds
 - Who publishes this, and the conflict stated plainly
 - Data handling
 - Change control
@@ -93,6 +94,25 @@ number:
 | Job timeouts | `timeout-minutes` is set (GitHub's default is 6 hours) *(n/a when every job delegates to a reusable workflow and some of them live in another repo)* |
 | Scoped OIDC id-token | `id-token: write` at job level, never workflow-wide *(n/a when unused)* |
 | Pinned action SHAs | **≥95%** of remote action references (steps, composite actions, and calls to other repositories' reusable workflows) are pinned to a commit SHA or by GitHub's workflow lockfile — full adoption with room for Renovate-style stragglers (at most 1 in 20); the evidence always shows pinned-of-total. The threshold is a ratio, so a repo with fewer than 20 references has no straggler allowance: one unpinned reference fails it |
+
+## Pinned engine constants and read bounds
+
+These values can change a check's state or what workflow content the scorer can
+read. The machine-readable values and reasons live in `engine_constants` in
+`ci-score-spec.json`; the contract test requires this table and the engine to
+agree, and rejects a newly added numeric data constant until it is recorded.
+
+| Constant | Pinned value | What it controls |
+|---|---:|---|
+| `_MAX_PARALLEL_DEPTH` | 64 | Maximum nested `parallel:` groups before the rest is named as unread. |
+| `_MAX_WALK_STEPS` | 10,000 | Maximum entries visited in one parallel-step walk. |
+| `_SCRIPT_MAX_BYTES` | 1,048,576 bytes | Maximum first-party script size inspected for history reads. |
+| `_MAX_LOCAL_ACTION_DEPTH` | 16 | Maximum nested local-action or reusable-workflow calls read. |
+| `_MAX_LOCAL_COMPOSITES` | 256 | Maximum distinct local composite actions read in one scan. |
+| `_SETUP_CACHE_INPUTS` | setup-go 4; setup-uv 5; setup-ruby off | Default-cache switch and first default-on major for the shared setup-action table. |
+| `_SETUP_NODE_AUTO_CACHE_FROM_MAJOR` | 5 | First setup-node major with automatic package-manager caching. |
+| `_PLAUSIBLE_MAJOR` | setup-go 9; setup-node 9; setup-uv 15; setup-ruby 5 | Highest release major a version comment may name for each known setup action. |
+| `_PLAUSIBLE_MAJOR_DEFAULT` | 20 | Conservative version-comment ceiling for other setup actions. |
 
 Every published best-practice page maps to a check except
 *keep-advisory-checks-non-blocking*: whether an advisory check blocks merges
