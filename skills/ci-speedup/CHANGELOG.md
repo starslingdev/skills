@@ -35,6 +35,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-16** — Detect wrapper-hidden duplicate test suites and package builds from matching completion signatures in separate job-log steps, keep different runtimes and packages quiet, and cap the opportunity at the later measured completion wall (#369).
 - **2026-11-15** — Restore the path-partitioned monorepo fixture's affected-package filter and per-package test command while retaining its package/runtime matrix, so the fixture again crowns the aggregation gate and exercises the applicable report checks (#356).
 - **2026-11-15** — Cap repeated checkout/setup savings at the affected jobs' measured completed-run compute, and disclose the measured ceiling whenever it lowers the modeled monthly credit. Every other per-run modeled saving (OPT1-9, OPT13, OPT16-18, OPT22, OPT27-28, OPT41-42, OPT52-54, OPT58-59, OPT61-63) is now also capped when only some of its affected jobs have measured compute, at those jobs' measured compute, with the measured share of jobs named in the note. A repeated-setup finding (OPT14/OPT15) whose affected jobs have no measured compute at all now renders not sized instead of keeping its modeled figure (#355).
 - **2026-11-15** — Lead bimodal gate reports with both measured modes and their shares, size the slow-mode improvement from per-PR ceilings, and reject a P50-only Bottom line for that shape (#353).
