@@ -2051,6 +2051,106 @@ def _log_step_sections(lines: list[str]) -> list[tuple[str, int, int]]:
     return out
 
 
+def _within_job_duplicate_leaf(lines: list[str]) -> dict[str, Any] | None:
+    """Return OPT16 evidence for wrapper-hidden repeated test/build work.
+
+    Static workflow scanning cannot see through a package script.  Job logs can:
+    compare completion signatures only across distinct GitHub Actions step groups,
+    and fail closed when the groups expose different runtime versions.  The later
+    completion duration is an upper bound because a summary can include nearby work.
+    """
+    runtime_re = re.compile(
+        r"^\s*(?:(?:node|python|go|rustc|java)\s+(?:version\s+)?)?"
+        r"v?(\d+\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?)\s*$", re.IGNORECASE)
+    package_re = re.compile(
+        r"^\s*>\s+(@?[^@\s]+(?:/[^@\s]+)?)@\S+\s+build\s+(\S+)\s*$",
+        re.IGNORECASE)
+    output_re = re.compile(r"^\s*((?:dist|build|out)/[^\s]+)", re.IGNORECASE)
+    duration_re = re.compile(r"\b(?:Duration\s+|built in\s+)([\d.]+)s\b",
+                             re.IGNORECASE)
+
+    def _runtime(group_lines: list[str]) -> tuple[str, ...]:
+        return tuple(sorted({m.group(1).casefold() for line in group_lines
+                             if (m := runtime_re.match(line))}))
+
+    def _test_signature(group_lines: list[str]) -> tuple[str, str] | None:
+        files = tests = None
+        tap_tests = tap_pass = None
+        for line in group_lines:
+            if m := re.search(r"\bTest Files\s+(\d+)\s+passed\s+\((\d+)\)", line,
+                              re.IGNORECASE):
+                files = f"{m.group(1)}/{m.group(2)}"
+            if m := re.search(r"^\s*Tests\s+(\d+)\s+passed\s+\((\d+)\)", line,
+                              re.IGNORECASE):
+                tests = f"{m.group(1)}/{m.group(2)}"
+            if m := re.search(r"^\s*#\s*tests\s+(\d+)\s*$", line, re.IGNORECASE):
+                tap_tests = m.group(1)
+            if m := re.search(r"^\s*#\s*pass\s+(\d+)\s*$", line, re.IGNORECASE):
+                tap_pass = m.group(1)
+        if files is not None and tests is not None:
+            return "vitest", f"files={files}; tests={tests}"
+        if tap_tests is not None and tap_pass is not None:
+            return "tap", f"tests={tap_tests}; pass={tap_pass}"
+        return None
+
+    def _build_signature(group_lines: list[str]) -> tuple[str, str] | None:
+        package = directory = output = None
+        for line in group_lines:
+            if (m := package_re.match(line)) and package is None:
+                package, directory = m.group(1), m.group(2).replace("\\", "/")
+            if (m := output_re.match(line)) and output is None:
+                output = m.group(1).replace("\\", "/").split("/", 1)[0]
+        if package is None or directory is None or output is None:
+            return None
+        return package, f"{directory.rstrip('/')}/{output}"
+
+    rows: list[dict[str, Any]] = []
+    for command, start, end in _log_step_sections(lines):
+        group_lines = lines[start + 1:end]
+        duration = next((float(m.group(1)) for line in reversed(group_lines)
+                         if (m := duration_re.search(line))), None)
+        if duration is None:
+            continue
+        test = _test_signature(group_lines)
+        build = _build_signature(group_lines)
+        if test is not None:
+            rows.append({"kind": "test", "signature": test, "command": command,
+                         "runtime": _runtime(group_lines), "seconds": duration})
+        if build is not None:
+            rows.append({"kind": "build", "signature": build, "command": command,
+                         "runtime": _runtime(group_lines), "seconds": duration})
+
+    for later_index, later in enumerate(rows[1:], 1):
+        for earlier in rows[:later_index]:
+            if (earlier["kind"] != later["kind"]
+                    or earlier["signature"] != later["signature"]
+                    or earlier["runtime"] != later["runtime"]):
+                continue
+            kind = later["kind"]
+            signature = "; ".join(later["signature"])
+            return {
+                "fix_key": "within-job-duplicate-work",
+                "unit_label": (f"the same {kind} completion signature appears in two "
+                               "job steps"),
+                "magnitude": {
+                    "label": f"later repeated {kind} wall (upper bound)",
+                    "value": round(later["seconds"], 2),
+                    "unit": "s",
+                },
+                "deeper": [{
+                    "rows": [(earlier["command"], earlier["seconds"], None),
+                             (later["command"], later["seconds"], None)],
+                    "blocker_note": (f"both steps print the same {kind} signature; the "
+                                     "later summary duration is only an upper bound"),
+                    "pct_of": "sum",
+                }],
+                "evidence": [f"Run {earlier['command']}", signature,
+                             f"Run {later['command']}", signature],
+                "search": ["Test Files", "Tests", "# tests", "built in"],
+            }
+    return None
+
+
 def _install_build_section(lines: list[str], min_secs: float = _LIFECYCLE_BUILD_FLOOR_S):
     """The `<pm> install` step section with the LARGEST lifecycle build (a timed turbo block), when
     that build is >= `min_secs`, or None. Returns `(cmd, s, e, hit, total, secs, cidx)` — the exact
@@ -3461,7 +3561,12 @@ def _parse_log(text: str,
                 "magnitude": None, "evidence": [l.strip() for l in uncached[:2]],
                 "search": ["eslint", "--cache", ".eslintcache"]}
 
-    # --- G2: the same local Cargo crate is compiled in two job steps ----------
+    # --- G2: a wrapper hides a repeated test suite or package build ----------
+    duplicate_work = _within_job_duplicate_leaf(lines)
+    if duplicate_work is not None:
+        return duplicate_work
+
+    # --- G3: the same local Cargo crate is compiled in two job steps ----------
     # Cargo's group-delimited step logs let us distinguish a repeated compile
     # from multiple crates within one invocation. Only paths with a recognizable
     # GitHub Actions checkout shape count; registry/git and arbitrary machine-local
@@ -4927,6 +5032,27 @@ _FIX_META: dict[str, dict[str, Any]] = {
                    "re-lint changed files and the updated cache "
                    "is saved. Verify a deliberately-introduced lint error still fails CI "
                    "(the cache must not hide it) and re-measure the lint step.",
+    },
+    "within-job-duplicate-work": {
+        "cause": "Two separate steps in this job print the same completed test-suite or "
+                 "package-build signature under the same observable runtime. One call may "
+                 "be hidden inside a wrapper script, so workflow YAML alone does not show "
+                 "the repeat. The later summary duration is an upper bound, not a claim "
+                 "that every second in that step is removable.",
+        "look": "`{wf}` and the package scripts reached by both named steps — expand each "
+                "wrapper and identify the common test or build leaf. Compare runtime, "
+                "platform, feature flags, environment, output directory and coverage mode.",
+        "constraints": "Preserve every distinct runtime, platform, feature set, package, "
+                       "coverage mode and failure path. Matching totals are evidence of a "
+                       "repeat only when the observable execution settings also match. Do "
+                       "not remove a run that provides intentionally different coverage.",
+        "docs": ["GitHub Actions workflow syntax for jobs and steps: "
+                 "https://docs.github.com/actions/writing-workflows/workflow-syntax-for-github-actions"],
+        "deliver": "Trace both wrappers to their leaf commands, then keep one invocation "
+                   "only if their runtime, platform, settings and coverage are equivalent. "
+                   "If a later aggregate build repeats one package, exclude only that "
+                   "already-built package. Keep the same test count, artifacts and failure "
+                   "propagation, and re-measure both steps.",
     },
     "cargo-double-compile": {
         "cause": "Two separate Cargo steps compile the same checked-out crate with the "
@@ -7433,6 +7559,7 @@ _LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
     "emulated-image-compile": "build",
+    "within-job-duplicate-work": frozenset({"build", "test"}),
     "cargo-double-compile": frozenset({"build", "scan", "test"}),
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",

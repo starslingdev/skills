@@ -1899,6 +1899,92 @@ def test_parse_log_detects_serial_cargo_test_suite():
     assert leaf["evidence"]
 
 
+def test_parse_log_detects_same_vitest_suite_inside_wrapper_and_direct_step():
+    log = "\n".join([
+        "##[group]Run bun run release:ci",
+        "$ node --version",
+        "v22.14.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "##[group]Run bun run test",
+        "$ node --version",
+        "v22.14.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "within-job-duplicate-work"
+    assert leaf["magnitude"] == {
+        "label": "later repeated test wall (upper bound)",
+        "value": 43.8,
+        "unit": "s",
+    }
+
+
+def test_parse_log_duplicate_suite_stays_quiet_across_runtime_versions():
+    log = "\n".join([
+        "##[group]Run bun run test:node20",
+        "$ node --version",
+        "v20.19.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "##[group]Run bun run test:node22",
+        "$ node --version",
+        "v22.14.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
+def test_parse_log_detects_same_build_reached_through_two_package_scripts():
+    log = "\n".join([
+        "##[group]Run pnpm run check",
+        "> docs@1.0.0 build /github/workspace/docs",
+        "> vite build",
+        "dist/index.html                 2.31 kB",
+        "✓ built in 41.20s",
+        "##[group]Run pnpm run build",
+        "> docs@1.0.0 build /github/workspace/docs",
+        "> vite build --force",
+        "dist/index.html                 2.31 kB",
+        "✓ built in 39.40s",
+    ])
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "within-job-duplicate-work"
+    assert leaf["magnitude"] == {
+        "label": "later repeated build wall (upper bound)",
+        "value": 39.4,
+        "unit": "s",
+    }
+
+
+def test_parse_log_two_different_package_builds_are_not_duplicates():
+    log = "\n".join([
+        "##[group]Run pnpm --filter docs build",
+        "> docs@1.0.0 build /github/workspace/docs",
+        "> vite build",
+        "dist/index.html                 2.31 kB",
+        "✓ built in 41.20s",
+        "##[group]Run pnpm --filter web build",
+        "> web@1.0.0 build /github/workspace/web",
+        "> vite build",
+        "dist/index.html                 2.31 kB",
+        "✓ built in 39.40s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
 def test_parse_log_cargo_test_tail_row_keeps_drill_shares_summing_to_the_wall():
     # >6 binaries fold into one VALUED tail row so the `pct_of: "sum"` bars still total
     # the serial wall (a None tail would drop out of the denominator and inflate shares).

@@ -3851,6 +3851,7 @@ agent prompt in `_PROMPTS`; it is **not** a prescribed fix):
 | `install-lifecycle-build` | a root `prepare`/`postinstall` lifecycle script runs a build DURING `<pm> install` — "work runs during install", not a cache miss | build wall run inside install (**seconds**) |
 | `buildx-no-cache` | `docker buildx` imports no cache → every layer cold | slowest cold layer's share of the cold-build wall (%) |
 | `playwright-parallel` | specs run as sequential invocations | **none** — the finding is the *sequencing*, shown by the timeline itself |
+| `within-job-duplicate-work` | two step groups print the same completed test or package-build signature under the same observable runtime (OPT16) | later completion duration (**seconds**, upper bound) |
 | `lighthouse-serial-audits` | Lighthouse CI audits every URL `numberOfRuns` times per collect pass, one after another (OPT103). Counts completed passes only, and fires at 20 or more audits with at least two per distinct URL | audits beyond the first per URL, as a share of all audits (%) |
 
 A detector with `magnitude: None` is **categorical only**: the cause is structural
@@ -3868,6 +3869,12 @@ BEFORE the turbo detectors so a plain later-step turbo build still classifies as
 `turbo-remote-cache`/`turbo-partial-cache`. The install-section boundary + gating block come
 from `_install_build_section`, the single source both this detector and `_cache_state_of_log`
 read, so the leaf and the per-run cache state can never measure different builds.
+
+`within-job-duplicate-work` occupies the slot immediately before the
+Cargo-specific double-compile leaf. The generic leaf recognizes completed test and
+package-build signatures hidden behind wrappers; the Cargo leaf remains later and
+more specific to crate/profile/target context. Both cap their magnitude at the
+later step's measured completion wall.
 
 ### 12.4 Cross-run check — adaptive sampling (`_magnitude_sample`)
 
