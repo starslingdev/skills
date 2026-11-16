@@ -1899,6 +1899,312 @@ def test_parse_log_detects_serial_cargo_test_suite():
     assert leaf["evidence"]
 
 
+def test_parse_log_detects_same_vitest_suite_inside_wrapper_and_direct_step():
+    log = "\n".join([
+        "##[group]Run bun run release:ci",
+        "$ node --version",
+        "v22.14.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "##[group]Run bun run test",
+        "$ node --version",
+        "v22.14.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "within-job-duplicate-test"
+    assert leaf["magnitude"] == {
+        "label": "later repeated test wall (upper bound)",
+        "value": 43.8,
+        "unit": "s",
+    }
+
+
+def test_parse_log_duplicate_suite_stays_quiet_across_runtime_versions():
+    log = "\n".join([
+        "##[group]Run bun run test:node20",
+        "$ node --version",
+        "v20.19.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "##[group]Run bun run test:node22",
+        "$ node --version",
+        "v22.14.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
+def test_parse_log_duplicate_suite_carries_runtime_from_setup_steps():
+    log = "\n".join([
+        "##[group]Run nvm use 20",
+        "Now using node v20.19.0",
+        "##[group]Run bun run test:node20",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run bun run test:node22",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
+def test_parse_log_identical_totals_in_different_packages_stay_quiet():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run pnpm --filter package-a test",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "##[group]Run pnpm --filter package-b test",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
+def test_parse_log_duplicate_totals_without_runtime_evidence_stay_quiet():
+    log = "\n".join([
+        "##[group]Run npm run release:ci",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "##[group]Run npm test",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
+def test_parse_log_detects_real_node_tap_completion_duration():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run npm run release:ci",
+        "# tests 12",
+        "# pass 12",
+        "# duration_ms 42500",
+        "##[group]Run npm test",
+        "# tests 12",
+        "# pass 12",
+        "# duration_ms 41000",
+    ])
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "within-job-duplicate-test"
+    assert leaf["magnitude"]["value"] == 41.0
+
+
+def test_parse_log_detects_jest_completion_signature():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run npm run verify",
+        "Test Suites: 18 passed, 18 total",
+        "Tests:       184 passed, 184 total",
+        "Time:        45.1 s",
+        "##[group]Run npm test",
+        "Test Suites: 18 passed, 18 total",
+        "Tests:       184 passed, 184 total",
+        "Time:        43.8 s",
+    ])
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "within-job-duplicate-test"
+    assert leaf["magnitude"]["value"] == 43.8
+
+
+def test_parse_log_jest_accepts_an_estimated_time_suffix():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run npm run verify",
+        "Test Suites: 18 passed, 18 total",
+        "Tests:       184 passed, 184 total",
+        "Time:        45.1 s, estimated 50 s",
+        "##[group]Run npm test",
+        "Test Suites: 18 passed, 18 total",
+        "Tests:       184 passed, 184 total",
+        "Time:        43.8 s, estimated 50 s",
+    ])
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "within-job-duplicate-test"
+    assert leaf["magnitude"]["value"] == 43.8
+
+
+def test_parse_log_wrapper_runtime_switches_stay_distinct():
+    log = "\n".join([
+        "##[group]Run npm run test:all-runtimes",
+        "Now using node v20.19.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "Now using node v22.14.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
+def test_parse_log_wrapper_package_banners_keep_suites_distinct():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run pnpm run test:workspace",
+        "> package-a@1.0.0 test /github/workspace/packages/a",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "> package-b@1.0.0 test /github/workspace/packages/b",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
+def test_parse_log_detects_same_build_reached_through_two_package_scripts():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run pnpm run check",
+        "> docs@1.0.0 build /github/workspace/docs",
+        "> vite build",
+        "dist/index.html                 2.31 kB",
+        "✓ built in 41.20s",
+        "##[group]Run pnpm run build",
+        "> docs@1.0.0 build /github/workspace/docs",
+        "> vite build --force",
+        "dist/index.html                 2.31 kB",
+        "✓ built in 39.40s",
+    ])
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "within-job-duplicate-build"
+    assert leaf["magnitude"] == {
+        "label": "later repeated build wall (upper bound)",
+        "value": 39.4,
+        "unit": "s",
+    }
+
+
+def test_parse_log_two_different_package_builds_are_not_duplicates():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run pnpm --filter docs build",
+        "> docs@1.0.0 build /github/workspace/docs",
+        "> vite build",
+        "dist/index.html                 2.31 kB",
+        "✓ built in 41.20s",
+        "##[group]Run pnpm --filter web build",
+        "> web@1.0.0 build /github/workspace/web",
+        "> vite build",
+        "dist/index.html                 2.31 kB",
+        "✓ built in 39.40s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
+def test_parse_log_detects_two_package_scripts_inside_one_step():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run pnpm run verify",
+        "> docs@1.0.0 check /github/workspace/docs",
+        "> pnpm run build",
+        "> docs@1.0.0 build /github/workspace/docs",
+        "> vite build",
+        "dist/index.html                 2.31 kB",
+        "✓ built in 41.20s",
+        "> docs@1.0.0 build /github/workspace/docs",
+        "> vite build --force",
+        "dist/index.html                 2.31 kB",
+        "✓ built in 39.40s",
+    ])
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "within-job-duplicate-build"
+    assert leaf["magnitude"]["value"] == 39.4
+
+
+def test_parse_log_build_duration_belongs_to_its_package_occurrence():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run pnpm run first-wrapper",
+        "> docs@1.0.0 build /github/workspace/docs",
+        "dist/index.html 2.31 kB",
+        "✓ built in 10.00s",
+        "> web@1.0.0 build /github/workspace/web",
+        "out/index.html 2.31 kB",
+        "✓ built in 100.00s",
+        "##[group]Run pnpm run second-wrapper",
+        "> docs@1.0.0 build /github/workspace/docs",
+        "dist/index.html 2.31 kB",
+        "✓ built in 9.00s",
+        "> app@1.0.0 build /github/workspace/app",
+        "build/index.html 2.31 kB",
+        "✓ built in 80.00s",
+    ])
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "within-job-duplicate-build"
+    assert leaf["magnitude"]["value"] == 9.0
+
+
+def test_duplicate_leaf_category_matches_the_detected_work():
+    test_leaf = bp._parse_log("\n".join([
+        "##[group]Run nvm use 22", "Now using node v22.14.0",
+        "##[group]Run npm run release:ci", "# tests 12", "# pass 12",
+        "# duration_ms 42500", "##[group]Run npm test", "# tests 12",
+        "# pass 12", "# duration_ms 41000",
+    ]))
+    build_leaf = bp._parse_log("\n".join([
+        "##[group]Run nvm use 22", "Now using node v22.14.0",
+        "##[group]Run pnpm run verify",
+        "> docs@1.0.0 build /github/workspace/docs", "dist/index.html 2.31 kB",
+        "✓ built in 10.00s", "> docs@1.0.0 build /github/workspace/docs",
+        "dist/index.html 2.31 kB", "✓ built in 9.00s",
+    ]))
+
+    assert test_leaf is not None and build_leaf is not None
+    assert not bp._offcategory_leaf(test_leaf, {"dominant_category": "test"})
+    assert bp._offcategory_leaf(test_leaf, {"dominant_category": "build"})
+    assert not bp._offcategory_leaf(build_leaf, {"dominant_category": "build"})
+    assert bp._offcategory_leaf(build_leaf, {"dominant_category": "test"})
+
+
 def test_parse_log_cargo_test_tail_row_keeps_drill_shares_summing_to_the_wall():
     # >6 binaries fold into one VALUED tail row so the `pct_of: "sum"` bars still total
     # the serial wall (a None tail would drop out of the denominator and inflate shares).

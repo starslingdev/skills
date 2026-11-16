@@ -1426,6 +1426,21 @@ settings, the second step repeats compilation. Different crates or artifact
 settings stay quiet. The later step's full `Finished` wall is an upper bound,
 because it can include linking or other work beside the repeated compilation.
 
+The measured critical-path drill also recognizes wrappers outside Cargo. It
+reports OPT16 when two invocations (in separate step groups or inside one wrapper
+step) print the same completed test signature (matching test-file and test totals,
+including TAP totals) or the same package-build signature (package plus output
+directory). It requires a readable active runtime version, carries that version
+forward from setup steps, and compares package scope, so different runtime
+versions and different packages stay quiet. A matching signature is evidence to
+investigate the wrapper; it is not permission to remove distinct platform,
+feature, coverage, or failure-path coverage.
+
+For these wrapper-hidden repeats, the later completion duration is a measured
+upper bound. It can include nearby work in that step, so the report never credits
+more than that duration and requires re-measurement after the duplicate leaf
+command is removed.
+
 ```bash
 # For each job in each workflow, check if any command appears in multiple steps
 for f in /tmp/workflows/*.yml; do
@@ -1434,7 +1449,10 @@ for f in /tmp/workflows/*.yml; do
 done
 ```
 
-**Fix**: Remove the duplicate invocation. For Cargo, preserve every intended
+**Fix**: Trace both wrappers to the commands they ultimately run, then remove the
+duplicate invocation only when their runtime, platform, settings and coverage are
+equivalent. If an aggregate build repeats one package, exclude only that
+already-built package. For Cargo, preserve every intended
 package, feature, platform and test target. Combine package selections in one
 invocation when they are meant to share artifacts, or align the feature, target
 directory, toolchain and compiler settings that should produce the same artifact;
