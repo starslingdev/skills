@@ -3,98 +3,98 @@
   "checks": {
     "sha-a": [
       {
-        "completed_at": "2026-01-28T00:04:35Z",
+        "completed_at": "2026-01-28T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (api, 20)",
         "started_at": "2026-01-28T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-28T00:04:35Z",
+        "completed_at": "2026-01-28T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (api, 22)",
         "started_at": "2026-01-28T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-28T00:04:35Z",
+        "completed_at": "2026-01-28T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (web, 20)",
         "started_at": "2026-01-28T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-28T00:04:35Z",
+        "completed_at": "2026-01-28T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (web, 22)",
         "started_at": "2026-01-28T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-28T00:05:05Z",
+        "completed_at": "2026-01-28T00:05:00Z",
         "conclusion": "success",
         "name": "gate",
-        "started_at": "2026-01-28T00:04:35Z"
+        "started_at": "2026-01-28T00:02:00Z"
       }
     ],
     "sha-b": [
       {
-        "completed_at": "2026-01-27T00:04:35Z",
+        "completed_at": "2026-01-27T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (api, 20)",
         "started_at": "2026-01-27T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-27T00:04:35Z",
+        "completed_at": "2026-01-27T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (api, 22)",
         "started_at": "2026-01-27T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-27T00:04:35Z",
+        "completed_at": "2026-01-27T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (web, 20)",
         "started_at": "2026-01-27T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-27T00:04:35Z",
+        "completed_at": "2026-01-27T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (web, 22)",
         "started_at": "2026-01-27T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-27T00:05:05Z",
+        "completed_at": "2026-01-27T00:05:00Z",
         "conclusion": "success",
         "name": "gate",
-        "started_at": "2026-01-27T00:04:35Z"
+        "started_at": "2026-01-27T00:02:00Z"
       }
     ],
     "sha-c": [
       {
-        "completed_at": "2026-01-26T00:04:35Z",
+        "completed_at": "2026-01-26T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (api, 20)",
         "started_at": "2026-01-26T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-26T00:04:35Z",
+        "completed_at": "2026-01-26T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (api, 22)",
         "started_at": "2026-01-26T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-26T00:04:35Z",
+        "completed_at": "2026-01-26T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (web, 20)",
         "started_at": "2026-01-26T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-26T00:04:35Z",
+        "completed_at": "2026-01-26T00:02:00Z",
         "conclusion": "success",
         "name": "tests / test (web, 22)",
         "started_at": "2026-01-26T00:00:00Z"
       },
       {
-        "completed_at": "2026-01-26T00:05:05Z",
+        "completed_at": "2026-01-26T00:05:00Z",
         "conclusion": "success",
         "name": "gate",
-        "started_at": "2026-01-26T00:04:35Z"
+        "started_at": "2026-01-26T00:02:00Z"
       }
     ]
   },
@@ -102,8 +102,9 @@
   "jobs": {
     "1001": [
       {
-        "completed_at": "2026-01-28T00:04:35Z",
+        "completed_at": "2026-01-28T00:02:00Z",
         "id": 10011,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -111,35 +112,16 @@
         "started_at": "2026-01-28T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-28T00:00:00Z",
-            "completed_at": "2026-01-28T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-28T00:00:15Z",
-            "completed_at": "2026-01-28T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-28T00:00:45Z",
-            "completed_at": "2026-01-28T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-28T00:01:00Z",
-            "completed_at": "2026-01-28T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-28T00:02:00Z",
+            "name": "test api on 20",
+            "started_at": "2026-01-28T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-28T00:04:35Z",
+        "completed_at": "2026-01-28T00:02:00Z",
         "id": 10012,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -147,35 +129,16 @@
         "started_at": "2026-01-28T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-28T00:00:00Z",
-            "completed_at": "2026-01-28T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-28T00:00:15Z",
-            "completed_at": "2026-01-28T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-28T00:00:45Z",
-            "completed_at": "2026-01-28T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-28T00:01:00Z",
-            "completed_at": "2026-01-28T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-28T00:02:00Z",
+            "name": "test api on 22",
+            "started_at": "2026-01-28T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-28T00:04:35Z",
+        "completed_at": "2026-01-28T00:02:00Z",
         "id": 10013,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -183,35 +146,16 @@
         "started_at": "2026-01-28T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-28T00:00:00Z",
-            "completed_at": "2026-01-28T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-28T00:00:15Z",
-            "completed_at": "2026-01-28T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-28T00:00:45Z",
-            "completed_at": "2026-01-28T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-28T00:01:00Z",
-            "completed_at": "2026-01-28T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-28T00:02:00Z",
+            "name": "test web on 20",
+            "started_at": "2026-01-28T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-28T00:04:35Z",
+        "completed_at": "2026-01-28T00:02:00Z",
         "id": 10014,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -219,55 +163,35 @@
         "started_at": "2026-01-28T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-28T00:00:00Z",
-            "completed_at": "2026-01-28T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-28T00:00:15Z",
-            "completed_at": "2026-01-28T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-28T00:00:45Z",
-            "completed_at": "2026-01-28T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-28T00:01:00Z",
-            "completed_at": "2026-01-28T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-28T00:02:00Z",
+            "name": "test web on 22",
+            "started_at": "2026-01-28T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-28T00:05:05Z",
+        "completed_at": "2026-01-28T00:05:00Z",
         "id": 10019,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
         "name": "gate",
-        "started_at": "2026-01-28T00:04:35Z",
+        "started_at": "2026-01-28T00:02:00Z",
         "steps": [
           {
+            "completed_at": "2026-01-28T00:05:00Z",
             "name": "test",
-            "started_at": "2026-01-28T00:04:35Z",
-            "completed_at": "2026-01-28T00:05:05Z",
-            "conclusion": "success"
+            "started_at": "2026-01-28T00:02:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       }
     ],
     "1002": [
       {
-        "completed_at": "2026-01-27T00:04:35Z",
+        "completed_at": "2026-01-27T00:02:00Z",
         "id": 10021,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -275,35 +199,16 @@
         "started_at": "2026-01-27T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-27T00:00:00Z",
-            "completed_at": "2026-01-27T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-27T00:00:15Z",
-            "completed_at": "2026-01-27T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-27T00:00:45Z",
-            "completed_at": "2026-01-27T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-27T00:01:00Z",
-            "completed_at": "2026-01-27T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-27T00:02:00Z",
+            "name": "test api on 20",
+            "started_at": "2026-01-27T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-27T00:04:35Z",
+        "completed_at": "2026-01-27T00:02:00Z",
         "id": 10022,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -311,35 +216,16 @@
         "started_at": "2026-01-27T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-27T00:00:00Z",
-            "completed_at": "2026-01-27T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-27T00:00:15Z",
-            "completed_at": "2026-01-27T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-27T00:00:45Z",
-            "completed_at": "2026-01-27T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-27T00:01:00Z",
-            "completed_at": "2026-01-27T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-27T00:02:00Z",
+            "name": "test api on 22",
+            "started_at": "2026-01-27T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-27T00:04:35Z",
+        "completed_at": "2026-01-27T00:02:00Z",
         "id": 10023,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -347,35 +233,16 @@
         "started_at": "2026-01-27T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-27T00:00:00Z",
-            "completed_at": "2026-01-27T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-27T00:00:15Z",
-            "completed_at": "2026-01-27T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-27T00:00:45Z",
-            "completed_at": "2026-01-27T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-27T00:01:00Z",
-            "completed_at": "2026-01-27T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-27T00:02:00Z",
+            "name": "test web on 20",
+            "started_at": "2026-01-27T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-27T00:04:35Z",
+        "completed_at": "2026-01-27T00:02:00Z",
         "id": 10024,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -383,55 +250,35 @@
         "started_at": "2026-01-27T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-27T00:00:00Z",
-            "completed_at": "2026-01-27T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-27T00:00:15Z",
-            "completed_at": "2026-01-27T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-27T00:00:45Z",
-            "completed_at": "2026-01-27T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-27T00:01:00Z",
-            "completed_at": "2026-01-27T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-27T00:02:00Z",
+            "name": "test web on 22",
+            "started_at": "2026-01-27T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-27T00:05:05Z",
+        "completed_at": "2026-01-27T00:05:00Z",
         "id": 10029,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
         "name": "gate",
-        "started_at": "2026-01-27T00:04:35Z",
+        "started_at": "2026-01-27T00:02:00Z",
         "steps": [
           {
+            "completed_at": "2026-01-27T00:05:00Z",
             "name": "test",
-            "started_at": "2026-01-27T00:04:35Z",
-            "completed_at": "2026-01-27T00:05:05Z",
-            "conclusion": "success"
+            "started_at": "2026-01-27T00:02:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       }
     ],
     "1003": [
       {
-        "completed_at": "2026-01-26T00:04:35Z",
+        "completed_at": "2026-01-26T00:02:00Z",
         "id": 10031,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -439,35 +286,16 @@
         "started_at": "2026-01-26T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-26T00:00:00Z",
-            "completed_at": "2026-01-26T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-26T00:00:15Z",
-            "completed_at": "2026-01-26T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-26T00:00:45Z",
-            "completed_at": "2026-01-26T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-26T00:01:00Z",
-            "completed_at": "2026-01-26T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-26T00:02:00Z",
+            "name": "test api on 20",
+            "started_at": "2026-01-26T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-26T00:04:35Z",
+        "completed_at": "2026-01-26T00:02:00Z",
         "id": 10032,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -475,35 +303,16 @@
         "started_at": "2026-01-26T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-26T00:00:00Z",
-            "completed_at": "2026-01-26T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-26T00:00:15Z",
-            "completed_at": "2026-01-26T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-26T00:00:45Z",
-            "completed_at": "2026-01-26T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-26T00:01:00Z",
-            "completed_at": "2026-01-26T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-26T00:02:00Z",
+            "name": "test api on 22",
+            "started_at": "2026-01-26T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-26T00:04:35Z",
+        "completed_at": "2026-01-26T00:02:00Z",
         "id": 10033,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -511,35 +320,16 @@
         "started_at": "2026-01-26T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-26T00:00:00Z",
-            "completed_at": "2026-01-26T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-26T00:00:15Z",
-            "completed_at": "2026-01-26T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-26T00:00:45Z",
-            "completed_at": "2026-01-26T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-26T00:01:00Z",
-            "completed_at": "2026-01-26T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-26T00:02:00Z",
+            "name": "test web on 20",
+            "started_at": "2026-01-26T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-26T00:04:35Z",
+        "completed_at": "2026-01-26T00:02:00Z",
         "id": 10034,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
@@ -547,49 +337,28 @@
         "started_at": "2026-01-26T00:00:00Z",
         "steps": [
           {
-            "name": "Setup",
-            "started_at": "2026-01-26T00:00:00Z",
-            "completed_at": "2026-01-26T00:00:15Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Build",
-            "started_at": "2026-01-26T00:00:15Z",
-            "completed_at": "2026-01-26T00:00:45Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Install browser",
-            "started_at": "2026-01-26T00:00:45Z",
-            "completed_at": "2026-01-26T00:01:00Z",
-            "conclusion": "success"
-          },
-          {
-            "name": "Tests",
-            "started_at": "2026-01-26T00:01:00Z",
-            "completed_at": "2026-01-26T00:04:35Z",
-            "conclusion": "success"
+            "completed_at": "2026-01-26T00:02:00Z",
+            "name": "test web on 22",
+            "started_at": "2026-01-26T00:00:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       },
       {
-        "completed_at": "2026-01-26T00:05:05Z",
+        "completed_at": "2026-01-26T00:05:00Z",
         "id": 10039,
+        "conclusion": "success",
         "labels": [
           "ubuntu-latest"
         ],
         "name": "gate",
-        "started_at": "2026-01-26T00:04:35Z",
+        "started_at": "2026-01-26T00:02:00Z",
         "steps": [
           {
+            "completed_at": "2026-01-26T00:05:00Z",
             "name": "test",
-            "started_at": "2026-01-26T00:04:35Z",
-            "completed_at": "2026-01-26T00:05:05Z",
-            "conclusion": "success"
+            "started_at": "2026-01-26T00:02:00Z"
           }
-        ],
-        "conclusion": "success"
+        ]
       }
     ]
   },
@@ -613,7 +382,7 @@
           "id": 1001,
           "run_started_at": "2026-01-28T00:00:00Z",
           "status": "completed",
-          "updated_at": "2026-01-28T00:05:05Z"
+          "updated_at": "2026-01-28T00:05:00Z"
         },
         {
           "conclusion": "success",
@@ -624,7 +393,7 @@
           "id": 1002,
           "run_started_at": "2026-01-27T00:00:00Z",
           "status": "completed",
-          "updated_at": "2026-01-27T00:05:05Z"
+          "updated_at": "2026-01-27T00:05:00Z"
         },
         {
           "conclusion": "success",
@@ -635,24 +404,10 @@
           "id": 1003,
           "run_started_at": "2026-01-26T00:00:00Z",
           "status": "completed",
-          "updated_at": "2026-01-26T00:05:05Z"
+          "updated_at": "2026-01-26T00:05:00Z"
         }
       ],
       "runs_30d": 3
     }
-  ],
-  "logs": {
-    "10011": "2026-01-28T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-28T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10012": "2026-01-28T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-28T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10013": "2026-01-28T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-28T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10014": "2026-01-28T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-28T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10021": "2026-01-27T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-27T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10022": "2026-01-27T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-27T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10023": "2026-01-27T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-27T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10024": "2026-01-27T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-27T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10031": "2026-01-26T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-26T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10032": "2026-01-26T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-26T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10033": "2026-01-26T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-26T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n",
-    "10034": "2026-01-26T00:01:00Z cargo test\nRunning tests/api.rs (target/debug/deps/api-a1)\n2026-01-26T00:03:05Z test result: ok. 100 passed; 0 failed; finished in 80.00s\nRunning tests/web.rs (target/debug/deps/web-b2)\ntest result: ok. 80 passed; 0 failed; finished in 50.00s\nRunning tests/db.rs (target/debug/deps/db-c3)\ntest result: ok. 60 passed; 0 failed; finished in 35.00s\nRunning tests/cli.rs (target/debug/deps/cli-d4)\ntest result: ok. 40 passed; 0 failed; finished in 20.00s\n"
-  }
+  ]
 }
