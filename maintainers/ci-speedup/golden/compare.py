@@ -312,10 +312,12 @@ def _recorded_required_checks(recording: Path) -> set[str]:
                 includes = [str(value) for value in refs.get("include") or []]
                 excludes = [str(value) for value in refs.get("exclude") or []]
                 if (includes
+                        and "~ALL" not in includes
                         and "~DEFAULT_BRANCH" not in includes
                         and not any(fnmatchcase(target, value) for value in includes)):
                     continue
-                if ("~DEFAULT_BRANCH" in excludes
+                if ("~ALL" in excludes
+                        or "~DEFAULT_BRANCH" in excludes
                         or any(fnmatchcase(target, value) for value in excludes)):
                     continue
         classic = (payload if "_protection_" in path.name
@@ -363,6 +365,16 @@ def _job_name_pattern(template: str) -> re.Pattern[str]:
         r"^" + "".join(pieces) + r"(?: \([^)]*\))?(?: / .+)?$")
 
 
+def _required_matches_job_template(
+        workflow: str, template: str, required: str) -> bool:
+    candidates = {required}
+    prefix = workflow + " / "
+    if workflow and required.startswith(prefix):
+        candidates.add(required[len(prefix):])
+    pattern = _job_name_pattern(template)
+    return any(pattern.fullmatch(candidate) for candidate in candidates)
+
+
 def _recorded_gate_job_patterns(
         recording: Path,
         required_names: set[str],
@@ -399,8 +411,10 @@ def _recorded_gate_job_patterns(
             )
         selected = {
             job_id for job_id, display in displays.items()
-            if any(_matches_required_job(
-                {"workflow": workflow, "name": display}, required)
+            if any((_matches_required_job(
+                        {"workflow": workflow, "name": display}, required)
+                    or _required_matches_job_template(
+                        workflow, display, required))
                 for required in required_names)
         }
         pending = list(selected)
@@ -547,9 +561,8 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
                 if (any(pattern.fullmatch(str(job.get("name") or ""))
                         for pattern in gate_patterns.get(
                             str(job.get("workflow") or ""), []))
-                    or (str(job.get("workflow") or "") not in gate_patterns
-                        and any(_matches_required_job(job, name)
-                                for name in representative_required)))
+                    or any(_matches_required_job(job, name)
+                           for name in representative_required))
             ]
             included_workflows = {
                 str(job.get("workflow") or "") for job in row["jobs"]
