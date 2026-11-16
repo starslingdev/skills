@@ -365,7 +365,7 @@ def test_an_errored_scan_block_holds_back_and_never_takes_the_no_manifest_path()
 def test_the_two_scan_gates_are_held_back_gates():
     assert {"type_aware_lint_scan_missing", "type_aware_config_reader_failed"} <= (
         cr._OPT84_HELD_BACK_GATES)
-    assert len(cr._OPT84_HELD_BACK_GATES) == 17 and len(cr._OPT84_VERDICT_GATES) == 6
+    assert len(cr._OPT84_HELD_BACK_GATES) == 18 and len(cr._OPT84_VERDICT_GATES) == 7
 
 
 def test_counting_an_unknown_gate_or_an_unlisted_hold_back_raises():
