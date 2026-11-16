@@ -4865,7 +4865,8 @@ def _static_cache_family(
             if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", text):
                 return family
     for token in reversed(path_tokens):
-        if (token not in ignored
+        if (token in key_tokens
+                and token not in ignored
                 and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
             return token
     text = " ".join(texts)
