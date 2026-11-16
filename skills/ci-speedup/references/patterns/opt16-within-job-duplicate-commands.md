@@ -25,12 +25,14 @@ settings stay quiet. The later step's full `Finished` wall is an upper bound,
 because it can include linking or other work beside the repeated compilation.
 
 The measured critical-path drill also recognizes wrappers outside Cargo. It
-reports OPT16 when two distinct step groups print the same completed test
-signature (matching test-file and test totals, including TAP totals) or the same
-package-build signature (package plus output directory), under the same observable
-runtime version. Different runtime versions and different packages stay quiet. A
-matching signature is evidence to investigate the wrapper; it is not permission to
-remove distinct platform, feature, coverage, or failure-path coverage.
+reports OPT16 when two invocations (in separate step groups or inside one wrapper
+step) print the same completed test signature (matching test-file and test totals,
+including TAP totals) or the same package-build signature (package plus output
+directory). It requires a readable active runtime version, carries that version
+forward from setup steps, and compares package scope, so different runtime
+versions and different packages stay quiet. A matching signature is evidence to
+investigate the wrapper; it is not permission to remove distinct platform,
+feature, coverage, or failure-path coverage.
 
 For these wrapper-hidden repeats, the later completion duration is a measured
 upper bound. It can include nearby work in that step, so the report never credits

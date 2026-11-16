@@ -66,6 +66,7 @@ _INFRA_FAILURE_SIGNATURES = {
     # "+1502 packages" or "(503.2 kB)" are progress output, not a registry error.
     "network": r"\b(?:ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b|\b(?:HTTP|status(?: code)?)\b[^\n]{0,40}\b(?:502|503)\b|\b(?:502|503)\b\W{0,3}(?:Bad Gateway|Service Unavailable)",
 }
+
 # Network faults count only in a step that installs or fetches something, including
 # the runner's own "Set up job" (action downloads). A step that also names test
 # work is a test step whose network errors may be the product's own.
@@ -2055,27 +2056,45 @@ def _within_job_duplicate_leaf(lines: list[str]) -> dict[str, Any] | None:
     """Return OPT16 evidence for wrapper-hidden repeated test/build work.
 
     Static workflow scanning cannot see through a package script.  Job logs can:
-    compare completion signatures only across distinct GitHub Actions step groups,
-    and fail closed when the groups expose different runtime versions.  The later
-    completion duration is an upper bound because a summary can include nearby work.
+    compare completion signatures across invocations in GitHub Actions step groups,
+    and fail closed unless the active runtime version and package scope are readable.
+    The later completion duration is an upper bound because a summary can include
+    nearby work.
     """
-    runtime_re = re.compile(
-        r"^\s*(?:(?:node|python|go|rustc|java)\s+(?:version\s+)?)?"
-        r"v?(\d+\.\d+(?:\.\d+)?(?:[-+][\w.-]+)?)\s*$", re.IGNORECASE)
     package_re = re.compile(
         r"^\s*>\s+(@?[^@\s]+(?:/[^@\s]+)?)@\S+\s+build\s+(\S+)\s*$",
         re.IGNORECASE)
     output_re = re.compile(r"^\s*((?:dist|build|out)/[^\s]+)", re.IGNORECASE)
-    duration_re = re.compile(r"\b(?:Duration\s+|built in\s+)([\d.]+)s\b",
-                             re.IGNORECASE)
 
-    def _runtime(group_lines: list[str]) -> tuple[str, ...]:
-        return tuple(sorted({m.group(1).casefold() for line in group_lines
-                             if (m := runtime_re.match(line))}))
+    def _runtime_version(command: str, group_lines: list[str]) -> str | None:
+        for line in (command, *group_lines):
+            patterns = (
+                r"\bnvm\s+use\s+v?(\d+(?:\.\d+){0,2})\b",
+                r"\bnode-version\s*:\s*['\"]?v?(\d+(?:\.\d+){0,2})\b",
+                r"\b(?:Now using\s+)?node\s+(?:version\s+)?v(\d+(?:\.\d+){1,2})\b",
+                r"^\s*v(\d+(?:\.\d+){1,2})\s*$",
+            )
+            if match := next((m for pattern in patterns
+                              if (m := re.search(pattern, line, re.IGNORECASE))), None):
+                return f"node={match.group(1).casefold()}"
+        return None
 
-    def _test_signature(group_lines: list[str]) -> tuple[str, str] | None:
-        files = tests = None
-        tap_tests = tap_pass = None
+    def _test_scope(command: str) -> str | None:
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            return None
+        for index, token in enumerate(tokens):
+            option, separator, inline = token.partition("=")
+            if option in {"--filter", "-F", "--workspace", "-w", "--cwd", "--dir"}:
+                value = inline if separator else (
+                    tokens[index + 1] if index + 1 < len(tokens) else "")
+                return f"{option}={value}" if value else None
+        return "repo-root"
+
+    def _test_occurrences(group_lines: list[str]) -> list[tuple[tuple[str, str], float]]:
+        out: list[tuple[tuple[str, str], float]] = []
+        files = tests = tap_tests = tap_pass = suites = jest_tests = None
         for line in group_lines:
             if m := re.search(r"\bTest Files\s+(\d+)\s+passed\s+\((\d+)\)", line,
                               re.IGNORECASE):
@@ -2087,51 +2106,91 @@ def _within_job_duplicate_leaf(lines: list[str]) -> dict[str, Any] | None:
                 tap_tests = m.group(1)
             if m := re.search(r"^\s*#\s*pass\s+(\d+)\s*$", line, re.IGNORECASE):
                 tap_pass = m.group(1)
-        if files is not None and tests is not None:
-            return "vitest", f"files={files}; tests={tests}"
-        if tap_tests is not None and tap_pass is not None:
-            return "tap", f"tests={tap_tests}; pass={tap_pass}"
-        return None
+            if m := re.search(r"^\s*Test Suites:\s+.*?(\d+)\s+total\s*$", line,
+                              re.IGNORECASE):
+                suites = m.group(1)
+            if m := re.search(r"^\s*Tests:\s+.*?(\d+)\s+total\s*$", line,
+                              re.IGNORECASE):
+                jest_tests = m.group(1)
 
-    def _build_signature(group_lines: list[str]) -> tuple[str, str] | None:
+            seconds: float | None = None
+            if m := re.search(r"\bDuration\s+([\d.]+)s\b", line, re.IGNORECASE):
+                seconds = float(m.group(1))
+            elif m := re.search(r"^\s*#\s*duration_ms\s+([\d.]+)\s*$", line,
+                                re.IGNORECASE):
+                seconds = float(m.group(1)) / 1000.0
+            elif m := re.search(r"^\s*Time:\s+([\d.]+)\s*s\s*$", line,
+                                re.IGNORECASE):
+                seconds = float(m.group(1))
+            if seconds is None:
+                continue
+            signature = None
+            if files is not None and tests is not None:
+                signature = ("vitest", f"files={files}; tests={tests}")
+            elif tap_tests is not None and tap_pass is not None:
+                signature = ("tap", f"tests={tap_tests}; pass={tap_pass}")
+            elif suites is not None and jest_tests is not None:
+                signature = ("jest", f"suites={suites}; tests={jest_tests}")
+            if signature is not None:
+                out.append((signature, seconds))
+            files = tests = tap_tests = tap_pass = suites = jest_tests = None
+        return out
+
+    def _build_occurrences(group_lines: list[str]) -> list[tuple[tuple[str, str], float]]:
+        out: list[tuple[tuple[str, str], float]] = []
         package = directory = output = None
         for line in group_lines:
-            if (m := package_re.match(line)) and package is None:
+            if m := package_re.match(line):
                 package, directory = m.group(1), m.group(2).replace("\\", "/")
-            if (m := output_re.match(line)) and output is None:
+                output = None
+                continue
+            if (m := output_re.match(line)) and package is not None and output is None:
                 output = m.group(1).replace("\\", "/").split("/", 1)[0]
-        if package is None or directory is None or output is None:
-            return None
-        return package, f"{directory.rstrip('/')}/{output}"
+                continue
+            if (m := re.search(r"\bbuilt in\s+([\d.]+)s\b", line, re.IGNORECASE)):
+                if package is not None and directory is not None and output is not None:
+                    out.append(((package, f"{directory.rstrip('/')}/{output}"),
+                                float(m.group(1))))
+                package = directory = output = None
+        return out
 
     rows: list[dict[str, Any]] = []
+    active_runtime: str | None = None
     for command, start, end in _log_step_sections(lines):
         group_lines = lines[start + 1:end]
-        duration = next((float(m.group(1)) for line in reversed(group_lines)
-                         if (m := duration_re.search(line))), None)
-        if duration is None:
+        active_runtime = _runtime_version(command, group_lines) or active_runtime
+        if active_runtime is None:
             continue
-        test = _test_signature(group_lines)
-        build = _build_signature(group_lines)
-        if test is not None:
-            rows.append({"kind": "test", "signature": test, "command": command,
-                         "runtime": _runtime(group_lines), "seconds": duration})
-        if build is not None:
-            rows.append({"kind": "build", "signature": build, "command": command,
-                         "runtime": _runtime(group_lines), "seconds": duration})
+        scope = _test_scope(command)
+        for occurrence, (signature, seconds) in enumerate(_test_occurrences(group_lines), 1):
+            if scope is not None:
+                rows.append({"kind": "test", "signature": signature,
+                             "command": f"{command} [test {occurrence}]",
+                             "runtime": active_runtime, "scope": scope,
+                             "seconds": seconds})
+        for occurrence, (signature, seconds) in enumerate(_build_occurrences(group_lines), 1):
+            rows.append({"kind": "build", "signature": signature,
+                         "command": f"{command} [build {occurrence}]",
+                         "runtime": active_runtime, "scope": signature,
+                         "seconds": seconds})
 
     for later_index, later in enumerate(rows[1:], 1):
         for earlier in rows[:later_index]:
             if (earlier["kind"] != later["kind"]
                     or earlier["signature"] != later["signature"]
-                    or earlier["runtime"] != later["runtime"]):
+                    or earlier["runtime"] != later["runtime"]
+                    or earlier["scope"] != later["scope"]):
                 continue
             kind = later["kind"]
+            if kind == "test":
+                fix_key = "within-job-duplicate-test"
+            else:
+                fix_key = "within-job-duplicate-build"
             signature = "; ".join(later["signature"])
             return {
-                "fix_key": "within-job-duplicate-work",
+                "fix_key": fix_key,
                 "unit_label": (f"the same {kind} completion signature appears in two "
-                               "job steps"),
+                               "job invocations"),
                 "magnitude": {
                     "label": f"later repeated {kind} wall (upper bound)",
                     "value": round(later["seconds"], 2),
@@ -5276,6 +5335,12 @@ _FIX_META: dict[str, dict[str, Any]] = {
     },
 }
 
+# Test and build duplicates share the investigation recipe but retain distinct
+# leaf identities so category reconciliation and report verification cannot let
+# one kind crown the other's measured pole.
+_FIX_META["within-job-duplicate-test"] = _FIX_META["within-job-duplicate-work"]
+_FIX_META["within-job-duplicate-build"] = _FIX_META["within-job-duplicate-work"]
+
 
 def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return claim-safe catalog guidance for one parsed log leaf."""
@@ -7559,7 +7624,8 @@ _LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
     "emulated-image-compile": "build",
-    "within-job-duplicate-work": frozenset({"build", "test"}),
+    "within-job-duplicate-test": "test",
+    "within-job-duplicate-build": "build",
     "cargo-double-compile": frozenset({"build", "scan", "test"}),
     "cargo-test-shard": "test",
     "benchmark-serial-reruns": "test",
