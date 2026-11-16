@@ -18,8 +18,12 @@ _REPOSITORIES = {
     "home-assistant-core": (
         "PR #318 covers the headline follow-up; issue #365 tracks gate share",
         (
-            # Issue #365 tracks the independent 0.909 versus 0.747 share mismatch.
+            # Issue #365 tracks the independent engine/oracle hassfest share mismatch.
             "gate share differs for 'CI / Check hassfest'",
+            # Issue #365 tracks this independently recorded missing pylint gate.
+            "frequent gate absent: 'CI / Check pylint'",
+            # Issue #365 tracks this independently recorded missing test-lint gate.
+            "frequent gate absent: 'CI / Check pylint on tests'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
