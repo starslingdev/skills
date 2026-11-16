@@ -2035,6 +2035,60 @@ def test_parse_log_detects_jest_completion_signature():
     assert leaf["magnitude"]["value"] == 43.8
 
 
+def test_parse_log_jest_accepts_an_estimated_time_suffix():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run npm run verify",
+        "Test Suites: 18 passed, 18 total",
+        "Tests:       184 passed, 184 total",
+        "Time:        45.1 s, estimated 50 s",
+        "##[group]Run npm test",
+        "Test Suites: 18 passed, 18 total",
+        "Tests:       184 passed, 184 total",
+        "Time:        43.8 s, estimated 50 s",
+    ])
+
+    leaf = bp._parse_log(log)
+
+    assert leaf is not None and leaf["fix_key"] == "within-job-duplicate-test"
+    assert leaf["magnitude"]["value"] == 43.8
+
+
+def test_parse_log_wrapper_runtime_switches_stay_distinct():
+    log = "\n".join([
+        "##[group]Run npm run test:all-runtimes",
+        "Now using node v20.19.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "Now using node v22.14.0",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
+def test_parse_log_wrapper_package_banners_keep_suites_distinct():
+    log = "\n".join([
+        "##[group]Run nvm use 22",
+        "Now using node v22.14.0",
+        "##[group]Run pnpm run test:workspace",
+        "> package-a@1.0.0 test /github/workspace/packages/a",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  45.10s",
+        "> package-b@1.0.0 test /github/workspace/packages/b",
+        " Test Files  18 passed (18)",
+        "      Tests  184 passed (184)",
+        "   Duration  43.80s",
+    ])
+
+    assert bp._parse_log(log) is None
+
+
 def test_parse_log_detects_same_build_reached_through_two_package_scripts():
     log = "\n".join([
         "##[group]Run nvm use 22",

@@ -2066,17 +2066,16 @@ def _within_job_duplicate_leaf(lines: list[str]) -> dict[str, Any] | None:
         re.IGNORECASE)
     output_re = re.compile(r"^\s*((?:dist|build|out)/[^\s]+)", re.IGNORECASE)
 
-    def _runtime_version(command: str, group_lines: list[str]) -> str | None:
-        for line in (command, *group_lines):
-            patterns = (
-                r"\bnvm\s+use\s+v?(\d+(?:\.\d+){0,2})\b",
-                r"\bnode-version\s*:\s*['\"]?v?(\d+(?:\.\d+){0,2})\b",
-                r"\b(?:Now using\s+)?node\s+(?:version\s+)?v(\d+(?:\.\d+){1,2})\b",
-                r"^\s*v(\d+(?:\.\d+){1,2})\s*$",
-            )
-            if match := next((m for pattern in patterns
-                              if (m := re.search(pattern, line, re.IGNORECASE))), None):
-                return f"node={match.group(1).casefold()}"
+    def _runtime_from_line(line: str) -> str | None:
+        patterns = (
+            r"\bnvm\s+use\s+v?(\d+(?:\.\d+){0,2})\b",
+            r"\bnode-version\s*:\s*['\"]?v?(\d+(?:\.\d+){0,2})\b",
+            r"\b(?:Now using\s+)?node\s+(?:version\s+)?v(\d+(?:\.\d+){1,2})\b",
+            r"^\s*v(\d+(?:\.\d+){1,2})\s*$",
+        )
+        if match := next((m for pattern in patterns
+                          if (m := re.search(pattern, line, re.IGNORECASE))), None):
+            return f"node={match.group(1).casefold()}"
         return None
 
     def _test_scope(command: str) -> str | None:
@@ -2092,10 +2091,21 @@ def _within_job_duplicate_leaf(lines: list[str]) -> dict[str, Any] | None:
                 return f"{option}={value}" if value else None
         return "repo-root"
 
-    def _test_occurrences(group_lines: list[str]) -> list[tuple[tuple[str, str], float]]:
-        out: list[tuple[tuple[str, str], float]] = []
+    def _test_occurrences(
+        group_lines: list[str], inherited_runtime: str | None, fallback_scope: str | None,
+    ) -> tuple[list[tuple[tuple[str, str], float, str, str]], str | None]:
+        out: list[tuple[tuple[str, str], float, str, str]] = []
         files = tests = tap_tests = tap_pass = suites = jest_tests = None
+        runtime = inherited_runtime
+        scope = fallback_scope
         for line in group_lines:
+            runtime = _runtime_from_line(line) or runtime
+            if m := re.match(
+                r"^\s*>\s+(@?[^@\s]+(?:/[^@\s]+)?)@\S+\s+\S+\s+(\S+)\s*$",
+                line, re.IGNORECASE,
+            ):
+                directory = m.group(2).replace("\\", "/").rstrip("/")
+                scope = f"package={m.group(1)}; dir={directory}"
             if m := re.search(r"\bTest Files\s+(\d+)\s+passed\s+\((\d+)\)", line,
                               re.IGNORECASE):
                 files = f"{m.group(1)}/{m.group(2)}"
@@ -2119,7 +2129,8 @@ def _within_job_duplicate_leaf(lines: list[str]) -> dict[str, Any] | None:
             elif m := re.search(r"^\s*#\s*duration_ms\s+([\d.]+)\s*$", line,
                                 re.IGNORECASE):
                 seconds = float(m.group(1)) / 1000.0
-            elif m := re.search(r"^\s*Time:\s+([\d.]+)\s*s\s*$", line,
+            elif m := re.search(
+                    r"^\s*Time:\s+([\d.]+)\s*s(?:,\s*estimated\s+[\d.]+\s*s)?\s*$", line,
                                 re.IGNORECASE):
                 seconds = float(m.group(1))
             if seconds is None:
@@ -2131,15 +2142,19 @@ def _within_job_duplicate_leaf(lines: list[str]) -> dict[str, Any] | None:
                 signature = ("tap", f"tests={tap_tests}; pass={tap_pass}")
             elif suites is not None and jest_tests is not None:
                 signature = ("jest", f"suites={suites}; tests={jest_tests}")
-            if signature is not None:
-                out.append((signature, seconds))
+            if signature is not None and runtime is not None and scope is not None:
+                out.append((signature, seconds, runtime, scope))
             files = tests = tap_tests = tap_pass = suites = jest_tests = None
-        return out
+        return out, runtime
 
-    def _build_occurrences(group_lines: list[str]) -> list[tuple[tuple[str, str], float]]:
-        out: list[tuple[tuple[str, str], float]] = []
+    def _build_occurrences(
+        group_lines: list[str], inherited_runtime: str | None,
+    ) -> tuple[list[tuple[tuple[str, str], float, str]], str | None]:
+        out: list[tuple[tuple[str, str], float, str]] = []
         package = directory = output = None
+        runtime = inherited_runtime
         for line in group_lines:
+            runtime = _runtime_from_line(line) or runtime
             if m := package_re.match(line):
                 package, directory = m.group(1), m.group(2).replace("\\", "/")
                 output = None
@@ -2148,31 +2163,32 @@ def _within_job_duplicate_leaf(lines: list[str]) -> dict[str, Any] | None:
                 output = m.group(1).replace("\\", "/").split("/", 1)[0]
                 continue
             if (m := re.search(r"\bbuilt in\s+([\d.]+)s\b", line, re.IGNORECASE)):
-                if package is not None and directory is not None and output is not None:
+                if (package is not None and directory is not None and output is not None
+                        and runtime is not None):
                     out.append(((package, f"{directory.rstrip('/')}/{output}"),
-                                float(m.group(1))))
+                                float(m.group(1)), runtime))
                 package = directory = output = None
-        return out
+        return out, runtime
 
     rows: list[dict[str, Any]] = []
     active_runtime: str | None = None
     for command, start, end in _log_step_sections(lines):
         group_lines = lines[start + 1:end]
-        active_runtime = _runtime_version(command, group_lines) or active_runtime
-        if active_runtime is None:
-            continue
+        active_runtime = _runtime_from_line(command) or active_runtime
         scope = _test_scope(command)
-        for occurrence, (signature, seconds) in enumerate(_test_occurrences(group_lines), 1):
-            if scope is not None:
-                rows.append({"kind": "test", "signature": signature,
-                             "command": f"{command} [test {occurrence}]",
-                             "runtime": active_runtime, "scope": scope,
-                             "seconds": seconds})
-        for occurrence, (signature, seconds) in enumerate(_build_occurrences(group_lines), 1):
+        test_rows, test_runtime = _test_occurrences(group_lines, active_runtime, scope)
+        for occurrence, (signature, seconds, runtime, test_scope) in enumerate(test_rows, 1):
+            rows.append({"kind": "test", "signature": signature,
+                         "command": f"{command} [test {occurrence}]",
+                         "runtime": runtime, "scope": test_scope,
+                         "seconds": seconds})
+        build_rows, build_runtime = _build_occurrences(group_lines, active_runtime)
+        for occurrence, (signature, seconds, runtime) in enumerate(build_rows, 1):
             rows.append({"kind": "build", "signature": signature,
                          "command": f"{command} [build {occurrence}]",
-                         "runtime": active_runtime, "scope": signature,
+                         "runtime": runtime, "scope": signature,
                          "seconds": seconds})
+        active_runtime = build_runtime or test_runtime or active_runtime
 
     for later_index, later in enumerate(rows[1:], 1):
         for earlier in rows[:later_index]:
