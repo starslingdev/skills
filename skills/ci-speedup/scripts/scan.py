@@ -5142,11 +5142,14 @@ def _detect_opt61(
             r"cross\s+(?:build|test|check|bench)\b|"
             r"cmake\s+--build\b|meson\s+compile\b|make\b|ninja\b|"
             r"bazel(?:isk)?\s+(?:build|test)\b|"
-            r"(?:just|task)[ \t]++(?!-)\S+|"
+            # `[ \t]+(?![ \t]|X)` replaces the possessive `[ \t]++(?!X)`, which
+            # is Python 3.11+ only; the added `[ \t]` alternative keeps the
+            # lookahead from passing on a shortened whitespace run.
+            r"(?:just|task)[ \t]+(?![ \t]|-)\S+|"
             r"npm\s+(?:run|exec|test|start)\b|"
-            r"(?:pnpm|yarn|bun)[ \t]++(?!-)"
+            r"(?:pnpm|yarn|bun)[ \t]+(?![ \t]|-)"
             r"(?!(?:version|help|info|list|config|cache)\b)\S+|"
-            r"rustc[ \t]++(?!(?:--version|-Vv?|--print|--explain)"
+            r"rustc[ \t]+(?![ \t]|(?:--version|-Vv?|--print|--explain)"
             r"(?:[ \t]|$))|"
             r"(?:python(?:3(?:\.\d+)?)?|bash|sh)[ \t]+"
             r"(?:-[A-Za-z]+[ \t]+)*[^\s;&|]+\.(?:py|sh|js|ts)\b|"
