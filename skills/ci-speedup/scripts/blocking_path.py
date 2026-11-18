@@ -4569,6 +4569,11 @@ _SHARD_RUNNER_MINUTE_LINE = (
 )
 
 
+def _runner_minute_amount(value: float) -> str:
+    """Render the signed-effect schema's stored thousandth precision."""
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
 def _finding_runner_minute_effect_line(finding: dict[str, Any]) -> str:
     """Render a signed compute effect for a job-expanding wall-clock lever."""
     effect = finding.get("runner_minute_effect")
@@ -4583,7 +4588,8 @@ def _finding_runner_minute_effect_line(finding: dict[str, Any]) -> str:
         floor = _num(effect.get("setup_floor_s")) or 0.0
         runs = int(_num(effect.get("runs_per_month")) or 0)
         return (
-            f"Runner-minute effect: +{amount:g} runner-min/month added cost; assumes "
+            f"Runner-minute effect: +{_runner_minute_amount(amount)} runner-min/month "
+            "added cost; assumes "
             f"{shards} shards and a measured {floor:g}s repeated setup floor across "
             f"{runs} runs/month; scales as (N−1) with N shards."
         )
@@ -4616,7 +4622,8 @@ def _group_runner_minute_effect_line(findings: list[dict[str, Any]]) -> str:
     unknown = (f"; {len(unsized)} additional split"
                f"{'s are' if len(unsized) != 1 else ' is'} not sized"
                if unsized else "")
-    return (f"Runner-minute effect: +{amount:g} runner-min/month {label}; assumes "
+    return (f"Runner-minute effect: +{_runner_minute_amount(amount)} runner-min/month "
+            f"{label}; assumes "
             f"2 shards and {detail}; extra shard jobs repeat checkout and setup and bill "
             f"each job; scales as (N−1) with N shards{unknown}.")
 

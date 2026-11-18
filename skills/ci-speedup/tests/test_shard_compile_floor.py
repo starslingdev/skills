@@ -390,6 +390,18 @@ def test_small_positive_shard_cost_does_not_round_to_zero(tmp_path: Path) -> Non
     assert vr.check_wall_clock_runner_minute_effects(report, findings_path).ok
 
 
+def test_large_fractional_shard_cost_keeps_displayed_precision(tmp_path: Path) -> None:
+    finding = {"pattern": "OPT24", "runner_minute_setup_floor_s": 60.1}
+    cr._size_finding(finding, {}, 1201)
+    assert finding["runner_minute_effect"]["runner_min_per_month"] == 1203.002
+    doc = {"runner_minute_effect_schema": 1, "findings": [finding]}
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report = bp._finding_runner_minute_effect_line(finding)
+    assert "+1203.002 runner-min/month" in report
+    assert vr.check_wall_clock_runner_minute_effects(report, findings_path).ok
+
+
 def test_uncredited_shard_cost_prompt_does_not_promise_a_speedup() -> None:
     finding = {
         "pattern": "OPT24",
