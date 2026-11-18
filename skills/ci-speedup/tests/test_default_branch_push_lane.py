@@ -711,12 +711,16 @@ def test_branch_not_protected_is_a_readable_empty_required_check_configuration(
         "repos/o/r/branches/main/protection/required_status_checks")
 
     class ProtectionStateClient(_PushLaneClient):
-        def __init__(self, status: int, message: str):
+        def __init__(self, status: int, message: str, *, rulesets_read: bool):
             super().__init__()
             self.status = status
             self.message = message
+            self.rulesets_read = rulesets_read
 
         def json(self, endpoint: str, allow_missing: bool = False):
+            if endpoint == "repos/o/r/rulesets?includes_parents=true":
+                self.queries += 1
+                return [] if self.rulesets_read else None
             if endpoint == protection_endpoint:
                 self.queries += 1
                 return None
@@ -729,28 +733,32 @@ def test_branch_not_protected_is_a_readable_empty_required_check_configuration(
             return self.message if endpoint == protection_endpoint else None
 
     cases = [
-        ("branch-not-protected", 404, "Branch not protected", True),
-        ("forbidden", 403, "Resource not accessible by integration", False),
-        ("ambiguous-not-found", 404, "Not Found", False),
+        ("branch-not-protected", 404, "Branch not protected", True, True),
+        ("rulesets-unread", 404, "Branch not protected", False, False),
+        ("forbidden", 403, "Resource not accessible by integration", True, False),
+        ("ambiguous-not-found", 404, "Not Found", True, False),
     ]
-    for label, status, message, readable_empty in cases:
-        client = ProtectionStateClient(status, message)
+    for label, status, message, rulesets_read, configured_empty in cases:
+        client = ProtectionStateClient(
+            status, message, rulesets_read=rulesets_read)
         monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
         doc = cr.collect(
             _doc(), "o/r", max_runs=20, shallow_runs=20,
             created_before="2026-01-02T00:00:00Z")
 
-        assert doc["required_checks"] == ([] if readable_empty else None)
-        assert doc["required_checks_complete"] is readable_empty
-        assert doc["required_checks_classic_read"] is readable_empty
-        assert doc["required_checks_rulesets_read"] is readable_empty
+        classic_read = status == 404 and message == "Branch not protected"
+        assert doc["required_checks"] == ([] if classic_read else None)
+        assert doc["required_checks_complete"] is classic_read
+        assert doc["required_checks_classic_read"] is classic_read
+        assert doc["required_checks_rulesets_read"] is (
+            classic_read and rulesets_read)
 
         case_dir = tmp_path / label
         case_dir.mkdir()
         report, findings_path, report_path = _write_artifacts(case_dir, doc)
         expected = "No required checks are configured"
-        assert (expected in report) is readable_empty
-        assert ("Required checks were unreadable" in report) is not readable_empty
+        assert (expected in report) is configured_empty
+        assert ("Required checks were unreadable" in report) is not configured_empty
         checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
         failures = [check for check in checks if not check.skipped and not check.ok]
         assert failures == [], [(check.name, check.detail) for check in failures]

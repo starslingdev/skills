@@ -7265,6 +7265,8 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "is the measured **PR-floor** — the file-backed work a normal PR "
                    "runs — not the branch-protection gate.")
     elif (doc.get("required_checks_complete") is True
+          and doc.get("required_checks_rulesets_read") is True
+          and doc.get("required_checks_classic_read") is True
           and doc.get("required_checks") == []):
         out.append("> - **No required checks are configured** — the repository's "
                    "readable ruleset and classic branch-protection configuration "
