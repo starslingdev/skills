@@ -7045,6 +7045,20 @@ def _pr_sample_job_list_budget_line(doc: dict[str, Any]) -> str:
     return f"> - **PR-sample job-list reads:** {reads} of at most {cap}{cap_note}."
 
 
+def _configured_empty_protection_line(doc: dict[str, Any]) -> str:
+    """Describe a proven empty required-check configuration, on every render path."""
+    if not (doc.get("required_checks_complete") is True
+            and doc.get("required_checks_rulesets_read") is True
+            and doc.get("required_checks_classic_read") is True
+            and doc.get("required_checks") == []):
+        return ""
+    return (
+        "> - **No required checks are configured** — the repository's readable "
+        "ruleset and classic branch-protection configuration contains no required "
+        "status checks, so 'gate' here means the **slowest check on a typical PR** "
+        "(observed), not a merge requirement.")
+
+
 def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[str]:
     """Spell out WHERE the numbers come from: levels 1–2 are P50 from the committed
     ci-speedup audit (its own sample size + window + gate-sample completeness);
@@ -7264,15 +7278,8 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "so their per-commit presence and timing could not be established. The spine "
                    "is the measured **PR-floor** — the file-backed work a normal PR "
                    "runs — not the branch-protection gate.")
-    elif (doc.get("required_checks_complete") is True
-          and doc.get("required_checks_rulesets_read") is True
-          and doc.get("required_checks_classic_read") is True
-          and doc.get("required_checks") == []):
-        out.append("> - **No required checks are configured** — the repository's "
-                   "readable ruleset and classic branch-protection configuration "
-                   "contains no required status checks, so 'gate' here means the "
-                   "**slowest check on a typical PR** (observed), not a merge "
-                   "requirement.")
+    elif _configured_empty_protection_line(doc):
+        out.append(_configured_empty_protection_line(doc))
     elif cp.get("sample_job_list_scoped"):
         if cp.get("sample_partial_count"):
             out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "
@@ -14129,6 +14136,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     out: list[str] = [_STATIC_ONLY_MARKER, "",
                       f"# {repo} — why is the merge slow?", ""]
     out += _metadata_table(doc, repo)
+    _empty_protection = _configured_empty_protection_line(doc)
+    if _empty_protection:
+        out += ["> **Where this data comes from**", ">", _empty_protection, ""]
     _static_stop = str(cp.get("sample_stop_reason") or "")
     if _static_stop == "required_suite_empty" and not broken:
         out += ["> [!IMPORTANT]",
