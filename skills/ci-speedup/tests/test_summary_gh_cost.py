@@ -11,13 +11,14 @@ def test_summary_states_the_gh_call_count_before_rendering():
     doc = _summary_doc(data_sources={"gh_query_count": 170, "gh_error_count": 0},
                        timings={"scripted_total_s": 41.88})
     s = build_summary(doc)
-    assert "gh API cost: 170 call(s) in ~42s." in s, s
+    assert "Actual gh API cost: 170 call(s) in ~42s." in s, s
+    assert "actual" in s.lower(), s
 
 
 def test_summary_names_failed_gh_calls():
     doc = _summary_doc(data_sources={"gh_query_count": 12, "gh_error_count": 3})
     s = build_summary(doc)
-    assert "gh API cost: 12 call(s) (3 failed)." in s, s
+    assert "Actual gh API cost: 12 call(s) (3 failed)." in s, s
 
 
 def test_summary_omits_the_cost_line_when_no_gh_pass_ran():

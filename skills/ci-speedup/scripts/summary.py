@@ -763,7 +763,7 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
     ds = doc.get("data_sources") if isinstance(doc.get("data_sources"), dict) else {}
     calls = ds.get("gh_query_count")
     if isinstance(calls, int) and not isinstance(calls, bool) and calls > 0:
-        cost = f"gh API cost: {calls} call(s)"
+        cost = f"Actual gh API cost: {calls} call(s)"
         secs = _num((doc.get("timings") or {}).get("scripted_total_s"))
         if secs:
             cost += f" in ~{_clock(secs)}"

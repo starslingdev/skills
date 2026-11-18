@@ -172,13 +172,13 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    **auto-derived `<OUT>.data` dir** — **never pass `--data-dir`** to `run.py` (it's
    `collect_runs.py`'s internal flag, and passing it to `run.py` errors). `<OUT.json>`
    and its `.data` bundle hold raw third-party job logs, so write `--out` to a scratch
-   path outside any tracked tree (or a gitignored dir). gh calls are frugal and the
-   sampling adaptive (ARCHITECTURE §2.1): the gate/poles/floor are exact, off-path
-   hygiene figures approximate (flagged). `run.py` then prints a **data-pass summary**
-   to stdout — the gating resolution (required checks, **already resolved from rulesets
-   + branch protection**: a fileless/managed check like `Claude Code Review` is flagged
-   auto-demoted, an empty set means none are declared), the addressable long poles, the gh
-   API call count, and the **exact `blocking_path.py` render command** with per-pole bindings pre-filled.
+   path outside any tracked tree (or a gitignored dir). Before the adaptive bulk sample,
+   `run.py` prints a bounded request estimate, log downloads, and quota/reset; above half
+   the remaining quota it asks before continuing and offers less sampling/logs or waiting.
+   The gate/poles/floor are exact, off-path figures approximate (flagged). Its **data-pass
+   summary** gives the gating resolution (rulesets + branch protection), addressable poles,
+   actual API calls including probes, and the exact pre-filled `blocking_path.py` command.
+   Fileless/managed checks are flagged auto-demoted; an empty required set means none declared.
    **Act on that summary.** Do NOT re-query gh for branch protection / rulesets (the
    data pass did it — read `required_checks`), manually verify a fileless check's
    gating, or hand-spelunk `findings.json` with `python -c` — it's all in the summary.

@@ -47,6 +47,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 _DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DIR))
@@ -138,6 +139,73 @@ def _skill_lock_provenance(skill_root: Path) -> str:
 _STEP_TIMEOUT_S = 900
 
 
+class _RequestEstimate(NamedTuple):
+    """Cheap preflight estimate, kept separate from the measured final count."""
+
+    request_low: int
+    request_high: int
+    log_low: int
+    log_high: int
+    remaining: int
+    reset_epoch: int
+    probe_requests: int
+
+
+def _gh_json(endpoint: str) -> dict:
+    """Read one audited-repository endpoint through the authenticated gh client."""
+    result = subprocess.run(
+        ["gh", "api", endpoint], capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"gh api failed for {endpoint}")
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict):
+        raise ValueError(f"gh api returned non-object JSON for {endpoint}")
+    return value
+
+
+def _estimate_data_pass(repo: str, *, with_logs: bool) -> _RequestEstimate:
+    """Estimate the adaptive bulk pass from four cheap, bounded probes."""
+    workflows = _gh_json(f"repos/{repo}/actions/workflows?per_page=100")
+    runs = _gh_json(f"repos/{repo}/actions/runs?per_page=10")
+    recent = runs.get("workflow_runs") if isinstance(runs.get("workflow_runs"), list) else []
+    run_id = next((r.get("id") for r in recent if isinstance(r, dict) and r.get("id")), None)
+    jobs = (_gh_json(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
+            if run_id is not None else {"total_count": 0, "jobs": []})
+    rate = _gh_json("rate_limit")
+
+    workflow_count = max(1, int(workflows.get("total_count") or 0))
+    jobs_per_run = max(1, int(jobs.get("total_count") or 0))
+    job_pages = max(1, (jobs_per_run + 99) // 100)
+    probe_requests = 4
+    request_low = probe_requests + workflow_count * (1 + 4 * job_pages)
+    request_high = probe_requests + 4 + workflow_count * (2 + 20 * job_pages)
+    # Log downloads do not consume core JSON requests, so state them separately.
+    log_high = min(20, workflow_count) if with_logs else 0
+    core = ((rate.get("resources") or {}).get("core") or {})
+    return _RequestEstimate(
+        request_low=request_low, request_high=request_high,
+        log_low=0, log_high=log_high,
+        remaining=max(0, int(core.get("remaining") or 0)),
+        reset_epoch=max(0, int(core.get("reset") or 0)),
+        probe_requests=probe_requests,
+    )
+
+
+def _confirm_request_budget(estimate: _RequestEstimate) -> bool:
+    """Ask before a pass whose upper estimate spends over half the quota."""
+    if estimate.request_high <= estimate.remaining / 2:
+        return True
+    relation = ("exceeds the remaining quota" if estimate.request_high > estimate.remaining
+                else "exceeds half the remaining quota")
+    try:
+        answer = input(
+            f"The estimated data pass ({estimate.request_low}-{estimate.request_high} "
+            f"requests) {relation} ({estimate.remaining} remain). Continue? [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
 def _step(cmd: list[str], *, capture_stdout: bool) -> subprocess.CompletedProcess[str]:
     """Run a sub-step. stderr always inherits (flows to our stderr → the
     orchestrator sees scan warnings etc. inline, so no per-script stderr file is
@@ -209,6 +277,29 @@ def main(argv: list[str] | None = None) -> int:
         "--verify-cache-sensitive", action="store_true",
         help="Use three distinct default-branch pushes instead of warm reruns.")
     args = parser.parse_args(argv)
+
+    request_estimate: _RequestEstimate | None = None
+    if args.repo:
+        try:
+            request_estimate = _estimate_data_pass(args.repo, with_logs=args.with_logs)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            # A failed cheap probe must not turn an otherwise usable collector into a
+            # static-only run. Collection keeps its existing loud partial-state path.
+            print(f"Data-pass request estimate unavailable ({e}).", file=sys.stderr)
+        else:
+            reset = (time.strftime("%Y-%m-%d %H:%M:%S UTC",
+                                   time.gmtime(request_estimate.reset_epoch))
+                     if request_estimate.reset_epoch else "unknown")
+            print(
+                "Data-pass request estimate: "
+                f"{request_estimate.request_low}-{request_estimate.request_high} "
+                "GitHub API requests; "
+                f"{request_estimate.log_low}-{request_estimate.log_high} log downloads; "
+                f"{request_estimate.remaining} requests remain (reset {reset}).")
+            if not _confirm_request_budget(request_estimate):
+                print("Data pass not started. Use a smaller sample, omit --with-logs, "
+                      "or wait for the quota reset.", file=sys.stderr)
+                return 1
 
     # Create the output directory up front. Without this, a fresh `--out
     # /tmp/run/findings.json` whose parent doesn't exist tracebacks on the first
@@ -346,6 +437,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: post-collect findings JSON is unreadable ({e}); stopping.",
                   file=sys.stderr)
             return 1
+        if request_estimate is not None:
+            ds = data.get("data_sources")
+            if isinstance(ds, dict):
+                measured = ds.get("gh_query_count")
+                if isinstance(measured, int) and not isinstance(measured, bool):
+                    ds["gh_query_count"] = measured + request_estimate.probe_requests
+                ds["request_estimate"] = {
+                    "request_low": request_estimate.request_low,
+                    "request_high": request_estimate.request_high,
+                    "log_low": request_estimate.log_low,
+                    "log_high": request_estimate.log_high,
+                    "remaining_before_data_pass": request_estimate.remaining,
+                    "probe_requests": request_estimate.probe_requests,
+                }
         timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
         # `run_start_epoch` is set by scan.py (the always-runs anchor); don't
         # override it here. The driver only adds its own scripted-phase span.
