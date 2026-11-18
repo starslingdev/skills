@@ -188,6 +188,39 @@ def test_pr_light_legs_with_github_step_names_do_not_create_an_imbalance(
         "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600}) == []
 
 
+def test_conditional_action_post_step_does_not_make_idle_legs_look_active():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((600, 400, 12, 12)):
+        ran = index < 2
+        steps = [
+            {"name": "Upload test results", "conclusion": "success",
+             "started_at": start.isoformat(),
+             "completed_at": (start + timedelta(seconds=5)).isoformat()},
+            {"name": "Run divided tests",
+             "conclusion": "success" if ran else "skipped",
+             "started_at": start.isoformat() if ran else None,
+             "completed_at": ((start + timedelta(seconds=duration)).isoformat()
+                              if ran else None)},
+        ]
+        if ran:
+            steps.append({
+                "name": "Post Run example/setup-tool@v1", "conclusion": "success",
+                "started_at": (start + timedelta(seconds=duration)).isoformat(),
+                "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            })
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": steps,
+        })
+
+    assert cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600}) == []
+
+
 def test_always_run_upload_cannot_become_the_dominant_step():
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     jobs = []

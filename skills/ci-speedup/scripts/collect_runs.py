@@ -10327,10 +10327,11 @@ def _detect_opt25_shard_imbalance(
                 else ("position", position))
 
     def _workflow_shape(job: dict[str, Any]) -> tuple[tuple[str, int], ...]:
-        """Version a job's step positions so an inserted step cannot steal an identity."""
+        """Version declared work without runner-added setup/cleanup differences."""
         return tuple(_raw_step_identity(step, position)
                      for position, step in enumerate(job.get("steps") or [])
-                     if isinstance(step, dict))
+                     if (isinstance(step, dict)
+                         and not _is_preparation_step(str(step.get("name") or ""))))
 
     def _step_identity(
         step: dict[str, Any], position: int, shape: tuple[tuple[str, int], ...],
