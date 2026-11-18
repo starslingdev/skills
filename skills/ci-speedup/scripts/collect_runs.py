@@ -10071,6 +10071,22 @@ _STRUCTURAL_META: dict[str, dict[str, Any]] = {
             "the routed lever's rollout; re-measure the pole's p50 after the "
             "dominant step is attacked — the next-largest step becomes the target"),
     },
+    "OPT104": {
+        "severity": "MEDIUM", "risk": "LOW",
+        "title": "Rust coverage loads unoptimized debug artifacts",
+        "heading": "Rust Coverage Loads Unoptimized Debug Artifacts",
+        "fix_strategy": "rust-coverage-profile-override",
+        "failure_mode": (
+            "an over-broad Cargo profile change can alter artifacts outside coverage, "
+            "and removing debug information can change what a coverage tool can map"),
+        "guardrail": (
+            "scope the override to the artifact the coverage tests load; compare both "
+            "test wall time and covered-line count on the same commit, and keep the "
+            "change only when coverage is unchanged"),
+        "rollout": (
+            "benchmark before and after on the same runner class, confirm the cache "
+            "key includes the profile settings, then sample subsequent coverage runs"),
+    },
 }
 
 # Per-step warm/irreducible floor by category — the conservative cost a cache /
@@ -22806,6 +22822,29 @@ def _wf_is_file_backed(wf) -> bool:
     return str(wf or "").strip().lower().endswith((".yml", ".yaml"))
 
 
+def _rust_coverage_profile_matches(
+    fact: dict[str, Any] | None, wf_path: str, job_name: str,
+    dominant_step: str,
+) -> bool:
+    """Join a measured dominant step to scan's literal Cargo coverage command."""
+    if not isinstance(fact, dict) or not fact.get("eligible"):
+        return False
+    jobs = (fact.get("jobs") or {}).get(wf_path) or {}
+    if not isinstance(jobs, dict):
+        return False
+    for yaml_key, details in jobs.items():
+        if not isinstance(details, dict):
+            continue
+        declared = str(details.get("job_name") or yaml_key)
+        # Matrix suffixes keep the declared display name as their prefix.
+        if job_name != declared and not job_name.startswith(f"{declared} ("):
+            continue
+        coverage_steps = {str(name).strip() for name in details.get("steps") or []}
+        if dominant_step.strip() in coverage_steps:
+            return True
+    return False
+
+
 def _detect_structural_candidates(
     pr_checks_tuple: tuple[tuple[str, float], ...],
     pr_check_populations: list,
@@ -22831,6 +22870,7 @@ def _detect_structural_candidates(
     status_publishers: "dict[str, dict[str, Any]] | None" = None,
     pr_check_populations_complete: list[bool] | None = None,
     log_leaf_owners: "frozenset[tuple[str, str, str]]" = frozenset(),
+    rust_coverage_profile: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Route the top measured critical-path checks into STRUCTURAL candidates
     instead of the old inherent-cost dead-end. For each top check: map it to its
@@ -22946,7 +22986,11 @@ def _detect_structural_candidates(
         if decomp is not None:
             dom = decomp["dominant_category"]
             ratio = decomp["redundant_ratio"]
-            if dom == "build" and ratio is not None and ratio > 2.0:
+            if _rust_coverage_profile_matches(
+                    rust_coverage_profile, wf_path, job_name,
+                    str(decomp["dominant_step"])):
+                sp = "OPT104"
+            elif dom == "build" and ratio is not None and ratio > 2.0:
                 sp = "OPT72"  # build dominated by redundant setup/build → cache it
             elif dom == "build":
                 sp = "OPT70"  # build → scope to changed targets (the safe build lever)
@@ -22969,7 +23013,14 @@ def _detect_structural_candidates(
                         "gate": _DOMINANT_STEP_OVERLAP_GATE})
             else:
                 raw_s, assum_s = _structural_raw_estimate(decomp)
-                picks.append((sp, raw_s, assum_s, "cascade"))
+                if sp == "OPT104":
+                    picks.append((
+                        sp, 0.0,
+                        "the measured coverage step is the ceiling, not a forecast; "
+                        "compare test wall time and covered-line count before and after",
+                        "uncredited"))
+                else:
+                    picks.append((sp, raw_s, assum_s, "cascade"))
         elif mapping is None:
             # No SAMPLED job/steps for this check (`_map_check_to_job` returned None).
             # STILL route a speed-up by the check NAME's category, and let the user's
@@ -23128,6 +23179,16 @@ def _detect_structural_candidates(
                     own_check_names=frozenset({check_name}),
                     chain_members=chain_members,
                     chain_p50_s=chain_p50_s, chain_win_s=chain_win_s)
+            elif sizing == "uncredited":
+                f["wall_clock_p50_s"] = 0.0
+                f["runner_min_saving"] = None
+                f["sizing_basis"] = "uncredited"
+                f["realization"] = "none"
+                f["tier"] = 2
+                f["size_note"] = (
+                    "Uncredited. The measured coverage step is only a ceiling; "
+                    "benchmark before and after on the same runner and require an "
+                    "unchanged covered-line count before claiming a saving.")
             else:
                 # NAME-INFERRED structural pick (`sizing == "qualitative"` — set ONLY by the
                 # `mapping is None` branch, where there is NO sampled job/step): the cost category is
@@ -33381,6 +33442,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         wf_docs=_wf_docs, overlap_withheld=_overlap_withheld,
         status_publishers=findings_doc.get("workflow_status_publishers"),
         pr_check_populations_complete=pr_check_population_complete,
+        rust_coverage_profile=findings_doc.get("rust_coverage_profile"),
         log_leaf_owners=frozenset(
             (str(entry.get("workflow_file") or ""), str(entry.get("job") or ""),
              str(entry.get("leaf_fix_key") or ""))
