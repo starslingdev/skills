@@ -2191,6 +2191,35 @@ def test_p1425_later_command_directory_flag_does_not_move_the_install(
     assert "pnpm@10.34.5" not in note
 
 
+def test_p1425_manager_and_directory_come_from_the_same_install_segment(
+    tmp_path,
+):
+    """A protected install before the exposed one cannot lend that later
+    install its package manager.  Manager and placement are properties of one
+    qualifying shell segment, not independent searches across the source line.
+    """
+    _pkg(tmp_path, "pnpm@10.34.5", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/legacy", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  pnpm --dir apps/legacy install --ignore-scripts && npm ci
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "npm major your runner resolves" in note
+    assert "pnpm@9.15.0" not in note
+    assert "pnpm@10.34.5" not in note
+
+
 def test_p1425_directory_flag_nested_pnpm9_is_not_covered_by_root_pnpm10(
     tmp_path,
 ):

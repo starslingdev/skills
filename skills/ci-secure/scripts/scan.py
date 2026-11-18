@@ -2491,9 +2491,23 @@ _PKG_SPEC_RE = re.compile(
 _INSTALL_SUBCOMMANDS = {"install", "i", "ci"}
 
 
+def _qualifying_install_segment(command: str) -> str | None:
+    """First dependency-tree install whose lifecycle scripts remain active."""
+    return next(
+        (segment for segment in _install_command_segments(command)
+         if _INSTALL_CMD_RE.search(segment)
+         and not _IGNORE_SCRIPTS_RE.search(segment)
+         and _is_dependency_tree_install(segment)),
+        None,
+    )
+
+
 def _install_manager(command: str) -> str | None:
-    """Which package manager the install command in `command` invokes."""
-    m = _INSTALL_CMD_RE.search(command)
+    """Which package manager the qualifying install in `command` invokes."""
+    segment = _qualifying_install_segment(command)
+    if segment is None:
+        return None
+    m = _INSTALL_CMD_RE.search(segment)
     if m is None:
         return None
     # `cmd`, not `group(0)`: the match now opens with the command-position
@@ -2525,13 +2539,7 @@ def _install_directory_flag(command: str) -> tuple[bool, str | None]:
     # verbatim. Limit option parsing to the qualifying install segment: a later
     # command on that line may carry its OWN `--dir`/`--cwd`, which cannot move
     # an install that already ran.
-    install_segment = next(
-        (segment for segment in _install_command_segments(command)
-         if _INSTALL_CMD_RE.search(segment)
-         and not _IGNORE_SCRIPTS_RE.search(segment)
-         and _is_dependency_tree_install(segment)),
-        None,
-    )
+    install_segment = _qualifying_install_segment(command)
     if install_segment is None:
         return False, None
     m = _INSTALL_CMD_RE.search(install_segment)
