@@ -37,6 +37,10 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple
 
+_DIR = Path(__file__).resolve().parent
+if str(_DIR) not in sys.path:
+    sys.path.insert(0, str(_DIR))
+
 import pr_lifecycle
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)

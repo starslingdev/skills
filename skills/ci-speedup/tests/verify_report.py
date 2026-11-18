@@ -51,6 +51,10 @@ from dataclasses import dataclass
 from typing import Callable, Literal, NamedTuple
 from pathlib import Path
 
+_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
+if str(_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS_DIR))
+
 # Bounded exception to "this file never imports the renderer" (see the module
 # docstring / _UNTRUSTED_MARKER_RE's own comment): `untrusted_wrap.py` is a leaf
 # utility module with no dependency on blocking_path.py's actual rendering logic,

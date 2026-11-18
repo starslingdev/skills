@@ -47,6 +47,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+_DIR = Path(__file__).resolve().parent
+if str(_DIR) not in sys.path:
+    sys.path.insert(0, str(_DIR))
+
 from gate_frequency_contract import (
     GATE_BOOKKEEPING_CUTOFF_S as _GATE_BOOKKEEPING_CUTOFF_S,
     GATE_INTERVAL_Z as _GATE_INTERVAL_Z,
