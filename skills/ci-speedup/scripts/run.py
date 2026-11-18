@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import time
@@ -53,7 +54,12 @@ _DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DIR))
 from summary import build_summary  # noqa: E402  (sibling module; needs _DIR on path)
 from before_after import advance_verification, GhVerificationClient  # noqa: E402
-from pr_sample_contract import pr_sample_goal_text  # noqa: E402
+from pr_sample_contract import (  # noqa: E402
+    PR_SAMPLE_CANDIDATE_PAGE_CAP,
+    PR_SAMPLE_JOB_LIST_READ_CAP,
+    PR_SAMPLE_TARGET,
+    pr_sample_goal_text,
+)
 
 
 def _git_short_sha(repo_dir: Path, short: bool = True) -> str | None:
@@ -151,6 +157,17 @@ class _RequestEstimate(NamedTuple):
     probe_requests: int
 
 
+class _RequestProbe:
+    """Count every attempted preflight request, including a failing final probe."""
+
+    def __init__(self) -> None:
+        self.requests = 0
+
+    def json(self, endpoint: str) -> dict:
+        self.requests += 1
+        return _gh_json(endpoint)
+
+
 def _gh_json(endpoint: str) -> dict:
     """Read one audited-repository endpoint through the authenticated gh client."""
     result = subprocess.run(
@@ -163,24 +180,54 @@ def _gh_json(endpoint: str) -> dict:
     return value
 
 
-def _estimate_data_pass(repo: str, *, with_logs: bool) -> _RequestEstimate:
+def _estimate_data_pass(
+        repo: str, *, with_logs: bool, target: int = 10,
+        probe: _RequestProbe | None = None) -> _RequestEstimate:
     """Estimate the adaptive bulk pass from four cheap, bounded probes."""
-    workflows = _gh_json(f"repos/{repo}/actions/workflows?per_page=100")
-    runs = _gh_json(f"repos/{repo}/actions/runs?per_page=10")
+    probe = probe or _RequestProbe()
+    workflows = probe.json(f"repos/{repo}/actions/workflows?per_page=100")
+    runs = probe.json(f"repos/{repo}/actions/runs?per_page=10")
     recent = runs.get("workflow_runs") if isinstance(runs.get("workflow_runs"), list) else []
     run_id = next((r.get("id") for r in recent if isinstance(r, dict) and r.get("id")), None)
-    jobs = (_gh_json(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
+    jobs = (probe.json(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
             if run_id is not None else {"total_count": 0, "jobs": []})
-    rate = _gh_json("rate_limit")
+    rate = probe.json("rate_limit")
 
     workflow_count = max(1, int(workflows.get("total_count") or 0))
     jobs_per_run = max(1, int(jobs.get("total_count") or 0))
     job_pages = max(1, (jobs_per_run + 99) // 100)
-    probe_requests = 4 if run_id is not None else 3
+    probe_requests = probe.requests
     request_low = probe_requests + workflow_count * (1 + 4 * job_pages)
-    request_high = probe_requests + 4 + workflow_count * (2 + 20 * job_pages)
+    # The collector can walk twelve run-list pages and targets 100 complete PR
+    # commits across every observable workflow. Price that population separately
+    # from the ordinary twenty-run detector sample, while retaining the collector's
+    # hard 1,200 job-list-read ceiling.
+    pr_sample_reads = min(
+        PR_SAMPLE_JOB_LIST_READ_CAP,
+        PR_SAMPLE_TARGET * workflow_count * job_pages,
+    )
+    request_high = (
+        probe_requests + 4
+        + workflow_count * PR_SAMPLE_CANDIDATE_PAGE_CAP
+        + pr_sample_reads
+        + workflow_count * 20 * job_pages
+    )
     # Log downloads do not consume core JSON requests, so state them separately.
-    log_high = min(20, workflow_count) if with_logs else 0
+    if with_logs:
+        # Use the collector's own caps rather than a workflow-count proxy: a single
+        # workflow may probe several occurrences of every candidate cache/check job.
+        import collect_runs as collector  # local: avoid its startup cost without logs
+        candidate_jobs = max(1, workflow_count * jobs_per_run)
+        log_high = (
+            candidate_jobs * (
+                collector._OPT79_LOG_PROBE_MAX
+                + collector._OPT80_LOG_PROBE_MAX
+                + collector._CACHE_PUSH_PROBE_MAX
+            )
+            + max(1, target)  # one representative log per drilled pole
+        )
+    else:
+        log_high = 0
     core = ((rate.get("resources") or {}).get("core") or {})
     return _RequestEstimate(
         request_low=request_low, request_high=request_high,
@@ -279,10 +326,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     request_estimate: _RequestEstimate | None = None
-    if args.repo and not args.verify_branch:
+    request_probe = _RequestProbe()
+    offline_replay = bool(os.environ.get("CI_SPEEDUP_GH_FIXTURES"))
+    if args.repo and not args.verify_branch and not offline_replay:
         try:
-            request_estimate = _estimate_data_pass(args.repo, with_logs=args.with_logs)
-        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            request_estimate = _estimate_data_pass(
+                args.repo, with_logs=args.with_logs, target=args.target,
+                probe=request_probe)
+        except (OSError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
             # A failed cheap probe must not turn an otherwise usable collector into a
             # static-only run. Collection keeps its existing loud partial-state path.
             print(f"Data-pass request estimate unavailable ({e}).", file=sys.stderr)
@@ -437,20 +488,20 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: post-collect findings JSON is unreadable ({e}); stopping.",
                   file=sys.stderr)
             return 1
-        if request_estimate is not None:
-            ds = data.get("data_sources")
-            if isinstance(ds, dict):
-                measured = ds.get("gh_query_count")
-                if isinstance(measured, int) and not isinstance(measured, bool):
-                    ds["gh_query_count"] = measured + request_estimate.probe_requests
-                ds["request_estimate"] = {
-                    "request_low": request_estimate.request_low,
-                    "request_high": request_estimate.request_high,
-                    "log_low": request_estimate.log_low,
-                    "log_high": request_estimate.log_high,
-                    "remaining_before_data_pass": request_estimate.remaining,
-                    "probe_requests": request_estimate.probe_requests,
-                }
+        ds = data.get("data_sources")
+        if isinstance(ds, dict) and request_probe.requests:
+            measured = ds.get("gh_query_count")
+            if isinstance(measured, int) and not isinstance(measured, bool):
+                ds["gh_query_count"] = measured + request_probe.requests
+        if request_estimate is not None and isinstance(ds, dict):
+            ds["request_estimate"] = {
+                "request_low": request_estimate.request_low,
+                "request_high": request_estimate.request_high,
+                "log_low": request_estimate.log_low,
+                "log_high": request_estimate.log_high,
+                "remaining_before_data_pass": request_estimate.remaining,
+                "probe_requests": request_estimate.probe_requests,
+            }
         timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
         # `run_start_epoch` is set by scan.py (the always-runs anchor); don't
         # override it here. The driver only adds its own scripted-phase span.
