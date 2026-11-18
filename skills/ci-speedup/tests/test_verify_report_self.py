@@ -1843,6 +1843,32 @@ def test_verify_report_does_not_mutate_sys_path_on_import():
     assert vr.uw is not None, "the sibling untrusted_wrap should still load in a checkout"
 
 
+def test_verify_report_does_not_mutate_an_isolated_process_sys_path():
+    """The import-path invariant must hold without pytest's configured path."""
+    probe = """
+import importlib.util
+import json
+import sys
+
+before = list(sys.path)
+spec = importlib.util.spec_from_file_location("isolated_verify_report", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+print(json.dumps({"before": before, "after": sys.path}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(_VERIFY)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    paths = json.loads(result.stdout)
+    assert paths["after"] == paths["before"], (
+        "importing verify_report under -I mutated sys.path")
+
+
 def test_gap_fill_grounding_skips_loudly_without_the_sibling_module(tmp_path: Path):
     # The degraded case for the by-path load: verify_report copied next to a report
     # with no sibling scripts/. `_ground_transform` then cannot mirror the renderer's
