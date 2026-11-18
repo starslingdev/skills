@@ -100,6 +100,27 @@ def test_non_tty_over_budget_refuses_without_reading_and_prints_exact_rerun(
     assert str(tmp_path / "findings.json") in stderr
 
 
+def test_request_estimate_is_flushed_before_a_non_tty_run_stops(
+        monkeypatch, tmp_path):
+    estimate = run_mod._RequestEstimate(
+        request_low=80, request_high=120, log_low=0, log_high=5,
+        remaining=200, reset_epoch=2_000_000_000, probe_requests=4)
+    monkeypatch.setattr(run_mod, "_estimate_data_pass", lambda *_a, **_kw: estimate)
+    monkeypatch.setattr(run_mod.sys, "stdin", _NotTTY())
+    printed: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr("builtins.print", lambda *args, **kwargs: printed.append(
+        (args, kwargs)))
+
+    assert run_mod.main([
+        "--root", str(tmp_path), "--out", str(tmp_path / "findings.json"),
+        "--repo", "o/r",
+    ]) == 1
+    estimate_print = next(
+        kwargs for args, kwargs in printed
+        if args and str(args[0]).startswith("Data-pass request estimate:"))
+    assert estimate_print.get("flush") is True
+
+
 def test_accept_request_estimate_allows_non_tty_run(monkeypatch, tmp_path, capsys):
     estimate = run_mod._RequestEstimate(
         request_low=80, request_high=120, log_low=0, log_high=5,

@@ -370,7 +370,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"{request_estimate.request_low}-{request_estimate.request_high} "
                 "GitHub API requests; "
                 f"{request_estimate.log_low}-{request_estimate.log_high} log downloads; "
-                f"{request_estimate.remaining} requests remain (reset {reset}).")
+                f"{request_estimate.remaining} requests remain (reset {reset}).",
+                flush=True)
             if not _confirm_request_budget(
                     request_estimate,
                     explicitly_accepted=args.accept_request_estimate):
