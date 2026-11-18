@@ -16,13 +16,13 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1] / "golden"
 _REPOSITORIES = {
     "home-assistant-core": (
-        "PR #318 covers the headline follow-up; issue #365 tracks gate share",
+        "PR #318 covers the headline; #365 tracks hassfest share; #381 tracks pylint gates",
         (
             # Issue #365 tracks the independent engine/oracle hassfest share mismatch.
             "gate share differs for 'CI / Check hassfest'",
-            # Issue #365 tracks this independently recorded missing pylint gate.
+            # Issue #381 tracks this independently recorded missing pylint gate.
             "frequent gate absent: 'CI / Check pylint'",
-            # Issue #365 tracks this independently recorded missing test-lint gate.
+            # Issue #381 tracks this independently recorded missing test-lint gate.
             "frequent gate absent: 'CI / Check pylint on tests'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
@@ -44,12 +44,10 @@ _REPOSITORIES = {
         ),
     ),
     "ethereum-go-ethereum": (
-        "a true predecessor is misclassified; issue #305 remains after PR #318",
+        "a true predecessor is misclassified; issue #305 tracks the remaining OPT21 row",
         (
             # The workflow's real dependency edge is still classified as OPT21.
             "forbidden finding present: OPT21",
-            # Owner-reviewed headline text waits for that classification fix.
-            "Bottom line does not contain reviewed text",
         ),
     ),
     "microsoft-playwright": (
@@ -151,6 +149,27 @@ def test_known_red_reasons_name_the_public_issue_and_fix_pr() -> None:
         reason, _markers = _REPOSITORIES[name]
         assert issue in reason
         assert "#318" in reason
+
+
+def test_home_assistant_pylint_gaps_name_their_own_issue() -> None:
+    reason, markers = _REPOSITORIES["home-assistant-core"]
+
+    assert "#381" in reason
+    assert "frequent gate absent: 'CI / Check pylint'" in markers
+    assert "frequent gate absent: 'CI / Check pylint on tests'" in markers
+
+
+def test_go_ethereum_review_expectation_names_the_required_gate() -> None:
+    expected = json.loads((
+        _ROOT / "repositories" / "ethereum-go-ethereum" / "expected.json"
+    ).read_text(encoding="utf-8"))
+    review = expected["human_review"]
+
+    assert review["bottom_line_must_contain"] == "Lint"
+    assert review["rendered_pole_order"] == ["Lint", "validate-pr"]
+    assert "required gate" in review["review_notes"]
+    assert "32bit tests" in review["review_notes"]
+    assert "downstream" in review["review_notes"]
 
 
 def test_reference_oracle_uses_month_wide_last_job_facts_and_ignores_bookkeeping() -> None:
