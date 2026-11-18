@@ -2073,6 +2073,8 @@ def test_p1425_a_nested_manifest_symlinked_out_of_the_checkout_is_not_read(
     ("npm install --prefix apps/web", "npm@11.0.0", "npm@10.9.0"),
     ("pnpm -C apps/web install", "pnpm@10.25.0", "pnpm@9.15.0"),
     ("pnpm --dir apps/web install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("pnpm -C  apps/web install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("pnpm --dir\tapps/web install", "pnpm@10.25.0", "pnpm@9.15.0"),
     ("yarn --cwd apps/web", "yarn@4.0.0", "yarn@1.22.22"),
 ])
 def test_p1425_install_directory_flags_select_the_nested_pin(
@@ -2092,7 +2094,8 @@ def test_p1425_install_directory_flags_select_the_nested_pin(
             permissions:
               contents: write
             steps:
-              - run: {command}
+              - run: |
+                  {command}
     """)
     assert len(hits) == 1
     note = hits[0].derived_note or ""
@@ -2159,6 +2162,33 @@ def test_p1425_tilde_directory_flag_does_not_read_a_literal_repo_directory(
     note = hits[0].derived_note or ""
     assert "this repo pins `npm@11.0.0`" in note
     assert "npm@10.9.0" not in note
+
+
+def test_p1425_later_command_directory_flag_does_not_move_the_install(
+    tmp_path,
+):
+    """Only the qualifying install command owns its directory option. A
+    later command on the same line cannot relocate the earlier root install.
+    """
+    _pkg(tmp_path, "pnpm@9.15.0", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.34.5")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  pnpm install && pnpm --dir apps/web run build
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "this repo pins `pnpm@9.15.0`" in note
+    assert "pnpm@10.34.5" not in note
 
 
 def test_p1425_directory_flag_nested_pnpm9_is_not_covered_by_root_pnpm10(

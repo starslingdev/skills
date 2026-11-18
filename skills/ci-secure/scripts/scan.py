@@ -2406,7 +2406,7 @@ _INSTALL_CMD_RE = re.compile(
     _CMD_START + _CMD_PREFIX +
     r"(?<![\w./-])(?P<cmd>"
     r"npm\s+(?:ci|install|i)(?![\w-])"
-    r"|pnpm(?:\s+(?:-C|--dir)(?:=" + _YARN_OPT_VALUE + r"|[ ]"
+    r"|pnpm(?:\s+(?:-C|--dir)(?:=" + _YARN_OPT_VALUE + r"|[ \t]+"
     r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _YARN_OPT_VALUE
     + r")){0,1}\s+(?:install|i)(?![\w-])"
     r"|yarn\s+install(?![\w-])"
@@ -2521,13 +2521,27 @@ def _install_directory_flag(command: str) -> tuple[bool, str | None]:
     fall back to the repository root for an unknowable directory rather than
     guessing which nested manifest the package manager will load.
     """
-    m = _INSTALL_CMD_RE.search(command)
+    # `_install_lines` stores the joined source line so its evidence remains
+    # verbatim. Limit option parsing to the qualifying install segment: a later
+    # command on that line may carry its OWN `--dir`/`--cwd`, which cannot move
+    # an install that already ran.
+    install_segment = next(
+        (segment for segment in _install_command_segments(command)
+         if _INSTALL_CMD_RE.search(segment)
+         and not _IGNORE_SCRIPTS_RE.search(segment)
+         and _is_dependency_tree_install(segment)),
+        None,
+    )
+    if install_segment is None:
+        return False, None
+    m = _INSTALL_CMD_RE.search(install_segment)
     if m is None:
         return False, None
     try:
-        tokens = shlex.split(command[m.start("cmd"):], comments=False)
+        tokens = shlex.split(
+            install_segment[m.start("cmd"):], comments=False)
     except ValueError:
-        tokens = command[m.start("cmd"):].split()
+        tokens = install_segment[m.start("cmd"):].split()
     if not tokens:
         return False, None
     manager = tokens[0]
