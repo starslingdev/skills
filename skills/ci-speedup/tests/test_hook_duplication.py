@@ -286,6 +286,16 @@ def test_environment_assignment_order_does_not_change_the_match(monkeypatch, tmp
         "independent environment assignments are compared by final value")
 
 
+def test_shell_expanding_environment_assignments_are_withheld(monkeypatch, tmp_path):
+    workflow = _WORKFLOW_TEXT.replace("pnpm lint", "A=one B=$A pnpm lint")
+    monkeypatch.setattr(sys.modules[__name__], "_WORKFLOW_TEXT", workflow)
+
+    doc, _report = _collect(monkeypatch, tmp_path, "B=$A A=one pnpm lint")
+
+    assert not any(f.get("pattern") == "OPT105" for f in doc["findings"]), (
+        "shell-dependent assignment values cannot be compared statically")
+
+
 class _DuplicateStepNameClient(_Client):
     def json(self, endpoint: str, allow_missing: bool = False):
         payload = super().json(endpoint, allow_missing)

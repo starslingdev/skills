@@ -16062,13 +16062,17 @@ def _opt82_tokens(segment: str) -> list[str]:
 
 
 def _opt82_effective_env(
-        inherited: tuple[str, ...], local: tuple[str, ...],
-) -> tuple[str, ...]:
-    """Canonical final values after inner assignments override outer ones."""
+        inherited: "tuple[str, ...] | None", local: tuple[str, ...],
+) -> "tuple[str, ...] | None":
+    """Canonical final literal values, or None when shell expansion is needed."""
+    if inherited is None:
+        return None
     values: dict[str, str] = {}
     for assignment in inherited + local:
         name, separator, value = assignment.partition("=")
         if separator:
+            if "$" in value or "`" in value or value.startswith("~"):
+                return None
             values[name] = value
     return tuple(f"{name}={values[name]}" for name in sorted(values))
 
@@ -16862,7 +16866,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
              chain: "list[str] | None", depth: int, runner: str,
              acc: ResolvedLeaves, in_runner: "str | None" = None,
              stack: "frozenset[tuple[str, str]]" = frozenset(),
-             inherited_env: tuple[str, ...] = ()) -> "tuple | None":
+             inherited_env: "tuple[str, ...] | None" = ()) -> "tuple | None":
     """One level of `_resolve_run_leaves`. Control flow is OPT82's original
     resolver, verbatim, so its verdict is byte-identical (a snapshot test pins
     it); the leaves and unresolved records are collected beside it.
@@ -17013,7 +17017,8 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                 acc.leaves.append({"command": shlex.join(rest), "tokens": list(rest),
                                    "wd": None if lost is not None else wd,
                                    "runner": seg_runner, "chain": list(chain),
-                                   "env": list(effective_env),
+                                   "env": (list(effective_env)
+                                           if effective_env is not None else None),
                                    **({"task_runner": {"tool": in_runner}}
                                       if in_runner else {})})
             continue
