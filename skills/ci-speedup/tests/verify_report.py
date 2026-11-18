@@ -17100,7 +17100,7 @@ def check_wall_clock_runner_minute_effects(
         expected = (floor * (shards - 1) * runs / 60.0
                     if None not in (floor, runs, shards) else None)
         if (expected is None or amount is None or expected <= 0
-                or abs(amount - round(expected, 1)) > 0.01):
+                or abs(amount - round(expected, 3)) > 0.0005):
             failures.append(f"{pattern} added cost does not re-derive from floor*(N-1)*runs")
         elif amount > 0:
             priced_amounts.append(amount)
@@ -17110,12 +17110,14 @@ def check_wall_clock_runner_minute_effects(
     )]
     # A rendered prompt may group only the findings routed to one pole, so its
     # subtotal can be any non-empty subset of the signed findings.  A bitset over
-    # tenths keeps that exact without trusting arbitrary prose amounts.
+    # thousandths keeps that exact without trusting arbitrary prose amounts, including
+    # small positive costs that would disappear if reduced to tenths.
+    effect_scale = 1000
     reachable_costs = 1
     for value in priced_amounts:
-        reachable_costs |= reachable_costs << int(round(value * 10))
+        reachable_costs |= reachable_costs << int(round(value * effect_scale))
     for amount in displayed_costs:
-        units = int(round(amount * 10))
+        units = int(round(amount * effect_scale))
         if units <= 0 or not (reachable_costs >> units) & 1:
             failures.append(
                 f"displayed +{amount:g} runner-min/month is not backed by signed findings")
