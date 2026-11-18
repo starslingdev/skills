@@ -17108,11 +17108,15 @@ def check_wall_clock_runner_minute_effects(
         r"Runner-minute effect:\s*\+([0-9]+(?:\.[0-9]+)?)\s+runner-min/month",
         report,
     )]
-    allowed_costs = {round(value, 1) for value in priced_amounts}
-    if priced_amounts:
-        allowed_costs.add(round(sum(priced_amounts), 1))
+    # A rendered prompt may group only the findings routed to one pole, so its
+    # subtotal can be any non-empty subset of the signed findings.  A bitset over
+    # tenths keeps that exact without trusting arbitrary prose amounts.
+    reachable_costs = 1
+    for value in priced_amounts:
+        reachable_costs |= reachable_costs << int(round(value * 10))
     for amount in displayed_costs:
-        if round(amount, 1) not in allowed_costs:
+        units = int(round(amount * 10))
+        if units <= 0 or not (reachable_costs >> units) & 1:
             failures.append(
                 f"displayed +{amount:g} runner-min/month is not backed by signed findings")
     if "fix_key=emulated-image-compile" in report:
