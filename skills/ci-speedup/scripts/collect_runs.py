@@ -16044,14 +16044,20 @@ _OPT82_PM_BUILTINS = frozenset({
 _OPT82_CACHE_FLAGS_WITH_VALUE = frozenset({"--cache-location", "--cache-strategy"})
 
 
-def _opt82_tokens(segment: str) -> list[str]:
+def _opt82_tokens_and_env(segment: str) -> tuple[list[str], tuple[str, ...]]:
     import shlex
     try:
         toks = shlex.split(segment)
     except ValueError:
         toks = segment.split()
+    env: list[str] = []
     while toks and _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", toks[0]):
-        toks = toks[1:]            # leading `VAR=value` assignments
+        env.append(toks.pop(0))     # leading `VAR=value` assignments
+    return toks, tuple(env)
+
+
+def _opt82_tokens(segment: str) -> list[str]:
+    toks, _env = _opt82_tokens_and_env(segment)
     return toks
 
 
@@ -16392,6 +16398,18 @@ _RL_UNWALKED_DIRS = frozenset({"node_modules", "dist", "coverage", "__pycache__"
 # its contract test.
 _OPT105_MIN_DUPLICATE_STEP_S = 20.0
 _OPT105_MIN_JOB_SHARE = 0.15
+_OPT105_YAML_MAX_NODES = 10_000
+_OPT105_YAML_MAX_DEPTH = 100
+_OPT105_HOOK_NAMES = frozenset({
+    "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit",
+    "pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-commit",
+    "pre-rebase", "post-checkout", "post-merge", "pre-push", "pre-receive",
+    "update", "proc-receive", "post-receive", "post-update",
+    "reference-transaction", "push-to-checkout", "pre-auto-gc", "post-rewrite",
+    "sendemail-validate", "fsmonitor-watchman", "p4-changelist",
+    "p4-prepare-changelist", "p4-post-changelist", "p4-pre-submit",
+    "post-index-change",
+})
 
 
 def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
@@ -16426,6 +16444,8 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
         except OSError:
             paths = []
         for path in paths:
+            if path.name not in _OPT105_HOOK_NAMES:
+                continue
             text = _read(path)
             if text is None:
                 continue
@@ -16452,8 +16472,28 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
         except Exception:  # malformed config is unknown, never a finding
             return
 
-        def _walk(value: Any, key: str = "", working_directory: str = "") -> None:
+        rows: list[tuple[str, str, str]] = []
+        seen: set[int] = set()
+        visits = 0
+        exceeded = False
+
+        def _walk(value: Any, key: str = "", working_directory: str = "",
+                  depth: int = 0) -> None:
+            nonlocal visits, exceeded
+            if exceeded:
+                return
+            if depth > _OPT105_YAML_MAX_DEPTH:
+                exceeded = True
+                return
+            if isinstance(value, (dict, list)) and id(value) in seen:
+                return
+            if visits >= _OPT105_YAML_MAX_NODES:
+                exceeded = True
+                return
+            visits += 1
             if isinstance(value, dict):
+                identity = id(value)
+                seen.add(identity)
                 local_directory = working_directory
                 if lefthook and isinstance(value.get("root"), str):
                     raw_directory = str(value["root"])
@@ -16467,20 +16507,64 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
                         return
                     local_directory = "" if local_directory == "." else local_directory
                 for child_key, child in value.items():
-                    _walk(child, str(child_key), local_directory)
+                    _walk(child, str(child_key), local_directory, depth + 1)
             elif isinstance(value, list):
+                identity = id(value)
+                seen.add(identity)
                 for child in value:
-                    _walk(child, key, working_directory)
+                    _walk(child, key, working_directory, depth + 1)
             elif key in keys and isinstance(value, str) and value.strip():
-                out.append((path.relative_to(root).as_posix(), value.strip(),
-                            working_directory))
+                rows.append((path.relative_to(root).as_posix(), value.strip(),
+                             working_directory))
 
         _walk(doc)
+        if not exceeded:
+            out.extend(rows)
+
+    def _pre_commit_commands(path: Path) -> None:
+        text = _read(path)
+        if text is None:
+            return
+        try:
+            import shlex
+            import yaml
+            doc = yaml.safe_load(text)
+        except Exception:
+            return
+        repos = doc.get("repos") if isinstance(doc, dict) else None
+        if not isinstance(repos, list) or len(repos) > _OPT105_YAML_MAX_NODES:
+            return
+        rows: list[tuple[str, str, str]] = []
+        visits = 0
+        for repo in repos:
+            visits += 1
+            if visits > _OPT105_YAML_MAX_NODES or not isinstance(repo, dict):
+                return
+            hooks = repo.get("hooks")
+            if not isinstance(hooks, list):
+                continue
+            for hook in hooks:
+                visits += 1
+                if visits > _OPT105_YAML_MAX_NODES:
+                    return
+                if not isinstance(hook, dict) or hook.get("pass_filenames") is not False:
+                    continue
+                entry = hook.get("entry")
+                args = hook.get("args", [])
+                if (not isinstance(entry, str) or not entry.strip()
+                        or not isinstance(args, list)
+                        or not all(isinstance(arg, str) for arg in args)):
+                    continue
+                command = entry.strip()
+                if args:
+                    command += " " + shlex.join(args)
+                rows.append((path.relative_to(root).as_posix(), command, ""))
+        out.extend(rows)
 
     _yaml_commands(root / "lefthook.yml", frozenset({"run", "command"}), lefthook=True)
     _yaml_commands(root / "lefthook.yaml", frozenset({"run", "command"}), lefthook=True)
-    _yaml_commands(root / ".pre-commit-config.yaml", frozenset({"entry"}))
-    _yaml_commands(root / ".pre-commit-config.yml", frozenset({"entry"}))
+    _pre_commit_commands(root / ".pre-commit-config.yaml")
+    _pre_commit_commands(root / ".pre-commit-config.yml")
 
     package_text = _read(root / "package.json")
     if package_text is not None:
@@ -16523,12 +16607,18 @@ def _opt105_has_unproven_scope(command: str) -> bool:
     return False
 
 
-def _opt105_leaf_key(leaf: dict[str, Any]) -> "tuple[str, tuple[str, ...]] | None":
+def _opt105_leaf_key(
+        leaf: dict[str, Any],
+) -> "tuple[str, tuple[str, ...], tuple[str, ...]] | None":
     tokens = leaf.get("tokens")
+    env = leaf.get("env", [])
     if not isinstance(tokens, list) or not tokens or not all(
             isinstance(token, str) and token for token in tokens):
         return None
-    return str(leaf.get("wd") or ""), tuple(tokens)
+    if not isinstance(env, list) or not all(
+            isinstance(assignment, str) and assignment for assignment in env):
+        return None
+    return str(leaf.get("wd") or ""), tuple(env), tuple(tokens)
 
 
 def _detect_opt105_hook_duplication(
@@ -16559,7 +16649,9 @@ def _detect_opt105_hook_duplication(
     scripts_unreadable = frozenset(str(v) for v in
                                    (block.get("package_scripts_unreadable") or []))
     walk_complete = block.get("truncated") is False
-    hook_key_sources: dict[tuple[str, tuple[str, ...]], set[str]] = {}
+    hook_key_sources: dict[
+        tuple[str, tuple[str, ...], tuple[str, ...]], set[str]
+    ] = {}
     for source, command, working_directory in _opt105_config_commands(root):
         if _opt105_has_unproven_scope(command):
             continue
@@ -16643,7 +16735,10 @@ def _detect_opt105_hook_duplication(
             total = _duration_s(occurrence.get("started_at"), occurrence.get("completed_at"))
             if total is None or total <= 0:
                 continue
-            durations = {name: duration for name, duration in _step_durations(occurrence)}
+            duration_rows = _step_durations(occurrence)
+            name_counts = Counter(name for name, _duration in duration_rows)
+            durations = {name: duration for name, duration in duration_rows
+                         if name_counts[name] == 1}
             present = [name for name in matched_steps if name in durations]
             if not present:
                 continue
@@ -16754,7 +16849,8 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
              stop: "Callable[..., tuple | None] | None",
              chain: "list[str] | None", depth: int, runner: str,
              acc: ResolvedLeaves, in_runner: "str | None" = None,
-             stack: "frozenset[tuple[str, str]]" = frozenset()) -> "tuple | None":
+             stack: "frozenset[tuple[str, str]]" = frozenset(),
+             inherited_env: tuple[str, ...] = ()) -> "tuple | None":
     """One level of `_resolve_run_leaves`. Control flow is OPT82's original
     resolver, verbatim, so its verdict is byte-identical (a snapshot test pins
     it); the leaves and unresolved records are collected beside it.
@@ -16818,7 +16914,8 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                 _note("expression", "a ${{ }} expression only known at run time", seg)
                 unresolvable = unresolvable or ("unresolvable", "expression", chain)
             continue
-        toks = _opt82_tokens(seg)
+        toks, local_env = _opt82_tokens_and_env(seg)
+        effective_env = inherited_env + local_env
         if relevant is None:
             while toks and toks[0] in _RL_SHELL_KEYWORDS:
                 toks = toks[1:]
@@ -16826,7 +16923,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
         if call is not None:               # `npx -c '<command>'`
             sub = _rl_walk(call, wd, scripts_by_dir, scripts_unreadable, relevant,
                            stop, chain, depth + 1, seg_runner, acc,
-                           in_runner, stack)
+                           in_runner, stack, effective_env)
             if sub is not None and sub[0] != "unresolvable":
                 return _found(sub)
             if sub is not None:
@@ -16883,7 +16980,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                 _rl_walk(body + (" " + shlex.join(tr_fwd) if tr_fwd else ""), d,
                          scripts_by_dir, scripts_unreadable, relevant, stop,
                          chain + [f"{tool} run {task} ({d or '.'})"], depth + 1,
-                         pm_runner, acc, tool, stack | {(d, task)})
+                         pm_runner, acc, tool, stack | {(d, task)}, effective_env)
             continue
         dlg = _opt82_delegator(toks)
         if relevant is None and dlg in _RL_NON_JS_DELEGATORS:
@@ -16904,6 +17001,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                 acc.leaves.append({"command": shlex.join(rest), "tokens": list(rest),
                                    "wd": None if lost is not None else wd,
                                    "runner": seg_runner, "chain": list(chain),
+                                   "env": list(effective_env),
                                    **({"task_runner": {"tool": in_runner}}
                                       if in_runner else {})})
             continue
@@ -16928,7 +17026,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                        wd, scripts_by_dir, scripts_unreadable, relevant, stop,
                        chain + [f"{toks[0]} run {name}"], depth + 1,
                        _OPT82_RUNNER_BY_PM.get(toks[0], "npx"), acc, in_runner,
-                       stack | {(wd, name)})
+                       stack | {(wd, name)}, effective_env)
         if sub is not None and sub[0] != "unresolvable":
             return _found(sub)
         if sub is not None and lint_named:

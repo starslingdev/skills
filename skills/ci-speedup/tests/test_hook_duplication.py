@@ -5,6 +5,7 @@ import importlib.util
 import json
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -114,7 +115,8 @@ class _Client:
         return ""
 
 
-def _collect(monkeypatch, tmp_path: Path, hook: str | None) -> tuple[dict, str]:
+def _collect(monkeypatch, tmp_path: Path, hook: str | None, *,
+             client_cls: type[_Client] = _Client) -> tuple[dict, str]:
     workflow = tmp_path / _WORKFLOW
     workflow.parent.mkdir(parents=True)
     workflow.write_text(_WORKFLOW_TEXT, encoding="utf-8")
@@ -126,7 +128,7 @@ def _collect(monkeypatch, tmp_path: Path, hook: str | None) -> tuple[dict, str]:
         husky.parent.mkdir()
         husky.write_text("#!/bin/sh\n" + hook + "\n", encoding="utf-8")
 
-    monkeypatch.setattr(cr, "GhClient", _Client)
+    monkeypatch.setattr(cr, "GhClient", client_cls)
     monkeypatch.setattr(cr, "_root_is_clone_of", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(cr, "_workflows_are_dirty", lambda *_args, **_kwargs: False)
     doc = scan_mod.scan(tmp_path, SKILL / "references" / "patterns")
@@ -185,7 +187,8 @@ def test_every_supported_static_hook_surface_is_read(tmp_path):
         "pre-push:\n  commands:\n    types:\n      run: pnpm tsc --noEmit\n",
         encoding="utf-8")
     (tmp_path / ".pre-commit-config.yaml").write_text(
-        "repos:\n  - repo: local\n    hooks:\n      - id: lint\n        entry: pnpm lint\n",
+        "repos:\n  - repo: local\n    hooks:\n      - id: lint\n"
+        "        entry: pnpm lint\n        pass_filenames: false\n",
         encoding="utf-8")
     (tmp_path / "package.json").write_text(json.dumps({
         "simple-git-hooks": {"pre-push": "pnpm test"},
@@ -244,6 +247,45 @@ def test_typescript_project_flag_is_an_exact_match_not_a_package_filter(
     assert findings[0]["hook_duplication"]["steps"] == ["Typecheck"]
 
 
+def test_different_explicit_environments_do_not_match(monkeypatch, tmp_path):
+    workflow = _WORKFLOW_TEXT.replace(
+        "pnpm lint", "ESLINT_USE_FLAT_CONFIG=true pnpm lint")
+    monkeypatch.setattr(sys.modules[__name__], "_WORKFLOW_TEXT", workflow)
+
+    doc, _report = _collect(
+        monkeypatch, tmp_path, "ESLINT_USE_FLAT_CONFIG=false pnpm lint")
+
+    assert not any(f.get("pattern") == "OPT105" for f in doc["findings"]), (
+        "commands with different explicit environments are not the same work")
+
+
+class _DuplicateStepNameClient(_Client):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        payload = super().json(endpoint, allow_missing)
+        if re.match(r"repos/o/r/actions/runs/(101|102)/jobs", endpoint):
+            payload["jobs"][0]["steps"] = [
+                {"name": "Checkout", "conclusion": "success",
+                 "started_at": _iso(0), "completed_at": _iso(20)},
+                {"name": "Check", "conclusion": "success",
+                 "started_at": _iso(20), "completed_at": _iso(25)},
+                {"name": "Check", "conclusion": "success",
+                 "started_at": _iso(25), "completed_at": _iso(205)},
+            ]
+        return payload
+
+
+def test_duplicate_step_names_cannot_borrow_another_steps_time(monkeypatch, tmp_path):
+    workflow = _WORKFLOW_TEXT.replace("name: Lint", "name: Check").replace(
+        "name: Test", "name: Check")
+    monkeypatch.setattr(sys.modules[__name__], "_WORKFLOW_TEXT", workflow)
+
+    doc, _report = _collect(
+        monkeypatch, tmp_path, "pnpm lint", client_cls=_DuplicateStepNameClient)
+
+    assert not any(f.get("pattern") == "OPT105" for f in doc["findings"]), (
+        "a duplicate display name must not lend a slow step's time to a hook match")
+
+
 def test_lefthook_root_is_not_discarded(monkeypatch, tmp_path):
     web = tmp_path / "apps" / "web"
     web.mkdir(parents=True)
@@ -269,3 +311,53 @@ def test_hook_reader_refuses_symlinks_outside_checkout(tmp_path):
 
     assert cr._opt105_config_commands(tmp_path) == [], (
         "hook configuration must never be read through an escaping symlink")
+
+
+def test_hook_directories_ignore_inactive_sample_files(tmp_path):
+    hooks = tmp_path / ".githooks"
+    hooks.mkdir()
+    (hooks / "pre-push.sample").write_text("pnpm lint\n", encoding="utf-8")
+
+    assert cr._opt105_config_commands(tmp_path) == [], (
+        "a sample file Git never invokes is not a configured hook")
+
+
+def test_pre_commit_default_filenames_are_not_treated_as_full_suite(tmp_path):
+    (tmp_path / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: tests\n        entry: pytest\n",
+        encoding="utf-8",
+    )
+
+    assert cr._opt105_config_commands(tmp_path) == [], (
+        "pre-commit appends selected filenames unless pass_filenames is false")
+
+
+def test_pre_commit_explicit_args_are_part_of_the_command(tmp_path):
+    (tmp_path / ".pre-commit-config.yaml").write_text(
+        "repos:\n  - repo: local\n    hooks:\n      - id: tests\n"
+        "        entry: pytest\n        args: [-q, tests/unit]\n"
+        "        pass_filenames: false\n",
+        encoding="utf-8",
+    )
+
+    rows = cr._opt105_config_commands(tmp_path)
+
+    assert rows == [(".pre-commit-config.yaml", "pytest -q tests/unit", "")]
+
+
+def test_yaml_alias_fanout_has_bounded_work(tmp_path):
+    levels = ["seed: &seed [{run: pnpm lint}]"]
+    previous = "seed"
+    for index in range(12):
+        current = f"level{index}"
+        levels.append(f"{current}: &{current} [*{previous}, *{previous}]")
+        previous = current
+    levels.append(f"pre-push: *{previous}")
+    (tmp_path / "lefthook.yml").write_text("\n".join(levels) + "\n", encoding="utf-8")
+
+    started = time.monotonic()
+    rows = cr._opt105_config_commands(tmp_path)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 0.5, "YAML aliases must not multiply traversal work"
+    assert rows == [("lefthook.yml", "pnpm lint", "")]
