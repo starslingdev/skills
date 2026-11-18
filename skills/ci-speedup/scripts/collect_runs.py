@@ -10342,7 +10342,7 @@ def _detect_opt25_shard_imbalance(
     def _step_seconds(step: dict[str, Any]) -> float | None:
         started = _parse_dt(step.get("started_at"))
         completed = _parse_dt(step.get("completed_at"))
-        if started is None or completed is None or completed <= started:
+        if started is None or completed is None or completed < started:
             return None
         return (completed - started).total_seconds()
 
