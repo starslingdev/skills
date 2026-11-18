@@ -212,7 +212,7 @@ def test_always_run_upload_cannot_become_the_dominant_step():
         "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 90}) == []
 
 
-def test_universal_test_work_does_not_keep_light_legs_in_the_matrix():
+def test_shared_test_work_keeps_working_legs_in_the_matrix():
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     jobs = []
     for index, duration in enumerate((900, 100, 100)):
@@ -235,8 +235,49 @@ def test_universal_test_work_does_not_keep_light_legs_in_the_matrix():
             ],
         })
 
+    findings = cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900})
+
+    assert findings
+    assert findings[0]["legs_excluded_no_work"] == 0
+
+
+def test_step_identity_survives_a_workflow_edit_that_inserts_a_step():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def jobs(*, inserted_step: bool):
+        out = []
+        for index, duration in enumerate((900, 100, 90), start=1):
+            ran = index == 1
+            steps = []
+            if inserted_step:
+                steps.append({
+                    "number": 2,
+                    "name": "Prepare environment",
+                    "conclusion": "success",
+                    "started_at": start.isoformat(),
+                    "completed_at": (start + timedelta(seconds=5)).isoformat(),
+                })
+            steps.append({
+                "number": 3 if inserted_step else 2,
+                "name": "Run divided tests",
+                "conclusion": "success" if ran else "skipped",
+                "started_at": start.isoformat() if ran else None,
+                "completed_at": ((start + timedelta(seconds=duration)).isoformat()
+                                 if ran else None),
+            })
+            out.append({
+                "name": f"Test (Shard {index})",
+                "started_at": start.isoformat(),
+                "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+                "conclusion": "success",
+                "steps": steps,
+            })
+        return out
+
     assert cr._detect_opt25_shard_imbalance(
-        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900}) == []
+        "ci.yml", [jobs(inserted_step=False), jobs(inserted_step=True)], 0,
+        {"long_pole_p50": 900}) == []
 
 
 def test_universal_step_identity_does_not_depend_on_display_name():

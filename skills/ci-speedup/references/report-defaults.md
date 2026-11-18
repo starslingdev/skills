@@ -595,6 +595,23 @@ pattern must add its own named minimum and contract entry rather than borrowing
 an unrelated global threshold.
 
 **Approval status:** awaiting owner approval.
+### `opt25-universal-housekeeping`
+
+**Current value:** 60 seconds per matrix leg
+(`_OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S`).
+
+**Report statements:** whether work shared by every active matrix leg is treated
+as short housekeeping or retained as real work when diagnosing OPT25 imbalance.
+
+**Reason:** universally present setup and upload steps should not keep otherwise
+idle legs in the matrix, but a substantial shared test phase is useful work and
+must keep those legs in the comparison.
+
+**Proposed decision:** **Keep 60 seconds.** This matches the reader-facing
+bookkeeping cutoff while making longer shared work visible to the imbalance
+detector.
+
+**Approval status:** awaiting owner approval.
 ### `saving-caps`
 
 **Current value:** modeled cache savings use at most 90% of the available cache
@@ -751,6 +768,12 @@ implementation lands.
     "decision": "minimum-timed-runs",
     "sources": {
       "collect_runs.py:_MIN_TIMED_RUNS": 3
+    }
+  },
+  "opt25-universal-housekeeping": {
+    "decision": "opt25-universal-housekeeping",
+    "sources": {
+      "collect_runs.py:_OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S": 60.0
     }
   },
   "opt64-retried-runs": {

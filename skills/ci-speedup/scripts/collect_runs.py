@@ -10271,6 +10271,9 @@ def _size_opt25_next_step(finding: dict[str, Any], ctx: WallClockContext) -> Non
         "capped by the existing cross-workflow floor; this is not an extra credited saving.")
 
 
+_OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S = 60.0
+
+
 def _detect_opt25_shard_imbalance(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     crit: dict[str, Any], workflow_doc: dict[str, Any] | None = None,
@@ -10302,18 +10305,40 @@ def _detect_opt25_shard_imbalance(
             r"save cache|install (?:dependencies|deps|packages)(?:\s|$))",
             name.strip()))
 
-    def _step_identity(step: dict[str, Any], position: int) -> tuple[str, int]:
-        """Identify the workflow step across matrix legs, independent of its name."""
+    def _raw_step_identity(step: dict[str, Any], position: int) -> tuple[str, int]:
         number = step.get("number")
         return (("number", number) if isinstance(number, int) and not isinstance(number, bool)
                 else ("position", position))
 
-    dominant_step_by_base: dict[str, tuple[str, int]] = {}
-    step_seconds_by_base: dict[str, dict[tuple[str, int], float]] = {}
-    always_run_by_run: list[dict[str, set[tuple[str, int]]]] = []
-    non_universal_steps_by_base: dict[str, set[tuple[str, int]]] = {}
+    def _workflow_shape(job: dict[str, Any]) -> tuple[tuple[str, int], ...]:
+        """Version a job's step positions so an inserted step cannot steal an identity."""
+        return tuple(_raw_step_identity(step, position)
+                     for position, step in enumerate(job.get("steps") or [])
+                     if isinstance(step, dict))
+
+    def _step_identity(
+        step: dict[str, Any], position: int, shape: tuple[tuple[str, int], ...],
+    ) -> tuple[tuple[tuple[str, int], ...], str, int]:
+        """Identify a matrix step within the recorded workflow shape, not by display name."""
+        kind, value = _raw_step_identity(step, position)
+        return shape, kind, value
+
+    def _step_seconds(step: dict[str, Any]) -> float | None:
+        started = _parse_dt(step.get("started_at"))
+        completed = _parse_dt(step.get("completed_at"))
+        if started is None or completed is None or completed <= started:
+            return None
+        return (completed - started).total_seconds()
+
+    StepIdentity = tuple[tuple[tuple[str, int], ...], str, int]
+    dominant_step_by_base: dict[str, StepIdentity] = {}
+    step_seconds_by_base: dict[str, dict[StepIdentity, float]] = {}
+    always_run_by_run: list[dict[str, set[StepIdentity]]] = []
+    non_universal_steps_by_base: dict[str, set[StepIdentity]] = {}
     for run_jobs in jobs_per_run:
-        active_steps_by_base: dict[str, list[dict[tuple[str, int], str]]] = {}
+        active_steps_by_base: dict[
+            str, list[dict[StepIdentity, tuple[str, float | None]]]
+        ] = {}
         for job in run_jobs:
             if str(job.get("conclusion") or "").lower() == "skipped":
                 continue
@@ -10325,21 +10350,29 @@ def _detect_opt25_shard_imbalance(
                 base = suffix_base[job_name]
             else:
                 continue
+            shape = _workflow_shape(job)
             active_steps_by_base.setdefault(base, []).append({
-                _step_identity(step, position): str(step.get("name") or "")
+                _step_identity(step, position, shape): (
+                    str(step.get("name") or ""), _step_seconds(step))
                 for position, step in enumerate(job.get("steps") or [])
                 if (isinstance(step, dict)
                     and not _is_preparation_step(str(step.get("name") or ""))
                     and str(step.get("conclusion") or "").lower() != "skipped")
             })
-        always_run_by_base: dict[str, set[tuple[str, int]]] = {}
+        always_run_by_base: dict[str, set[StepIdentity]] = {}
         for base, active_steps in active_steps_by_base.items():
             universal = (set.intersection(*(set(steps) for steps in active_steps))
                          if active_steps else set())
-            always_run_by_base[base] = universal
+            short_universal = {
+                identity for identity in universal
+                if all((steps[identity][1] is None
+                        or steps[identity][1] <= _OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S)
+                       for steps in active_steps)
+            }
+            always_run_by_base[base] = short_universal
             for steps in active_steps:
                 non_universal_steps_by_base.setdefault(base, set()).update(
-                    identity for identity in steps if identity not in universal)
+                    identity for identity in steps if identity not in short_universal)
         always_run_by_run.append(always_run_by_base)
 
     for run_jobs in jobs_per_run:
@@ -10352,6 +10385,7 @@ def _detect_opt25_shard_imbalance(
                 base = suffix_base[job_name]
             else:
                 continue
+            shape = _workflow_shape(job)
             for position, step in enumerate(job.get("steps") or []):
                 if (not isinstance(step, dict)
                         or _is_preparation_step(str(step.get("name") or ""))
@@ -10361,7 +10395,7 @@ def _detect_opt25_shard_imbalance(
                 completed = _parse_dt(step.get("completed_at"))
                 if started is None or completed is None or completed <= started:
                     continue
-                step_identity = _step_identity(step, position)
+                step_identity = _step_identity(step, position, shape)
                 seconds = (completed - started).total_seconds()
                 by_step = step_seconds_by_base.setdefault(base, {})
                 by_step[step_identity] = by_step.get(step_identity, 0.0) + seconds
@@ -10389,6 +10423,7 @@ def _detect_opt25_shard_imbalance(
                 inferred_suffix_group = True
             else:
                 continue  # neither convention matched → not a matrix job
+            shape = _workflow_shape(j)
             steps = [(position, step) for position, step in enumerate(j.get("steps") or [])
                      if isinstance(step, dict)]
             work_steps = [
@@ -10400,11 +10435,11 @@ def _detect_opt25_shard_imbalance(
             dominant_identity = dominant_step_by_base.get(base)
             distinctive_active_steps = [
                 step for position, step in active_work_steps
-                if (_step_identity(step, position) == dominant_identity
-                    or _step_identity(step, position)
+                if (_step_identity(step, position, shape) == dominant_identity
+                    or _step_identity(step, position, shape)
                     not in always_run_by_base.get(base, set()))]
             dominant_steps = [step for position, step in work_steps
-                              if _step_identity(step, position) == dominant_identity]
+                              if _step_identity(step, position, shape) == dominant_identity]
             # An active step identity that did not run on every leg is positive
             # evidence that this leg did real work (for example platform-specific
             # test steps). Only use the dominant sibling step to confirm an

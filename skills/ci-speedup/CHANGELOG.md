@@ -35,7 +35,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
-- **2026-11-15** — Exclude light matrix legs when every remaining active workflow step also ran on every other leg, matching steps by identity rather than display-name patterns while preserving platform-specific work (#359).
+- **2026-11-18** — Exclude light matrix legs only when every remaining active workflow step also ran briefly on every other leg, while retaining substantial shared test work and platform-specific work. Match steps by identity rather than display-name patterns, and scope identities to the recorded workflow shape so an inserted step cannot be mistaken for an older one (#359).
 - **2026-11-15** — Cap repeated checkout/setup savings at the affected jobs' measured completed-run compute, and disclose the measured ceiling whenever it lowers the modeled monthly credit. Every other per-run modeled saving (OPT1-9, OPT13, OPT16-18, OPT22, OPT27-28, OPT41-42, OPT52-54, OPT58-59, OPT61-63) is now also capped when only some of its affected jobs have measured compute, at those jobs' measured compute, with the measured share of jobs named in the note. A repeated-setup finding (OPT14/OPT15) whose affected jobs have no measured compute at all now renders not sized instead of keeping its modeled figure (#355).
 - **2026-11-15** — Lead bimodal gate reports with both measured modes and their shares, size the slow-mode improvement from per-PR ceilings, and reject a P50-only Bottom line for that shape (#353).
 - **2026-11-12** — Cap baseline job-log reads across an entire post-fix verification, persist the sampled baseline and any in-flight sample or rerun state for later polls even when the branch-head lookup is temporarily unavailable, and disclose the calls used against the budget.

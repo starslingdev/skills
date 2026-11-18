@@ -29,6 +29,7 @@ REQUIRED_DECISIONS = {
     "dependency-cache-floor", "cold-cache-miss-threshold",
     "cache-partial-miss-floor",
     "ceiling-minimum-gates", "partial-majority-rule",
+    "opt25-universal-housekeeping",
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
@@ -122,6 +123,7 @@ REQUIRED_CURRENT_SOURCES = {
     "collect_runs.py:_MAG_WIDE_REL": 0.25,
     "collect_runs.py:_MIN_TIMED_RUNS": 3,
     "collect_runs.py:_NOOP_FLOOR_S": 30.0,
+    "collect_runs.py:_OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S": 60.0,
     "collect_runs.py:_OPT57_DEFAULT_KILL_CEILING_S": 22500.0,
     "collect_runs.py:_OPT57_KILL_GRACE_S": 900.0,
     "collect_runs.py:_OPT57_MIN_TIMEOUT_S": 900.0,
