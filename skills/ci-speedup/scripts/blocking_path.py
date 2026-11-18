@@ -7264,6 +7264,13 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    "so their per-commit presence and timing could not be established. The spine "
                    "is the measured **PR-floor** — the file-backed work a normal PR "
                    "runs — not the branch-protection gate.")
+    elif (doc.get("required_checks_complete") is True
+          and doc.get("required_checks") == []):
+        out.append("> - **No required checks are configured** — the repository's "
+                   "readable ruleset and classic branch-protection configuration "
+                   "contains no required status checks, so 'gate' here means the "
+                   "**slowest check on a typical PR** (observed), not a merge "
+                   "requirement.")
     elif cp.get("sample_job_list_scoped"):
         if cp.get("sample_partial_count"):
             out.append("> - ⚠️ **Required-suite coverage comes from run/job lists** — this "

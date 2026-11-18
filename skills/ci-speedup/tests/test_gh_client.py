@@ -103,6 +103,21 @@ def test_json_nonzero_rc_allow_missing_true(monkeypatch):
     assert client.errors == 0
 
 
+def test_json_preserves_structured_failure_message(monkeypatch):
+    endpoint = "repos/o/r/branches/main/protection/required_status_checks"
+    _patch_run(monkeypatch, lambda *a, **kw: _completed(
+        returncode=1,
+        stdout=_gh_i(
+            "HTTP/2.0 404 Not Found",
+            body='{"message":"Branch not protected"}'),
+        stderr="gh: Branch not protected (HTTP 404)"))
+    client = GhClient()
+
+    assert client.json(endpoint, allow_missing=True) is None
+    assert client.failure_status(endpoint) == 404
+    assert client.failure_message(endpoint) == "Branch not protected"
+
+
 def test_json_non_json_body_allow_missing_false(monkeypatch):
     _patch_run(monkeypatch, lambda *a, **kw: _completed(returncode=0, stdout="not json"))
     client = GhClient()
