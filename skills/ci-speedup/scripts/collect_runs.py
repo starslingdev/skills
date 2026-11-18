@@ -2604,7 +2604,7 @@ def _stamp_commit_queue_work(clock: dict[str, Any]) -> dict[str, Any]:
                 complete.append(fact)
         stamped.append(fact)
     out[key] = stamped
-    if not complete:
+    if not complete or out.get("representative") is False:
         return out
     queue = [float(f["queue_s"]) for f in complete]
     work = [float(f["work_s"]) for f in complete]
@@ -31694,13 +31694,25 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
     _complete_walls = [float(f["wall_s"]) for f in _commit_facts
                        if isinstance(f.get("wall_s"), (int, float))]
+    # A median of the readable tail is not a typical-commit figure when most
+    # sampled commits are partial. Keep the facts for diagnosis, but refuse to
+    # publish percentiles or projections from a minority complete subset.
+    _complete_population_representative = bool(
+        _complete_walls
+        and len(_complete_walls) * 2 >= len(_commit_facts)
+    )
     _commit_wall_clock = {
         "p50_s": (round(_percentile(_complete_walls, 50), 3)
-                  if _complete_walls else None),
+                  if _complete_population_representative else None),
         "p90_s": (round(_percentile(_complete_walls, 90), 3)
-                  if _complete_walls else None),
+                  if _complete_population_representative else None),
+        "representative": _complete_population_representative,
+        "complete_commit_count": len(_complete_walls),
+        "sampled_commit_count": len(_commit_facts),
         "facts": _commit_facts,
-        **_projection_population(_commit_facts),
+        **(_projection_population(_commit_facts)
+           if _complete_population_representative
+           else {"median_projection_multiple": None, "worst_commit": None}),
     }
     _joint_runner_bases = {
         tuple(sorted((observation.get("check_runners") or {}).items()))

@@ -11627,6 +11627,12 @@ def _commit_wall_disclosure_lines(commit_clock: dict[str, Any]) -> list[str]:
             f"> {len(partial)} sampled commit(s) were partial"
             + (f" ({'; '.join(reasons)})" if reasons else "")
             + "; their observed spans were excluded from these percentiles.")
+    if commit_clock.get("representative") is False and facts:
+        complete_count = sum(_num(f.get("wall_s")) is not None for f in facts)
+        lines.append(
+            f"> **Typical wait withheld:** {complete_count} of {len(facts)} sampled "
+            "commits were complete. Because the complete subset is a minority, it "
+            "is not representative enough to publish a typical per-commit wait.")
     return lines
 
 
@@ -15687,6 +15693,14 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             f"> {len(_partial_commit_facts)} sampled commit(s) were partial"
             + (f" ({'; '.join(_partial_reasons)})" if _partial_reasons else "")
             + "; their observed spans were excluded from these percentiles.")
+    if _commit_wall.get("representative") is False and _commit_facts:
+        _complete_count = sum(
+            _num(f.get("wall_s")) is not None for f in _commit_facts)
+        _commit_wall_block.append(
+            f"> **Typical wait withheld:** {_complete_count} of "
+            f"{len(_commit_facts)} sampled commits were complete. Because the "
+            "complete subset is a minority, it is not representative enough to "
+            "publish a typical per-commit wait.")
     _fold_bottom_line(
         out,
         _lead_block,

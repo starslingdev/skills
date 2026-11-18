@@ -841,7 +841,10 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
                 "report lacks the re-derived partial-commit count/workflow disclosure")
 
     walls = [row[1] for row in complete]
-    if walls:
+    representative = bool(walls and len(walls) * 2 >= len(facts))
+    if representative:
+        if stamp.get("representative") is False:
+            failures.append("representative complete-commit population is marked withheld")
         expected_p50 = round(percentile(walls, 50), 3)
         expected_p90 = round(percentile(walls, 90), 3)
         if _num(stamp.get("p50_s")) != expected_p50:
@@ -930,6 +933,22 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             + projection_clause)
         if report.splitlines().count(expected_line) != 1:
             failures.append("report lacks the re-derived per-commit wait/projection line")
+    elif walls:
+        if stamp.get("representative") is not False:
+            failures.append("minority complete-commit population is not marked unrepresentative")
+        if _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
+            failures.append("minority complete-commit population publishes percentiles")
+        if (_num(stamp.get("median_projection_multiple")) is not None
+                or stamp.get("worst_commit")):
+            failures.append("minority complete-commit population publishes projections")
+        expected_withheld = (
+            f"> **Typical wait withheld:** {len(walls)} of {len(facts)} sampled "
+            "commits were complete. Because the complete subset is a minority, it "
+            "is not representative enough to publish a typical per-commit wait.")
+        if report.splitlines().count(expected_withheld) != 1:
+            failures.append("report lacks the unrepresentative-population disclosure")
+        if "> **Per-commit PR wait:**" in report:
+            failures.append("report publishes a per-commit wait from an unrepresentative subset")
     elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
         failures.append("empty complete population publishes commit percentiles")
 
@@ -17203,11 +17222,14 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
     share_p50 = statistics.median(share_values) if share_values else 0.0
     displayed_work = max(wall_p50 - min(queue_p50, wall_p50), 0.0)
     credited_work = min(work_p50, displayed_work)
-    for key, expected in (("work_p50_s", work_p50),
-                          ("queue_p50_s", queue_p50),
-                          ("p50_s", wall_p50),
-                          ("queue_share_p50", share_p50),
-                          ("n", float(len(work_values)))):
+    expected_aggregates = (() if clock.get("representative") is False else (
+        ("work_p50_s", work_p50),
+        ("queue_p50_s", queue_p50),
+        ("p50_s", wall_p50),
+        ("queue_share_p50", share_p50),
+        ("n", float(len(work_values))),
+    ))
+    for key, expected in expected_aggregates:
         try:
             stamped = float(clock.get(key))
         except (TypeError, ValueError):
@@ -17236,7 +17258,7 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
                 f"{saving:g}s above {credited_work:g}s work on the typical full wait")
 
     text_failures: list[str] = []
-    if queue_p50 > 0:
+    if queue_p50 > 0 and clock.get("representative") is not False:
         bottom = next((line for line in report.splitlines()
                        if line.startswith("> **Bottom line.**")), "")
         if _fmt_clock(wall_p50) not in bottom:
