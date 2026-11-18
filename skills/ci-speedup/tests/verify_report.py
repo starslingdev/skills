@@ -12744,7 +12744,15 @@ def _cooccurrence_floor_s(per_pr: list[list[tuple[str, float]]], pole_name: str,
         return None, None, len(gating)
     co: dict[str, int] = {}
     for pr in gating:
-        for nm in {_cmp_name(n) for n, _p in pr[1:]}:   # de-dupe within a PR
+        # Keep the population's slowest-first order while de-duplicating within
+        # this PR.  The renderer selects the first check when effective floors
+        # tie; iterating a set here made the verifier's winner hash-seed dependent.
+        seen: set[str] = set()
+        for name, _p in pr[1:]:
+            nm = _cmp_name(name)
+            if nm in seen:
+                continue
+            seen.add(nm)
             co[nm] = co.get(nm, 0) + 1
     floor_s, floor_name = 0.0, None
     majority = len(gating) * 0.5
