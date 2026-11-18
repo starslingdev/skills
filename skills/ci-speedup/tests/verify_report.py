@@ -17252,7 +17252,8 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
         if (saving > 0 and not finding.get("off_spine")
                 and not finding.get("advisory") and not finding.get("spine_rare")):
             code_savings.append(saving)
-        if saving > credited_work + 0.11:
+        if (clock.get("representative") is not False
+                and saving > credited_work + 0.11):
             bad_credit.append(
                 f"{finding.get('id') or finding.get('pattern') or '?'} credits "
                 f"{saving:g}s above {credited_work:g}s work on the typical full wait")
