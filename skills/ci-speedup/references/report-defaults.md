@@ -595,6 +595,7 @@ pattern must add its own named minimum and contract entry rather than borrowing
 an unrelated global threshold.
 
 **Approval status:** awaiting owner approval.
+
 ### `opt25-universal-housekeeping`
 
 **Current value:** 60 seconds per matrix leg
@@ -612,6 +613,7 @@ bookkeeping cutoff while making longer shared work visible to the imbalance
 detector.
 
 **Approval status:** awaiting owner approval.
+
 ### `saving-caps`
 
 **Current value:** modeled cache savings use at most 90% of the available cache

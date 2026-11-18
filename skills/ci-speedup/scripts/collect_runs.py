@@ -10352,9 +10352,7 @@ def _detect_opt25_shard_imbalance(
     always_run_by_run: list[dict[str, set[StepIdentity]]] = []
     non_universal_steps_by_base: dict[str, set[StepIdentity]] = {}
     for run_jobs in jobs_per_run:
-        active_steps_by_base: dict[
-            str, list[dict[StepIdentity, tuple[str, float | None]]]
-        ] = {}
+        active_steps_by_base: dict[str, list[dict[StepIdentity, float | None]]] = {}
         for job in run_jobs:
             if str(job.get("conclusion") or "").lower() == "skipped":
                 continue
@@ -10368,8 +10366,7 @@ def _detect_opt25_shard_imbalance(
                 continue
             shape = _workflow_shape(job)
             active_steps_by_base.setdefault(base, []).append({
-                _step_identity(step, position, shape): (
-                    str(step.get("name") or ""), _step_seconds(step))
+                _step_identity(step, position, shape): _step_seconds(step)
                 for position, step in enumerate(job.get("steps") or [])
                 if (isinstance(step, dict)
                     and not _is_preparation_step(str(step.get("name") or ""))
@@ -10381,8 +10378,8 @@ def _detect_opt25_shard_imbalance(
                          if active_steps else set())
             short_universal = {
                 identity for identity in universal
-                if all((steps[identity][1] is None
-                        or steps[identity][1] <= _OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S)
+                if all((steps[identity] is not None
+                        and steps[identity] <= _OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S)
                        for steps in active_steps)
             }
             always_run_by_base[base] = short_universal
