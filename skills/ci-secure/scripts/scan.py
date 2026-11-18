@@ -3278,6 +3278,7 @@ def _install_pin_directory(
     if flag_present:
         if (not flag_dir or _EXPRESSION_TOKEN_RE.search(flag_dir)
                 or "$" in flag_dir or "`" in flag_dir
+                or flag_dir.startswith("~")
                 or flag_dir.startswith("/")
                 or _RUNNER_ABSOLUTE_RE.match(flag_dir)):
             return None

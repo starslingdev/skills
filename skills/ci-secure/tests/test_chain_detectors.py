@@ -2135,6 +2135,32 @@ def test_p1425_install_directory_flags_cannot_read_outside_the_repo(
     assert outside_pin not in note
 
 
+def test_p1425_tilde_directory_flag_does_not_read_a_literal_repo_directory(
+    tmp_path,
+):
+    """An unquoted tilde is expanded by the shell outside the checkout. The
+    scanner must not mistake a repository directory literally named ``~`` for
+    that external location.
+    """
+    _pkg(tmp_path, "npm@11.0.0")
+    _nested_pkg(tmp_path, "~/outside", "npm@10.9.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: npm ci --prefix ~/outside
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "this repo pins `npm@11.0.0`" in note
+    assert "npm@10.9.0" not in note
+
+
 def test_p1425_directory_flag_nested_pnpm9_is_not_covered_by_root_pnpm10(
     tmp_path,
 ):
