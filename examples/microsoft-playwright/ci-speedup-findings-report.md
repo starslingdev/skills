@@ -391,7 +391,8 @@ THE GATE
 - Workflow `tests_secondary.yml`, job `Test chrome on macos-latest`.
 - Rarely the merge pole - the actual slowest check a PR waits on, on only 1/20 sampled PRs (present on 5/20): P50 59m 33s. A slower concurrent check usually gates ahead, so speeding it helps only the PRs where it IS the pole, not typical merge-wait.
 
-Runner-minute effect: If the structural fix moves work to added jobs or machines, duplicated checkout and setup raise runner minutes; moving the same work without duplication is roughly level, and removing measured work lowers them.
+Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
+Runner-minute effect: not sized; extra shard jobs repeat checkout and setup and bill each job.
 
 WHERE THE TIME GOES
 - The job's time is dominated by the `Run ./.github/actions/run-test` step: ~59m 21s (100% of the job wall), from the sampled per-step decomposition (no single-run timeline was captured for this job).
@@ -955,7 +956,7 @@ Pattern: OPT24 - Long Test Job Without Sharding.
 Where: tests_primary.yml (Installation Test ubuntu-latest); tests_primary.yml (Installation Test windows-latest); tests_primary.yml (Installation Test macos-latest); tests_secondary.yml (time test runner - realtime); tests_secondary.yml (Test chrome on ubuntu-22.04); tests_secondary.yml (Test chrome-beta on ubuntu-22.04); tests_secondary.yml (time test runner - frozen); tests_secondary.yml (Test chrome on macos-latest); +1 more (see findings JSON).
 What ci-speedup saw: job `Test chrome on macos-latest` p50 3573s over 4 runs, no shard axis observed (job names lack a `shard` / `partition` matrix marker)
 Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
-Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner. Extra shard jobs repeat checkout and setup and bill each job; N shards also add roughly (N-1) × the measured pre-test floor in runner minutes. Measure compile and setup before adding jobs.
+Runner-minute effect: not sized; extra shard jobs repeat checkout and setup and bill each job.
 Saving: developer WALL-CLOCK (~6m 51s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):
@@ -998,6 +999,7 @@ failure mode and how you have guarded it before shipping.
 **Where:** `tests_components.yml` (- Node.js 20), `tests_secondary.yml` (Windows)
 **Activity:** 1114 runs in 30 days · most recent 2026-07-24.
 **Wall-clock:** unlike the other findings in this section, this one **sits ON the merge-gating critical path** (a long pole) - its catalog fix **cuts developer wall-clock**, it is not a bill-only cleanup. See the spine above and this pattern's catalog recipe below for the remedy.
+**Runner-minute effect: not sized; extra shard jobs repeat checkout and setup and bill each job.**
 **Evidence:** leg `Windows (firefox)` median 4377s vs `Windows (chromium)` 1598s - 2.7× imbalance over 3 sampled runs (heterogeneous legs - split the slow leg, don't rebalance)
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt25--shard-imbalance
 
@@ -1011,7 +1013,7 @@ Pattern: OPT25 - Matrix Leg Imbalance.
 Where: tests_components.yml (- Node.js 20); tests_secondary.yml (Windows).
 What ci-speedup saw: leg `Windows (firefox)` median 4377s vs `Windows (chromium)` 1598s - 2.7× imbalance over 3 sampled runs (heterogeneous legs - split the slow leg, don't rebalance)
 Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
-Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner. Extra shard jobs repeat checkout and setup and bill each job; N shards also add roughly (N-1) × the measured pre-test floor in runner minutes. Measure compile and setup before adding jobs.
+Runner-minute effect: not sized; extra shard jobs repeat checkout and setup and bill each job.
 Saving: developer WALL-CLOCK (~3m 21s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):

@@ -76,6 +76,9 @@ THE GATE
 - Workflow `test.yml`, job `tests`.
 - Slowest check a typical PR waits on: P50 10m 00s; its workflow `test.yml` gates 4/4 sampled PRs.
 
+Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
+Runner-minute effect: not sized; extra shard jobs repeat checkout and setup and bill each job.
+
 WHERE THE TIME GOES
 - No per-step breakdown was captured for this job; profile its slowest step in the repo.
 
@@ -131,6 +134,7 @@ DELIVER & VERIFY
 **Where:** `test.yml` (tests)
 **Activity:** not measured.
 **Wall-clock:** unlike the other findings in this section, this one **sits ON the merge-gating critical path** (a long pole) - its catalog fix **cuts developer wall-clock**, it is not a bill-only cleanup. See the spine above and this pattern's catalog recipe below for the remedy.
+**Runner-minute effect: not sized; extra shard jobs repeat checkout and setup and bill each job.**
 **Evidence:** One shard gates the matrix.
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/abcdef1234567890/skills/ci-speedup/references/optimization-patterns.md
 
@@ -144,7 +148,7 @@ Pattern: OPT25 - Shard imbalance.
 Where: test.yml (tests).
 What ci-speedup saw: One shard gates the matrix.
 Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
-Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner. Extra shard jobs repeat checkout and setup and bill each job; N shards also add roughly (N-1) × the measured pre-test floor in runner minutes. Measure compile and setup before adding jobs.
+Runner-minute effect: not sized; extra shard jobs repeat checkout and setup and bill each job.
 Saving: developer WALL-CLOCK (~4m 10s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):

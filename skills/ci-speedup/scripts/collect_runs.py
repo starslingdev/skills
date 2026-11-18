@@ -6795,10 +6795,13 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
     f["runner_min_note"] = f"{existing}; {note}" if existing else note
 
 
+_JOB_EXPANDING_EFFECT_PATTERNS = frozenset(("OPT24",))
+
+
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
-    if f.get("pattern") == "OPT24":
+    if f.get("pattern") in _JOB_EXPANDING_EFFECT_PATTERNS:
         floor = f.get("runner_minute_setup_floor_s")
         if isinstance(floor, (int, float)) and floor > 0 and monthly_volume:
             f["runner_minute_effect"] = {
@@ -34105,6 +34108,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             sum(s["prior_attempt_job_minutes"] for s in _gate_stats), 1),
         "sampled_prs": int(findings_doc["pr_critical_path"].get("sampled_pr_count") or 0),
     }
+    findings_doc["runner_minute_effect_schema"] = 1
     return findings_doc
 
 

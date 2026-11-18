@@ -15779,6 +15779,7 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
         data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
+    data = _as_dict(data)
     findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
     guarded = [f for f in findings if isinstance(f.get("cache_sizing_guard"), dict)]
     cache_patterns = {"OPT4", "OPT6", "OPT9", "OPT61", "OPT62", "OPT96", "OPT101"}
@@ -17073,14 +17074,16 @@ def check_wall_clock_runner_minute_effects(
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings JSON unreadable", skipped=True)
     failures: list[str] = []
+    data = _as_dict(data)
+    effect_schema = data.get("runner_minute_effect_schema") == 1
     findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
     for finding in findings:
         pattern = str(finding.get("pattern") or "")
         if pattern not in {"OPT24", "OPT25"}:
             continue
         effect = _as_dict(finding.get("runner_minute_effect"))
-        if not effect and finding.get("sizing_basis") != "measured":
-            continue  # legacy/synthetic verifier fixture, not collector output
+        if not effect and not effect_schema:
+            continue  # legacy recorded artifact predating signed-effect stamps
         direction = effect.get("direction")
         if direction not in {"added_cost", "unsized"}:
             failures.append(f"{pattern} has no signed or explicitly unsized effect")

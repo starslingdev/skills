@@ -186,7 +186,8 @@ _SCENARIOS = {
 # `_size_finding` starts reading something the class key does not.
 _SPECIAL_SETS = ("_SERIAL_GATE_PATTERNS", "_PRESTART_AXIS_PATTERNS",
                  "_EPHEMERAL_CACHE_SUSPECT", "_RUNNER_MIN_UPPER_BOUND",
-                 "_WALL_CLOCK_ONLY_NO_RUNNER_MIN")
+                 "_WALL_CLOCK_ONLY_NO_RUNNER_MIN",
+                 "_JOB_EXPANDING_EFFECT_PATTERNS")
 
 
 def _sizing_class(pattern: str) -> tuple:
