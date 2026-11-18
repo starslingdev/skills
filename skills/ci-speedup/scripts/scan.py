@@ -4982,6 +4982,11 @@ def _static_cache_family(
     cache_paths: object = (),
 ) -> str:
     """Return a stable cache-family token for log confirmation."""
+    families = (
+        "sccache", "ccache", "staticcheck", "golangci", "buildkit",
+        "jest", "playwright", "pnpm", "turbo", "cargo", "npm",
+        "maven", "go",
+    )
     key_text = str(cache_key or "").casefold()
     key_literal_prefix = key_text.partition("${{")[0]
     key_tokens = [
@@ -5000,23 +5005,27 @@ def _static_cache_family(
     ]
     path_tokens = [token for token in path_tokens if token]
     ignored = {
+        "arm64",
         "build", "cache", "ci", "dependencies", "deps", "github", "home",
-        "key", "keys", "linux", "repository", "restore", "runner", "sha",
-        "shared", "ubuntu",
+        "key", "keys", "latest", "linux", "macos", "repository", "restore",
+        "runner", "sha", "shared", "ubuntu", "windows", "x64",
     }
+    # An action or command identifies the cache more strongly than a user-chosen
+    # key word (for example ccache-action with a legacy `pnpm-*` key).
+    texts = [str(value or "").casefold() for value in values]
+    for text in texts:
+        for family in families:
+            if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", text):
+                return family
+    # Within the literal key prefix, prefer an actual tool name over generic
+    # platform/runner words while preserving the key's left-to-right intent.
+    for token in key_tokens:
+        if token in families:
+            return token
     for token in key_tokens:
         if (token not in ignored
                 and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
             return token
-    texts = [str(value or "").casefold() for value in values]
-    for text in texts:
-        for family in (
-            "sccache", "ccache", "staticcheck", "golangci", "buildkit",
-            "jest", "playwright", "pnpm", "turbo", "cargo", "npm",
-            "maven", "go",
-        ):
-            if re.search(rf"(?<![a-z0-9]){re.escape(family)}(?![a-z0-9])", text):
-                return family
     for token in reversed(path_tokens):
         if (token in key_tokens
                 and token not in ignored
