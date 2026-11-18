@@ -827,9 +827,9 @@ def test_spine_heavy_check_disclosure_discriminator(tmp_path: Path):
 def test_spine_floor_tie_verifies_identically_across_hash_seeds(tmp_path: Path):
     """One byte-identical report must have one verdict under every hash seed.
 
-    The renderer keeps the first equal-duration floor in population order.  The
-    verifier must make the same choice instead of letting set iteration order
-    decide whether that rendered disclosure passes.
+    The renderer keeps the first equal-duration floor in checks[] order.  The
+    verifier must make the same choice instead of letting set iteration or one
+    PR's measured order decide whether that rendered disclosure passes.
     """
     report = _good() + _ceil_floor_note(
         "deploy", "1m 00s", floor_name="lint", floor_dur="12s")
@@ -844,8 +844,13 @@ def test_spine_floor_tie_verifies_identically_across_hash_seeds(tmp_path: Path):
                  "workflow_file": ".github/workflows/tests.yml"},
             ],
             "populations": [
-                [0.125, [["deploy", 600.0], ["lint", 12.0], ["tests", 12.0]]]
-                for _ in range(8)
+                # This PR's local measurements order the tied-global-p50 floors
+                # opposite to checks[]; the renderer still uses checks[] order.
+                [0.125, [["deploy", 600.0], ["tests", 13.0], ["lint", 11.0]]],
+                *[
+                    [0.125, [["deploy", 600.0], ["lint", 12.0], ["tests", 12.0]]]
+                    for _ in range(7)
+                ],
             ],
         }
     }

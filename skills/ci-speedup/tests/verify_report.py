@@ -12756,10 +12756,13 @@ def _cooccurrence_floor_s(per_pr: list[list[tuple[str, float]]], pole_name: str,
             co[nm] = co.get(nm, 0) + 1
     floor_s, floor_name = 0.0, None
     majority = len(gating) * 0.5
-    for nm, count in co.items():
+    # `p50_by` retains checks[] order, which is also the renderer's candidate
+    # order.  Iterating it makes an equal-p50 tie choose the same first check
+    # even when one gating PR happened to measure the tied checks in reverse.
+    for nm, v in p50_by.items():
+        count = co.get(nm, 0)
         if count <= majority:               # strict majority of the pole's OWN gating PRs
             continue
-        v = p50_by.get(nm) or 0.0
         if v > floor_s:
             floor_s, floor_name = v, nm
     return floor_s, floor_name, len(gating)
