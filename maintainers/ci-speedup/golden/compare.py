@@ -619,7 +619,6 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
         month = json.load(stream)
     manifest = load(recording / "manifest.json")
     repository = str(manifest["repository"])
-    recorded_runs_only = bool(manifest.get("replay_recorded_runs_only"))
     workflow_endpoint = f"repos/{repository}/actions/workflows?per_page=100"
     workflow_fixture = destination / _fixture_name(workflow_endpoint)
     if not workflow_fixture.is_file():
@@ -695,12 +694,6 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
                     "pull_request", "pull_request_target", "merge_group"}
                 if is_pr and str(run.get("head_sha") or "") not in month_shas:
                     continue
-                if recorded_runs_only and is_pr and run.get("id"):
-                    jobs_fixture = destination / _fixture_name(
-                        f"repos/{repository}/actions/runs/{int(run['id'])}"
-                        "/jobs?per_page=100")
-                    if not jobs_fixture.is_file():
-                        continue
                 kept_runs.append(run)
             payload["workflow_runs"] = kept_runs
             fixture.write_text(
@@ -788,12 +781,6 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
             jobs = jobs_by_run.get(run_index) or []
             jobs_recorded = (bool(source_run.get("jobs_recorded"))
                              if "jobs_recorded" in source_run else bool(jobs))
-            # A normalized month row can list a workflow whose job endpoint was
-            # never captured.  Recorded-only fixtures omit those run rows rather
-            # than making every sample partial; replay marks every dimension that
-            # consequently shares the normalized month data with the oracle.
-            if recorded_runs_only and not jobs_recorded:
-                continue
             workflow = workflows.get(workflow_name)
             if not workflow:
                 continue
@@ -873,8 +860,9 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
                     "steps": copied_job.get("steps") or [],
                 })
             if not jobs_recorded:
-                # An explicit unrecorded run remains visible as a failed read
-                # unless this recording opted into the recorded-only replay.
+                # Keep the run visible but omit its jobs endpoint. The replay
+                # then treats the missing list as a failed/partial read instead
+                # of silently improving the sample by dropping the run.
                 if copied_run:
                     for filter_suffix in ("", "&filter=all"):
                         endpoint = (

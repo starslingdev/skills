@@ -166,7 +166,7 @@ def test_go_ethereum_review_expectation_names_the_required_gate() -> None:
     review = expected["human_review"]
 
     assert review["bottom_line_must_contain"] == "Lint"
-    assert review["rendered_pole_order"] == ["Lint", "validate-pr"]
+    assert review["rendered_pole_order"] == ["Lint"]
     assert "required gate" in review["review_notes"]
     assert "32bit tests" in review["review_notes"]
     assert "downstream" in review["review_notes"]
@@ -940,7 +940,10 @@ def test_replay_preserves_run_identity_timestamps_and_missing_job_lists(
     api = recording / "api"
     api.mkdir(parents=True)
     (recording / "manifest.json").write_text(
-        json.dumps({"repository": "public/example"}), encoding="utf-8")
+        json.dumps({
+            "repository": "public/example",
+            "replay_recorded_runs_only": True,
+        }), encoding="utf-8")
 
     def fixture(endpoint: str, payload: dict[str, object]) -> None:
         target = api / (compare._fixture_name(endpoint) + ".gz")
@@ -1001,6 +1004,7 @@ def test_replay_preserves_run_identity_timestamps_and_missing_job_lists(
     )).read_text(encoding="utf-8"))["workflow_runs"][1:]
     assert [row["created_at"] for row in ci_page] == [
         "2026-11-01T01:00:00Z", "2026-11-01T00:00:00Z"]
+    assert len(docs_page) == 1
     assert {row["head_sha"] for row in ci_page + docs_page} == {"commit-000001"}
     first_jobs = json.loads((replay / compare._fixture_name(
         f"repos/public/example/actions/runs/{ci_page[0]['id']}/jobs?per_page=100"
@@ -1608,8 +1612,9 @@ def test_real_repository_report_matches_independent_expectation(
         critical = findings.get("pr_critical_path") or {}
         sampled = int(critical.get("sampled_pr_count") or 0)
         partial = int(critical.get("sample_partial_count") or 0)
-        assert sampled and partial * 2 < sampled, (
-            f"{recording_name} replay remains mostly partial: {partial}/{sampled}"
+        assert sampled and partial > 0, (
+            f"{recording_name} replay dropped its missing-job runs instead of "
+            f"preserving them as partial: {partial}/{sampled}"
         )
     differences = compare.compare(
         findings, expected, report, recording=recording)

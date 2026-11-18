@@ -9,10 +9,9 @@
     "report_must_contain": [],
     "report_must_not_contain": [],
     "rendered_pole_order": [
-      "Lint",
-      "validate-pr"
+      "Lint"
     ],
-    "review_notes": "Proposed from the recorded public ruleset and workflow: Lint is a required gate. The 32bit tests job is downstream of Test, which itself needs Lint, so it must not replace Lint as the required-gate headline. Awaiting owner review."
+    "review_notes": "Proposed from the recorded public ruleset and workflow: Lint is a required gate and is the rendered pole retained by the partial replay. The 32bit tests job is downstream of Test, which itself needs Lint, so it must not replace Lint as the required-gate headline. Awaiting owner review."
   },
   "oracle": {
     "bookkeeping_cutoff_s": 60,
