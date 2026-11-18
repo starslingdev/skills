@@ -1,5 +1,6 @@
 # Changelog
 
+- **2026-11-18** — Let every ci-speedup entry script resolve its shipped sibling modules under Python isolated mode (`python3 -I`), with subprocess coverage across all seven command-line entry points. (#382)
 - **2026-11-15** — Preserve full commit identities in public golden recordings, mark comparisons that share normalized replay data, compare low-share gate counts within their uncertainty, pin rendered pole order and completed-sample spread to run creation dates, and keep incomplete recordings useful by replaying only run/job pairs whose evidence was captured, including copied runs whose jobs come from the normalized recording. (#352)
 - **2026-11-15** — Cache check-name tokenizing and job-name template patterns in `collect_runs.py`. Output is unchanged; the run-measurement step no longer redoes this work on every check-to-job comparison (millions of repeats on a large repository).
 - Keep schedule-, release-, and workflow-dispatch-only findings visible with their lane disclosure when their job also appears as a pull-request long pole.
