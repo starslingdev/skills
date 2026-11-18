@@ -35,6 +35,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-18** — Distinguish GitHub's explicit unprotected-branch response from unreadable branch protection, and report a readable empty ruleset and classic-protection configuration as having no required checks (#385).
 - **2026-11-16** — Flag a measured Rust coverage long pole when its dominant `cargo llvm-cov` or `cargo tarpaulin` step uses Cargo's default debug-heavy, unoptimized test profile; keep explicitly optimized profiles quiet, fail closed on alternate manifests/profiles/environment overrides and package-scoped ambiguity, support unnamed and toolchain-qualified coverage steps, and leave savings uncredited until wall time improves with an unchanged covered-line count (#370).
 - **2026-11-16** — Detect wrapper-hidden duplicate test suites and package builds from matching completion signatures across or within job-log steps, carry readable runtime context forward from setup, keep different runtimes and packages quiet, and cap the opportunity at the later measured completion wall (#369).
 - **2026-11-15** — Restore the path-partitioned monorepo fixture's affected-package filter and per-package test command while retaining its package/runtime matrix, so the fixture again crowns the aggregation gate and exercises the applicable report checks (#356).
