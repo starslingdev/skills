@@ -353,8 +353,8 @@ def main(argv: list[str] | None = None) -> int:
                 f"{request_estimate.log_low}-{request_estimate.log_high} log downloads; "
                 f"{request_estimate.remaining} requests remain (reset {reset}).")
             if not _confirm_request_budget(request_estimate):
-                print("Data pass not started. Use a smaller sample, omit --with-logs, "
-                      "or wait for the quota reset.", file=sys.stderr)
+                print("Data pass not started. Omit --with-logs or wait for the "
+                      "quota reset.", file=sys.stderr)
                 return 1
 
     # Create the output directory up front. Without this, a fresh `--out
