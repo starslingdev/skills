@@ -7762,6 +7762,9 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
     "OPT15": (_RM_DOOR_CLAMP,
               "cross-workflow repeated build — per-run modeled credit clamped to "
               "the affected jobs' measured cost-spine billable"),
+    "OPT105": (_RM_DOOR_CLAMP,
+               "repeated local-hook work — measured step-time credit clamped to "
+               "the affected jobs' measured cost-spine billable"),
     # DERIVE — whole-run cancel re-derives hit_rate x the affected jobs' measured
     # billable (implemented by `_reground_whole_run_cancel_saving`, run first).
     "OPT45": (_RM_DOOR_DERIVE,
@@ -16391,21 +16394,28 @@ _OPT105_MIN_DUPLICATE_STEP_S = 20.0
 _OPT105_MIN_JOB_SHARE = 0.15
 
 
-def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str]]:
+def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
     """Literal hook commands from the supported static configuration surfaces.
 
-    Returns ``(source, command)`` pairs.  This reader never executes repository
-    content and never follows a path outside ``root``.
+    Returns ``(source, command, working_directory)`` tuples.  This reader never
+    executes repository content and never follows a path outside ``root``.
     """
     if root is None:
         return []
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, str]] = []
+    try:
+        resolved_root = root.resolve()
+    except OSError:
+        return []
 
     def _read(path: Path) -> "str | None":
         try:
-            if not path.is_file() or path.stat().st_size > 1_000_000:
+            resolved = path.resolve()
+            if (not resolved.is_relative_to(resolved_root)
+                    or not resolved.is_file()
+                    or resolved.stat().st_size > 1_000_000):
                 return None
-            return path.read_text(encoding="utf-8")
+            return resolved.read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             return None
 
@@ -16427,12 +16437,12 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str]]:
                     continue
                 lines.append(stripped)
             if lines:
-                out.append((path.relative_to(root).as_posix(), "\n".join(lines)))
+                out.append((path.relative_to(root).as_posix(), "\n".join(lines), ""))
 
     _shell_dir(".husky")
     _shell_dir(".githooks")
 
-    def _yaml_commands(path: Path, keys: frozenset[str]) -> None:
+    def _yaml_commands(path: Path, keys: frozenset[str], *, lefthook: bool = False) -> None:
         text = _read(path)
         if text is None:
             return
@@ -16442,20 +16452,33 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str]]:
         except Exception:  # malformed config is unknown, never a finding
             return
 
-        def _walk(value: Any, key: str = "") -> None:
+        def _walk(value: Any, key: str = "", working_directory: str = "") -> None:
             if isinstance(value, dict):
+                local_directory = working_directory
+                if lefthook and isinstance(value.get("root"), str):
+                    raw_directory = str(value["root"])
+                    if "${{" in raw_directory:
+                        return
+                    local_directory = _opt82_norm_dir(raw_directory)
+                    local_directory = (_posixpath.normpath(local_directory)
+                                       if local_directory else "")
+                    if (local_directory == ".."
+                            or local_directory.startswith("../")):
+                        return
+                    local_directory = "" if local_directory == "." else local_directory
                 for child_key, child in value.items():
-                    _walk(child, str(child_key))
+                    _walk(child, str(child_key), local_directory)
             elif isinstance(value, list):
                 for child in value:
-                    _walk(child, key)
+                    _walk(child, key, working_directory)
             elif key in keys and isinstance(value, str) and value.strip():
-                out.append((path.relative_to(root).as_posix(), value.strip()))
+                out.append((path.relative_to(root).as_posix(), value.strip(),
+                            working_directory))
 
         _walk(doc)
 
-    _yaml_commands(root / "lefthook.yml", frozenset({"run", "command"}))
-    _yaml_commands(root / "lefthook.yaml", frozenset({"run", "command"}))
+    _yaml_commands(root / "lefthook.yml", frozenset({"run", "command"}), lefthook=True)
+    _yaml_commands(root / "lefthook.yaml", frozenset({"run", "command"}), lefthook=True)
     _yaml_commands(root / ".pre-commit-config.yaml", frozenset({"entry"}))
     _yaml_commands(root / ".pre-commit-config.yml", frozenset({"entry"}))
 
@@ -16469,8 +16492,18 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str]]:
         if isinstance(hooks, dict):
             for command in hooks.values():
                 if isinstance(command, str) and command.strip():
-                    out.append(("package.json#simple-git-hooks", command.strip()))
+                    out.append(("package.json#simple-git-hooks", command.strip(), ""))
     return out
+
+
+_OPT105_UNPROVEN_SCOPE_RE = _re.compile(
+    r"(?:^|\s)(?:--filter(?:=|\s)|-F(?:\s|$)|--scope(?:=|\s)|"
+    r"--project(?:s)?(?:=|\s))")
+
+
+def _opt105_has_unproven_scope(command: str) -> bool:
+    """Whether task-runner package selection cannot be preserved by the resolver."""
+    return bool(_OPT105_UNPROVEN_SCOPE_RE.search(command))
 
 
 def _opt105_leaf_key(leaf: dict[str, Any]) -> "tuple[str, tuple[str, ...]] | None":
@@ -16510,10 +16543,14 @@ def _detect_opt105_hook_duplication(
                                    (block.get("package_scripts_unreadable") or []))
     walk_complete = block.get("truncated") is False
     hook_key_sources: dict[tuple[str, tuple[str, ...]], set[str]] = {}
-    for source, command in _opt105_config_commands(root):
+    for source, command, working_directory in _opt105_config_commands(root):
+        if _opt105_has_unproven_scope(command):
+            continue
         resolved = _resolve_run_leaves(
-            command, "", scripts_by_dir, scripts_unreadable,
+            command, working_directory, scripts_by_dir, scripts_unreadable,
             walk_complete=walk_complete)
+        if resolved.unresolved:
+            continue
         for leaf in resolved.leaves:
             key = _opt105_leaf_key(leaf)
             if key is not None:
@@ -16557,9 +16594,13 @@ def _detect_opt105_hook_duplication(
                 resolved = _resolve_run_leaves(
                     command, wd, scripts_by_dir, scripts_unreadable,
                     walk_complete=walk_complete)
+                if resolved.unresolved or _opt105_has_unproven_scope(command):
+                    continue
                 keys = [_opt105_leaf_key(command_leaf) for command_leaf in resolved.leaves]
                 matching = [key for key in keys if key in hook_key_sources]
-                if matching:
+                # The step duration is safe to credit only when every resolved
+                # command in the step is proved to run in a supported hook.
+                if keys and None not in keys and len(matching) == len(keys):
                     display = _opt79_yaml_step_display(step)
                     if display and display not in matched_steps:
                         matched_steps.append(display)

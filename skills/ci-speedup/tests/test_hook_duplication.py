@@ -157,6 +157,7 @@ def test_husky_pre_push_work_repeated_in_pr_ci_is_measured(monkeypatch, tmp_path
     assert finding["wall_clock_p50_s"] == 180.0
     assert finding["hook_duplication"]["job_share"] == pytest.approx(0.6)
     assert finding["hook_duplication"]["steps"] == ["Typecheck", "Lint", "Test"]
+    assert finding["runner_min_basis"] == "measured_spine_billable"
     # The safe, input-keyed recipe leads; claim-based skipping is explicitly optional.
     safe = report.index("input-keyed")
     opt_in = report.index("opt-in")
@@ -191,9 +192,66 @@ def test_every_supported_static_hook_surface_is_read(tmp_path):
     }), encoding="utf-8")
 
     rows = cr._opt105_config_commands(tmp_path)
-    sources = {source for source, _command in rows}
+    sources = {source for source, _command, _working_directory in rows}
 
     assert sources == {
         ".husky/pre-push", ".githooks/pre-commit", "lefthook.yml",
         ".pre-commit-config.yaml", "package.json#simple-git-hooks",
     }
+
+
+def test_partial_step_match_does_not_credit_unrelated_work(monkeypatch, tmp_path):
+    workflow = _WORKFLOW_TEXT.replace(
+        "run: pnpm lint\n      - name: Test\n        run: pnpm test",
+        "run: pnpm lint && pnpm test\n      - name: Test\n        run: pnpm format",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_WORKFLOW_TEXT", workflow)
+
+    doc, _report = _collect(monkeypatch, tmp_path, "pnpm lint")
+
+    assert not any(f.get("pattern") == "OPT105" for f in doc["findings"]), (
+        "a partial command match must not credit the whole CI step")
+
+
+def test_task_runner_filters_do_not_match_different_packages(monkeypatch, tmp_path):
+    workflow = _WORKFLOW_TEXT.replace("pnpm lint", "pnpm --filter app-b lint")
+    monkeypatch.setattr(sys.modules[__name__], "_WORKFLOW_TEXT", workflow)
+    for package, command in (("app-a", "eslint app-a"), ("app-b", "eslint app-b")):
+        folder = tmp_path / "apps" / package
+        folder.mkdir(parents=True)
+        (folder / "package.json").write_text(
+            json.dumps({"name": package, "scripts": {"lint": command}}),
+            encoding="utf-8",
+        )
+
+    doc, _report = _collect(monkeypatch, tmp_path, "pnpm --filter app-a lint")
+
+    assert not any(f.get("pattern") == "OPT105" for f in doc["findings"]), (
+        "different package filters must not collapse to the same command")
+
+
+def test_lefthook_root_is_not_discarded(monkeypatch, tmp_path):
+    web = tmp_path / "apps" / "web"
+    web.mkdir(parents=True)
+    (web / "package.json").write_text(
+        json.dumps({"scripts": {"lint": "eslint apps/web"}}), encoding="utf-8")
+    (tmp_path / "lefthook.yml").write_text(
+        "pre-push:\n  commands:\n    lint:\n      root: apps/web\n      run: pnpm lint\n",
+        encoding="utf-8",
+    )
+
+    doc, _report = _collect(monkeypatch, tmp_path, None)
+
+    assert not any(f.get("pattern") == "OPT105" for f in doc["findings"]), (
+        "a Lefthook command must resolve from its configured root")
+
+
+def test_hook_reader_refuses_symlinks_outside_checkout(tmp_path):
+    outside = tmp_path.parent / "outside-pre-push"
+    outside.write_text("pnpm lint\n", encoding="utf-8")
+    husky = tmp_path / ".husky"
+    husky.mkdir()
+    (husky / "pre-push").symlink_to(outside)
+
+    assert cr._opt105_config_commands(tmp_path) == [], (
+        "hook configuration must never be read through an escaping symlink")
