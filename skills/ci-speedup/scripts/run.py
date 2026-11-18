@@ -176,7 +176,7 @@ def _estimate_data_pass(repo: str, *, with_logs: bool) -> _RequestEstimate:
     workflow_count = max(1, int(workflows.get("total_count") or 0))
     jobs_per_run = max(1, int(jobs.get("total_count") or 0))
     job_pages = max(1, (jobs_per_run + 99) // 100)
-    probe_requests = 4
+    probe_requests = 4 if run_id is not None else 3
     request_low = probe_requests + workflow_count * (1 + 4 * job_pages)
     request_high = probe_requests + 4 + workflow_count * (2 + 20 * job_pages)
     # Log downloads do not consume core JSON requests, so state them separately.
@@ -279,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     request_estimate: _RequestEstimate | None = None
-    if args.repo:
+    if args.repo and not args.verify_branch:
         try:
             request_estimate = _estimate_data_pass(args.repo, with_logs=args.with_logs)
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:

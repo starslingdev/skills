@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
 from pathlib import Path
 
 
@@ -53,3 +55,59 @@ def test_small_estimate_does_not_prompt(monkeypatch):
     monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(
         AssertionError("small estimates must not prompt")))
     assert run_mod._confirm_request_budget(estimate) is True
+
+
+def test_probe_without_a_recent_run_counts_only_the_requests_it_made(monkeypatch):
+    responses = {
+        "repos/o/r/actions/workflows?per_page=100": {"total_count": 1, "workflows": []},
+        "repos/o/r/actions/runs?per_page=10": {"total_count": 0, "workflow_runs": []},
+        "rate_limit": {"resources": {"core": {"remaining": 5000, "reset": 1}}},
+    }
+    calls: list[str] = []
+
+    def fake_gh(endpoint):
+        calls.append(endpoint)
+        return responses[endpoint]
+
+    monkeypatch.setattr(run_mod, "_gh_json", fake_gh)
+    estimate = run_mod._estimate_data_pass("o/r", with_logs=False)
+
+    assert estimate.probe_requests == len(calls) == 3
+
+
+def test_post_fix_verification_never_runs_the_bulk_request_probe(monkeypatch, tmp_path):
+    findings = tmp_path / "findings.json"
+    findings.write_text('{"findings": []}', encoding="utf-8")
+    monkeypatch.setattr(run_mod, "_estimate_data_pass", lambda *_a, **_kw: (_ for _ in ()).throw(
+        AssertionError("post-fix verification must not price a data pass it will not run")))
+    monkeypatch.setattr(run_mod, "advance_verification", lambda *_a, **_kw: {"status": "done"})
+
+    assert run_mod.main([
+        "--root", str(tmp_path), "--out", str(findings), "--repo", "o/r",
+        "--verify-branch", "fix/topic",
+    ]) == 0
+
+
+def test_main_prints_estimate_then_counts_probe_calls_in_actual_total(
+        monkeypatch, tmp_path, capsys):
+    estimate = run_mod._RequestEstimate(10, 20, 0, 0, 5000, 2_000_000_000, 4)
+    monkeypatch.setattr(run_mod, "_estimate_data_pass", lambda *_a, **_kw: estimate)
+
+    def fake_step(cmd, *, capture_stdout):
+        if any(str(part).endswith("scan.py") for part in cmd):
+            return subprocess.CompletedProcess(cmd, 0, stdout='{"findings": []}')
+        out = Path(cmd[cmd.index("--out") + 1])
+        doc = json.loads(out.read_text(encoding="utf-8"))
+        doc["data_sources"] = {"gh_query_count": 10, "gh_error_count": 0}
+        out.write_text(json.dumps(doc), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="")
+
+    monkeypatch.setattr(run_mod, "_step", fake_step)
+    out = tmp_path / "findings.json"
+    assert run_mod.main([
+        "--root", str(tmp_path), "--out", str(out), "--repo", "o/r",
+        "--skill-commit-sha", "deadbee", "--commit-sha", "cafef00",
+    ]) == 0
+    stdout = capsys.readouterr().out
+    assert stdout.index("Data-pass request estimate: 10-20") < stdout.index(
+        "Actual gh API cost: 14 call(s)")
