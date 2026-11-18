@@ -2406,7 +2406,9 @@ _INSTALL_CMD_RE = re.compile(
     _CMD_START + _CMD_PREFIX +
     r"(?<![\w./-])(?P<cmd>"
     r"npm\s+(?:ci|install|i)(?![\w-])"
-    r"|pnpm\s+(?:install|i)(?![\w-])"
+    r"|pnpm(?:\s+(?:-C|--dir)(?:=" + _YARN_OPT_VALUE + r"|[ ]"
+    r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _YARN_OPT_VALUE
+    + r")){0,1}\s+(?:install|i)(?![\w-])"
     r"|yarn\s+install(?![\w-])"
     r"|yarn(?!\s+-{0,2}(?:version|help|[vV]|h)(?![\w-]))"
     r"(?:\s+-[\w-]+(?:=" + _YARN_OPT_VALUE + r"|[ ]"
@@ -2504,6 +2506,56 @@ def _install_manager(command: str) -> str | None:
     return None      # pragma: no cover - the regex has only three arms
 
 
+_INSTALL_DIRECTORY_FLAGS = {
+    "npm": {"--prefix"},
+    "pnpm": {"-C", "--dir"},
+    "yarn": {"--cwd"},
+}
+
+
+def _install_directory_flag(command: str) -> tuple[bool, str | None]:
+    """``(present, value)`` for an install's own directory option.
+
+    The value is ``None`` when the option is present but cannot be read
+    statically. That is deliberately distinct from an absent option: callers
+    fall back to the repository root for an unknowable directory rather than
+    guessing which nested manifest the package manager will load.
+    """
+    m = _INSTALL_CMD_RE.search(command)
+    if m is None:
+        return False, None
+    try:
+        tokens = shlex.split(command[m.start("cmd"):], comments=False)
+    except ValueError:
+        tokens = command[m.start("cmd"):].split()
+    if not tokens:
+        return False, None
+    manager = tokens[0]
+    flags = _INSTALL_DIRECTORY_FLAGS.get(manager, set())
+    present = False
+    value = None
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        matched = next((flag for flag in flags
+                        if token == flag or token.startswith(flag + "=")), None)
+        if matched is None:
+            i += 1
+            continue
+        present = True
+        if token == matched:
+            if i + 1 >= len(tokens) or tokens[i + 1].startswith("-"):
+                value = None
+                i += 1
+                continue
+            value = tokens[i + 1]
+            i += 2
+            continue
+        value = token[len(matched) + 1:]
+        i += 1
+    return present, value
+
+
 def _is_dependency_tree_install(segment: str) -> bool:
     """Is the install matched in `segment` a DEPENDENCY-TREE install?
 
@@ -2527,7 +2579,21 @@ def _is_dependency_tree_install(segment: str) -> bool:
         tokens = tail.split()
     if not tokens:
         return False
+    manager = tokens[0]
     tokens = tokens[1:]                                   # the manager itself
+    # pnpm accepts its working-directory option before the subcommand:
+    # `pnpm -C apps/web install`. Consume those option/value pairs before
+    # identifying the install subcommand, or `install` is misread as a named
+    # package and the privileged dependency-tree install disappears.
+    if manager == "pnpm":
+        while tokens:
+            if tokens[0].startswith("--dir=") or tokens[0].startswith("-C="):
+                tokens = tokens[1:]
+                continue
+            if tokens[0] in ("-C", "--dir") and len(tokens) >= 2:
+                tokens = tokens[2:]
+                continue
+            break
     subcommand = None
     if tokens and tokens[0] in _INSTALL_SUBCOMMANDS:
         subcommand = tokens[0]
@@ -3208,6 +3274,14 @@ def _install_pin_directory(
             if target.startswith("/") or _RUNNER_ABSOLUTE_RE.match(target):
                 return None
             base = _resolve_path(base, target)
+    flag_present, flag_dir = _install_directory_flag(candidates[ordinal][2])
+    if flag_present:
+        if (not flag_dir or _EXPRESSION_TOKEN_RE.search(flag_dir)
+                or "$" in flag_dir or "`" in flag_dir
+                or flag_dir.startswith("/")
+                or _RUNNER_ABSOLUTE_RE.match(flag_dir)):
+            return None
+        base = _resolve_path(base, flag_dir)
     if base == ".." or base.startswith("../"):
         return None
     return base

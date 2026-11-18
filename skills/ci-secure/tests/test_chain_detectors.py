@@ -2068,6 +2068,73 @@ def test_p1425_a_nested_manifest_symlinked_out_of_the_checkout_is_not_read(
     assert "this repo pins `pnpm@10.25.0`" in (hits[0].derived_note or "")
 
 
+@pytest.mark.parametrize(("command", "root_pin", "nested_pin"), [
+    ("npm ci --prefix apps/web", "npm@11.0.0", "npm@10.9.0"),
+    ("npm install --prefix apps/web", "npm@11.0.0", "npm@10.9.0"),
+    ("pnpm -C apps/web install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("pnpm --dir apps/web install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("yarn --cwd apps/web", "yarn@4.0.0", "yarn@1.22.22"),
+])
+def test_p1425_install_directory_flags_select_the_nested_pin(
+    tmp_path, command, root_pin, nested_pin,
+):
+    """Install-directory flags select the same nested manifest as a step's
+    ``working-directory`` instead of inheriting the repository-root pin.
+    """
+    _pkg(tmp_path, root_pin)
+    _nested_pkg(tmp_path, "apps/web", nested_pin)
+    hits = _install_hits(tmp_path, f"""\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: {command}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert nested_pin in note
+    assert "apps/web" in note
+    assert root_pin not in note
+
+
+@pytest.mark.parametrize(("command", "root_pin", "outside_pin"), [
+    ("npm ci --prefix ../outside", "npm@11.0.0", "npm@10.9.0"),
+    ("pnpm -C ../outside install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("pnpm --dir ../outside install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("yarn --cwd ../outside", "yarn@4.0.0", "yarn@1.22.22"),
+])
+def test_p1425_install_directory_flags_cannot_read_outside_the_repo(
+    tmp_path, command, root_pin, outside_pin,
+):
+    """A command-line directory that escapes the checkout falls back to the
+    repository-root pin instead of reading an outside manifest.
+    """
+    _pkg(tmp_path, root_pin)
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "package.json").write_text(
+        f'{{"name": "outside", "packageManager": "{outside_pin}"}}\n')
+    hits = _install_hits(tmp_path, f"""\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: {command}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert f"this repo pins `{root_pin}`" in note
+    assert outside_pin not in note
+
+
 @pytest.mark.parametrize("command", [
     "npm ci --maxsockets 3",
     "pnpm install --fetch-timeout 60000",
