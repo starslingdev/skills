@@ -212,7 +212,9 @@ def _estimate_data_pass(
         + pr_sample_reads
         + workflow_count * 20 * job_pages
     )
-    # Log downloads do not consume core JSON requests, so state them separately.
+    # State log downloads separately because they are the large-response part of
+    # the pass. Their REST endpoint calls still consume the same primary budget,
+    # so the confirmation gate below includes them in its upper bound.
     if with_logs:
         # Use the collector's own caps rather than a workflow-count proxy: a single
         # workflow may probe several occurrences of every candidate cache/check job.
@@ -240,14 +242,17 @@ def _estimate_data_pass(
 
 def _confirm_request_budget(estimate: _RequestEstimate) -> bool:
     """Ask before a pass whose upper estimate spends over half the quota."""
-    if estimate.request_high <= estimate.remaining / 2:
+    quota_high = estimate.request_high + estimate.log_high
+    if quota_high <= estimate.remaining / 2:
         return True
-    relation = ("exceeds the remaining quota" if estimate.request_high > estimate.remaining
+    relation = ("exceeds the remaining quota" if quota_high > estimate.remaining
                 else "exceeds half the remaining quota")
     try:
         answer = input(
-            f"The estimated data pass ({estimate.request_low}-{estimate.request_high} "
-            f"requests) {relation} ({estimate.remaining} remain). Continue? [y/N] ")
+            f"The estimated data pass (up to {quota_high} API calls: "
+            f"{estimate.request_low}-{estimate.request_high} JSON requests and "
+            f"{estimate.log_low}-{estimate.log_high} log downloads) "
+            f"{relation} ({estimate.remaining} remain). Continue? [y/N] ")
     except EOFError:
         return False
     return answer.strip().lower() in {"y", "yes"}

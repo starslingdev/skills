@@ -58,6 +58,18 @@ def test_small_estimate_does_not_prompt(monkeypatch):
     assert run_mod._confirm_request_budget(estimate) is True
 
 
+def test_log_downloads_count_toward_the_confirmation_budget(monkeypatch):
+    estimate = run_mod._RequestEstimate(
+        request_low=20, request_high=40, log_low=0, log_high=20,
+        remaining=100, reset_epoch=2_000_000_000, probe_requests=4)
+    answers: list[str] = []
+
+    monkeypatch.setattr("builtins.input", lambda prompt: answers.append(prompt) or "n")
+
+    assert run_mod._confirm_request_budget(estimate) is False
+    assert answers and "60" in answers[0]
+
+
 def test_probe_without_a_recent_run_counts_only_the_requests_it_made(monkeypatch):
     responses = {
         "repos/o/r/actions/workflows?per_page=100": {"total_count": 1, "workflows": []},
