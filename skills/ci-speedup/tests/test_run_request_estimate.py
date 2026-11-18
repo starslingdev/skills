@@ -49,6 +49,23 @@ def test_large_estimate_requires_confirmation_before_the_data_pass(monkeypatch):
     assert answers and "half" in answers[0].lower()
 
 
+def test_decline_names_only_supported_lower_cost_options(monkeypatch, tmp_path, capsys):
+    estimate = run_mod._RequestEstimate(
+        request_low=80, request_high=120, log_low=0, log_high=5,
+        remaining=200, reset_epoch=2_000_000_000, probe_requests=4)
+    monkeypatch.setattr(run_mod, "_estimate_data_pass", lambda *_a, **_kw: estimate)
+    monkeypatch.setattr("builtins.input", lambda _prompt: "n")
+
+    assert run_mod.main([
+        "--root", str(tmp_path), "--out", str(tmp_path / "findings.json"),
+        "--repo", "o/r", "--with-logs",
+    ]) == 1
+    stderr = capsys.readouterr().err
+    assert "smaller sample" not in stderr.lower()
+    assert "omit --with-logs" in stderr.lower()
+    assert "wait for the quota reset" in stderr.lower()
+
+
 def test_small_estimate_does_not_prompt(monkeypatch):
     estimate = run_mod._RequestEstimate(
         request_low=10, request_high=20, log_low=0, log_high=0,
