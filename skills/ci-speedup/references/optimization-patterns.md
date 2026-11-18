@@ -1869,7 +1869,11 @@ work, use `tsc --incremental` with a cached `.tsbuildinfo`, `eslint --cache`
 with its cache file persisted, changed-file test selection such as
 `--changedSince`, or a remote task cache such as Turborepo or Nx. Key reuse on
 the source tree, lockfile, configuration, and tool versions. A cache miss or
-changed input still performs the full check in CI.
+changed input still performs the full check in CI. When `actions/cache` stores
+local tool-result state, use a rolling primary key such as
+`<tool>-<os>-<lockfile-hash>-${{ github.sha }}` and a matching `restore-keys`
+prefix such as `<tool>-<os>-<lockfile-hash>-`; set a cache budget and retention
+policy so superseded results do not grow without bound.
 
 **Optional, owner-approved alternative — trailer skip**: a hook may record a
 commit trailer naming the checks it ran, but this is opt-in because it changes
