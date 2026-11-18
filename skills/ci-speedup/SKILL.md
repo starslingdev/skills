@@ -173,8 +173,8 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    `collect_runs.py`'s internal flag, and passing it to `run.py` errors). `<OUT.json>`
    and its `.data` bundle hold raw third-party job logs, so write `--out` to a scratch
    path outside any tracked tree (or a gitignored dir). Before the adaptive bulk sample,
-   `run.py` prints a bounded request estimate, log downloads, and quota/reset; above half
-   the remaining quota it asks before continuing and offers less sampling/logs or waiting.
+   `run.py` prints a bounded request estimate, log downloads, and quota/reset; above half the
+   remaining quota it asks. Omit `--with-logs`, wait, or rerun with `--accept-request-estimate`; non-TTY runs never block.
    The gate/poles/floor are exact, off-path figures approximate (flagged). Its **data-pass
    summary** gives the gating resolution (rulesets + branch protection), addressable poles,
    actual API calls including probes, and the exact pre-filled `blocking_path.py` command.

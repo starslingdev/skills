@@ -764,6 +764,18 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
     calls = ds.get("gh_query_count")
     if isinstance(calls, int) and not isinstance(calls, bool) and calls > 0:
         cost = f"Actual gh API cost: {calls} call(s)"
+        estimate = ds.get("request_estimate")
+        if isinstance(estimate, dict):
+            request_low = estimate.get("request_low")
+            request_high = estimate.get("request_high")
+            log_low = estimate.get("log_low")
+            log_high = estimate.get("log_high")
+            if all(isinstance(value, int) and not isinstance(value, bool)
+                   for value in (request_low, request_high, log_low, log_high)):
+                cost += (
+                    f"; estimate was {request_low}-{request_high} JSON request(s)"
+                    f" + {log_low}-{log_high} log download(s)"
+                )
         secs = _num((doc.get("timings") or {}).get("scripted_total_s"))
         if secs:
             cost += f" in ~{_clock(secs)}"

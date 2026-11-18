@@ -14,6 +14,16 @@ run_mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(run_mod)
 
 
+class _TTY:
+    def isatty(self):
+        return True
+
+
+class _NotTTY:
+    def isatty(self):
+        return False
+
+
 def test_probe_estimates_requests_and_logs_within_its_stated_range(monkeypatch):
     responses = {
         "repos/o/r/actions/workflows?per_page=100": {
@@ -43,6 +53,7 @@ def test_large_estimate_requires_confirmation_before_the_data_pass(monkeypatch):
         remaining=200, reset_epoch=2_000_000_000, probe_requests=4)
     answers: list[str] = []
 
+    monkeypatch.setattr(run_mod.sys, "stdin", _TTY())
     monkeypatch.setattr("builtins.input", lambda prompt: answers.append(prompt) or "n")
 
     assert run_mod._confirm_request_budget(estimate) is False
@@ -54,6 +65,7 @@ def test_decline_names_only_supported_lower_cost_options(monkeypatch, tmp_path, 
         request_low=80, request_high=120, log_low=0, log_high=5,
         remaining=200, reset_epoch=2_000_000_000, probe_requests=4)
     monkeypatch.setattr(run_mod, "_estimate_data_pass", lambda *_a, **_kw: estimate)
+    monkeypatch.setattr(run_mod.sys, "stdin", _TTY())
     monkeypatch.setattr("builtins.input", lambda _prompt: "n")
 
     assert run_mod.main([
@@ -64,6 +76,55 @@ def test_decline_names_only_supported_lower_cost_options(monkeypatch, tmp_path, 
     assert "smaller sample" not in stderr.lower()
     assert "omit --with-logs" in stderr.lower()
     assert "wait for the quota reset" in stderr.lower()
+    assert "--accept-request-estimate" in stderr
+
+
+def test_non_tty_over_budget_refuses_without_reading_and_prints_exact_rerun(
+        monkeypatch, tmp_path, capsys):
+    estimate = run_mod._RequestEstimate(
+        request_low=80, request_high=120, log_low=0, log_high=5,
+        remaining=200, reset_epoch=2_000_000_000, probe_requests=4)
+    monkeypatch.setattr(run_mod, "_estimate_data_pass", lambda *_a, **_kw: estimate)
+    monkeypatch.setattr(run_mod.sys, "stdin", _NotTTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(
+        AssertionError("a non-TTY run must never call input()")))
+    argv = [
+        "--root", str(tmp_path), "--out", str(tmp_path / "findings.json"),
+        "--repo", "o/r", "--with-logs",
+    ]
+
+    assert run_mod.main(argv) == 1
+    stderr = capsys.readouterr().err
+    assert "Rerun exactly:" in stderr
+    assert "--accept-request-estimate" in stderr
+    assert str(tmp_path / "findings.json") in stderr
+
+
+def test_accept_request_estimate_allows_non_tty_run(monkeypatch, tmp_path, capsys):
+    estimate = run_mod._RequestEstimate(
+        request_low=80, request_high=120, log_low=0, log_high=5,
+        remaining=200, reset_epoch=2_000_000_000, probe_requests=4)
+    monkeypatch.setattr(run_mod, "_estimate_data_pass", lambda *_a, **_kw: estimate)
+    monkeypatch.setattr(run_mod.sys, "stdin", _NotTTY())
+    monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(
+        AssertionError("the explicit flag must never call input()")))
+
+    def fake_step(cmd, *, capture_stdout):
+        if any(str(part).endswith("scan.py") for part in cmd):
+            return subprocess.CompletedProcess(cmd, 0, stdout='{"findings": []}')
+        out = Path(cmd[cmd.index("--out") + 1])
+        doc = json.loads(out.read_text(encoding="utf-8"))
+        doc["data_sources"] = {"gh_query_count": 10, "gh_error_count": 0}
+        out.write_text(json.dumps(doc), encoding="utf-8")
+        return subprocess.CompletedProcess(cmd, 0, stdout="")
+
+    monkeypatch.setattr(run_mod, "_step", fake_step)
+    assert run_mod.main([
+        "--root", str(tmp_path), "--out", str(tmp_path / "findings.json"),
+        "--repo", "o/r", "--accept-request-estimate",
+        "--skill-commit-sha", "deadbee", "--commit-sha", "cafef00",
+    ]) == 0
+    assert "Actual gh API cost" in capsys.readouterr().out
 
 
 def test_small_estimate_does_not_prompt(monkeypatch):
@@ -81,6 +142,7 @@ def test_log_downloads_count_toward_the_confirmation_budget(monkeypatch):
         remaining=100, reset_epoch=2_000_000_000, probe_requests=4)
     answers: list[str] = []
 
+    monkeypatch.setattr(run_mod.sys, "stdin", _TTY())
     monkeypatch.setattr("builtins.input", lambda prompt: answers.append(prompt) or "n")
 
     assert run_mod._confirm_request_budget(estimate) is False
@@ -148,13 +210,14 @@ def test_offline_replay_never_runs_the_live_request_probe(monkeypatch, tmp_path)
 
 def test_main_prints_estimate_then_counts_probe_calls_in_actual_total(
         monkeypatch, tmp_path, capsys):
-    estimate = run_mod._RequestEstimate(10, 20, 0, 0, 5000, 2_000_000_000, 4)
-
-    def fake_estimate(*_args, **kwargs):
-        kwargs["probe"].requests = 4
-        return estimate
-
-    monkeypatch.setattr(run_mod, "_estimate_data_pass", fake_estimate)
+    responses = {
+        "repos/o/r/actions/workflows?per_page=100": {"total_count": 1},
+        "repos/o/r/actions/runs?per_page=10": {"workflow_runs": [{"id": 101}]},
+        "repos/o/r/actions/runs/101/jobs?per_page=100": {"total_count": 1},
+        "rate_limit": {"resources": {"core": {
+            "remaining": 5000, "reset": 2_000_000_000}}},
+    }
+    monkeypatch.setattr(run_mod, "_gh_json", lambda endpoint: responses[endpoint])
 
     def fake_step(cmd, *, capture_stdout):
         if any(str(part).endswith("scan.py") for part in cmd):
@@ -172,8 +235,14 @@ def test_main_prints_estimate_then_counts_probe_calls_in_actual_total(
         "--skill-commit-sha", "deadbee", "--commit-sha", "cafef00",
     ]) == 0
     stdout = capsys.readouterr().out
-    assert stdout.index("Data-pass request estimate: 10-20") < stdout.index(
-        "Actual gh API cost: 14 call(s)")
+    estimate_line = next(line for line in stdout.splitlines()
+                         if line.startswith("Data-pass request estimate:"))
+    low, high = [int(part) for part in estimate_line.split(": ", 1)[1]
+                 .split(" GitHub", 1)[0].split("-")]
+    actual_line = next(line for line in stdout.splitlines()
+                       if line.startswith("Actual gh API cost:"))
+    assert low <= 14 <= high
+    assert "estimate was" in actual_line
 
 
 def test_failed_preflight_still_counts_each_probe_it_issued(monkeypatch, tmp_path, capsys):

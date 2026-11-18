@@ -24,6 +24,7 @@ no fix-subagent phase. After this driver, the orchestrator just renders with
 Usage:
     run.py --root REPO --out FINDINGS.json [--repo owner/repo]
            [--target N] [--with-logs] [--catalog PATH]
+           [--accept-request-estimate]
            [--skill-commit-sha SHA] [--commit-sha SHA]
     # writes FINDINGS.json; then render it with `blocking_path.py --in FINDINGS.json`.
     # scan stderr flows straight through, so coverage warnings are visible.
@@ -44,6 +45,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -240,11 +242,16 @@ def _estimate_data_pass(
     )
 
 
-def _confirm_request_budget(estimate: _RequestEstimate) -> bool:
-    """Ask before a pass whose upper estimate spends over half the quota."""
+def _confirm_request_budget(
+        estimate: _RequestEstimate, *, explicitly_accepted: bool = False) -> bool:
+    """Require explicit consent before a pass spends over half the quota."""
     quota_high = estimate.request_high + estimate.log_high
-    if quota_high <= estimate.remaining / 2:
+    if quota_high <= estimate.remaining / 2 or explicitly_accepted:
         return True
+    # An agent or redirected run must never hang on input(). Its rerun command
+    # carries the explicit acceptance flag instead.
+    if not sys.stdin.isatty():
+        return False
     relation = ("exceeds the remaining quota" if quota_high > estimate.remaining
                 else "exceeds half the remaining quota")
     try:
@@ -256,6 +263,14 @@ def _confirm_request_budget(estimate: _RequestEstimate) -> bool:
     except EOFError:
         return False
     return answer.strip().lower() in {"y", "yes"}
+
+
+def _accepted_estimate_command(argv: list[str] | None) -> str:
+    """Exact command that repeats this run with the quota estimate accepted."""
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if "--accept-request-estimate" not in raw:
+        raw.append("--accept-request-estimate")
+    return shlex.join([sys.executable, str(_DIR / "run.py"), *raw])
 
 
 def _step(cmd: list[str], *, capture_stdout: bool) -> subprocess.CompletedProcess[str]:
@@ -306,6 +321,10 @@ def main(argv: list[str] | None = None) -> int:
                              "(issue #81).")
     parser.add_argument("--with-logs", action="store_true",
                         help="Also run collect_runs' Tier-3 logs deep dive.")
+    parser.add_argument(
+        "--accept-request-estimate", action="store_true",
+        help="Proceed when the printed upper request estimate exceeds half of "
+             "the remaining GitHub quota (required for non-interactive runs).")
     parser.add_argument("--catalog", default=None, help="Override catalog path.")
     parser.add_argument("--skill-commit-sha", default=None,
                         help="Skill provenance sha for the report footer/catalog "
@@ -352,9 +371,14 @@ def main(argv: list[str] | None = None) -> int:
                 "GitHub API requests; "
                 f"{request_estimate.log_low}-{request_estimate.log_high} log downloads; "
                 f"{request_estimate.remaining} requests remain (reset {reset}).")
-            if not _confirm_request_budget(request_estimate):
+            if not _confirm_request_budget(
+                    request_estimate,
+                    explicitly_accepted=args.accept_request_estimate):
                 print("Data pass not started. Omit --with-logs or wait for the "
-                      "quota reset.", file=sys.stderr)
+                      "quota reset, or explicitly accept this estimate.",
+                      file=sys.stderr)
+                print("Rerun exactly: " + _accepted_estimate_command(argv),
+                      file=sys.stderr)
                 return 1
 
     # Create the output directory up front. Without this, a fresh `--out
