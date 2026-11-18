@@ -7,7 +7,9 @@ stay legible in the artifact, not only in chat history.
 """
 from __future__ import annotations
 
+import ast
 import json
+import operator
 import re
 from pathlib import Path
 
@@ -171,6 +173,287 @@ def test_methodology_and_skill_md_describe_the_basic_rubric():
     assert "13-check" not in m, "the granular canonical description survived in the methodology"
     sk = re.sub(r"\s+", " ", _SKILL_MD_PATH.read_text())
     assert "13-check" not in sk, "the granular canonical description survived in SKILL.md"
+
+
+def _contains_number(value: object) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return True
+    if isinstance(value, list):
+        return any(_contains_number(item) for item in value)
+    if isinstance(value, dict):
+        return any(
+            _contains_number(item)
+            for pair in value.items()
+            for item in pair
+        )
+    return False
+
+
+def _methodology_row_matches(
+    name: str, methodology_value: str, rows: list[str]
+) -> bool:
+    row = next((line for line in rows if line.startswith(f"| `{name}` |")), "")
+    cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+    return len(cells) >= 2 and cells[:2] == [f"`{name}`", methodology_value]
+
+
+def _methodology_value(name: str, value: object) -> str:
+    """Derive the human-facing table cell from the machine contract."""
+
+    if isinstance(value, int) and not isinstance(value, bool):
+        suffix = " bytes" if name == "_SCRIPT_MAX_BYTES" else ""
+        return f"{value:,}{suffix}"
+    if name == "_SETUP_CACHE_INPUTS" and isinstance(value, dict):
+        return "; ".join(
+            f"{action.rsplit('/', 1)[-1]} "
+            f"{settings[1] if settings[1] is not None else 'off'}"
+            for action, settings in value.items()
+        )
+    if name == "_PLAUSIBLE_MAJOR" and isinstance(value, dict):
+        return "; ".join(
+            f"{action.rsplit('/', 1)[-1]} {major}"
+            for action, major in value.items()
+        )
+    raise AssertionError(f"no methodology display rule for {name}")
+
+
+def test_numeric_dictionary_keys_are_part_of_the_constant_contract():
+    assert _contains_number({64: "limit"})
+
+
+def test_methodology_value_must_match_the_whole_value_cell():
+    rows = ["| `_MAX_PARALLEL_DEPTH` | 640 | reason |"]
+    assert not _methodology_row_matches("_MAX_PARALLEL_DEPTH", "64", rows)
+
+
+_CONSTANT_BINOPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod, ast.Pow: operator.pow,
+    ast.LShift: operator.lshift, ast.RShift: operator.rshift,
+    ast.BitOr: operator.or_, ast.BitAnd: operator.and_,
+    ast.BitXor: operator.xor,
+}
+_CONSTANT_UNARYOPS = {
+    ast.USub: operator.neg, ast.UAdd: operator.pos, ast.Invert: operator.invert,
+}
+
+
+def _numeric_constants_in(source: str) -> dict[str, object]:
+    """Return module constants in ``source`` whose literal value has a number.
+
+    Public and private names count. The small evaluator accepts data literals,
+    unary and binary arithmetic, and names of constants already evaluated
+    above; calls such as ``chr(0xFEFF)`` are strings at runtime and stay out
+    of this grade/read-bound contract. Chained (``_A = _B = 3``), annotated
+    and augmented assignments are all read, so no spelling of a new numeric
+    constant escapes the record.
+    """
+
+    known: dict[str, object] = {}
+
+    def evaluate(node: ast.AST) -> object:
+        if isinstance(node, ast.Constant):
+            return node.value
+        if isinstance(node, (ast.Tuple, ast.List, ast.Set)):
+            return [evaluate(item) for item in node.elts]
+        if isinstance(node, ast.Dict):
+            if any(key is None for key in node.keys):
+                raise ValueError
+            return {
+                evaluate(key): evaluate(value)
+                for key, value in zip(node.keys, node.values)
+            }
+        if isinstance(node, ast.Name) and node.id in known:
+            return known[node.id]
+        if isinstance(node, ast.UnaryOp) and type(node.op) in _CONSTANT_UNARYOPS:
+            return _CONSTANT_UNARYOPS[type(node.op)](evaluate(node.operand))
+        if isinstance(node, ast.BinOp) and type(node.op) in _CONSTANT_BINOPS:
+            return _CONSTANT_BINOPS[type(node.op)](
+                evaluate(node.left), evaluate(node.right))
+        raise ValueError
+
+    constants: dict[str, object] = {}
+    for statement in ast.parse(source).body:
+        if isinstance(statement, ast.Assign):
+            targets, value_node = statement.targets, statement.value
+        elif isinstance(statement, ast.AnnAssign) and statement.value is not None:
+            targets, value_node = [statement.target], statement.value
+        elif isinstance(statement, ast.AugAssign):
+            targets = [statement.target]
+            value_node = ast.BinOp(
+                left=ast.Name(id=getattr(statement.target, "id", ""),
+                              ctx=ast.Load()),
+                op=statement.op, right=statement.value)
+        else:
+            continue
+        names = [target.id for target in targets if isinstance(target, ast.Name)]
+        try:
+            value = evaluate(value_node)
+        except (TypeError, ValueError, ArithmeticError):
+            for name in names:
+                known.pop(name, None)
+                constants.pop(name, None)
+            continue
+        for name in names:
+            known[name] = value
+            if _contains_number(value):
+                constants[name] = value
+            else:
+                constants.pop(name, None)
+    return constants
+
+
+def _literal_numeric_constants() -> dict[str, object]:
+    """The live engine's numeric module constants (see `_numeric_constants_in`)."""
+
+    return _numeric_constants_in((_SCRIPTS_DIR / "practice_facts.py").read_text())
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("_NEG = -1\n", {"_NEG": -1}),
+        ("_SUM = 60 + 4\n", {"_SUM": 64}),
+        ("_SHIFT = 1 << 20\n", {"_SHIFT": 1 << 20}),
+        ("_A = _B = 3\n", {"_A": 3, "_B": 3}),
+        ("MAX_PUBLIC = 7\n", {"MAX_PUBLIC": 7}),
+        ("_LIMIT: int = 8\n", {"_LIMIT": 8}),
+        ("_BASE = 4\n_DERIVED = _BASE * 2 - 1\n", {"_BASE": 4, "_DERIVED": 7}),
+        ("_TABLE = {'a': -(2 ** 3)}\n", {"_TABLE": {"a": -8}}),
+        ("_STEP = 1\n_STEP += 1\n", {"_STEP": 2}),
+    ],
+    ids=["unary-minus", "addition", "shift", "chained", "public", "annotated",
+         "known-name", "nested", "augmented"],
+)
+def test_constant_scan_records_every_numeric_form(source, expected):
+    # Each form must reach the contract, so a new constant written this way
+    # fails the spec test until it is recorded under engine_constants.
+    assert _numeric_constants_in(source) == expected
+
+
+def test_constant_scan_skips_runtime_values():
+    source = "_BOM = chr(0xFEFF)\n_FLAG = True\n_NAME = 'x'\n_RE = re.compile('a')\n"
+    assert _numeric_constants_in(source) == {}
+
+
+def test_every_numeric_practice_fact_constant_is_bound_to_the_spec(spec):
+    recorded = spec.get("engine_constants", {})
+    live = _literal_numeric_constants()
+    assert not (live.keys() - recorded.keys()), (
+        "unrecorded module-level numeric constants: "
+        f"{sorted(live.keys() - recorded.keys())}"
+    )
+    assert not (recorded.keys() - live.keys()), (
+        f"stale engine constants: {sorted(recorded.keys() - live.keys())}"
+    )
+    for name, value in live.items():
+        assert recorded[name]["value"] == value, name
+        assert recorded[name]["reason"].strip(), name
+
+
+def test_methodology_lists_the_numeric_engine_contract(spec):
+    rows = _METHODOLOGY_PATH.read_text().splitlines()
+    for name, entry in spec.get("engine_constants", {}).items():
+        expected = _methodology_value(name, entry["value"])
+        assert entry["methodology_value"] == expected, name
+        assert _methodology_row_matches(name, expected, rows), name
+
+
+# Every prose copy of a bound engine value, tied to its constant. Each entry is
+# (constant, pattern whose one group is the number). The counts pin how many
+# copies each surface carries, so a copy reworded out of a pattern's reach
+# fails here instead of silently going stale.
+_PROSE_BINDINGS = (
+    ("_MAX_PARALLEL_DEPTH", r"contains itself, nested more than ([\d,]+) deep"),
+    ("_MAX_WALK_STEPS", r"past the ([\d,]+)-entry read"),
+    ("_MAX_LOCAL_ACTION_DEPTH",
+     r"(?:sits|a chain|in the wrong case, or) more than ([\d,]+)(?: calls)? deep"),
+)
+_PROSE_COUNTS = {
+    "methodology": {"_MAX_PARALLEL_DEPTH": 1, "_MAX_WALK_STEPS": 1,
+                    "_MAX_LOCAL_ACTION_DEPTH": 4},
+    "spec facts": {"_MAX_LOCAL_ACTION_DEPTH": 4},
+}
+# Any phrase of these shapes must be claimed by a binding above.
+_BOUND_PHRASE_RE = re.compile(r"more than [\d,]+(?: calls)? deep|[\d,]+-entry")
+
+
+def _prose_bound_value_errors(
+    surface: str, text: str, constants: dict[str, object]
+) -> list[str]:
+    """Name every prose copy of a bound value that disagrees with its constant."""
+
+    errors: list[str] = []
+    claimed: set[tuple[int, int]] = set()
+    counts: dict[str, int] = {}
+    for name, pattern in _PROSE_BINDINGS:
+        for match in re.finditer(pattern, text):
+            counts[name] = counts.get(name, 0) + 1
+            claimed.add(match.span(1))
+            if int(match.group(1).replace(",", "")) != constants[name]:
+                errors.append(
+                    f"{surface}: {match.group(0)!r} disagrees with "
+                    f"{name} = {constants[name]}")
+    for match in _BOUND_PHRASE_RE.finditer(text):
+        number = re.search(r"[\d,]+", match.group(0))
+        span = (match.start() + number.start(), match.start() + number.end())
+        if span not in claimed:
+            errors.append(f"{surface}: {match.group(0)!r} is bound to no constant")
+    expected = _PROSE_COUNTS.get(surface, {})
+    if counts != expected:
+        errors.append(f"{surface}: prose copies {counts} != pinned {expected}")
+    return errors
+
+
+def _prose_surfaces(spec: dict) -> dict[str, str]:
+    return {
+        "methodology": _METHODOLOGY_PATH.read_text(),
+        "spec facts": "\n".join(check["fact"] for check in spec["checks"]),
+    }
+
+
+def test_prose_copies_of_bound_values_match_their_constants(spec):
+    live = _literal_numeric_constants()
+    errors = [
+        error
+        for surface, text in _prose_surfaces(spec).items()
+        for error in _prose_bound_value_errors(surface, text, live)
+    ]
+    assert not errors, errors
+
+
+@pytest.mark.parametrize(
+    ("old", "new"),
+    [
+        ("sits more than 16 calls deep", "sits more than 17 calls deep"),
+        ("a chain more than 16 deep", "a chain more than 17 deep"),
+        ("in the wrong case, or more than 16 deep",
+         "in the wrong case, or more than 17 deep"),
+        ("nested more than 64 deep", "nested more than 65 deep"),
+        ("the 10,000-entry read", "the 10,001-entry read"),
+        ("a chain more than 16 deep", "a chain deeper than 16"),
+    ],
+)
+def test_any_drifted_prose_copy_fails_the_binding(spec, old, new):
+    live = _literal_numeric_constants()
+    text = _METHODOLOGY_PATH.read_text()
+    assert old in text
+    assert _prose_bound_value_errors("methodology", text.replace(old, new, 1), live)
+
+
+def test_a_moved_constant_fails_the_unchanged_prose(spec):
+    for name in ("_MAX_PARALLEL_DEPTH", "_MAX_WALK_STEPS",
+                 "_MAX_LOCAL_ACTION_DEPTH"):
+        moved = {**_literal_numeric_constants()}
+        moved[name] += 1
+        assert any(
+            name in error
+            for surface, text in _prose_surfaces(spec).items()
+            for error in _prose_bound_value_errors(surface, text, moved)
+        ), name
 
 
 def test_scorer_module_is_basic_sized():

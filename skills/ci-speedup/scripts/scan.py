@@ -1077,6 +1077,159 @@ def _read_repo_file(root: Path, name: str) -> str:
         return ""
 
 
+_RUST_COVERAGE_COMMAND_RE = re.compile(
+    r"(?:^|[\s;&|])cargo\s+(?:\+[^\s;&|]+\s+)?(?:llvm-cov|tarpaulin)\b",
+    re.IGNORECASE)
+
+
+def _fallback_cargo_profiles(text: str) -> dict[str, Any] | None:
+    """Read the tiny profile subset on Python 3.9/3.10; ambiguity fails closed."""
+    profiles: dict[str, Any] = {"dev": {}, "test": {}}
+    section: str | None = None
+    for raw_line in text.splitlines():
+        # Profile scalar values used here cannot contain a meaningful `#`.
+        line = raw_line.split("#", 1)[0].strip()
+        if not line:
+            continue
+        header = re.fullmatch(r"\[\s*([^]]+)\s*\]", line)
+        if header:
+            name = header.group(1).strip()
+            if name in {"profile.dev", "profile.test"}:
+                section = name.rsplit(".", 1)[-1]
+            elif name.startswith(("profile.dev.", "profile.test.")):
+                profiles.setdefault("package_override", True)
+                section = None
+            else:
+                section = None
+            continue
+        if section is None:
+            continue
+        assignment = re.fullmatch(r"([\w-]+)\s*=\s*(.+)", line)
+        if assignment is None:
+            return None
+        key, raw_value = assignment.groups()
+        if key not in {"debug", "opt-level"}:
+            continue
+        value = raw_value.strip()
+        if value in {"false", "true"}:
+            parsed: Any = value == "true"
+        elif re.fullmatch(r"\d+", value):
+            parsed = int(value)
+        elif re.fullmatch(r"(['\"])(?:0|1|2|3|s|z|none|false)\1", value,
+                          re.IGNORECASE):
+            parsed = value[1:-1]
+        else:
+            return None
+        profiles[section][key] = parsed
+    return profiles
+
+
+def _cargo_profiles(text: str) -> dict[str, Any] | None:
+    try:
+        import tomllib
+    except ImportError:  # Python 3.9/3.10: keep the shipped scanner dependency-free.
+        return _fallback_cargo_profiles(text)
+    try:
+        cargo = tomllib.loads(text)
+    except (tomllib.TOMLDecodeError, TypeError):
+        return None
+    profiles = cargo.get("profile") if isinstance(cargo, dict) else None
+    return profiles if isinstance(profiles, dict) else {}
+
+
+def _read_rust_coverage_profile(
+    root: Path, parsed: list[tuple[str, dict, str]],
+) -> dict[str, Any] | None:
+    """Config fact for measured Rust-coverage routing; never a finding by itself."""
+    jobs: dict[str, dict[str, dict[str, Any]]] = {}
+    for rel, doc, _raw in parsed:
+        workflow_jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        if not isinstance(workflow_jobs, dict):
+            continue
+        for job_key, job in workflow_jobs.items():
+            if not isinstance(job, dict):
+                continue
+            workflow_defaults = doc.get("defaults") if isinstance(doc.get("defaults"), dict) else {}
+            workflow_run_defaults = (workflow_defaults.get("run")
+                                     if isinstance(workflow_defaults.get("run"), dict) else {})
+            job_defaults = job.get("defaults") if isinstance(job.get("defaults"), dict) else {}
+            job_run_defaults = (job_defaults.get("run")
+                                if isinstance(job_defaults.get("run"), dict) else {})
+            workflow_env = doc.get("env") if isinstance(doc.get("env"), dict) else {}
+            job_env = job.get("env") if isinstance(job.get("env"), dict) else {}
+            coverage_steps = []
+            for step in _steps(job):
+                command = step.get("run")
+                if not isinstance(command, str) or not _RUST_COVERAGE_COMMAND_RE.search(command):
+                    continue
+                step_env = step.get("env") if isinstance(step.get("env"), dict) else {}
+                profile_env = {
+                    str(key).upper() for env in (workflow_env, job_env, step_env)
+                    for key in env if str(key).upper().startswith("CARGO_PROFILE_")}
+                # V1 reads only the repository-root manifest. A literal or dynamic
+                # directory/manifest hop is unknown, never assumed to mean root.
+                if (step.get("working-directory")
+                        or job_run_defaults.get("working-directory")
+                        or workflow_run_defaults.get("working-directory")
+                        or re.search(r"(?:^|\s)--manifest-path(?:=|\s)", command)
+                        or re.search(r"(?:^|\s)(?:--release|--profile(?:=|\s))", command)
+                        or re.search(r"(?:^|[\n;&|])\s*cd\s+", command)
+                        or "${{" in command
+                        or profile_env
+                        or re.search(r"\bCARGO_PROFILE_[A-Z0-9_]+\s*=", command)):
+                    continue
+                name = str(step.get("name") or "").strip()
+                if not name:
+                    first_line = next((line.strip() for line in command.splitlines()
+                                       if line.strip()), "")
+                    name = f"Run {first_line}" if first_line else ""
+                if name:
+                    coverage_steps.append(name)
+            if coverage_steps:
+                jobs.setdefault(rel, {})[str(job_key)] = {
+                    "job_name": str(job.get("name") or job_key),
+                    "steps": coverage_steps,
+                }
+    if not jobs:
+        return None
+
+    cargo_path = root / "Cargo.toml"
+    if not _inside_scan_root(cargo_path) or not cargo_path.is_file():
+        return {"status": "unreadable", "eligible": False, "jobs": jobs}
+    cargo_text = _read_repo_file(root, "Cargo.toml")
+    if not cargo_text.strip():
+        return {"status": "unreadable", "eligible": False, "jobs": jobs}
+    profiles = _cargo_profiles(cargo_text)
+    if profiles is None:
+        return {"status": "unreadable", "eligible": False, "jobs": jobs}
+    dev = profiles.get("dev") if isinstance(profiles.get("dev"), dict) else {}
+    test = profiles.get("test") if isinstance(profiles.get("test"), dict) else {}
+
+    # Without a measured loaded-package identity, a package override may already
+    # be the requested remedy (or may make the selected artifact debug-heavy).
+    # Either direction is ambiguous, so withhold instead of guessing.
+    package_overrides = bool(
+        profiles.get("package_override")
+        or (isinstance(dev.get("package"), dict) and dev["package"])
+        or (isinstance(test.get("package"), dict) and test["package"]))
+    if package_overrides:
+        return {"status": "package-overrides", "eligible": False, "jobs": jobs}
+
+    debug = test.get("debug", dev.get("debug"))
+    opt_level = test.get("opt-level", dev.get("opt-level"))
+    debug_disabled = debug is False or debug == 0 or (
+        isinstance(debug, str) and debug.casefold() in {"0", "false", "none"})
+    optimized = opt_level not in (None, 0, "0")
+    return {
+        "status": "configured" if (debug is not None or opt_level is not None) else "defaults",
+        "eligible": not (debug_disabled or optimized),
+        "effective_profile": "test",
+        "debug": debug,
+        "opt_level": opt_level,
+        "jobs": jobs,
+    }
+
+
 def _parse_gitmodules(text: str) -> list[str]:
     """The `path = …` values declared in `.gitmodules`. Values may be quoted (a
     path containing a space has to be) and may carry a trailing `#` comment;
@@ -4989,11 +5142,14 @@ def _detect_opt61(
             r"cross\s+(?:build|test|check|bench)\b|"
             r"cmake\s+--build\b|meson\s+compile\b|make\b|ninja\b|"
             r"bazel(?:isk)?\s+(?:build|test)\b|"
-            r"(?:just|task)[ \t]++(?!-)\S+|"
+            # `[ \t]+(?![ \t]|X)` replaces the possessive `[ \t]++(?!X)`, which
+            # is Python 3.11+ only; the added `[ \t]` alternative keeps the
+            # lookahead from passing on a shortened whitespace run.
+            r"(?:just|task)[ \t]+(?![ \t]|-)\S+|"
             r"npm\s+(?:run|exec|test|start)\b|"
-            r"(?:pnpm|yarn|bun)[ \t]++(?!-)"
+            r"(?:pnpm|yarn|bun)[ \t]+(?![ \t]|-)"
             r"(?!(?:version|help|info|list|config|cache)\b)\S+|"
-            r"rustc[ \t]++(?!(?:--version|-Vv?|--print|--explain)"
+            r"rustc[ \t]+(?![ \t]|(?:--version|-Vv?|--print|--explain)"
             r"(?:[ \t]|$))|"
             r"(?:python(?:3(?:\.\d+)?)?|bash|sh)[ \t]+"
             r"(?:-[A-Za-z]+[ \t]+)*[^\s;&|]+\.(?:py|sh|js|ts)\b|"
@@ -9520,7 +9676,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # pole step runs a tool with a native drop-in) is routed the same way, from
     # the pole's step decomposition plus the workflow YAML and package scripts.
     structural_detected = {"OPT70", "OPT71", "OPT72", "OPT73", "OPT75", "OPT83",
-                           "OPT84", "OPT85"}
+                           "OPT84", "OPT85", "OPT104"}
     structural_without_detector = sorted(
         c.pattern for c in catalog
         if c.finding_class == "structural" and c.pattern not in structural_detected)
@@ -9721,6 +9877,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     if held_back:
         parallel_stats["held_back"] = held_back
     extra: dict[str, Any] = dict(extra_opt96)
+    rust_coverage_profile = _read_rust_coverage_profile(root, parsed)
+    if rust_coverage_profile:
+        extra["rust_coverage_profile"] = rust_coverage_profile
     jest_coverage = _jest_coverage_notes(parsed)
     if jest_coverage:
         extra["jest_coverage_notes"] = jest_coverage
