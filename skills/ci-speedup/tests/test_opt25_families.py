@@ -342,6 +342,71 @@ def test_step_identity_survives_a_workflow_edit_that_inserts_a_step():
         {"long_pole_p50": 900}) == []
 
 
+def test_step_numbers_shift_between_workflow_versions():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+    def jobs(*, edited: bool):
+        out = []
+        for index, duration in enumerate((600, 600, 12, 12), start=1):
+            ran = index <= 2
+            test = {
+                "number": 3 if edited else 2,
+                "name": "Run divided tests",
+                "conclusion": "success" if ran else "skipped",
+                "started_at": start.isoformat() if ran else None,
+                "completed_at": ((start + timedelta(seconds=duration)).isoformat()
+                                 if ran else None),
+            }
+            upload = {
+                "number": 2 if edited else 3,
+                "name": "Upload test results",
+                "conclusion": "success",
+                "started_at": start.isoformat(),
+                "completed_at": (start + timedelta(seconds=5)).isoformat(),
+            }
+            out.append({
+                "name": f"Test (Shard {index})",
+                "started_at": start.isoformat(),
+                "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+                "conclusion": "success",
+                "steps": [upload, test] if edited else [test, upload],
+            })
+        return out
+
+    assert cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs(edited=False), jobs(edited=True)], 0,
+        {"long_pole_p50": 600}) == []
+
+
+def test_position_fallback_survives_an_omitted_skipped_step():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((600, 600, 12, 12), start=1):
+        ran = index <= 2
+        steps = []
+        if ran:
+            steps.append({
+                "name": "Run divided tests", "conclusion": "success",
+                "started_at": start.isoformat(),
+                "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            })
+        steps.append({
+            "name": "Upload test results", "conclusion": "success",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=5)).isoformat(),
+        })
+        jobs.append({
+            "name": f"Test (Shard {index})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": steps,
+        })
+
+    assert cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 600}) == []
+
+
 def test_universal_step_identity_does_not_depend_on_display_name():
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     jobs = []
