@@ -2135,6 +2135,54 @@ def test_p1425_install_directory_flags_cannot_read_outside_the_repo(
     assert outside_pin not in note
 
 
+def test_p1425_directory_flag_nested_pnpm9_is_not_covered_by_root_pnpm10(
+    tmp_path,
+):
+    """The directory option affects the mitigation gate as well as the note:
+    pnpm 9 does not carry pnpm 10's build-allowlist mechanism.
+    """
+    _pkg(tmp_path, "pnpm@10.34.5", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  pnpm install --dir apps/web
+    """)
+    assert len(hits) == 1
+    assert "pnpm@9.15.0" in (hits[0].derived_note or "")
+
+
+def test_p1425_directory_flag_nested_pnpm10_uses_the_allowlist_mechanism(
+    tmp_path,
+):
+    """The mirror: a nested pnpm-10 package is protected by a real disable
+    aimed at the workspace config even when the repository root pins pnpm 9.
+    """
+    _pkg(tmp_path, "pnpm@9.15.0", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.34.5")
+    assert _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  pnpm install --dir apps/web
+    """) == []
+
+
 @pytest.mark.parametrize("command", [
     "npm ci --maxsockets 3",
     "pnpm install --fetch-timeout 60000",
