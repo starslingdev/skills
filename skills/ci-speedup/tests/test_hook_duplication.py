@@ -230,6 +230,20 @@ def test_task_runner_filters_do_not_match_different_packages(monkeypatch, tmp_pa
         "different package filters must not collapse to the same command")
 
 
+def test_typescript_project_flag_is_an_exact_match_not_a_package_filter(
+        monkeypatch, tmp_path):
+    command = "pnpm exec tsc --project tsconfig.json"
+    workflow = _WORKFLOW_TEXT.replace("pnpm tsc --noEmit", command)
+    monkeypatch.setattr(sys.modules[__name__], "_WORKFLOW_TEXT", workflow)
+
+    doc, _report = _collect(monkeypatch, tmp_path, command)
+
+    findings = [f for f in doc["findings"] if f.get("pattern") == "OPT105"]
+    assert len(findings) == 1, (
+        "TypeScript's --project selects a config, not a workspace package")
+    assert findings[0]["hook_duplication"]["steps"] == ["Typecheck"]
+
+
 def test_lefthook_root_is_not_discarded(monkeypatch, tmp_path):
     web = tmp_path / "apps" / "web"
     web.mkdir(parents=True)

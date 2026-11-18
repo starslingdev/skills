@@ -16496,14 +16496,31 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
     return out
 
 
-_OPT105_UNPROVEN_SCOPE_RE = _re.compile(
-    r"(?:^|\s)(?:--filter(?:=|\s)|-F(?:\s|$)|--scope(?:=|\s)|"
-    r"--project(?:s)?(?:=|\s))")
-
-
 def _opt105_has_unproven_scope(command: str) -> bool:
-    """Whether task-runner package selection cannot be preserved by the resolver."""
-    return bool(_OPT105_UNPROVEN_SCOPE_RE.search(command))
+    """Whether task-runner package selection cannot be preserved by the resolver.
+
+    ``--project`` is tool-specific: Nx uses it to select workspace packages,
+    while TypeScript uses it to select a configuration file.  Identify the
+    command behind an exec wrapper before treating that spelling as package
+    scope; exact non-runner leaves retain the flag in their comparison key.
+    """
+    for segment in _OPT82_SEGMENT_SPLIT_RE.split(command or ""):
+        tokens = _opt82_tokens(segment.strip())
+        if not tokens:
+            continue
+        if any(token.split("=", 1)[0] in ("--filter", "-F")
+               for token in tokens):
+            return True
+        unwrapped, _runner, _call = _opt82_exec_call(tokens)
+        if not unwrapped:
+            continue
+        tool = unwrapped[0].rsplit("/", 1)[-1].split("@", 1)[0]
+        flags = {token.split("=", 1)[0] for token in unwrapped[1:]}
+        if tool in ("turbo", "lerna") and "--scope" in flags:
+            return True
+        if tool == "nx" and flags.intersection({"--project", "--projects"}):
+            return True
+    return False
 
 
 def _opt105_leaf_key(leaf: dict[str, Any]) -> "tuple[str, tuple[str, ...]] | None":
