@@ -5985,6 +5985,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                           if f.get("pattern")})
     dd_pats = sorted({str(f.get("pattern", "")) for f in (data_driven or [])
                       if f.get("pattern")})
+    dd_saves_wall_clock = any(_saves_wall_clock(f) for f in (data_driven or []))
     # OPT79 claims the pole only at the long-pole magnitude (`_opt79_pole_covers`);
     # a smaller one is mentioned as a side note, never as the pole's explanation.
     opt79_minor = bool(opt79) and not _opt79_pole_covers(opt79)
@@ -6137,11 +6138,16 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 "runs use the slower runner class. It is about where the job runs, not "
                 "about the step above.", ""]
     elif dd_pats:
+        effect = (
+            "it sits ON the critical path, so it shrinks this pole's wall time"
+            if dd_saves_wall_clock else
+            "its repeated runner cost is measured, but no wall-clock saving is credited"
+        )
         out += ["DATA-DRIVEN CATALOG PATTERN MATCHED",
                 f"- A data-driven catalog pattern ({', '.join(dd_pats)}) matched this "
                 f"pole - see {_dd_where(dd_pats)} for the measured lever and "
-                "its catalog fix recipe (it sits ON the critical path, so it shrinks this "
-                "pole's wall time). The step above is the load-bearing one that lever "
+                f"its catalog fix recipe ({effect}). The step above is the load-bearing "
+                "one that lever "
                 f"targets; {log_ref} to see what inside it the lever reshapes.", ""]
     if opt79:
         out += ["MEASURED CACHE PATTERN MATCHED",

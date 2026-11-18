@@ -203,7 +203,6 @@ class _SeparateBuildClient(_Client):
                 },
             ]
         return response
-
     def text(self, endpoint: str, allow_missing: bool = False):
         job_id = int(endpoint.split("/")[-2])
         if job_id % 10 != 1:
@@ -216,6 +215,12 @@ class _SeparateBuildClient(_Client):
             f"{_iso(2990)} Finished `test` profile [unoptimized + debuginfo] target(s) in 29m 50s",
             f"{_iso(2995)} test result: ok. 42 passed; 0 failed; finished in 5.00s",
         ])
+
+
+class _SeparateBuildExpiredClient(_SeparateBuildClient):
+    def text(self, endpoint: str, allow_missing: bool = False):
+        self.queries += 1
+        return ""
 
 
 def _finding(doc: dict, job: str) -> dict:
@@ -322,6 +327,15 @@ def test_dynamic_matrix_name_with_expired_log_holds_back_compile_credit(
     cargo = _finding(doc, "cargo tests")
     assert cargo["wall_clock_p50_s"] == 0.0
     assert cargo["pre_test_floor_unmeasured"] is True
+    assert cargo["runner_minute_effect"]["direction"] == "unsized"
+
+
+def test_measured_setup_with_unreadable_compile_floor_stays_unsized(
+        monkeypatch, tmp_path: Path) -> None:
+    doc = _collect_and_verify(monkeypatch, tmp_path, _SeparateBuildExpiredClient)
+    cargo = _finding(doc, "cargo tests")
+    assert cargo["runner_minute_effect"]["direction"] == "unsized"
+    assert cargo["pre_test_floor_unmeasured"] is True
 
 
 def test_separate_build_compile_is_not_subtracted_from_test_payload_twice(
@@ -362,6 +376,28 @@ def test_fractional_shard_cost_is_positive_and_report_amount_is_verified(
     assert vr.check_wall_clock_runner_minute_effects(good, findings_path).ok
     bad = good.replace("+0.2 runner-min/month", "+999999 runner-min/month")
     assert not vr.check_wall_clock_runner_minute_effects(bad, findings_path).ok
+
+
+def test_small_positive_shard_cost_does_not_round_to_zero() -> None:
+    finding = {"pattern": "OPT24"}
+    finding["runner_minute_setup_floor_s"] = 1.0
+    cr._size_finding(finding, {}, 2)
+    assert finding["runner_minute_effect"]["runner_min_per_month"] > 0
+
+
+def test_uncredited_shard_cost_prompt_does_not_promise_a_speedup() -> None:
+    finding = {
+        "pattern": "OPT24",
+        "affected_jobs": ["tests"],
+        "wall_clock_p50_s": 0.0,
+        "runner_minute_effect": {"direction": "added_cost"},
+    }
+    prompt = bp._build_generic_agent_prompt(
+        {"check": "tests", "job": "tests", "workflow_file": "ci.yml", "p50_s": 300},
+        [], None, "o/r", "abcdef0", 1, 1, None, data_driven=[finding],
+    )
+    assert "shrinks this pole's wall time" not in prompt
+    assert "no wall-clock saving is credited" in prompt
 
 
 def test_mixed_shard_group_discloses_unknown_cost_beside_measured_subtotal() -> None:

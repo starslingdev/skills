@@ -6806,7 +6806,7 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         if isinstance(floor, (int, float)) and floor > 0 and monthly_volume:
             f["runner_minute_effect"] = {
                 "direction": "added_cost",
-                "runner_min_per_month": round(float(floor) * monthly_volume / 60.0, 1),
+                "runner_min_per_month": round(float(floor) * monthly_volume / 60.0, 3),
                 "runs_per_month": monthly_volume,
                 "setup_floor_s": round(float(floor), 1),
                 "assumed_shards": 2,
@@ -24581,11 +24581,11 @@ def _detect_opt24_long_test_no_sharding(
                               if decomp is not None else 0.0)
             finding["runner_minute_setup_floor_s"] = round(
                 pre_test_floor + separate_setup, 1)
+        elif measure_first:
+            finding["pre_test_floor_unmeasured"] = True
         elif decomp is not None and decomp.get("setup_build_s", 0) > 0:
             finding["runner_minute_setup_floor_s"] = round(
                 float(decomp["setup_build_s"]), 1)
-        elif measure_first:
-            finding["pre_test_floor_unmeasured"] = True
         out.append(finding)
     return out
 
