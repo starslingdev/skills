@@ -24574,7 +24574,13 @@ def _detect_opt24_long_test_no_sharding(
         if pre_test_floor is not None:
             finding["pre_test_floor_s"] = round(pre_test_floor, 1)
             finding["shardable_test_s"] = round(shardable, 1)
-            finding["runner_minute_setup_floor_s"] = round(pre_test_floor, 1)
+            # A compile inside the test step and checkout/install/build steps
+            # outside it all repeat on every added shard.  The test-step log is
+            # deliberately sliced so these two measurements do not overlap.
+            separate_setup = (float(decomp.get("setup_build_s", 0))
+                              if decomp is not None else 0.0)
+            finding["runner_minute_setup_floor_s"] = round(
+                pre_test_floor + separate_setup, 1)
         elif decomp is not None and decomp.get("setup_build_s", 0) > 0:
             finding["runner_minute_setup_floor_s"] = round(
                 float(decomp["setup_build_s"]), 1)

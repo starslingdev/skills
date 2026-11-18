@@ -4602,12 +4602,17 @@ def _group_runner_minute_effect_line(findings: list[dict[str, Any]]) -> str:
                    for f in sized})
     floors = sorted({_num(f["runner_minute_effect"].get("setup_floor_s")) or 0.0
                      for f in sized})
+    unsized = [f for f in findings if f not in sized]
     detail = (f"a measured {floors[0]:g}s repeated setup floor across {runs[0]} runs/month"
               if len(floors) == len(runs) == 1
               else f"{len(sized)} measured repeated setup floors")
-    return (f"Runner-minute effect: +{amount:g} runner-min/month added cost; assumes "
+    label = "measured subtotal" if unsized else "added cost"
+    unknown = (f"; {len(unsized)} additional split"
+               f"{'s are' if len(unsized) != 1 else ' is'} not sized"
+               if unsized else "")
+    return (f"Runner-minute effect: +{amount:g} runner-min/month {label}; assumes "
             f"2 shards and {detail}; extra shard jobs repeat checkout and setup and bill "
-            "each job; scales as (N−1) with N shards.")
+            f"each job; scales as (N−1) with N shards{unknown}.")
 
 
 def _emulated_runner_minute_effect_line(

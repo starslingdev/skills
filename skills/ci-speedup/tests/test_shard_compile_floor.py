@@ -330,6 +330,54 @@ def test_separate_build_compile_is_not_subtracted_from_test_payload_twice(
     cargo = _finding(doc, "cargo tests")
     assert cargo["wall_clock_p50_s"] == 0.0
     assert cargo["pre_test_floor_s"] == 1790.0
+    assert cargo["runner_minute_effect"] == {
+        "direction": "added_cost",
+        "runner_min_per_month": 598.0,
+        "runs_per_month": 12,
+        "setup_floor_s": 2990.0,
+        "assumed_shards": 2,
+    }
+
+
+def test_fractional_shard_cost_is_positive_and_report_amount_is_verified(
+        tmp_path: Path) -> None:
+    doc = {
+        "runner_minute_effect_schema": 1,
+        "findings": [{
+            "pattern": "OPT24",
+            "runner_minute_effect": {
+                "direction": "added_cost",
+                "runner_min_per_month": 0.2,
+                "runs_per_month": 12,
+                "setup_floor_s": 1.0,
+                "assumed_shards": 2,
+            },
+        }],
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    good = ("Runner-minute effect: +0.2 runner-min/month added cost; assumes 2 "
+            "shards and a measured 1s repeated setup floor across 12 runs/month; "
+            "scales as (N−1) with N shards.")
+    assert vr.check_wall_clock_runner_minute_effects(good, findings_path).ok
+    bad = good.replace("+0.2 runner-min/month", "+999999 runner-min/month")
+    assert not vr.check_wall_clock_runner_minute_effects(bad, findings_path).ok
+
+
+def test_mixed_shard_group_discloses_unknown_cost_beside_measured_subtotal() -> None:
+    line = bp._group_runner_minute_effect_line([
+        {"runner_minute_effect": {
+            "direction": "added_cost", "runner_min_per_month": 10.0,
+            "runs_per_month": 12, "setup_floor_s": 50.0,
+            "assumed_shards": 2,
+        }},
+        {"runner_minute_effect": {
+            "direction": "unsized", "reason": "setup floor unavailable",
+            "assumed_shards": 2,
+        }},
+    ])
+    assert "+10 runner-min/month measured subtotal" in line
+    assert "1 additional split is not sized" in line
 
 
 def test_shard_guidance_names_the_repeated_runner_minute_floor() -> None:

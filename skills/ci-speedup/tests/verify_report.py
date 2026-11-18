@@ -17077,6 +17077,7 @@ def check_wall_clock_runner_minute_effects(
     data = _as_dict(data)
     effect_schema = data.get("runner_minute_effect_schema") == 1
     findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
+    priced_amounts: list[float] = []
     for finding in findings:
         pattern = str(finding.get("pattern") or "")
         if pattern not in {"OPT24", "OPT25"}:
@@ -17101,12 +17102,39 @@ def check_wall_clock_runner_minute_effects(
         if (expected is None or amount is None or expected <= 0
                 or abs(amount - round(expected, 1)) > 0.01):
             failures.append(f"{pattern} added cost does not re-derive from floor*(N-1)*runs")
+        elif amount > 0:
+            priced_amounts.append(amount)
+    displayed_costs = [float(value) for value in re.findall(
+        r"Runner-minute effect:\s*\+([0-9]+(?:\.[0-9]+)?)\s+runner-min/month",
+        report,
+    )]
+    allowed_costs = {round(value, 1) for value in priced_amounts}
+    if priced_amounts:
+        allowed_costs.add(round(sum(priced_amounts), 1))
+    for amount in displayed_costs:
+        if round(amount, 1) not in allowed_costs:
+            failures.append(
+                f"displayed +{amount:g} runner-min/month is not backed by signed findings")
     if "fix_key=emulated-image-compile" in report:
         prompt = report[report.find("fix_key=emulated-image-compile"):]
         if ("Runner-minute effect: saving" not in prompt
                 and "Runner-minute effect: not sized" not in prompt):
             failures.append("emulated-image wall-clock lever has no sized/unsized effect")
-    if re.search(r"Runner-minute effect:\s*(?:0|\+0)(?:\.0+)?\b", report):
+        savings = [float(value) for value in re.findall(
+            r"Runner-minute effect:\s*saving\s+~([0-9]+(?:\.[0-9]+)?)\s+runner-min/month",
+            prompt,
+        )]
+        measured_cap = sum(
+            _num(row.get("completed_billable_equiv_min_per_month")) or 0.0
+            for row in _as_list(_as_dict(data.get("runner_minute_spine")).get("rows"))
+            if isinstance(row, dict)
+        )
+        if savings and (measured_cap <= 0 or any(value > measured_cap + 0.05
+                                                  for value in savings)):
+            failures.append("emulated-image saving exceeds measured completed-run compute")
+    zero_effects = [float(value) for value in re.findall(
+        r"Runner-minute effect:\s*\+?([0-9]+(?:\.[0-9]+)?)\b", report)]
+    if any(value == 0 for value in zero_effects):
         failures.append("report contains a bare zero runner-minute effect")
     return Check(name, not failures,
                  "; ".join(failures[:8]) if failures
