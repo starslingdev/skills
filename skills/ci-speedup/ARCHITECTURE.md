@@ -26,9 +26,9 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 98-pattern
-catalog — 87 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100–OPT103) plus 11 **structural /
-critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85 and OPT87, routed from the measured long pole; see
+ci-speedup audits a repository's GitHub Actions workflows against a 99-pattern
+catalog — 87 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98 and OPT100–OPT103) plus 12 **structural /
+critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85, OPT87 and OPT104, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
 runner-minutes (the cloud bill). Detection, ranking, and every measured number
@@ -3851,6 +3851,8 @@ agent prompt in `_PROMPTS`; it is **not** a prescribed fix):
 | `install-lifecycle-build` | a root `prepare`/`postinstall` lifecycle script runs a build DURING `<pm> install` — "work runs during install", not a cache miss | build wall run inside install (**seconds**) |
 | `buildx-no-cache` | `docker buildx` imports no cache → every layer cold | slowest cold layer's share of the cold-build wall (%) |
 | `playwright-parallel` | specs run as sequential invocations | **none** — the finding is the *sequencing*, shown by the timeline itself |
+| `within-job-duplicate-test` | two invocations print the same completed test signature under the same readable active runtime and package scope (OPT16) | later completion duration (**seconds**, upper bound) |
+| `within-job-duplicate-build` | two invocations print the same package/output build signature under the same readable active runtime (OPT16) | later completion duration (**seconds**, upper bound) |
 | `lighthouse-serial-audits` | Lighthouse CI audits every URL `numberOfRuns` times per collect pass, one after another (OPT103). Counts completed passes only, and fires at 20 or more audits with at least two per distinct URL | audits beyond the first per URL, as a share of all audits (%) |
 
 A detector with `magnitude: None` is **categorical only**: the cause is structural
@@ -3868,6 +3870,14 @@ BEFORE the turbo detectors so a plain later-step turbo build still classifies as
 `turbo-remote-cache`/`turbo-partial-cache`. The install-section boundary + gating block come
 from `_install_build_section`, the single source both this detector and `_cache_state_of_log`
 read, so the leaf and the per-run cache state can never measure different builds.
+
+The `within-job-duplicate-test` / `within-job-duplicate-build` pair occupies the
+slot immediately before the Cargo-specific double-compile leaf. The generic pair
+recognizes completed test and package-build signatures hidden behind wrappers,
+including two invocations inside one step; the Cargo leaf remains later and more
+specific to crate/profile/target context. The separate fix keys keep test and
+build category reconciliation exact. All three cap their magnitude at the later
+invocation's measured completion wall.
 
 ### 12.4 Cross-run check — adaptive sampling (`_magnitude_sample`)
 
@@ -4155,7 +4165,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
-  the 98-pattern catalog, one file per pattern (frontmatter + body); the source
+  the 99-pattern catalog, one file per pattern (frontmatter + body); the source
   of truth for detection and the report's TL;DR / pattern background. The
   single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
   is compiled from `references/patterns/` by
