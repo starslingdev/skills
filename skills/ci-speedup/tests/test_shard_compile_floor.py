@@ -366,18 +366,31 @@ def test_fractional_shard_cost_is_positive_and_report_amount_is_verified(
 
 def test_mixed_shard_group_discloses_unknown_cost_beside_measured_subtotal() -> None:
     line = bp._group_runner_minute_effect_line([
-        {"runner_minute_effect": {
+        {"pattern": "OPT24", "runner_minute_effect": {
             "direction": "added_cost", "runner_min_per_month": 10.0,
             "runs_per_month": 12, "setup_floor_s": 50.0,
             "assumed_shards": 2,
         }},
-        {"runner_minute_effect": {
+        {"pattern": "OPT25", "runner_minute_effect": {
             "direction": "unsized", "reason": "setup floor unavailable",
             "assumed_shards": 2,
         }},
     ])
     assert "+10 runner-min/month measured subtotal" in line
     assert "1 additional split is not sized" in line
+
+
+def test_shard_group_ignores_unrelated_unsized_findings() -> None:
+    line = bp._group_runner_minute_effect_line([
+        {"pattern": "OPT24", "runner_minute_effect": {
+            "direction": "added_cost", "runner_min_per_month": 10.0,
+            "runs_per_month": 12, "setup_floor_s": 50.0,
+            "assumed_shards": 2,
+        }},
+        {"pattern": "OPT81"},
+    ])
+    assert "+10 runner-min/month added cost" in line
+    assert "additional split" not in line
 
 
 def test_shard_guidance_names_the_repeated_runner_minute_floor() -> None:

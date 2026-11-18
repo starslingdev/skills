@@ -4591,6 +4591,12 @@ def _finding_runner_minute_effect_line(finding: dict[str, Any]) -> str:
 
 
 def _group_runner_minute_effect_line(findings: list[dict[str, Any]]) -> str:
+    shard_findings = [
+        finding for finding in findings
+        if finding.get("pattern") in {"OPT24", "OPT25"}
+    ]
+    if shard_findings:
+        findings = shard_findings
     sized = [f for f in findings
              if isinstance(f.get("runner_minute_effect"), dict)
              and f["runner_minute_effect"].get("direction") == "added_cost"]
