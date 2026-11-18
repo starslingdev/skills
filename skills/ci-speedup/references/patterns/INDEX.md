@@ -27,6 +27,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT15 — Cross-Workflow Build Redundancy (HIGH, static) — same build in several PR workflows
 - OPT16 — Within-Job Duplicate Commands (LOW, static) — same command twice in one job
 - OPT77 — Repeated Fixed Setup Across Independent Small Jobs (MEDIUM, data-driven) — small checks each pay full setup
+- OPT105 — Local Hook Work Is Repeated in Pull-Request CI (MEDIUM, data-driven) — measured PR steps repeat a resolved local-hook command
 ## Category 3 — Docker
 - OPT17 — Sleep-Based Container Readiness (MEDIUM, static) — sleep instead of healthchecks
 - OPT18 — All Containers Started for Single-Service Tests (MEDIUM, static) — compose up starts every service

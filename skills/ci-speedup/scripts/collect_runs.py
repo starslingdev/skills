@@ -5949,6 +5949,8 @@ _SIZING: dict[str, dict[str, Any]] = {
     # hit_rate — a modeled number here would re-create exactly the inference
     # OPT49 was cut for.
     "OPT80": {"model": "measured"},  # checkout stalls on the tail
+    # Local-hook duplication owns measured step-time sizing on both axes.
+    "OPT105": {"model": "measured"},
     # Hidden Failures and Dead Config.
     "OPT68": {"model": "runner-min-only", "hit_rate": 0.0},  # broken step masked — reliability
     "OPT69": {"model": "runner-min-only", "hit_rate": 0.0},  # dead env vars — cosmetic
@@ -16381,6 +16383,286 @@ def _rl_task_runner(toks: list[str]
 # folder is treated as skipped): a package.json there is never read.
 _RL_UNWALKED_DIRS = frozenset({"node_modules", "dist", "coverage", "__pycache__",
                                "build", "out", "vendor", "target"})
+
+# OPT105 reports hook work only when the repeated CI steps are both measurable and
+# material.  These are report-shaping defaults, mirrored in report-defaults.md and
+# its contract test.
+_OPT105_MIN_DUPLICATE_STEP_S = 20.0
+_OPT105_MIN_JOB_SHARE = 0.15
+
+
+def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str]]:
+    """Literal hook commands from the supported static configuration surfaces.
+
+    Returns ``(source, command)`` pairs.  This reader never executes repository
+    content and never follows a path outside ``root``.
+    """
+    if root is None:
+        return []
+    out: list[tuple[str, str]] = []
+
+    def _read(path: Path) -> "str | None":
+        try:
+            if not path.is_file() or path.stat().st_size > 1_000_000:
+                return None
+            return path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return None
+
+    def _shell_dir(name: str) -> None:
+        folder = root / name
+        try:
+            paths = sorted(folder.iterdir()) if folder.is_dir() else []
+        except OSError:
+            paths = []
+        for path in paths:
+            text = _read(path)
+            if text is None:
+                continue
+            lines = []
+            for line in text.splitlines():
+                stripped = line.strip()
+                if (not stripped or stripped.startswith(("#", ". ", "source "))
+                        or stripped.startswith("#!/")):
+                    continue
+                lines.append(stripped)
+            if lines:
+                out.append((path.relative_to(root).as_posix(), "\n".join(lines)))
+
+    _shell_dir(".husky")
+    _shell_dir(".githooks")
+
+    def _yaml_commands(path: Path, keys: frozenset[str]) -> None:
+        text = _read(path)
+        if text is None:
+            return
+        try:
+            import yaml
+            doc = yaml.safe_load(text)
+        except Exception:  # malformed config is unknown, never a finding
+            return
+
+        def _walk(value: Any, key: str = "") -> None:
+            if isinstance(value, dict):
+                for child_key, child in value.items():
+                    _walk(child, str(child_key))
+            elif isinstance(value, list):
+                for child in value:
+                    _walk(child, key)
+            elif key in keys and isinstance(value, str) and value.strip():
+                out.append((path.relative_to(root).as_posix(), value.strip()))
+
+        _walk(doc)
+
+    _yaml_commands(root / "lefthook.yml", frozenset({"run", "command"}))
+    _yaml_commands(root / "lefthook.yaml", frozenset({"run", "command"}))
+    _yaml_commands(root / ".pre-commit-config.yaml", frozenset({"entry"}))
+    _yaml_commands(root / ".pre-commit-config.yml", frozenset({"entry"}))
+
+    package_text = _read(root / "package.json")
+    if package_text is not None:
+        try:
+            package = json.loads(package_text)
+        except (ValueError, TypeError):
+            package = None
+        hooks = package.get("simple-git-hooks") if isinstance(package, dict) else None
+        if isinstance(hooks, dict):
+            for command in hooks.values():
+                if isinstance(command, str) and command.strip():
+                    out.append(("package.json#simple-git-hooks", command.strip()))
+    return out
+
+
+def _opt105_leaf_key(leaf: dict[str, Any]) -> "tuple[str, tuple[str, ...]] | None":
+    tokens = leaf.get("tokens")
+    if not isinstance(tokens, list) or not tokens or not all(
+            isinstance(token, str) and token for token in tokens):
+        return None
+    return str(leaf.get("wd") or ""), tuple(tokens)
+
+
+def _detect_opt105_hook_duplication(
+    root: "Path | None",
+    wf_path: str,
+    jobs_per_run: list[list[dict[str, Any]]],
+    crit: dict[str, Any],
+    workflow_doc: dict[str, Any],
+    scan_block: "dict[str, Any] | None",
+    monthly_volume: "int | None",
+    start_idx: int,
+    is_pr: bool = True,
+) -> list[dict[str, Any]]:
+    """OPT105: measured PR steps repeat commands from a local hook.
+
+    Package-script calls on both sides go through ``_resolve_run_leaves``.  The
+    static match alone is never enough: the matched steps must clear the absolute
+    duration and job-share floors in successful sampled pull-request runs.
+    """
+    if not is_pr or not jobs_per_run or not isinstance(workflow_doc, dict):
+        return []
+    jobs = workflow_doc.get("jobs")
+    block = scan_block if isinstance(scan_block, dict) else {}
+    if not isinstance(jobs, dict) or block.get("error"):
+        return []
+    scripts_by_dir = {str(k): v for k, v in (block.get("package_scripts") or {}).items()
+                      if isinstance(v, dict)}
+    scripts_unreadable = frozenset(str(v) for v in
+                                   (block.get("package_scripts_unreadable") or []))
+    walk_complete = block.get("truncated") is False
+    hook_key_sources: dict[tuple[str, tuple[str, ...]], set[str]] = {}
+    for source, command in _opt105_config_commands(root):
+        resolved = _resolve_run_leaves(
+            command, "", scripts_by_dir, scripts_unreadable,
+            walk_complete=walk_complete)
+        for leaf in resolved.leaves:
+            key = _opt105_leaf_key(leaf)
+            if key is not None:
+                hook_key_sources.setdefault(key, set()).add(source)
+    if not hook_key_sources:
+        return []
+
+    def _defaults_wd(value: Any) -> Any:
+        defaults = value.get("defaults") if isinstance(value, dict) else None
+        run = defaults.get("run") if isinstance(defaults, dict) else None
+        return run.get("working-directory") if isinstance(run, dict) else None
+
+    matched_by_job: dict[str, tuple[str, list[str], set[str]]] = {}
+    for run_jobs in jobs_per_run:
+        for job in run_jobs:
+            job_name = str(job.get("name") or "").strip()
+            if not job_name or job_name in matched_by_job:
+                continue
+            hit = _opt83_match_yaml_job(jobs, job_name)
+            if hit is None:
+                continue
+            yaml_key, spec = hit
+            matched_steps: list[str] = []
+            matched_sources: set[str] = set()
+            for leaf_step in job_walk(spec).leaves:
+                step = leaf_step.step
+                command = step.get("run") if isinstance(step, dict) else None
+                if not isinstance(command, str) or "${{" in command:
+                    continue
+                raw_wd = step.get(
+                    "working-directory",
+                    _defaults_wd(spec) if _defaults_wd(spec) is not None
+                    else _defaults_wd(workflow_doc))
+                if "${{" in str(raw_wd or ""):
+                    continue
+                wd = _opt82_norm_dir(raw_wd)
+                wd = _posixpath.normpath(wd) if wd else ""
+                if wd == ".." or wd.startswith("../"):
+                    continue
+                wd = "" if wd == "." else wd
+                resolved = _resolve_run_leaves(
+                    command, wd, scripts_by_dir, scripts_unreadable,
+                    walk_complete=walk_complete)
+                keys = [_opt105_leaf_key(command_leaf) for command_leaf in resolved.leaves]
+                matching = [key for key in keys if key in hook_key_sources]
+                if matching:
+                    display = _opt79_yaml_step_display(step)
+                    if display and display not in matched_steps:
+                        matched_steps.append(display)
+                    for key in matching:
+                        matched_sources.update(hook_key_sources[key])
+            if matched_steps:
+                matched_by_job[job_name] = (yaml_key, matched_steps, matched_sources)
+    if not matched_by_job:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for job_name, (yaml_key, matched_steps, hook_sources) in matched_by_job.items():
+        duplicate_samples: list[tuple[float, str]] = []
+        job_samples: list[float] = []
+        observed_steps: set[str] = set()
+        observed_shas: set[str] = set()
+        observed_prs: set[int] = set()
+        for run_jobs in jobs_per_run:
+            occurrence = next((job for job in run_jobs
+                               if str(job.get("name") or "").strip() == job_name), None)
+            if occurrence is None:
+                continue
+            total = _duration_s(occurrence.get("started_at"), occurrence.get("completed_at"))
+            if total is None or total <= 0:
+                continue
+            durations = {name: duration for name, duration in _step_durations(occurrence)}
+            present = [name for name in matched_steps if name in durations]
+            if not present:
+                continue
+            duplicate = sum(durations[name] for name in present)
+            if duplicate <= 0:
+                continue
+            duplicate_samples.append((duplicate, str(occurrence.get("html_url") or "")))
+            job_samples.append(total)
+            observed_steps.update(present)
+            sha = str(occurrence.get("_run_head_sha") or "")
+            if sha:
+                observed_shas.add(sha)
+            pr_number = occurrence.get("_run_pr_number")
+            if isinstance(pr_number, int) and not isinstance(pr_number, bool):
+                observed_prs.add(pr_number)
+        if not duplicate_samples or not job_samples:
+            continue
+        duplicate_p50 = _percentile([value for value, _url in duplicate_samples], 50)
+        job_p50 = _percentile(job_samples, 50)
+        share = duplicate_p50 / job_p50 if job_p50 > 0 else 0.0
+        if (duplicate_p50 < _OPT105_MIN_DUPLICATE_STEP_S
+                or share < _OPT105_MIN_JOB_SHARE):
+            continue
+        wc, cap_note = _cap_wall_clock(duplicate_p50, job_name, crit)
+        effective_volume = _effective_volume(
+            monthly_volume, len(duplicate_samples), len(jobs_per_run))
+        runner_minutes = (round(duplicate_p50 * effective_volume / 60.0, 1)
+                          if effective_volume else None)
+        population_count = len(observed_prs) or len(observed_shas)
+        runs_per_pr = (len(duplicate_samples) / population_count
+                       if population_count else 1.0)
+        step_names = [name for name in matched_steps if name in observed_steps]
+        source_text = ", ".join(f"`{source}`" for source in sorted(hook_sources))
+        evidence = (
+            f"Local hook configuration {source_text} runs the same resolved commands "
+            f"as {len(step_names)} measured step(s) in PR job `{job_name}`. Those steps "
+            f"total {duplicate_p50:.0f}s at p50 ({share * 100:.0f}% of the job) over "
+            f"{len(duplicate_samples)} sampled run(s); the sample has "
+            f"{runs_per_pr:.1f} workflow run(s) per PR.")
+        slow_value, slow_url = max(duplicate_samples, key=lambda row: row[0])
+        measured = _measured_evidence(
+            ["PR job", "Repeated hook steps", "P50", "Share of job", "Samples",
+             "Slowest run (job log)"],
+            [[f"`{job_name}`", ", ".join(f"`{name}`" for name in step_names),
+              f"{duplicate_p50:.0f}s", f"{share * 100:.0f}%",
+              str(len(duplicate_samples)), _link(slow_value, slow_url)]],
+            summary=evidence,
+            note=("Commands were matched after resolving package scripts on both the "
+                  "local-hook and workflow sides; duration comes from jobs API step "
+                  "timestamps. The credited p50 is a ceiling until input-keyed reuse "
+                  "is measured after adoption."))
+        size_note = ("measured repeated-step p50; default input-keyed reuse keeps CI "
+                     "authoritative and may leave a small cache-validation floor")
+        if cap_note:
+            size_note += "; " + cap_note
+        finding = _new_finding(
+            "OPT105", "MEDIUM", "Pull-request CI repeats work already run by a local hook",
+            wf_path, job_name, evidence, "reuse-local-hook-work-by-input",
+            _catalog_anchor("OPT105", "Local Hook Work Is Repeated in Pull-Request CI"),
+            start_idx + len(out) + 1, wc_p50=wc, rm=runner_minutes,
+            size_note=size_note, realization="direct" if wc > 0 else "none",
+            measured_evidence=measured)
+        finding["sizing_basis"] = "measured"
+        finding["hook_duplication"] = {
+            "kind": "opt105_hook_duplication",
+            "yaml_job": yaml_key,
+            "hook_sources": sorted(hook_sources),
+            "steps": step_names,
+            "duplicate_p50_s": round(duplicate_p50, 1),
+            "job_p50_s": round(job_p50, 1),
+            "job_share": round(share, 6),
+            "sample_count": len(duplicate_samples),
+            "runs_per_pr_commit": round(runs_per_pr, 3),
+            "monthly_volume": effective_volume,
+        }
+        out.append(finding)
+    return out
 
 
 def _rl_effective_scripts(wd: str, scripts_by_dir: dict[str, dict[str, str]],
@@ -32878,6 +33160,23 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         for _f in new:
             if isinstance(_f.get("type_aware_lint"), dict):
                 _f["type_aware_lint"]["merge_group_workflows"] = list(_mq)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+
+        # OPT105 joins supported local-hook configurations to PR workflow commands
+        # through the shared package-script resolver, then admits only steps whose
+        # jobs-API timings clear the named duration/share floors. It makes no gh call.
+        try:
+            new = _detect_opt105_hook_duplication(
+                root, wf_path, jobs_per_run, crit, _wf_docs.get(wf_path, {}),
+                findings_doc.get("type_aware_lint"), opt65_monthly, next_id,
+                is_pr=is_pr)
+        except Exception as e:  # noqa: BLE001 — never take the data pass down
+            logger.warning("OPT105 detector failed on %s: %s: %s",
+                           wf_path, type(e).__name__, e)
+            _skip_detectors(wf_path, ["OPT105"],
+                            f"the local-hook duplication check failed ({type(e).__name__})")
+            new = []
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
