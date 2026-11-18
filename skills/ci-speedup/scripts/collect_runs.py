@@ -6798,6 +6798,22 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
+    if f.get("pattern") == "OPT24":
+        floor = f.get("runner_minute_setup_floor_s")
+        if isinstance(floor, (int, float)) and floor > 0 and monthly_volume:
+            f["runner_minute_effect"] = {
+                "direction": "added_cost",
+                "runner_min_per_month": round(float(floor) * monthly_volume / 60.0, 1),
+                "runs_per_month": monthly_volume,
+                "setup_floor_s": round(float(floor), 1),
+                "assumed_shards": 2,
+            }
+        else:
+            f["runner_minute_effect"] = {
+                "direction": "unsized",
+                "reason": "no measured repeated setup floor or monthly run volume",
+                "assumed_shards": 2,
+            }
     cache_confirmation = f.get("cache_log_confirmation")
     confirmed_miss_majority = (
         isinstance(cache_confirmation, dict)
@@ -10584,6 +10600,11 @@ def _detect_opt25_shard_imbalance(
             wc_p50=wc, rm=None, size_note=size_note,
             realization=("direct" if wc > 0 else "none"), measured_evidence=me,
         ))
+        out[-1]["runner_minute_effect"] = {
+            "direction": "unsized",
+            "reason": "the added split job's repeated setup floor was not measured",
+            "assumed_shards": 2,
+        }
         if family is not None:
             out[-1]["shard_family"] = family
             out[-1]["evidence"] = summary
@@ -24550,6 +24571,10 @@ def _detect_opt24_long_test_no_sharding(
         if pre_test_floor is not None:
             finding["pre_test_floor_s"] = round(pre_test_floor, 1)
             finding["shardable_test_s"] = round(shardable, 1)
+            finding["runner_minute_setup_floor_s"] = round(pre_test_floor, 1)
+        elif decomp is not None and decomp.get("setup_build_s", 0) > 0:
+            finding["runner_minute_setup_floor_s"] = round(
+                float(decomp["setup_build_s"]), 1)
         elif measure_first:
             finding["pre_test_floor_unmeasured"] = True
         out.append(finding)

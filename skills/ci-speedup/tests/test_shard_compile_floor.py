@@ -245,6 +245,14 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
     assert cargo["wall_clock_p50_s"] <= 5.0, (
         "the 49m50s compile repeats on every shard, so it is not shardable payload")
     assert "49m 50s" in cargo["measured_evidence"]["note"]
+    effect = cargo["runner_minute_effect"]
+    assert effect == {
+        "direction": "added_cost",
+        "runner_min_per_month": 598.0,
+        "runs_per_month": 12,
+        "setup_floor_s": 2990.0,
+        "assumed_shards": 2,
+    }
 
     go = _finding(doc, "go tests")
     assert go["wall_clock_p50_s"] == 0.0
@@ -254,6 +262,9 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
     assert jest["wall_clock_p50_s"] == 1400.0
 
     report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    assert "+598 runner-min/month" in report
+    assert "assumes 2 shards" in report
+    assert "scales as (N-1)" in report
     assert "| test compile log probe | 3 job log(s) read |" in report
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"

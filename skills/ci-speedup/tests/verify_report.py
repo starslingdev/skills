@@ -17060,6 +17060,54 @@ def check_job_adding_prompts_state_runner_minute_effect(
         "; ".join(failures[:6]) if failures
         else f"{len(blocks)} coding-agent prompt(s) checked",
     )
+
+
+def check_wall_clock_runner_minute_effects(
+        report: str, findings_path: Path | None) -> Check:
+    """Re-derive signed OPT24 cost stamps and reject bare-zero disclosures."""
+    name = "wall-clock fixes state a signed runner-minute effect"
+    if findings_path is None or not findings_path.exists():
+        return Check(name, True, "findings JSON unavailable", skipped=True)
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings JSON unreadable", skipped=True)
+    failures: list[str] = []
+    findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
+    for finding in findings:
+        pattern = str(finding.get("pattern") or "")
+        if pattern not in {"OPT24", "OPT25"}:
+            continue
+        effect = _as_dict(finding.get("runner_minute_effect"))
+        if not effect and finding.get("sizing_basis") != "measured":
+            continue  # legacy/synthetic verifier fixture, not collector output
+        direction = effect.get("direction")
+        if direction not in {"added_cost", "unsized"}:
+            failures.append(f"{pattern} has no signed or explicitly unsized effect")
+            continue
+        if direction == "unsized":
+            if not str(effect.get("reason") or "").strip():
+                failures.append(f"{pattern} unsized effect has no reason")
+            continue
+        floor = _num(effect.get("setup_floor_s"))
+        runs = _num(effect.get("runs_per_month"))
+        amount = _num(effect.get("runner_min_per_month"))
+        shards = _num(effect.get("assumed_shards"))
+        expected = (floor * (shards - 1) * runs / 60.0
+                    if None not in (floor, runs, shards) else None)
+        if (expected is None or amount is None or expected <= 0
+                or abs(amount - round(expected, 1)) > 0.01):
+            failures.append(f"{pattern} added cost does not re-derive from floor*(N-1)*runs")
+    if "fix_key=emulated-image-compile" in report:
+        prompt = report[report.find("fix_key=emulated-image-compile"):]
+        if ("Runner-minute effect: saving" not in prompt
+                and "Runner-minute effect: not sized" not in prompt):
+            failures.append("emulated-image wall-clock lever has no sized/unsized effect")
+    if re.search(r"Runner-minute effect:\s*(?:0|\+0)(?:\.0+)?\b", report):
+        failures.append("report contains a bare zero runner-minute effect")
+    return Check(name, not failures,
+                 "; ".join(failures[:8]) if failures
+                 else "signed/unsized runner-minute effects re-derived")
 def check_commit_queue_work_credit(report: str, findings_path: Path | None,
                                    report_path: Path | None = None) -> Check:
     """Queue is in the developer wait, but only runner-pool findings own it.
@@ -17435,6 +17483,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_pole_anchors_resolve(report),
         check_rca_hands_off_never_prescribes(report),
         check_job_adding_prompts_state_runner_minute_effect(report, findings_path),
+        check_wall_clock_runner_minute_effects(report, findings_path),
         check_measured_cause_matches_rendered_timeline(report),
         check_skip_family_prompts_carry_pending_caveat(report),
         check_also_noticed_count_honest(report),

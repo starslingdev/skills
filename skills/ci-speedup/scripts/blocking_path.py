@@ -4567,6 +4567,74 @@ _SHARD_RUNNER_MINUTE_LINE = (
     "each job; N shards also add roughly (N−1) × the measured pre-test floor in runner "
     "minutes. Measure compile and setup before adding jobs."
 )
+
+
+def _finding_runner_minute_effect_line(finding: dict[str, Any]) -> str:
+    """Render a signed compute effect for a job-expanding wall-clock lever."""
+    effect = finding.get("runner_minute_effect")
+    if not isinstance(effect, dict) or effect.get("direction") == "unsized":
+        reason = (effect or {}).get("reason") if isinstance(effect, dict) else None
+        tail = f" ({reason})" if reason else ""
+        return ("Runner-minute effect: not sized" + tail
+                + "; extra shard jobs repeat checkout and setup and bill each job.")
+    if effect.get("direction") == "added_cost":
+        amount = _num(effect.get("runner_min_per_month")) or 0.0
+        shards = int(_num(effect.get("assumed_shards")) or 2)
+        floor = _num(effect.get("setup_floor_s")) or 0.0
+        runs = int(_num(effect.get("runs_per_month")) or 0)
+        return (
+            f"Runner-minute effect: +{amount:g} runner-min/month added cost; assumes "
+            f"{shards} shards and a measured {floor:g}s repeated setup floor across "
+            f"{runs} runs/month; scales as (N−1) with N shards."
+        )
+    return "Runner-minute effect: not sized."
+
+
+def _group_runner_minute_effect_line(findings: list[dict[str, Any]]) -> str:
+    sized = [f for f in findings
+             if isinstance(f.get("runner_minute_effect"), dict)
+             and f["runner_minute_effect"].get("direction") == "added_cost"]
+    if not sized:
+        return _finding_runner_minute_effect_line(findings[0])
+    amount = sum(_num(f["runner_minute_effect"].get("runner_min_per_month")) or 0.0
+                 for f in sized)
+    runs = sorted({int(_num(f["runner_minute_effect"].get("runs_per_month")) or 0)
+                   for f in sized})
+    floors = sorted({_num(f["runner_minute_effect"].get("setup_floor_s")) or 0.0
+                     for f in sized})
+    detail = (f"a measured {floors[0]:g}s repeated setup floor across {runs[0]} runs/month"
+              if len(floors) == len(runs) == 1
+              else f"{len(sized)} measured repeated setup floors")
+    return (f"Runner-minute effect: +{amount:g} runner-min/month added cost; assumes "
+            f"2 shards and {detail}; extra shard jobs repeat checkout and setup and bill "
+            "each job; scales as (N−1) with N shards.")
+
+
+def _emulated_runner_minute_effect_line(
+        doc: dict[str, Any], pole: dict[str, Any], leaf: dict[str, Any]) -> str:
+    """Size a confirmed emulated-build saving and bind it to measured compute."""
+    if (leaf.get("fix_key") != "emulated-image-compile"
+            or leaf.get("builder_topology_unconfirmed") is True):
+        return "Runner-minute effect: not sized; builder topology is unconfirmed."
+    magnitude = _num((leaf.get("magnitude") or {}).get("value"))
+    wf = str(pole.get("workflow_file") or "")
+    job = str(pole.get("job") or pole.get("check") or "")
+    rows = [row for row in ((doc.get("runner_minute_spine") or {}).get("rows") or [])
+            if str(row.get("workflow_file") or "") == wf
+            and str(row.get("job_name") or "") == job]
+    if magnitude is None or not rows:
+        return "Runner-minute effect: not sized; no measured cost-spine row."
+    volume = sum(_num(row.get("effective_monthly_job_volume")) or 0.0 for row in rows)
+    measured = sum(
+        _num(row.get("completed_billable_equiv_min_per_month")) or 0.0
+        for row in rows)
+    if volume <= 0 or measured <= 0:
+        return "Runner-minute effect: not sized; measured monthly compute is unavailable."
+    modeled = magnitude * volume / 60.0
+    saving = min(modeled, measured)
+    return (f"Runner-minute effect: saving ~{saving:g} runner-min/month; modeled from "
+            f"{magnitude:g}s across {volume:g} runs/month and capped at the job's "
+            f"measured compute ({measured:g} runner-min/month).")
 _MACHINE_RUNNER_MINUTE_LINE = (
     "Runner cost effect: A faster machine can reduce elapsed runner minutes, while "
     "each runner class bills at its own rate; compare both elapsed minutes and billed cost."
@@ -5779,10 +5847,13 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
            *_shard_floor_prompt_lines(pole),
            ""]
 
+    if leaf.get("runner_minute_effect_line"):
+        out += [str(leaf["runner_minute_effect_line"]), ""]
+
     fix_key = str((leaf or {}).get("fix_key", ""))
     if fix_key in _JOB_EXPANDING_LEAVES:
         out += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE, ""]
-    elif structural:
+    elif structural and not leaf.get("runner_minute_effect_line"):
         out += ["Structural cost context: This pole also matched a structural catalog "
                 "pattern; account for its job or machine movement separately.",
                 _RELOCATION_RUNNER_MINUTE_LINE, ""]
@@ -5998,7 +6069,10 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
            *_timing_spread_prompt_lines(pole),
            *_shard_floor_prompt_lines(pole),
            ""]
-    if struct_pats:
+    if "OPT24" in dd_pats or "OPT25" in dd_pats:
+        out += [_CONCURRENCY_ORDER_LINE,
+                _group_runner_minute_effect_line(list(data_driven or [])), ""]
+    elif struct_pats:
         out += [_RELOCATION_RUNNER_MINUTE_LINE, ""]
     wtg = ["WHERE THE TIME GOES" + (f" (representative run {rid})" if rid else "")]
     pole_dom = str(pole.get("dominant_step") or "")
@@ -11349,7 +11423,8 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "crediting seconds."
         )
     if pat in {"OPT24", "OPT25"}:
-        body += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE]
+        body += [_CONCURRENCY_ORDER_LINE,
+                 _group_runner_minute_effect_line(members)]
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.
@@ -12887,6 +12962,8 @@ def _also_noticed_block(findings: list[dict[str, Any]],
                          "its catalog fix **cuts developer wall-clock**, it is not a "
                          "bill-only cleanup. See the spine above and this pattern's "
                          "catalog recipe below for the remedy.")
+            if pat in {"OPT24", "OPT25"}:
+                lines.append("**" + _group_runner_minute_effect_line(ms) + "**")
         elif saves_wc:
             # `spine_rare`: the job carries a real multi-minute wall-clock saving, but the spine
             # DEMOTES it as opt-in/rare (present on only a minority of PRs). So its fix cuts
@@ -13350,8 +13427,10 @@ def _data_driven_for_pole(pole: dict[str, Any],
             continue  # pre-start wait has its own section
         if _is_opt79_pole_finding(f):
             continue  # rendered AT the pole (`_opt79_pole_for`), never in the appendix
-        if not _saves_wall_clock(f):
-            continue  # only a credited-wall-clock finding claims the spine
+        if (not _saves_wall_clock(f)
+                and _as_dict(f.get("runner_minute_effect")).get("direction")
+                != "added_cost"):
+            continue  # credited wall-clock or priced added compute claims the pole
         jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
         if not jobs:
             continue  # an unrouted finding can't anchor to a pole
@@ -16386,6 +16465,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # leaf whose category contradicts the pole's dominant work is kept as a secondary note,
         # never crowned).
         log_text, leaf, offcat_leaf = _pole_leaves[id(p)]
+        if leaf is not None and leaf.get("fix_key") == "emulated-image-compile":
+            leaf = dict(leaf)
+            leaf["runner_minute_effect_line"] = _emulated_runner_minute_effect_line(
+                doc, p, leaf)
         sample = _match(samples)
         run_url = _match(log_runs)
         timeline = _match(steps)
