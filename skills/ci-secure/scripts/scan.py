@@ -3075,6 +3075,184 @@ def _package_manager_pin(root: Path | None) -> tuple[str, int, str] | None:
     return m.group(1), int(m.group(3)), m.group(2)
 
 
+# A `cd` whose target is fully static: bare or quoted, with no variable,
+# substitution, or expression anywhere in it. Anything else — `cd $DIR`,
+# `cd "apps/${{ matrix.app }}"`, `cd $(dirname …)` — makes the install's
+# directory unknowable, and guessing a package's pin is the defect class this
+# scanner may not commit.
+_STATIC_CD_RE = re.compile(
+    r"^cd\s+(\"[^\"$`]+\"|'[^']+'|[^\s;&|<>$`\"']+)\s*$")
+
+
+def _segments_before_install(
+    text: str,
+    job_range: tuple[int, int] | None,
+    candidates: list[tuple[int, str, str]],
+    ordinal: int,
+) -> list[tuple[int, str]]:
+    """Every shell segment in the job BEFORE the ordinal-th candidate's
+    install.
+
+    Replays `_install_lines`' own walk — one candidate per qualifying LINE —
+    but splits each line into segments, because the install's own line can
+    carry its directory change: `cd apps/web && pnpm install`. The candidate's
+    install is the line's FIRST unprotected-install segment (the same
+    predicate `_is_unprotected_install` applies); segments before it ran
+    before it, segments after it did not. Lines with no install are split
+    into their commands for the same reason: a `cd` after an `&&` on such a
+    line still moves the install's directory.
+    """
+    lines = text.splitlines()
+    shell_lines = _run_scalar_line_numbers(text)
+    start, end = job_range if job_range else (1, len(lines))
+    out: list[tuple[int, str]] = []
+    seen = 0
+    for line_no, _raw, cmd in _shell_commands(lines):
+        if line_no < start or line_no > min(end, len(lines)):
+            continue
+        if line_no not in shell_lines:
+            continue
+        if not _is_unprotected_install(cmd):
+            # Split here too, not only on lines that carry an install:
+            # `echo preparing && cd apps/web` is one LINE whose directory
+            # change lives in a later command, and keeping the line whole hid
+            # that `cd` from the install's directory reader.
+            out.extend(
+                (line_no, seg) for seg in _install_command_segments(cmd))
+            continue
+        counted = False
+        for seg in _install_command_segments(cmd):
+            if (not counted
+                    and _INSTALL_CMD_RE.search(seg)
+                    and not _IGNORE_SCRIPTS_RE.search(seg)
+                    and _is_dependency_tree_install(seg)):
+                if seen == ordinal:
+                    return out
+                seen += 1
+                counted = True  # one candidate per line, as `_install_lines`
+                continue
+            out.append((line_no, seg))
+    return out
+
+
+def _install_pin_directory(
+    text: str,
+    doc: dict,
+    job: Any,
+    job_name: str,
+    job_range: tuple[int, int] | None,
+    candidates: list[tuple[int, str, str]],
+    ordinal: int,
+    marks: list[Any] | None,
+) -> str | None:
+    """The repo-relative directory the ordinal-th install runs in, or None.
+
+    A dependency install resolves the `packageManager` pin of the package it
+    installs — in a monorepo that package is often NOT the repo root (issue
+    #33). The directory is the step's own `working-directory:`, else the
+    job's or workflow's `defaults.run.working-directory`, moved again by any
+    static `cd` above the install in the same `run:` scalar. None when any
+    leg is unknowable (an expression, an unreadable `cd`, an absolute path):
+    the caller falls back to the repo root, the historical reading, which is
+    right for the single-package repos the check was written against.
+    """
+    install_line = candidates[ordinal][0]
+    # A step mark's end_line is the parser's node end — it can spill one line
+    # into the NEXT step, so a single-line step's range also "contains" its
+    # successor's first line. The install belongs to the matching step whose
+    # run scalar starts latest.
+    step = max(
+        (m for m in (marks or [])
+         if m.job == job_name and m.run_line is not None
+         and m.start_line <= install_line <= m.end_line),
+        key=lambda m: m.run_line,
+        default=None,
+    )
+    if step is not None and step.working_directory:
+        # The step's own `working-directory:` wins GitHub's precedence over
+        # the job/workflow default, so it also wins the KNOWABILITY check:
+        # an unknowable default (an expression, an absolute path) says
+        # nothing about a step that names its own directory.
+        if _EXPRESSION_TOKEN_RE.search(step.working_directory):
+            return None
+        base = _resolve_path(".", step.working_directory)
+        if os.path.isabs(base):
+            return None
+    else:
+        base = _default_working_directory(doc, job)
+        if base.startswith(_OPAQUE_DIR) or os.path.isabs(base):
+            return None
+    if step is not None:
+        for cmd_line, cmd in _segments_before_install(
+                text, job_range, candidates, ordinal):
+            if cmd_line < step.run_line:
+                continue
+            # An inline `run:` leaves its YAML key on the first segment of
+            # its line: `- run: cd apps/web && pnpm install`.
+            run_key = _RUN_KEY_LINE_RE.match(cmd)
+            if run_key is not None:
+                cmd = run_key.group(2)
+            stripped = _command_after_assignments(cmd).strip()
+            if stripped != "cd" and not stripped.startswith("cd "):
+                continue
+            m = _STATIC_CD_RE.match(stripped)
+            if m is None:
+                # A `cd` this scanner cannot follow — the directory the
+                # install resolves its pin from is unknowable.
+                return None
+            target = m.group(1)
+            if len(target) > 1 and target[0] in "\"'" and target[-1] == target[0]:
+                target = target[1:-1]
+            if target == "-":  # `cd -` goes to $OLDPWD — unknowable here.
+                return None
+            if target.startswith("/") or _RUNNER_ABSOLUTE_RE.match(target):
+                return None
+            base = _resolve_path(base, target)
+    if base == ".." or base.startswith("../"):
+        return None
+    return base
+
+
+def _package_manager_pin_at(
+    root: Path | None, rel_dir: str | None
+) -> tuple[tuple[str, int, str] | None, str | None]:
+    """`(pin, origin)` — origin is the repo-relative directory the pin came
+    from, None when it came from the repo root (or there is no pin).
+
+    The install's own directory is read FIRST (issue #33); a nested package
+    without a `packageManager` field falls back to the root's pin, the
+    pre-#33 reading for every repo. A directory that resolves outside the
+    checkout is never read through (the symlink class of issue #37).
+    """
+    if root is None:
+        return None, None
+    if rel_dir and rel_dir != ".":
+        root_res = root.resolve()
+        candidate = (root_res / rel_dir).resolve()
+        # Contain the MANIFEST, not just its directory: a package.json that
+        # is itself a symlink out of the checkout would otherwise be read
+        # through, feeding the note (and the suppression gate) a file the
+        # repo does not carry — the symlink class of issue #37.
+        manifest = (candidate / "package.json").resolve()
+        if (candidate != root_res and root_res in candidate.parents
+                and manifest != root_res and root_res in manifest.parents):
+            pin = _package_manager_pin(candidate)
+            if pin is not None:
+                return pin, rel_dir
+    return _package_manager_pin(root), None
+
+
+def _pin_phrase(pin: tuple[str, int, str], origin: str | None) -> str:
+    """The `packageManager` clause of the per-manager condition note, naming
+    WHERE the pin was read when it is not the repo root (issue #33) — a
+    reader told the nested package pins `pnpm@9` cannot check that against
+    the root `package.json` pinning `pnpm@10`."""
+    if origin:
+        return (f"the installed package (`{origin}`) pins "
+                f"`{pin[0]}@{pin[2]}` via its `packageManager`")
+    return f"this repo pins `{pin[0]}@{pin[2]}` via `packageManager`"
+
+
 def _pnpm_build_allowlist(root: Path | None) -> str | None:
     """``"restrictive"`` / ``"permissive"`` / None for the repo's build
     allowlist.
@@ -3144,7 +3322,7 @@ def _allowlist_writes(
     text: str, job_range: tuple[int, int] | None
 ) -> list[tuple[int, bool, str]]:
     """Every EXECUTED write to the build allowlist in this job, in order:
-    ``(line_no, disables, verbatim line)``.
+    ``(line_no, disables, verbatim line, matched segment)``.
 
     This is the one thing that suppresses a P14.25 finding OUTRIGHT, so the
     line has to be an executed mutation of the package manager's build
@@ -3209,15 +3387,117 @@ def _allowlist_writes(
                     "a mitigation: %s", idx, raw.strip(),
                 )
                 continue
-            # A write that is not a disable re-opens the allowlist.
+            # A write that is not a disable re-opens the allowlist. The
+            # matched SEGMENT travels with the row: the caller resolves the
+            # write's target file from it (the verbatim line can carry other
+            # config-looking tokens in inert text around the real write).
             writes.append(
-                (idx, bool(_ALLOWLIST_DISABLE_RE.search(seg)), raw.strip())
+                (idx, bool(_ALLOWLIST_DISABLE_RE.search(seg)), raw.strip(),
+                 seg)
             )
     return writes
 
 
+def _allowlist_write_rel_target(
+    seg: str,
+    line_no: int,
+    doc: dict,
+    job: Any,
+    job_name: str,
+    marks: list[Any] | None,
+) -> str | None:
+    """The repo-relative config path an allowlist write lands on, or None.
+
+    `yq … -i pnpm-workspace.yaml` writes the file IN THE STEP'S working
+    directory — the same command protects the root config in one job and a
+    nested package's own workspace file in another, so the target cannot be
+    matched to an install without placing it. `pnpm config set` writes the
+    project's `.npmrc`. None when the directory is unknowable (an
+    expression, an absolute path) — the caller then treats the write as
+    covering nothing outside the root.
+    """
+    if _ALLOWLIST_WRITE_RES[2].search(seg):
+        raw_target = ".npmrc"
+    else:
+        m = re.search(_ALLOWLIST_TARGET, seg)
+        if m is None:
+            return None
+        raw_target = m.group(0)
+    step = max(
+        (mk for mk in (marks or [])
+         if mk.job == job_name and mk.run_line is not None
+         and mk.start_line <= line_no <= mk.end_line),
+        key=lambda mk: mk.run_line,
+        default=None,
+    )
+    if step is not None and step.working_directory:
+        if _EXPRESSION_TOKEN_RE.search(step.working_directory):
+            return None
+        base = _resolve_path(".", step.working_directory)
+        if os.path.isabs(base):
+            return None
+    else:
+        base = _default_working_directory(doc, job)
+        if base.startswith(_OPAQUE_DIR) or os.path.isabs(base):
+            return None
+    rel = _resolve_path(base, raw_target)
+    if os.path.isabs(rel) or rel == ".." or rel.startswith("../"):
+        return None
+    return rel
+
+
+def _install_workspace_config_dir(root: Path | None, install_rel: str) -> str:
+    """The directory whose build-allowlist file a pnpm install in
+    `install_rel` actually reads: the nearest ancestor-or-self carrying a
+    pnpm-workspace file (pnpm honors only the workspace root's allowlist),
+    else the install's own directory — a package outside any workspace
+    answers to its own config."""
+    if root is None:
+        return install_rel
+    root_res = root.resolve()
+    d = install_rel
+    while True:
+        cand = root_res if d == "." else (root_res / d).resolve()
+        if (cand == root_res or root_res in cand.parents) and any(
+                (cand / n).is_file()
+                for n in ("pnpm-workspace.yaml", "pnpm-workspace.yml")):
+            return d
+        if d == ".":
+            break
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent or "."
+    return install_rel
+
+
+def _allowlist_write_covers(
+    target_rel: str | None, install_rel: str, config_dir: str
+) -> bool:
+    """Does a write to `target_rel` change the allowlist an install in
+    `install_rel` resolves? A write aimed at the ROOT's pnpm-workspace.yaml
+    says nothing about a nested package that is its own workspace — the
+    root write never touches the config that install reads. A write INTO
+    the install's own directory counts even before the file exists:
+    creating `apps/web/pnpm-workspace.yaml` makes the install its own
+    workspace root with exactly the allowlist the write set.
+    """
+    if target_rel is None:
+        return False
+    parent, _, name = target_rel.rpartition("/")
+    parent = parent or "."
+    if name in ("pnpm-workspace.yaml", "pnpm-workspace.yml", ".npmrc"):
+        return parent in (install_rel, config_dir)
+    if name == "package.json":
+        # pnpm reads the pnpm.onlyBuiltDependencies field from the workspace
+        # root's manifest; editing a member package's own package.json
+        # changes nothing the install resolves.
+        return parent == config_dir
+    return False
+
+
 def _builds_disabled_at(
-    writes: list[tuple[int, bool, str]], install_line: int,
+    writes: list[tuple[int, bool, str, ...]], install_line: int,
     concurrent: Callable[[int, int], bool] | None = None,
 ) -> str | None:
     """The verbatim line that leaves builds disabled at `install_line`, if the
@@ -3226,7 +3506,7 @@ def _builds_disabled_at(
     A write in a step that may run at the same time as the install (see
     `_StepTiming`) is not known to land before it: it never counts as the
     protecting write, and if it re-enables builds the install is exposed."""
-    def _racing(w: tuple[int, bool, str]) -> bool:
+    def _racing(w: tuple[int, bool, str, ...]) -> bool:
         return concurrent is not None and concurrent(w[0], install_line)
     if any(_racing(w) and not w[1] for w in writes):
         return None
@@ -3288,6 +3568,7 @@ def _manager_condition_note(
     command: str,      # every `run:` scalar in the job, joined
     pin: tuple[str, int, str] | None,
     allowlist: str | None,
+    pin_origin: str | None = None,
 ) -> str:
     """The per-manager sentence: under what condition do scripts actually run?
 
@@ -3305,8 +3586,8 @@ def _manager_condition_note(
             )
         elif pin and pin[0] == "npm":
             version = (
-                f"this repo pins `npm@{pin[2]}` via `packageManager`, and that "
-                f"major "
+                _pin_phrase(pin, pin_origin)
+                + ", and that major "
                 + ("does not run them by default" if pin[1] >= 12
                    else "still runs them")
             )
@@ -3328,8 +3609,7 @@ def _manager_condition_note(
         )
         signals: list[str] = []
         if pin and pin[0] == "pnpm":
-            signals.append(
-                f"this repo pins `pnpm@{pin[2]}` via `packageManager`")
+            signals.append(_pin_phrase(pin, pin_origin))
         if allowlist == "permissive":
             signals.append(
                 "and its committed allowlist still permits at least one "
@@ -3356,8 +3636,7 @@ def _manager_condition_note(
             return (
                 "Yarn Classic (1.x) runs dependency lifecycle scripts by "
                 "default; Yarn Berry (2+) is governed by its `enableScripts` "
-                f"setting — this repo pins `yarn@{pin[2]}` via "
-                f"`packageManager`, i.e. {era}."
+                f"setting — {_pin_phrase(pin, pin_origin)}, i.e. {era}."
             )
         return (
             "Yarn Classic (1.x) runs dependency lifecycle scripts by default; "
@@ -3409,8 +3688,25 @@ def _correlation_install_scripts_in_privileged_job(
         return
     ranges = {name: (start, end) for name, start, end in job_line_ranges(file_path)}
     root = _repo_root_for_workflow(file_path)
-    pin = _package_manager_pin(root)
     allowlist = _pnpm_build_allowlist(root)
+    marks = _step_marks(text)
+
+    def _pin_for_install(
+        job: Any,
+        job_name: str,
+        candidates: list[tuple[int, str, str]],
+        ordinal: int,
+    ) -> tuple[tuple[str, int, str] | None, str | None]:
+        """The `packageManager` pin THIS install resolves, and where from.
+
+        Read from the install's own working directory first — a monorepo's
+        root pin says nothing about a nested package pinned differently
+        (issue #33) — falling back to the repo root.
+        """
+        rel = _install_pin_directory(
+            text, doc, job, job_name, ranges.get(job_name),
+            candidates, ordinal, marks)
+        return _package_manager_pin_at(root, rel)
     for job_name, job in _walk_jobs(doc):
         runs = _job_run_texts(job)
         if not any(_scalar_has_unprotected_install(r) for r in runs):
@@ -3438,10 +3734,12 @@ def _correlation_install_scripts_in_privileged_job(
         manager = _install_manager(command)
 
         # HARD evidence of disablement — an in-job step that empties the build
-        # allowlist before the install, on a repo that pins pnpm >= 10 (where
-        # that allowlist is the mechanism). No finding at all; asserting one
-        # here would be a false positive against the repo's own mitigation.
-        if manager == "pnpm" and pin and pin[0] == "pnpm" and pin[1] >= 10:
+        # allowlist before the install, on an install whose OWN pin resolves
+        # pnpm >= 10 (the only place that allowlist is the mechanism). No
+        # finding at all; asserting one here would be a false positive against
+        # the repo's own mitigation.
+        exposed_ordinal = 0
+        if any(_install_manager(c[2]) == "pnpm" for c in candidates):
             allowlist_writes = _allowlist_writes(text, ranges.get(job_name))
             spans = _step_spans(text)
             # Mitigation is decided PER INSTALL, by the last allowlist write
@@ -3449,25 +3747,59 @@ def _correlation_install_scripts_in_privileged_job(
             # install again. Report the first install that is exposed, so the
             # evidence quotes a command the reader can actually act on; if
             # every install in the job is covered, there is no finding.
-            # …and only for pnpm installs: the pnpm build allowlist says
-            # nothing about an `npm ci` or `yarn install` in the same job.
+            # …and only for pnpm installs whose own pin is >= 10: the pnpm
+            # build allowlist says nothing about an `npm ci` in the same job,
+            # and it does not exist below pnpm 10, so a root pin of pnpm 10
+            # cannot lend its cover to a nested package pinned at 9 (#33).
+            # A disable write covers an install only if it lands on the
+            # config file THAT install reads: `yq … -i pnpm-workspace.yaml`
+            # at the root mitigates a root install, but a nested package
+            # that is its own workspace resolves its own allowlist, and the
+            # root write never touches it.
+            placed_writes = [
+                (ln, dis, verb,
+                 _allowlist_write_rel_target(
+                     seg, ln, doc, job, job_name, marks))
+                for ln, dis, verb, seg in allowlist_writes
+            ]
+
+            def _covering_writes(install_rel: str | None) -> list:
+                if install_rel is None or install_rel == ".":
+                    # A root install reads the root config — the pre-#33
+                    # semantics, where every in-job write counts.
+                    return placed_writes
+                cfg_dir = _install_workspace_config_dir(root, install_rel)
+                return [w for w in placed_writes
+                        if _allowlist_write_covers(w[3], install_rel, cfg_dir)]
+
             exposed = next(
-                (c for c in candidates
+                ((i, c) for i, c in enumerate(candidates)
                  if _install_manager(c[2]) != "pnpm"
+                 or not (
+                     (p := _pin_for_install(job, job_name, candidates, i))[0]
+                     and p[0][0] == "pnpm"
+                     and p[0][1] >= 10
+                 )
                  or _builds_disabled_at(
-                     allowlist_writes, c[0],
+                     _covering_writes(_install_pin_directory(
+                         text, doc, job, job_name, ranges.get(job_name),
+                         candidates, i, marks)),
+                     c[0],
                      lambda a, b: _lines_concurrent(spans, a, b)) is None),
                 None,
             )
             if exposed is None:
                 logger.debug(
                     "P14.25: %s jobs.%s disables dependency builds before "
-                    "every install on a pnpm>=10 pin — not a finding",
+                    "every install whose own pin carries the allowlist "
+                    "mechanism — not a finding",
                     file_path, job_name,
                 )
                 continue
-            line, raw, command = exposed
+            exposed_ordinal, (line, raw, command) = exposed
             manager = _install_manager(command)
+        pin, pin_origin = _pin_for_install(job, job_name, candidates,
+                                           exposed_ordinal)
 
         payoff_parts = []
         if secrets:
@@ -3493,7 +3825,7 @@ def _correlation_install_scripts_in_privileged_job(
                 + " — so a compromised dependency's install script executes "
                 "holding them. "
                 + _manager_condition_note(
-                    manager, "\n".join(runs), pin, allowlist,
+                    manager, "\n".join(runs), pin, allowlist, pin_origin,
                 )
             ),
         )
