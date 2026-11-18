@@ -16061,6 +16061,18 @@ def _opt82_tokens(segment: str) -> list[str]:
     return toks
 
 
+def _opt82_effective_env(
+        inherited: tuple[str, ...], local: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Canonical final values after inner assignments override outer ones."""
+    values: dict[str, str] = {}
+    for assignment in inherited + local:
+        name, separator, value = assignment.partition("=")
+        if separator:
+            values[name] = value
+    return tuple(f"{name}={values[name]}" for name in sorted(values))
+
+
 # Each exec prefix, and the runner the benchmark uses to run ESLint the same way.
 _OPT82_EXEC_PREFIXES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("npm", "exec", "--"), "npx"), (("npm", "exec"), "npx"),
@@ -16915,7 +16927,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                 unresolvable = unresolvable or ("unresolvable", "expression", chain)
             continue
         toks, local_env = _opt82_tokens_and_env(seg)
-        effective_env = inherited_env + local_env
+        effective_env = _opt82_effective_env(inherited_env, local_env)
         if relevant is None:
             while toks and toks[0] in _RL_SHELL_KEYWORDS:
                 toks = toks[1:]

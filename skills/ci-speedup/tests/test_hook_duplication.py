@@ -116,13 +116,14 @@ class _Client:
 
 
 def _collect(monkeypatch, tmp_path: Path, hook: str | None, *,
-             client_cls: type[_Client] = _Client) -> tuple[dict, str]:
+             client_cls: type[_Client] = _Client,
+             package_scripts: dict[str, str] | None = None) -> tuple[dict, str]:
     workflow = tmp_path / _WORKFLOW
     workflow.parent.mkdir(parents=True)
     workflow.write_text(_WORKFLOW_TEXT, encoding="utf-8")
-    (tmp_path / "package.json").write_text(json.dumps({
-        "scripts": {"tsc": "tsc", "lint": "eslint .", "test": "vitest run"},
-    }), encoding="utf-8")
+    (tmp_path / "package.json").write_text(json.dumps({"scripts": package_scripts or {
+        "tsc": "tsc", "lint": "eslint .", "test": "vitest run",
+    }}), encoding="utf-8")
     if hook is not None:
         husky = tmp_path / ".husky" / "pre-push"
         husky.parent.mkdir()
@@ -257,6 +258,32 @@ def test_different_explicit_environments_do_not_match(monkeypatch, tmp_path):
 
     assert not any(f.get("pattern") == "OPT105" for f in doc["findings"]), (
         "commands with different explicit environments are not the same work")
+
+
+def test_inner_environment_assignment_overrides_the_outer_value(monkeypatch, tmp_path):
+    workflow = _WORKFLOW_TEXT.replace(
+        "pnpm lint", "NODE_ENV=production pnpm lint")
+    monkeypatch.setattr(sys.modules[__name__], "_WORKFLOW_TEXT", workflow)
+
+    doc, _report = _collect(
+        monkeypatch, tmp_path, "pnpm lint",
+        package_scripts={
+            "tsc": "tsc", "lint": "NODE_ENV=test eslint .", "test": "vitest run",
+        },
+    )
+
+    assert any(f.get("pattern") == "OPT105" for f in doc["findings"]), (
+        "the script's inner assignment is the final value on both sides")
+
+
+def test_environment_assignment_order_does_not_change_the_match(monkeypatch, tmp_path):
+    workflow = _WORKFLOW_TEXT.replace("pnpm lint", "A=1 B=2 pnpm lint")
+    monkeypatch.setattr(sys.modules[__name__], "_WORKFLOW_TEXT", workflow)
+
+    doc, _report = _collect(monkeypatch, tmp_path, "B=2 A=1 pnpm lint")
+
+    assert any(f.get("pattern") == "OPT105" for f in doc["findings"]), (
+        "independent environment assignments are compared by final value")
 
 
 class _DuplicateStepNameClient(_Client):
