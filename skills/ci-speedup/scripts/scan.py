@@ -5022,13 +5022,15 @@ def _static_cache_family(
     for token in key_tokens:
         if token in families:
             return token
-    for token in key_tokens:
-        if (token not in ignored
-                and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
-            return token
+    # A path word that is also present in the literal key prefix identifies the
+    # cached tool more narrowly than a generic user/organisation prefix.
     for token in reversed(path_tokens):
         if (token in key_tokens
                 and token not in ignored
+                and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
+            return token
+    for token in key_tokens:
+        if (token not in ignored
                 and not re.fullmatch(r"v\d+(?:[._-]\d+)*", token)):
             return token
     text = " ".join(texts)

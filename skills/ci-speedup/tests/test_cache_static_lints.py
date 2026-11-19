@@ -217,6 +217,30 @@ def test_opt61_path_word_cannot_relabel_a_generic_key_prefix(tmp_path) -> None:
     assert unrelated_status == "unknown"
 
 
+def test_opt61_path_tool_outranks_an_unrelated_shared_key_prefix(tmp_path) -> None:
+    rows = _scan(tmp_path, """      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/bazel
+          key: acme-bazel-${{ github.sha }}
+          restore-keys: other-
+      - run: bazel build //...
+""")
+    row = next(item for item in rows if item["pattern"] == "OPT61"
+               and "restore" in item["evidence"].lower())
+    own_status, _line = collect_runs._cache_status_from_log(
+        "Cache not found for input keys: acme-bazel-deadbeef",
+        collect_runs._cache_keywords_for_finding(row),
+    )
+    unrelated_status, _line = collect_runs._cache_status_from_log(
+        "Cache not found for input keys: acme-python-deadbeef",
+        collect_runs._cache_keywords_for_finding(row),
+    )
+
+    assert row["cache_family"] == "bazel"
+    assert own_status == "miss"
+    assert unrelated_status == "unknown"
+
+
 def test_opt61_restore_key_cannot_relabel_the_saved_key_family(tmp_path) -> None:
     rows = _scan(tmp_path, """      - uses: actions/cache@v4
         with:
