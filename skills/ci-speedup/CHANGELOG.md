@@ -1,6 +1,7 @@
 # Changelog
 
 - **2026-11-18** — Keep real-repository golden gate comparisons independent of engine findings: recorded default-branch and all-branch protection select the representative PR shape, while expanded matrix requirements, recorded workflow dependencies, jobs and durations define the eligible oracle gate. Preserve runs with missing job lists as explicit partial reads, keep the Home Assistant pylint omissions separate from its hassfest share mismatch, and record that go-ethereum requires Lint while 32bit tests runs downstream. (#358)
+- **2026-11-18** — Let every ci-speedup entry script resolve its shipped sibling modules under Python isolated mode (`python3 -I`), with subprocess coverage across all seven command-line entry points. (#382)
 - **2026-11-15** — Preserve full commit identities in public golden recordings, mark comparisons that share normalized replay data, compare low-share gate counts within their uncertainty, pin rendered pole order and completed-sample spread to run creation dates, and keep incomplete recordings useful by replaying only run/job pairs whose evidence was captured, including copied runs whose jobs come from the normalized recording. (#352)
 - **2026-11-15** — Cache check-name tokenizing and job-name template patterns in `collect_runs.py`. Output is unchanged; the run-measurement step no longer redoes this work on every check-to-job comparison (millions of repeats on a large repository).
 - Keep schedule-, release-, and workflow-dispatch-only findings visible with their lane disclosure when their job also appears as a pull-request long pole.
@@ -36,6 +37,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-18** — Withhold per-commit typical-wait percentiles and queue/work projections when fewer than half of sampled commits have complete workflow job data, while retaining and disclosing every partial observation (#384).
+- **2026-11-18** — Keep equal-duration co-occurrence floors in canonical `checks[]` order so report verification breaks ties the same way as the renderer, independent of Python's hash seed and individual PR timing order (#383).
 - **2026-11-16** — Flag a measured Rust coverage long pole when its dominant `cargo llvm-cov` or `cargo tarpaulin` step uses Cargo's default debug-heavy, unoptimized test profile; keep explicitly optimized profiles quiet, fail closed on alternate manifests/profiles/environment overrides and package-scoped ambiguity, support unnamed and toolchain-qualified coverage steps, and leave savings uncredited until wall time improves with an unchanged covered-line count (#370).
 - **2026-11-16** — Detect wrapper-hidden duplicate test suites and package builds from matching completion signatures across or within job-log steps, carry readable runtime context forward from setup, keep different runtimes and packages quiet, and cap the opportunity at the later measured completion wall (#369).
 - **2026-11-15** — Restore the path-partitioned monorepo fixture's affected-package filter and per-package test command while retaining its package/runtime matrix, so the fixture again crowns the aggregation gate and exercises the applicable report checks (#356).

@@ -126,6 +126,56 @@ class _MissingSecondWorkflowRunClient(_TwoWorkflowClient):
         return super().json(endpoint, allow_missing)
 
 
+class _UnrepresentativeCompleteCommitsClient(_TwoWorkflowClient):
+    """The long check is common, but every commit carrying it is partial."""
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        match = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
+        if match and not re.search(r"per_page=1(?![0-9])", match.group(2)):
+            self.queries += 1
+            workflow_id = int(match.group(1))
+            count = 96 if workflow_id == 1 else 76
+            return {"workflow_runs": [{
+                "id": workflow_id * 1000 + index,
+                "event": "pull_request",
+                "head_sha": f"sample-sha-{index:02d}",
+                "status": "completed",
+                "conclusion": "success",
+                "created_at": _iso(index * 200),
+                "run_started_at": _iso(index * 200),
+                "updated_at": _iso(index * 200 + (36 if workflow_id == 1 else 116)),
+            } for index in range(count)]}
+        match = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
+        if match:
+            self.queries += 1
+            run_id = int(match.group(1))
+            if run_id >= 2000:
+                # The test check ran on 76/96 PRs, but none of its job lists was
+                # readable. Those commits must not silently disappear from the
+                # population used to call a wait "typical".
+                return {"jobs": []}
+            index = run_id - 1000
+            return {"jobs": [_job(
+                "lint", run_id, index * 200, index * 200 + 36)]}
+        match = re.match(r"repos/o/r/commits/sample-sha-(\d+)/check-runs", endpoint)
+        if match:
+            self.queries += 1
+            index = int(match.group(1))
+            checks = [{
+                "name": "lint",
+                "started_at": _iso(index * 200),
+                "completed_at": _iso(index * 200 + 36),
+            }]
+            if index < 76:
+                checks.append({
+                    "name": "test",
+                    "started_at": _iso(index * 200),
+                    "completed_at": _iso(index * 200 + 116),
+                })
+            return {"check_runs": checks}
+        return super().json(endpoint, allow_missing)
+
+
 class _PullRequestAndQueueClient(_TwoWorkflowClient):
     def json(self, endpoint: str, allow_missing: bool = False):
         match = re.match(r"repos/o/r/actions/workflows/(\d+)/runs\?(.*)", endpoint)
@@ -339,6 +389,42 @@ def test_collect_stamps_one_commit_wall_across_both_workflows_and_verifies(
     assert "p50 **25m 00s**" in report
     assert "p90 **25m 00s**" in report
     assert "projects to **16m 00s** (**1.56x**)" in report
+
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_collect_withholds_typical_wait_when_complete_commits_are_unrepresentative(
+        monkeypatch, tmp_path: Path):
+    doc = json.loads(json.dumps(_DOC))
+    doc["workflow_job_graph"] = {
+        _FIRST: {"lint": {"name": "lint", "needs": []}},
+        _SECOND: {"test": {"name": "test", "needs": []}},
+    }
+    monkeypatch.setattr(cr, "GhClient", _UnrepresentativeCompleteCommitsClient)
+
+    doc = cr.collect(doc, "o/r", max_runs=96, shallow_runs=96)
+    clock = doc["pr_critical_path"]["commit_wall_clock"]
+    report = bp.render(doc, captured_at="2026-11-18T00:00:00Z")
+
+    assert len(clock["facts"]) == 96
+    assert sum(fact["partial"] is True for fact in clock["facts"]) == 76
+    assert clock["p50_s"] is None
+    assert clock["p90_s"] is None
+    assert clock["representative"] is False
+    assert "20 of 96 sampled commits were complete" in report
+    assert "Per-commit PR wait" not in report
+    assert "**0m 36s**" not in report
+    assert report.count("A typical PR waits") <= 1
 
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"
