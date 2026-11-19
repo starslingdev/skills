@@ -37,6 +37,10 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple
 
+_DIR = Path(__file__).resolve().parent
+if str(_DIR) not in sys.path:
+    sys.path.insert(0, str(_DIR))
+
 import pr_lifecycle
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
@@ -11627,6 +11631,12 @@ def _commit_wall_disclosure_lines(commit_clock: dict[str, Any]) -> list[str]:
             f"> {len(partial)} sampled commit(s) were partial"
             + (f" ({'; '.join(reasons)})" if reasons else "")
             + "; their observed spans were excluded from these percentiles.")
+    if commit_clock.get("representative") is False and facts:
+        complete_count = sum(_num(f.get("wall_s")) is not None for f in facts)
+        lines.append(
+            f"> **Typical wait withheld:** {complete_count} of {len(facts)} sampled "
+            "commits were complete. Because the complete subset is a minority, it "
+            "is not representative enough to publish a typical per-commit wait.")
     return lines
 
 
@@ -14044,6 +14054,8 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     incomplete = doc.get("scan_incomplete")
     cp = doc.get("pr_critical_path") or {}
     ds = doc.get("data_sources") or {}
+    commit_clock = cp.get("commit_wall_clock") or {}
+    commit_lines = _commit_wall_disclosure_lines(commit_clock)
     # A BROKEN measurement is itself the news, even with zero static findings. Without
     # this, a run whose every run-list fetch failed and which happens to have no static
     # findings rendered as the bare one-line "_No measured critical path in this
@@ -14079,7 +14091,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
             and not incomplete and not broken and not uncredited_lines
             and not cache_guard_lines
             and not withheld_n and not opt79_off_pole and not opt81_n
-            and not parallel_n and not jest_coverage_n):
+            and not parallel_n and not jest_coverage_n and not commit_lines):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
@@ -14110,7 +14122,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                           str(e) for e in evs)]
     no_pr_gating = bool(_wt) and not _pr_gating_wfs
     gh_never_started = ds.get("partial_kind") == "gh_unavailable"
-    _static_commit_wall = _num((cp.get("commit_wall_clock") or {}).get("p50_s")) or 0.0
+    _static_commit_wall = _num(commit_clock.get("p50_s")) or 0.0
 
     # Machine-readable static-only marker (an HTML comment, invisible in rendered
     # markdown). `verify_report._is_static_only` keys off THIS, not the human banner
@@ -14182,14 +14194,25 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         # no scoped population. Do not follow it with the generic no-run-history banner,
         # which would falsely say that no PR-gating timing exists.
         pass
-    elif _static_commit_wall > 0:
-        out += ["> [!IMPORTANT]",
+    elif _static_commit_wall > 0 or commit_lines:
+        if commit_clock.get("representative") is False:
+            _commit_banner = (
+                "> **Commit timing was sampled, but the typical wait was withheld.** "
+                "Too few sampled commits had complete workflow job data to publish a "
+                "representative typical wait. The disclosure below keeps the incomplete "
+                "sample visible without turning its minority into a headline."
+            )
+        else:
+            _commit_banner = (
                 "> **Commit-level developer wait was measured, but no per-check spine "
                 "could be ranked.** The supplied commit timing still covers workflow "
                 "creation through the last completed job, including runner-pickup "
                 "queue. The sections below show that full wait and any static findings; "
                 "individual long poles remain unavailable because no file-backed pole "
-                "was resolved.", ""]
+                "was resolved."
+            )
+        out += ["> [!IMPORTANT]",
+                _commit_banner, ""]
     elif no_pr_gating:
         # Third shape (issue: false dormant banner on live shapes) — the repo may be
         # perfectly active; its CI just never gates a PR. Say THAT, own any timing we
@@ -14267,6 +14290,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         bottom = ["> **Bottom line.** The gh data pass never started, so this report "
                   "can't rank what a PR waits on before the merge — a gap in this run, "
                   "not a verdict on your CI."]
+    elif commit_clock.get("representative") is False and commit_lines:
+        bottom = ["> **Bottom line.** Commit timing was sampled, but the complete "
+                  "subset was not representative enough to publish a typical wait."]
     else:
         bottom = ["> **Bottom line.** No PR run timing was available, so this report "
                   "can't rank what a PR waits on before the merge."]
@@ -14298,10 +14324,8 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *queue_lines]
     if tier2_lines:
         out += ["---", "", *tier2_lines]
-    _commit_lines = _commit_wall_disclosure_lines(
-        cp.get("commit_wall_clock") or {})
-    if _commit_lines:
-        out += ["---", "", *_commit_lines]
+    if commit_lines:
+        out += ["---", "", *commit_lines]
     # No pole is drilled here, so every OPT80 tail line renders in the off-pole
     # section, after the runner-minute cards and before Also noticed. This is
     # the static-only path (no measured poles); the block is empty unless some
@@ -15687,6 +15711,14 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             f"> {len(_partial_commit_facts)} sampled commit(s) were partial"
             + (f" ({'; '.join(_partial_reasons)})" if _partial_reasons else "")
             + "; their observed spans were excluded from these percentiles.")
+    if _commit_wall.get("representative") is False and _commit_facts:
+        _complete_count = sum(
+            _num(f.get("wall_s")) is not None for f in _commit_facts)
+        _commit_wall_block.append(
+            f"> **Typical wait withheld:** {_complete_count} of "
+            f"{len(_commit_facts)} sampled commits were complete. Because the "
+            "complete subset is a minority, it is not representative enough to "
+            "publish a typical per-commit wait.")
     _fold_bottom_line(
         out,
         _lead_block,

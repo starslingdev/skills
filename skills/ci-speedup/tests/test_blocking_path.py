@@ -9901,6 +9901,35 @@ def test_static_only_keeps_the_withheld_cache_disclosure():
     assert "held back" in md, md
 
 
+def test_static_only_keeps_withheld_typical_wait_without_a_pole():
+    """Incomplete commit timing is still the explanation when no pole resolves."""
+    doc = {
+        "repo": "o/r",
+        "findings": [],
+        "pr_critical_path": {
+            "poles": [],
+            "commit_wall_clock": {
+                "representative": False,
+                "facts": [
+                    {"sha": "a", "wall_s": 36.0},
+                    {"sha": "b", "wall_s": None, "partial": True,
+                     "missing_workflows": ["tests.yml"]},
+                    {"sha": "c", "wall_s": None, "partial": True,
+                     "missing_workflows": ["tests.yml"]},
+                ],
+            },
+        },
+        "data_sources": {"runs_sampled": 3},
+    }
+
+    static = bp._render_static_only(doc)
+    assert "Typical wait withheld" in static
+    assert "Commit timing was sampled" in static
+    md = bp.render(doc, "o/r")
+    assert "No measured critical path" not in md
+    assert "No PR run timing was available" not in md
+
+
 def test_tier2_cert_summary_names_the_below_long_pole_proof():
     """OPT79's second runner-minute proof renders as its own token, with the
     slowest job's lead as the margin and the certificate's `ref` naming that
