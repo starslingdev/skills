@@ -43,9 +43,12 @@ class _CommentClient:
 
     gave_up = False
 
-    def __init__(self, plan, monthly=600, recorder_s=0):
+    def __init__(self, plan, monthly=600, recorder_s=0,
+                 react_name="react", react_runs=None):
         self.plan, self.monthly = plan, monthly
         self.recorder_s = recorder_s
+        self.react_name = react_name
+        self.react_runs = len(plan) if react_runs is None else react_runs
         self.queries = self.errors = 0
 
     def available(self):
@@ -54,7 +57,8 @@ class _CommentClient:
     def _job(self, i):
         dur, conclusion = self.plan[i]
         t0 = i * 1000
-        return {"id": 5000 + i, "run_id": 100 + i, "name": "react", "status": "completed",
+        return {"id": 5000 + i, "run_id": 100 + i, "name": self.react_name,
+                "status": "completed",
                 "conclusion": conclusion, "started_at": _ts(t0),
                 "completed_at": _ts(t0 + dur), "labels": ["ubuntu-latest"],
                 "runner_name": "ubuntu-latest",
@@ -82,8 +86,8 @@ class _CommentClient:
         m = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
         if m:
             i = int(m.group(1)) - 100
-            jobs = [self._job(i)] if 0 <= i < len(self.plan) else []
-            if jobs and self.recorder_s:
+            jobs = [self._job(i)] if 0 <= i < self.react_runs else []
+            if 0 <= i < len(self.plan) and self.recorder_s:
                 t0 = i * 1000
                 jobs.append({
                     "id": 6000 + i, "run_id": 100 + i, "name": "record",
@@ -104,7 +108,7 @@ class _CommentClient:
         return ""
 
 
-def _collect(monkeypatch, client, *, duplicate=False):
+def _collect(monkeypatch, client, *, duplicate=False, job_graph=None):
     monkeypatch.setattr(cr, "GhClient", lambda *a, **k: client)
     finding = {
         "id": "f1", "pattern": "OPT108", "pattern_class": "static",
@@ -119,6 +123,8 @@ def _collect(monkeypatch, client, *, duplicate=False):
     if duplicate:
         findings.append({**finding, "id": "f2"})
     doc = {"repo": "o/r", "findings": findings}
+    if job_graph is not None:
+        doc["workflow_job_graph"] = job_graph
     return cr.collect(doc, "o/r", max_runs=len(client.plan),
                       shallow_runs=len(client.plan))
 
@@ -184,6 +190,36 @@ def test_opt108_does_not_credit_the_same_affected_job_twice(monkeypatch, tmp_pat
     rows = [f for f in doc["findings"] if f.get("pattern") == "OPT108"]
     assert [f["runner_min_saving"] for f in rows] == [450.0, None]
     assert "already credited" in rows[1]["comment_runner_measurement"]["reason"]
+    _verify(doc, tmp_path)
+
+
+def test_opt108_resolves_a_yaml_job_id_to_its_api_display_name(monkeypatch, tmp_path):
+    doc = _collect(
+        monkeypatch,
+        _CommentClient(_ISSUE_SHAPE, monthly=600, react_name="React to comments"),
+        job_graph={_WF: {"react": {"name": "React to comments"}}},
+    )
+    finding = _opt108(doc)
+    assert finding["runner_min_saving"] == 450.0
+    assert finding["comment_runner_measurement"]["sized_affected_jobs"] == ["react"]
+    # The fake omits unrelated OPT100 inputs; clear that disclosed harness gap
+    # so the full verifier judges the collected OPT108 certificate itself.
+    doc["data_sources"]["detectors_skipped"] = []
+    _verify(doc, tmp_path)
+
+
+def test_opt108_known_skips_contribute_zero_to_the_affected_job_mean(
+        monkeypatch, tmp_path):
+    # All 20 workflow runs are known and short, but the affected job executed
+    # only three times; an unrelated recorder made the other 17 runs succeed.
+    client = _CommentClient(
+        [(12, "success")] * 20, monthly=600, recorder_s=12, react_runs=3)
+    doc = _collect(monkeypatch, client)
+    finding = _opt108(doc)
+    measurement = finding["comment_runner_measurement"]
+    assert measurement["mean_short_billable_min"] == 0.15
+    assert finding["runner_min_saving"] == 90.0, measurement
+    assert measurement["affected_compute_min_30d"] == 90.0
     _verify(doc, tmp_path)
 
 

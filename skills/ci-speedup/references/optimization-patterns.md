@@ -3564,7 +3564,9 @@ seconds counts as a rejected comment. The saving is that share of the sampled
 runs, times the workflow's 30-day run volume, times those runs' mean billed
 minutes for the affected jobs (each job rounded up to the minute), capped at
 those jobs' measured billed compute over the same volume. A job's minutes are
-credited only once across findings. At least 3 short runs must be priced.
+credited only once across findings. YAML job ids resolve through the workflow
+job graph to API display names; a known skip contributes zero to the mean, while
+an unreadable affected-job timing is excluded. At least 3 short runs must be priced.
 When runs were not collected, the run list could not be read, or no successful
 comment run finished under 30 seconds, the finding stays unsized and says why.
 There is no wall-clock effect on the pull-request path: comment runs do not

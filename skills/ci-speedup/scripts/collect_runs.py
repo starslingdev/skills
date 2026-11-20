@@ -6225,16 +6225,20 @@ def _opt108_mean_billable_min(
         jobs_per_run: list[list[dict[str, Any]]]) -> tuple[float, int]:
     """(mean billed-equivalent minutes per run, runs priced): each job rounds up
     to the minute (`_billable_equiv_min`), as GitHub bills it, so a 12-second
-    rejected comment costs a full minute. A run with any unpriceable job is
+    rejected comment costs a full minute. A known skipped/absent affected job
+    contributes zero; a run with an affected job whose timing is unreadable is
     left out rather than counted as free."""
     per_run: list[int] = []
     for run_jobs in jobs_per_run:
-        mins = [_billable_equiv_min(j) for j in run_jobs]
-        if not mins or any(m is None for m in mins):
+        mins = [
+            0 if str(job.get("conclusion") or "") == "skipped"
+            else _billable_equiv_min(job)
+            for job in run_jobs
+        ]
+        if any(m is None for m in mins):
             continue
         total = sum(int(m) for m in mins if m is not None)
-        if total > 0:
-            per_run.append(total)
+        per_run.append(total)
     if not per_run:
         return 0.0, 0
     return sum(per_run) / len(per_run), len(per_run)
@@ -6335,6 +6339,7 @@ def _measure_opt108_comment_runs(
     all_status_page, wf_by_path: dict[str, dict[str, Any]],
     jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
     vol_by_wf: dict[str, int | None], job_memo: "_JobFetchMemo",
+    job_graph: Any,
 ) -> int:
     """Measure every OPT108 finding off its workflow's cached all-status page.
     Comment workflows are usually triaged (no job fetch), so the short runs'
@@ -6359,6 +6364,10 @@ def _measure_opt108_comment_runs(
                 sized_affected_jobs=[],
             )
             continue
+        aliases: dict[str, str] = {}
+        for job_name in sized_jobs:
+            for alias in _own_workflow_job_identities(job_graph, wf_path, job_name):
+                aliases[alias] = job_name
         wf_id = (wf_by_path.get(wf_path) or {}).get("id")
         all_runs = all_status_page(wf_path, wf_id) if wf_id is not None else None
         if all_runs is None:
@@ -6378,12 +6387,7 @@ def _measure_opt108_comment_runs(
             selected = []
             for job in jobs:
                 name = str(job.get("name") or "").strip()
-                base = _matrix_base_name(name)
-                matched = None
-                if name in sized_jobs:
-                    matched = name
-                elif base in sized_jobs:
-                    matched = base
+                matched = aliases.get(_whole_run_cancel_base_key(name))
                 if matched is not None:
                     matched_jobs.add(matched)
                     selected.append(job)
@@ -33936,7 +33940,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # OPT108 is sized only from the comment workflow's own short successful runs.
     jobs_fetch_failures += _measure_opt108_comment_runs(
         client, repo, findings, _all_status_page, wf_by_path, jobs_per_run_by_wf,
-        vol_by_wf, job_memo)
+        vol_by_wf, job_memo, findings_doc.get("workflow_job_graph"))
 
     _changed_files: dict[int, list[str] | None] = {}
     _measure_opt32_path_filters(
