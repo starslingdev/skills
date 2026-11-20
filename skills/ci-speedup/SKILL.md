@@ -368,7 +368,7 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    Re-run `run.py` with `--verify-branch <branch>` and one `--verify-changed-file <path>` per changed file; it resumes beside the scratch findings, counts the first cohort as sample one, prints wall-clock and runner-minute cost before rerunning, reuses completed samples, and discards samples when the head moves.
    For cache configuration, key, or image-layer changes, add `--verify-cache-sensitive`: warm reruns are invalid, so it waits for three distinct consecutive default-branch pushes. `CI_SPEEDUP_VERIFY_RUNS=0` disables the phase and verdict.
    Reruns start CI on the user's branch but never change repository contents, create branches, commit, or push.
-   Full rules: [before/after verification](references/before-after-verification-spec.md).
+   Full rules, including the optional `--account-weekly-series` account export: [before/after verification](references/before-after-verification-spec.md).
 
 `scripts/run.py` orchestrates the deterministic phases 2–3; the agent then calls
 `blocking_path.py` to render phase 4 and grounds any catalog gap from the log in

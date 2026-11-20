@@ -114,6 +114,27 @@ before/after beside the push-cohort wall clock (the report already has the step
 timeline). This line is mandatory so unrelated checkout or setup noise cannot
 hide or imitate the changed step's result.
 
+### Optional account-level weekly context
+
+Teams that already have an account export may pass it to `run.py` with
+`--account-weekly-series PATH`. The skill does not extrapolate one repository's
+sample into an account total. Each supplied week must carry:
+
+- week start, runner-hours and jobs completed;
+- merged pull-request count, from which the report derives runner-hours per
+  merged pull request; and
+- a plain statement of the workload change for that week. A total without this
+  context is rejected rather than presented as a speedup.
+
+The optional `paired_runs` input carries explicit before and after
+runner-minute observations. A before/after result requires at least **two paired
+runs per side**, with equal counts, and compares the two medians. The report
+states the effect as `runner-minute saving`, `runner-minute added cost`, or
+`runner-minute unchanged`; it never writes a bare signed zero. One observation
+per side remains visible as weekly context, but the paired comparison is
+withheld. This account view is descriptive runner-minute context and does not
+replace phase 7's push-wide wall-clock headline or change locked Decision 6.
+
 ## Comparability and disclosure contract
 
 This table is normative and closed-world: every row is evaluated for both arms.

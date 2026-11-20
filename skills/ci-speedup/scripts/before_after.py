@@ -45,6 +45,122 @@ _SETUP_CACHE_INPUT = re.compile(
 _VERIFY_LOG_JOB_CAP = 20
 _VERIFY_LOG_TOTAL_CHAR_CAP = 100_000
 
+# Two observations are the smallest paired population that can expose ordinary
+# run-to-run disagreement instead of presenting one unusually fast run as a
+# before/after result.  This is deliberately the same floor as phase 7's locked
+# fresh-run minimum, but it is named separately because an account export and a
+# branch rerun have different acquisition paths.
+_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS = 2
+
+
+def summarize_account_weekly(payload: dict[str, Any]) -> dict[str, Any]:
+    """Validate and normalize an optional account-level weekly export.
+
+    GitHub's repository run APIs do not provide a trustworthy account-wide
+    weekly history.  The caller therefore supplies its account export instead
+    of this skill silently extrapolating one repository.  Each weekly row keeps
+    the workload change beside the totals, and a before/after claim is emitted
+    only from explicit run observations on both sides.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("account weekly input must be a JSON object")
+    raw_weeks = payload.get("weeks")
+    if not isinstance(raw_weeks, list) or not raw_weeks:
+        raise ValueError("account weekly input needs a non-empty weeks array")
+
+    weeks: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_weeks):
+        if not isinstance(raw, dict):
+            raise ValueError(f"weeks[{index}] must be an object")
+        week = str(raw.get("week_start") or "").strip()
+        workload = str(raw.get("workload_change") or "").strip()
+        if not week:
+            raise ValueError(f"weeks[{index}].week_start is required")
+        if week in seen:
+            raise ValueError(f"duplicate week_start: {week}")
+        seen.add(week)
+        if not workload:
+            raise ValueError(f"weeks[{index}].workload_change is required")
+        try:
+            runner_hours = float(raw["runner_hours"])
+            jobs = int(raw["jobs"])
+            merged = int(raw["merged_pull_requests"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"weeks[{index}] needs numeric runner_hours, jobs and "
+                "merged_pull_requests") from exc
+        if runner_hours < 0 or jobs < 0 or merged < 0:
+            raise ValueError(f"weeks[{index}] totals cannot be negative")
+        weeks.append({
+            "week_start": week,
+            "runner_hours": round(runner_hours, 3),
+            "jobs": jobs,
+            "merged_pull_requests": merged,
+            "runner_hours_per_merged_pr": (
+                round(runner_hours / merged, 3) if merged else None),
+            "workload_change": workload,
+        })
+    weeks.sort(key=lambda row: str(row["week_start"]))
+
+    paired = payload.get("paired_runs")
+    paired = paired if isinstance(paired, dict) else {}
+
+    def values(name: str) -> list[float]:
+        raw = paired.get(name)
+        if not isinstance(raw, list):
+            return []
+        out: list[float] = []
+        for value in raw:
+            try:
+                number = float(value)
+            except (TypeError, ValueError):
+                return []
+            if number < 0:
+                return []
+            out.append(number)
+        return out
+
+    before = values("before_runner_minutes")
+    after = values("after_runner_minutes")
+    comparison: dict[str, Any] = {
+        "available": False,
+        "before_n": len(before),
+        "after_n": len(after),
+    }
+    if (len(before) < _ACCOUNT_WEEKLY_MIN_PAIRED_RUNS
+            or len(after) < _ACCOUNT_WEEKLY_MIN_PAIRED_RUNS):
+        comparison["reason"] = (
+            f"need at least {_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS} paired runs per side")
+    elif len(before) != len(after):
+        comparison["reason"] = "paired run counts differ"
+    else:
+        before_median = round(float(statistics.median(before)), 3)
+        after_median = round(float(statistics.median(after)), 3)
+        raw_delta = round(after_median - before_median, 3)
+        if raw_delta < 0:
+            effect = "saving"
+            delta = abs(raw_delta)
+        elif raw_delta > 0:
+            effect = "added cost"
+            delta = raw_delta
+        else:
+            effect = "unchanged"
+            delta = 0.0
+        comparison = {
+            "available": True,
+            "before_n": len(before),
+            "after_n": len(after),
+            "before_median_runner_minutes": before_median,
+            "after_median_runner_minutes": after_median,
+            "runner_minute_effect": effect,
+            "runner_minute_delta": delta,
+            "runner_minute_change_pct": (
+                round(raw_delta / before_median * 100.0, 1)
+                if before_median else None),
+        }
+    return {"weeks": weeks, "paired_comparison": comparison}
+
 
 def _cache_marker_lines(text: str) -> str:
     """Keep cache-state evidence without spending the budget on other output."""

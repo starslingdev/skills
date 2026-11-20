@@ -390,6 +390,25 @@ variation.
 
 **Proposed decision:** **Keep 3.** The value remains awaiting owner approval.
 
+### `account-weekly-paired-minimum`
+
+**Current value:** at least 2 explicit paired run observations per side
+(`before_after.py::_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS`), with equal before and
+after counts, before an account weekly export states a runner-minute effect.
+
+**Report statements:** the paired before/after median runner-minute effect in
+the optional account-level weekly section, or the reason that comparison is
+withheld.
+
+**Reason:** One run per side cannot expose ordinary run-to-run variation. Two is
+the smallest population that can disagree and matches phase 7's locked minimum
+without treating the account export as a repository rerun.
+
+**Proposed decision:** **Keep 2 paired observations per side.** The value
+remains awaiting owner approval.
+
+**Approval status:** awaiting owner approval.
+
 ### `rare-push-lane`
 
 **Current value:** fewer than 8 default-branch push runs in 30 days is treated
@@ -665,6 +684,12 @@ implementation lands.
 
 ```json report-defaults-contract
 {
+  "account-weekly-paired-minimum": {
+    "decision": "account-weekly-paired-minimum",
+    "sources": {
+      "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 2
+    }
+  },
   "bimodal-noise-band": {
     "decision": "bimodal-noise-band",
     "symbols": [
