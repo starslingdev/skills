@@ -2975,8 +2975,9 @@ def check_windows_setup_guidance(report: str, findings_path: Path | None) -> Che
 def check_rendered_patterns_exist(report: str, findings_path: Path | None) -> Check:
     """Every OPT-id rendered as a finding (the Also-noticed appendix) must be a real
     pattern in the findings JSON - the report never invents a finding. The
-    manual-review checklist (OPT13/15/18) is static guidance, not a finding, so it's
-    excluded."""
+    manual-review checklist (including OPT13's general judgment and OPT15/18) is
+    static guidance, not a finding, so it's excluded. OPT13's narrow measured
+    exception may also render as a real finding and is checked separately."""
     name = "every rendered finding pattern exists in the findings JSON"
     if findings_path is None:
         return Check(name, True, "no --findings to compare", skipped=True)
@@ -13073,11 +13074,12 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
             # job name matches, and the lane-isolation check independently
             # requires zero merge-gate wall-clock credit and a rendered tag.
             continue
-        if pat == "OPT82":
+        if pat in {"OPT13", "OPT82"}:
             # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
-            # keeps an OPT82 card on a drilled-pole lint job (its card is the only
-            # place the rules and ledger reach the reader), so it is no
-            # contradiction of the pole headline. Mirror that exemption.
+            # keeps these benchmark-first cards on their drilled-pole jobs (the
+            # card is the only place the measured ceiling and safety proof reach
+            # the reader), so they do not contradict the pole headline. Mirror
+            # that narrow exemption.
             continue
         if pat == "OPT32":
             measurement = f.get("path_filter_measurement")
@@ -15227,6 +15229,83 @@ def check_step_cited_within_job_window(findings_path: Path | None) -> Check:
                  "held only to the 5-day ceiling (no stamped job window)"
                  + (f"; {sums} job-level and category sum(s) held to the 5-day ceiling"
                     if sums else ""))
+
+
+def check_opt13_build_in_script_provenance(findings_path: Path | None) -> Check:
+    """OPT13's automatic path is bound to one conservative pole-log fact.
+
+    General OPT13 judgment stays manual.  A measured finding is admitted only
+    when its build interval agrees with the captured manifest, a separate full
+    validation job is named, and the source-output guard completed cleanly.
+    """
+    name = "OPT13 build-in-script findings retain measured safety provenance"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    findings = [f for f in _as_list(data.get("findings"))
+                if isinstance(f, dict) and f.get("pattern") == "OPT13"
+                and f.get("pattern_class") == "data-driven"]
+    if not findings:
+        return Check(name, True, "no automatic OPT13 finding")
+    entries = _as_list(_as_dict(data.get("data_bundle")).get("logs"))
+    failures: list[str] = []
+    allowed_labels = {
+        "vite build", "next build", "nuxt build", "framework build",
+        "bundle build", "TypeScript declaration emit", "Maven package build",
+        "Gradle assemble build",
+    }
+    for finding in findings:
+        fid = str(finding.get("id") or "OPT13")
+        jobs = [str(job) for job in _as_list(finding.get("affected_jobs")) if str(job)]
+        matches = [entry for entry in entries if isinstance(entry, dict)
+                   and str(entry.get("workflow_file") or "")
+                   == str(finding.get("workflow_file") or "")
+                   and jobs and str(entry.get("job") or "") == jobs[0]
+                   and isinstance(entry.get("opt13_build_in_script"), dict)]
+        if len(matches) != 1:
+            failures.append(f"{fid} has {len(matches)} matching pole-log facts")
+            continue
+        fact = _as_dict(matches[0].get("opt13_build_in_script"))
+        seconds = _num(fact.get("build_s"))
+        if (seconds is None or seconds <= 0
+                or seconds != _num(finding.get("opt13_wall_clock_ceiling_s"))):
+            failures.append(f"{fid} build seconds differ from its pole-log fact")
+        if str(fact.get("build_command") or "") not in allowed_labels:
+            failures.append(f"{fid} carries an unrecognized build label")
+        validation = _as_dict(finding.get("opt13_validation_build"))
+        if not validation.get("workflow_file") or not validation.get("job"):
+            failures.append(f"{fid} names no separate full validation build")
+        elif (str(validation.get("workflow_file"))
+              == str(finding.get("workflow_file"))
+              and jobs and str(validation.get("job")) == jobs[0]):
+            failures.append(f"{fid} treats its affected job as the validation build")
+        guard = _as_dict(finding.get("opt13_source_guard"))
+        if guard.get("safe") is not True or not isinstance(
+                guard.get("source_files_checked"), int) or guard["source_files_checked"] <= 0:
+            failures.append(f"{fid} lacks a completed compiled-output source guard")
+        if (_as_dict(matches[0].get("opt13_validation_build")) != validation
+                or _as_dict(matches[0].get("opt13_source_guard")) != guard):
+            failures.append(f"{fid} safety facts differ from its pole-log manifest")
+        graph = _as_dict(_as_dict(data.get("workflow_job_graph")).get(
+            str(validation.get("workflow_file") or "")))
+        graph_jobs = [spec for key, spec in graph.items() if isinstance(spec, dict)
+                      and str(validation.get("job") or "")
+                      in {str(key), str(spec.get("name") or key)}]
+        if len(graph_jobs) != 1 or graph_jobs[0].get("continue_on_error") is True:
+            failures.append(f"{fid} validation job is absent or non-gating in the workflow graph")
+        runs = finding.get("workflow_runs_30d")
+        if (_num(finding.get("wall_clock_p50_s")) is not None
+                or _num(finding.get("runner_min_saving")) is not None
+                or "not sized" not in str(finding.get("size_note") or "")):
+            failures.append(f"{fid} credits an unbenchmarked runtime-only replacement")
+        runner_min = _num(finding.get("opt13_runner_min_ceiling"))
+        if isinstance(runs, int) and runs > 0 and seconds is not None:
+            expected = round(seconds * runs / 60.0, 1)
+            if runner_min != expected:
+                failures.append(f"{fid} runner-minute ceiling is {runner_min}, expected {expected}")
+    return Check(name, not failures,
+                 f"{len(findings)} automatic OPT13 finding(s) retain their log and safety facts"
+                 if not failures else "; ".join(failures[:8]))
 
 
 def _vr_declared_timelines(data: dict, findings_path: Path | None
@@ -17552,6 +17631,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_rendered_patterns_exist(report, findings_path),
         check_windows_setup_guidance(report, findings_path),
         check_data_driven_have_signal(findings_path),
+        check_opt13_build_in_script_provenance(findings_path),
         check_speed_poles_complete(report, findings_path),
         check_aggregation_gate_poles_never_prescribe(report, findings_path),
         check_pole_drill_belongs_to_its_job(report, findings_path),

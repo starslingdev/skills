@@ -429,6 +429,261 @@ def test_opt14_credit_is_capped_by_measured_completed_compute_through_collect(
     assert [check for check in full_checks if not check.skipped and not check.ok] == []
 
 
+def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
+        monkeypatch, tmp_path):
+    """Measured package-script internals, not the wrapper name, decide OPT13."""
+    positive = tmp_path / "opt13-build-in-script"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    (positive / "src").mkdir()
+    (positive / "src" / "index.ts").write_text(
+        "export const answer = 42;\n", encoding="utf-8")
+    workflow_path = positive / "workflows" / "ci.yml"
+    workflow_path.write_text(
+        workflow_path.read_text(encoding="utf-8") + """
+  build-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - run: vite build
+""", encoding="utf-8")
+    responses_path = positive / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["logs"]["1103"] = """\
+2026-01-28T00:00:00.0000000Z ##[group]Run pnpm test
+2026-01-28T00:00:00.0000000Z ##[endgroup]
+2026-01-28T00:00:01.0000000Z > project@test
+2026-01-28T00:00:02.0000000Z > vite build
+2026-01-28T00:02:02.0000000Z ✓ built in 120.00s
+2026-01-28T00:02:03.0000000Z > vitest run
+2026-01-28T00:12:00.0000000Z Tests 48 passed
+"""
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+
+    positive_root = tmp_path / "run-opt13-positive"
+    positive_root.mkdir()
+    doc, report, checks = run_fixture(
+        positive, monkeypatch, positive_root, max_runs=20)
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT13")
+    assert finding["wall_clock_p50_s"] is None
+    assert finding["runner_min_saving"] is None
+    assert finding["opt13_wall_clock_ceiling_s"] == 120.0
+    assert finding["opt13_runner_min_ceiling"] > 0
+    assert "runtime-only" in finding["fix_strategy"]
+    assert "not sized" in finding["size_note"]
+    # Signed convention (#388): "+N runner-minutes" reads as an added cost, so
+    # the ceiling is worded as a bound on a saving, never as a signed figure.
+    ceiling = finding["opt13_runner_min_ceiling"]
+    assert (f"runner-minute saving: at most {ceiling:.1f}/month (measured build ceiling)"
+            in finding["size_note"])
+    assert "+" not in finding["size_note"]
+    assert finding["opt13_validation_build"]["job"] == "build-artifacts"
+    assert finding["opt13_source_guard"]["safe"] is True
+    assert finding["opt13_source_guard"]["source_files_checked"] == 1
+    assert ("A separate `build-artifacts` job retains the full validation build, "
+            "and 1 source file(s) passed the compiled-output backstop" in report)
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    findings_path = positive_root / positive.name / "findings.json"
+    tampered = json.loads(findings_path.read_text(encoding="utf-8"))
+    next(entry for entry in tampered["data_bundle"]["logs"]
+         if entry.get("opt13_build_in_script")).pop("opt13_build_in_script")
+    tampered_path = positive_root / "tampered-opt13.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    assert not vr.check_opt13_build_in_script_provenance(tampered_path).ok
+
+    negative = tmp_path / "opt13-quality-only"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", negative)
+    negative_responses = negative / "responses.json"
+    recorded = json.loads(negative_responses.read_text(encoding="utf-8"))
+    recorded["logs"]["1103"] = """\
+2026-01-28T00:00:00.0000000Z ##[group]Run pnpm test
+2026-01-28T00:00:00.0000000Z ##[endgroup]
+2026-01-28T00:00:01.0000000Z > project@test
+2026-01-28T00:00:02.0000000Z > vitest run
+2026-01-28T00:12:00.0000000Z Tests 48 passed
+"""
+    negative_responses.write_text(json.dumps(recorded), encoding="utf-8")
+
+    negative_root = tmp_path / "run-opt13-negative"
+    negative_root.mkdir()
+    negative_doc, _negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT13"]
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
+def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
+    prose = """\
+2026-01-28T00:00:00Z ##[group]Run pnpm test
+2026-01-28T00:00:00Z vite build
+2026-01-28T00:02:00Z built in 120s
+2026-01-28T00:02:01Z Documentation: run vitest separately
+"""
+    assert cr._opt13_build_in_quality_log(prose) is None
+
+    post_quality = """\
+2026-01-28T00:00:00Z ##[group]Run pnpm test
+2026-01-28T00:00:00Z > vitest run
+2026-01-28T00:10:00Z > vite build
+2026-01-28T00:12:00Z built in 120s
+"""
+    assert cr._opt13_build_in_quality_log(post_quality) is None
+
+    build_only_wrapper = """\
+2026-01-28T00:00:00Z ##[group]Run pnpm test
+2026-01-28T00:00:01Z > vite build
+2026-01-28T00:02:01Z built in 120s
+"""
+    assert cr._opt13_build_in_quality_log(build_only_wrapper) is None
+
+    loads_output = """\
+2026-01-28T00:00:00Z ##[group]Run pnpm test
+2026-01-28T00:00:01Z > vite build
+2026-01-28T00:02:01Z built in 120s
+2026-01-28T00:02:02Z > node --enable-source-maps ../dist/index.js
+2026-01-28T00:02:03Z > vitest run dist/unit.test.js
+"""
+    assert cr._opt13_build_in_quality_log(loads_output) is None
+
+
+def test_opt13_requires_a_separate_validation_build_and_clean_source_guard(tmp_path):
+    docs = {
+        ".github/workflows/ci.yml": {
+            "jobs": {
+                "test": {"steps": [{"run": "pnpm test"}]},
+                "artifacts": {"steps": [{"run": "pnpm build:ci-artifacts"}]},
+            }
+        }
+    }
+    assert cr._opt13_validation_build_job(
+        docs, ".github/workflows/ci.yml", "test") == {
+            "workflow_file": ".github/workflows/ci.yml", "job": "artifacts"}
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {"jobs": {"test": {"steps": [{"run": "pnpm test"}]}}}},
+        "ci.yml", "test") is None
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {"jobs": {
+            "test": {"steps": [{"run": "pnpm test"}]},
+            "declarations": {"steps": [{"run": "tsc --emitDeclarationOnly"}]},
+        }}}, "ci.yml", "test") is None
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {
+            "defaults": {"run": {"working-directory": "packages/app"}},
+            "jobs": {
+                "test": {"steps": [{"run": "pnpm test"}]},
+                "artifacts": {"steps": [{"run": "vite build",
+                                            "working-directory": "packages/app"}]},
+            },
+        }}, "ci.yml", "test") == {
+            "workflow_file": "ci.yml", "job": "artifacts"}
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {"jobs": {
+            "test": {"steps": [{"run": "pnpm test",
+                                   "working-directory": "packages/app"}]},
+            "other-package": {"steps": [{"run": "vite build",
+                                            "working-directory": "packages/docs"}]},
+        }}}, "ci.yml", "test") is None
+    for false_build in (
+        "echo pnpm build", "pnpm build:docs", "pnpm build qaRuntime",
+        "pnpm build-and-test",
+    ):
+        assert cr._opt13_validation_build_job(
+            {"ci.yml": {"jobs": {
+                "test": {"steps": [{"run": "pnpm test"}]},
+                "other": {"steps": [{"run": false_build}]},
+            }}}, "ci.yml", "test") is None
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {"jobs": {"matrix": {
+            "name": "Checks (${{ matrix.node }})",
+            "steps": [{"run": "pnpm build"}],
+        }}}}, "ci.yml", "Checks (20)") is None
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {"jobs": {
+            "test": {"steps": [{"run": "pnpm test"}]},
+            "optional": {"continue-on-error": True,
+                         "steps": [{"run": "pnpm build"}]},
+        }}}, "ci.yml", "test") is None
+
+    src = tmp_path / "src"
+    src.mkdir()
+    source = src / "worker.ts"
+    source.write_text("export const answer = 42;\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is True
+    source.write_text(
+        "import { Worker } from 'node:worker_threads';\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+
+def test_opt13_source_guard_ignores_checkout_ancestor_names(tmp_path):
+    checkout = tmp_path / "build" / "project"
+    src = checkout / "src"
+    src.mkdir(parents=True)
+    source = src / "runtime.ts"
+    source.write_text("export const answer = 42;\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(checkout)["safe"] is True
+
+
+def test_opt13_source_guard_catches_static_and_multiline_imports(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    source = src / "runtime.ts"
+    source.write_text("import '../dist/register.js';\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+    source.write_text(
+        "const runtime = require(\n  '../dist/runtime.js'\n);\n",
+        encoding="utf-8",
+    )
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+
+def test_opt13_source_guard_catches_computed_and_template_imports(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    source = src / "runtime.ts"
+    source.write_text(
+        "const runtime = require(path.resolve('dist/runtime.js'));\n",
+        encoding="utf-8",
+    )
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+    source.write_text(
+        "const runtime = await import(`../dist/runtime.js`);\n",
+        encoding="utf-8",
+    )
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+
+def test_opt13_source_guard_withholds_an_unclassified_output_dir_literal(tmp_path):
+    """The call balancer does not read past `require('node:path')`, but a bare
+    `'dist/'` literal is still an output-path mention the guard cannot
+    classify (it may feed a later load), so the finding is withheld: a false
+    "safe" is worse than a withheld finding."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "runtime.ts").write_text(
+        "const path = require('node:path')\n"
+        "const outputDir = 'dist/'\n",
+        encoding="utf-8",
+    )
+    assert not cr._opt13_call_loads_compiled_output(
+        (src / "runtime.ts").read_text(encoding="utf-8"))
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+
+def test_opt13_source_guard_withholds_commented_call_arguments(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "runtime.ts").write_text(
+        "const runtime = require(/* 1) Load generated code */ "
+        "'../dist/runtime.js');\n",
+        encoding="utf-8",
+    )
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+
 def test_pr_sample_day_floor_stays_coupled_through_the_findings_contract(
         monkeypatch, tmp_path):
     fixture = _busy_pr_sample_fixture(tmp_path)
