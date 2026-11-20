@@ -20,10 +20,16 @@ from test_opt81_faster_runner import _CI, _COLLECT_YAML, _Opt81Client, _cts  # n
 
 class _PathFilterClient(_Opt81Client):
     def __init__(self, paths_by_pr: dict[int, list[str]], *, yaml: str = _COLLECT_YAML,
-                 missing_pr_numbers: set[int] | None = None):
+                 missing_pr_numbers: set[int] | None = None,
+                 push_run_numbers: set[int] | None = None,
+                 failed_file_prs: set[int] | None = None,
+                 unreadable_job_runs: set[int] | None = None):
         super().__init__([("ubuntu-latest", 197)] * 60, yaml)
         self.paths_by_pr = paths_by_pr
         self.missing_pr_numbers = missing_pr_numbers or set()
+        self.push_run_numbers = push_run_numbers or set()
+        self.failed_file_prs = failed_file_prs or set()
+        self.unreadable_job_runs = unreadable_job_runs or set()
         self.changed_file_calls = 0
 
     def json(self, endpoint, allow_missing=False):
@@ -31,12 +37,22 @@ class _PathFilterClient(_Opt81Client):
         if response is not None:
             if isinstance(response, dict) and "workflow_runs" in response:
                 for i, run in enumerate(response["workflow_runs"], 1):
+                    if i in self.push_run_numbers:
+                        run["event"] = "push"
                     run["pull_requests"] = (
-                        [] if i in self.missing_pr_numbers else [{"number": i}])
+                        [] if i in self.missing_pr_numbers or i in self.push_run_numbers
+                        else [{"number": i}])
+            if isinstance(response, dict) and "jobs" in response:
+                match = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
+                run_number = int(match.group(1)) - 99 if match else -1
+                if run_number in self.unreadable_job_runs and response["jobs"]:
+                    response["jobs"][0]["completed_at"] = None
             return response
         match = re.fullmatch(r"repos/o/r/pulls/(\d+)/files\?per_page=100(?:&page=(\d+))?", endpoint)
         if match:
             self.changed_file_calls += 1
+            if int(match.group(1)) in self.failed_file_prs:
+                return None
             page = int(match.group(2) or 1)
             paths = self.paths_by_pr.get(int(match.group(1)), [])
             start = (page - 1) * 100
@@ -125,10 +141,80 @@ def test_opt39_measures_irrelevant_language_pr_compute_through_collect_and_verif
     assert finding.get("runner_min_saving") == 600.0
     assert finding.get("runner_minute_effect", {}).get("direction") == "saving"
     assert "30 of 60 sampled pull-request runs" in finding["evidence"]
-    assert "one 60-run pull-request sample" in finding["evidence"]
+    assert "one 60-run workflow sample (60 pull-request runs; 60 priced)" in finding["evidence"]
     report = _verify_full(doc, tmp_path)
     assert "30 of 60 sampled pull-request runs" in report
     assert "600.0 runner-minutes per 30 days" in report
+    assert "Unknown or failed changed-path lookups must run every language job" in report
+
+
+def test_opt39_scales_only_the_pr_event_share_of_mixed_workflow_volume(
+        monkeypatch, tmp_path):
+    paths = {
+        number: ([f"docs/guide-{number}.md"] if number <= 15
+                 else [f"internal/check_{number}.go"])
+        for number in range(1, 31)
+    }
+    client = _PathFilterClient(paths, push_run_numbers=set(range(31, 61)))
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], "opt39_languages": ["go"],
+        "opt39_job_kind": "per-language-toolchain",
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT39")
+    measurement = finding["language_path_measurement"]
+    assert measurement["workflow_runs_30d"] == 300
+    assert measurement["estimated_pr_runs_30d"] == 150.0
+    assert finding["runner_min_saving"] == 300.0
+    report = _verify_full(doc, tmp_path)
+    assert "30 of 60 pull-request event share" in report
+
+
+@pytest.mark.parametrize("client", [
+    _PathFilterClient(
+        {number: [f"docs/guide-{number}.md"] for number in range(1, 61)},
+        failed_file_prs={1}),
+    _PathFilterClient({
+        number: (["test/fixtures/shared.json"] if number == 1
+                 else [f"docs/guide-{number}.md"])
+        for number in range(1, 61)
+    }),
+])
+def test_opt39_withholds_the_whole_finding_when_any_input_is_unclassifiable(
+        monkeypatch, client):
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], "opt39_languages": ["go"],
+        "opt39_job_kind": "per-language-toolchain",
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    assert not any(f.get("pattern") == "OPT39" for f in doc["findings"])
+
+
+def test_opt39_unreadable_affected_compute_is_disclosed_as_unsized(
+        monkeypatch, tmp_path):
+    paths = {number: [f"docs/guide-{number}.md"] for number in range(1, 61)}
+    client = _PathFilterClient(paths, unreadable_job_runs={1})
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], "opt39_languages": ["go"],
+        "opt39_job_kind": "per-language-toolchain",
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT39")
+    assert finding["runner_minute_effect"]["direction"] == "unsized"
+    assert "missing or unreadable" in finding["runner_minute_effect"]["reason"]
+    _verify_full(doc, tmp_path)
 
 
 @pytest.mark.parametrize("paths", [

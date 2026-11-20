@@ -4836,24 +4836,10 @@ _OPT39_TOOLCHAIN_ACTIONS = {
 _OPT39_TOOLCHAIN_COMMANDS = {
     "rust": re.compile(r"\brustup\s+toolchain\s+(?:install|add)\b", re.I),
 }
-_OPT39_LANGUAGE_NAME_RE = {
-    "go": re.compile(r"(?:^|[^a-z])go(?:[^a-z]|$)", re.I),
-    "python": re.compile(r"(?:python|\bpy\b)", re.I),
-    "rust": re.compile(r"(?:rust|cargo)", re.I),
-}
-
-
-def _opt39_job_languages(job_name: str, job: dict) -> list[str]:
-    """Known language toolchains in a job that identifies itself as language-specific.
-
-    The name requirement keeps a repository's ordinary primary test job from being
-    called a per-language lane merely because it installs that repository's runtime.
-    """
-    display = f"{job_name} {job.get('name') or ''}"
+def _opt39_job_languages(job: dict) -> list[str]:
+    """Return the known language toolchains installed by one pull-request job."""
     languages: list[str] = []
-    for language, name_re in _OPT39_LANGUAGE_NAME_RE.items():
-        if not name_re.search(display):
-            continue
+    for language in _OPT39_TOOLCHAIN_ACTIONS:
         for step in _steps(job):
             uses = _uses(step)
             command = str(step.get("run") or "") if isinstance(step, dict) else ""
@@ -4864,6 +4850,39 @@ def _opt39_job_languages(job_name: str, job: dict) -> list[str]:
                 languages.append(language)
                 break
     return languages
+
+
+def _opt39_has_path_output_gate(doc: dict, job: dict) -> bool:
+    """Whether `job` consumes output from an upstream changed-path selector.
+
+    A generic `needs.meta.outputs.version` is not a path gate. Recognize the
+    established paths-filter action and the fail-open GitHub-script form used by
+    repositories that need exact, repository-specific ownership.
+    """
+    condition = str(job.get("if") or "")
+    references = re.findall(
+        r"\bneeds\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)", condition)
+    jobs = doc.get("jobs") if isinstance(doc.get("jobs"), dict) else {}
+    for upstream_name, output_name in references:
+        upstream = jobs.get(upstream_name)
+        if not isinstance(upstream, dict):
+            continue
+        for step in _steps(upstream):
+            uses = _uses(step)
+            if re.search(r"(?:^|/)dorny/paths-filter@", uses, re.I):
+                return True
+            if re.search(r"(?:^|/)actions/github-script@", uses, re.I):
+                with_doc = step.get("with")
+                script = str(with_doc.get("script") or "") if isinstance(
+                    with_doc, dict) else ""
+                if (re.search(r"(?:compareCommits|compareCommitsWithBasehead|pulls\.listFiles)",
+                              script)
+                        and re.search(r"\bfiles?\b", script)
+                        and re.search(
+                            rf"\bsetOutput\s*\(\s*['\"]{re.escape(output_name)}['\"]",
+                            script)):
+                    return True
+    return False
 
 
 def _opt39_trigger_path_language(pattern: str) -> str | None:
@@ -4927,15 +4946,12 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
         matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
         scanner_matrix = (isinstance(matrix, dict) and "language" in matrix
                           and any(_SCANNER_RE.search(_uses(s)) for s in _steps(job)))
-        job_languages = _opt39_job_languages(job_name, job)
+        job_languages = _opt39_job_languages(job)
         if not scanner_matrix and not job_languages:
             continue
         jif = job.get("if")
         leg_gated = isinstance(jif, str) and ("needs." in jif or "matrix.language" in jif)
-        language_path_gated = (
-            isinstance(jif, str)
-            and re.search(r"\bneeds\.[A-Za-z0-9_-]+\.outputs\.", jif) is not None
-        )
+        language_path_gated = _opt39_has_path_output_gate(doc, job)
         if scanner_matrix and (has_paths_filter or leg_gated):
             continue
         if job_languages and (language_path_gated or _opt39_trigger_is_language_scoped(

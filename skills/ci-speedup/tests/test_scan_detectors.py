@@ -2080,6 +2080,69 @@ jobs:
     assert _finding(_scan(tmp_path), "OPT39") is not None
 
 
+def test_opt39_unrelated_needs_output_is_not_a_path_gate(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - id: version
+        run: echo value=1 >> "$GITHUB_OUTPUT"
+  proof:
+    needs: meta
+    if: needs.meta.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is not None
+
+
+def test_opt39_fail_open_github_script_path_gate_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Rust proof
+on:
+  pull_request:
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      rust_changed: ${{ steps.select.outputs.rust_changed }}
+    steps:
+      - uses: actions/github-script@v9
+        id: select
+        with:
+          script: |
+            const { data } = await github.rest.repos.compareCommitsWithBasehead({
+              ...context.repo, basehead: 'base...head'
+            });
+            const files = data.files;
+            core.setOutput('rust_changed', files.some(file => file.filename.endsWith('.rs')));
+  proof:
+    needs: scope
+    if: needs.scope.outputs.rust_changed != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "proof.yml").write_text(workflow, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
 def test_opt39_language_scoped_pull_request_trigger_stays_quiet(tmp_path: Path):
     workflow = """
 name: Rust proof
@@ -2127,8 +2190,7 @@ jobs:
     assert finding["opt39_languages"] == ["rust"]
 
 
-def test_opt39_primary_language_job_is_not_assumed_to_be_an_optional_lane(
-        tmp_path: Path):
+def test_opt39_neutral_job_name_still_detects_its_language_setup(tmp_path: Path):
     workflow = """
 name: CI
 on:
@@ -2144,7 +2206,9 @@ jobs:
     path.mkdir(parents=True)
     (path / "ci.yml").write_text(workflow, encoding="utf-8")
 
-    assert _finding(_scan(tmp_path), "OPT39") is None
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["opt39_languages"] == ["python"]
 
 
 def test_opt62_clean_on_self_hosted(tmp_path: Path):

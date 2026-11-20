@@ -3422,7 +3422,7 @@ title_template: "Multi-Language Matrix Without Path Filter"
 
 - Workflow declares a matrix with `language: [javascript, python, ...]` (or similar)
 - Uses `github/codeql-action/init` (or `snyk/actions`, `returntocorp/semgrep-action`, etc.) with `languages: ${{ matrix.language }}`
-- Or a job identifies itself as a Go, Rust, or Python lane and installs that toolchain with `setup-go`, `setup-python`, a Rust toolchain action, or `rustup toolchain install`
+- Or a job installs a Go, Rust, or Python toolchain with `setup-go`, `setup-python`, a Rust toolchain action, or `rustup toolchain install`
 - The workflow has NO preceding `dorny/paths-filter` job or per-leg `if:` checking changed file extensions
 - **Activation fidelity**: only flag when the workflow actually runs on every PR — suppress when the `pull_request:` trigger is `types:`-gated to a non-lifecycle activity (e.g. `types: [labeled]`), since the legs then don't run on a normal PR. (Shared `_pr_trigger_runs_every_pr` in `scan.py`; see OPT33.)
 - **Measured admission**: for a per-language job, fetch the changed files of the already-sampled pull requests. Credit only the affected job's measured billed-equivalent minutes on diffs confidently owned by another language or documentation. An unknown input, incomplete file list, or failed lookup runs the job and receives no saving credit.

@@ -6635,16 +6635,33 @@ def _measure_opt39_language_jobs(
         if not languages:
             withhold(finding)
             continue
+        workflow_runs = list(sampled_runs_by_wf.get(workflow, []))
         sampled_runs = [
-            run for run in sampled_runs_by_wf.get(workflow, [])
+            run for run in workflow_runs
             if str(run.get("event") or "") in {"pull_request", "pull_request_target"}
         ]
+        if not workflow_runs or not sampled_runs:
+            withhold(finding)
+            continue
+        if any(not isinstance(_run_pr_number(run), int) for run in sampled_runs):
+            withhold(finding)
+            continue
         sampled_numbers = list(dict.fromkeys(
             number for run in sampled_runs for number in [_run_pr_number(run)]
             if isinstance(number, int)))
         for number in sampled_numbers:
             if number not in changed_files:
                 changed_files[number] = _opt32_changed_files(client, repo, number)
+        if any(changed_files.get(number) is None for number in sampled_numbers):
+            withhold(finding)
+            continue
+        classifications = {
+            number: _opt39_paths_classification(changed_files.get(number) or [], languages)
+            for number in sampled_numbers
+        }
+        if any(value == "unknown" for value in classifications.values()):
+            withhold(finding)
+            continue
         aliases: set[str] = set()
         for job_name in finding.get("affected_jobs") or []:
             aliases.update(_own_workflow_job_identities(
@@ -6666,12 +6683,16 @@ def _measure_opt39_language_jobs(
             if not matched or any(value is None for value in priced):
                 missing_job_rows += 1
                 continue
-            classification = _opt39_paths_classification(
-                changed_files.get(pr_number) or [], languages)
+            classification = classifications.get(pr_number, "unknown")
             rows.append((pr_number, classification,
                          float(sum(value for value in priced if value is not None))))
-        classified = [row for row in rows if row[1] != "unknown"]
-        unknown_prs = len(rows) - len(classified)
+        classified = rows
+        if missing_job_rows:
+            _opt39_unsized(
+                finding, "some affected job timings were missing or unreadable",
+                sampled_prs=len(classified), unknown_prs=0,
+                missing_job_rows=missing_job_rows)
+            continue
         if not classified:
             withhold(finding)
             continue
@@ -6687,22 +6708,29 @@ def _measure_opt39_language_jobs(
             withhold(finding)
             continue
         sample_saved = sum(row[2] for row in irrelevant)
-        saving = round(sample_saved / len(classified) * monthly_volume, 1)
+        pr_volume = monthly_volume * len(sampled_runs) / len(workflow_runs)
+        saving = round(sample_saved / len(classified) * pr_volume, 1)
         total_sample_compute = sum(row[2] for row in classified)
-        cap = round(total_sample_compute / len(classified) * monthly_volume, 1)
+        cap = round(total_sample_compute / len(classified) * pr_volume, 1)
         saving = min(saving, cap)
         language_text = "/".join(sorted(languages))
-        population = f"one {len(classified)}-run pull-request sample"
+        population = (
+            f"one {len(workflow_runs)}-run workflow sample "
+            f"({len(sampled_runs)} pull-request runs; {len(classified)} priced)"
+        )
         measurement = {
             "status": "measured",
             "languages": sorted(languages),
             "sampled_prs": len(classified),
             "irrelevant_prs": len(irrelevant),
-            "unknown_prs": unknown_prs,
+            "unknown_prs": 0,
             "missing_job_rows": missing_job_rows,
             "sample_runner_minutes_saved": round(sample_saved, 1),
             "sample_runner_minutes_total": round(total_sample_compute, 1),
             "workflow_runs_30d": monthly_volume,
+            "estimated_pr_runs_30d": round(pr_volume, 1),
+            "workflow_sampled_runs": len(workflow_runs),
+            "pr_sampled_runs": len(sampled_runs),
             "runner_minutes_per_30d": saving,
             "affected_compute_cap_min_30d": cap,
             "sample_population": population,
@@ -6719,9 +6747,6 @@ def _measure_opt39_language_jobs(
             f"runner-minute saving: {saving:.1f} per 30 days from {population}; "
             "pull-request wall-clock is not credited because an unchanged required "
             "aggregate may still gate the merge")
-        coverage = (f" {unknown_prs} additional sampled run(s) had inputs whose "
-                    "language owner was unknown and were excluded."
-                    if unknown_prs else "")
         finding["evidence"] = (
             str(finding.get("evidence") or "").rstrip()
             + f" Measured {len(irrelevant)} of {len(classified)} sampled pull-request "
@@ -6729,7 +6754,9 @@ def _measure_opt39_language_jobs(
               f"{language_text} input; their affected jobs used {sample_saved:.1f} "
               f"runner-minutes in {population}, projecting a saving of {saving:.1f} "
               f"runner-minutes per 30 days from {monthly_volume} workflow runs."
-            + coverage
+            + f" The 30-day scale applies the sample's {len(sampled_runs)} of "
+              f"{len(workflow_runs)} pull-request event share to the workflow's "
+              f"{monthly_volume} total runs."
             + " Unknown or failed changed-path lookups must run every language job."
         )
 
