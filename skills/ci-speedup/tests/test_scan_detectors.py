@@ -2809,6 +2809,29 @@ def test_opt46_aggregate_heading_states_an_unsized_saving(tmp_path: Path):
     assert "runner-minute saving: unsized (" in heading
 
 
+def test_opt46_aggregate_advice_keeps_cancelled_runs_from_reading_green(
+        tmp_path: Path):
+    """A skipped required check counts as passing, so the advice must make
+    the reader confirm a cancelled run's verdict does not conclude `skipped`
+    before relying on `!cancelled()` for a required check."""
+    _write_workflow(tmp_path, "ci.yml", _opt46_aggregate_workflow(
+        'test "$LINT_RESULT" = success'))
+    finding = next(f for f in _scan(tmp_path)["findings"]
+                   if f["pattern"] == "OPT46")
+    evidence = finding["evidence"]
+    assert "failed, cancelled or skipped dependencies" in evidence
+    assert "skipped required check counts as passing" in evidence
+    refs = _SKILL_DIR / "references"
+    for doc in (
+            refs / "optimization-patterns.md",
+            refs / "patterns" / ("opt46-superseded-runs-not-cancelled-"
+                                 "missing-concurrency-or-cancel-.md"),
+            refs / "patterns" / ("opt32-missing-paths-paths-ignore-on-"
+                                 "expensive-workflows.md")):
+        text = " ".join(doc.read_text(encoding="utf-8").split())
+        assert "skipped required check counts as passing" in text, doc.name
+
+
 def test_opt5_suppressed_when_pnpm_action_setup_caches(tmp_path: Path):
     neg = """name: CI
 on: push

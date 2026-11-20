@@ -1779,7 +1779,10 @@ def _detect_opt46_cancelled_aggregate(doc: dict, raw: str) -> list[Hit]:
                 "dependency results while the workflow cancels superseded runs, so it "
                 "can still acquire a runner after cancellation. Use `if: ${{ "
                 "!cancelled() }}` and keep the step-level result check fail-closed for "
-                "failed, cancelled or skipped dependencies. Runner-minute effect: "
+                "failed, cancelled or skipped dependencies. If this job is a required "
+                "check, first cancel one run on the current head and confirm its check "
+                "does not conclude `skipped` (a skipped required check counts as "
+                "passing); keep `always()` if it does. Runner-minute effect: "
                 "saving this aggregate job's compute on cancelled runs; not sized "
                 "until matched cancelled runs measure its runner allocation and compute."
             ),

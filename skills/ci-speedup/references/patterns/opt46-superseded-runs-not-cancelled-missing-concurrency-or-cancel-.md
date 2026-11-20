@@ -59,7 +59,10 @@ This pattern has three flavors around the same supersession mechanism:
 the job must still exit non-zero for any required dependency whose result is
 `failure`, `cancelled` or `skipped`. Test both halves independently: an ordinary
 failed dependency still makes the aggregate fail, while cancellation of the
-whole superseded run leaves the aggregate without a runner. Runner-minute
+whole superseded run leaves the aggregate without a runner. When the aggregate
+is a required check, cancel one run on the current head and confirm its check
+does not conclude `skipped` before relying on the new condition: a skipped
+required check counts as passing, so keep `always()` if it does. Runner-minute
 effect is a **saving**: that aggregate job's compute on cancelled runs. Leave it
 unsized until matched cancelled runs show that the runner was allocated and
 measure its compute; do not infer a number from the YAML.
