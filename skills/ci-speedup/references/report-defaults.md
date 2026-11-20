@@ -604,7 +604,9 @@ runs; OPT79: 3 hits, 3 misses, 5 seconds and 20% waste, a 25% tail share, and
 `max(3 × P50, P50 + 30 seconds)`, 2 tail runs, 2 proven tail runs, a 20-second
 gap, and at most 4 log probes;
 OPT81: 8 samples per label, a 30-second and 25% gap, 50% covered time, and a
-30-second cache-lever floor; OPT82: 60 seconds; OPT83: 15% and 20 seconds;
+30-second cache-lever floor; its same-class downsize half needs 5 samples per
+size and allows at most a 5% absolute median-duration difference; OPT82: 60
+seconds; OPT83: 15% and 20 seconds;
 OPT84: 0% minimum share and 20 seconds, and 15% of the pole for its
 install row (npm, pnpm or Yarn install to `bun install`); OPT108: a successful
 comment-triggered run under 30 seconds counts as a rejected comment (the drill's
@@ -852,11 +854,15 @@ implementation lands.
       "collect_runs.py:_OPT81_MIN_GAP_FRAC": 0.25,
       "collect_runs.py:_OPT81_MIN_GAP_S": 30.0,
       "collect_runs.py:_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+      "collect_runs.py:_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL": 5,
+      "collect_runs.py:_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC": 0.05,
       "collect_runs.py:_OPT81_COVERED_FRAC": 0.5,
       "collect_runs.py:_OPT81_CACHE_LEVER_MIN_S": 30.0,
       "verify_report.py:_VR_OPT81_MIN_GAP_FRAC": 0.25,
       "verify_report.py:_VR_OPT81_MIN_GAP_S": 30.0,
       "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+      "verify_report.py:_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL": 5,
+      "verify_report.py:_VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC": 0.05,
       "verify_report.py:_VR_OPT81_COVERED_FRAC": 0.5,
       "verify_report.py:_VR_OPT81_CACHE_LEVER_MIN_S": 30.0
     }

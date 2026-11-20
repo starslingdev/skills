@@ -15502,6 +15502,10 @@ _OPT81_MIN_SAMPLES_PER_LABEL = 8
 # half keeps a 30s wobble on a 40-minute job out.
 _OPT81_MIN_GAP_S = 30.0
 _OPT81_MIN_GAP_FRAC = 0.25
+# A measured downsize needs five interleaved successful runs on each class (the
+# paired public evidence population) and may add at most five percent wall time.
+_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL = 5
+_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC = 0.05
 # A2: the dominant step categories that count as compute.
 _OPT81_COMPUTE_CATEGORIES = frozenset({"build", "test"})
 # A2: a dominant step whose NAME says it is waiting, sleeping or moving bytes is not
@@ -15557,6 +15561,7 @@ _OPT81_VERDICT_GATES = frozenset({
     "different_operating_system",
     "different_architecture",
     "same_runner_class",
+    "downsize_slowdown_above_limit",
     # A2 verdicts: a cheaper lever exists, or the shape is not this lever's.
     "a2_not_a_pull_request_workflow",
     "a2_not_on_the_merge_gating_critical_path",
@@ -15666,6 +15671,13 @@ def _opt81_runner_class(label: str | None) -> "tuple[str, str, str, str] | None"
     if len(found) != 1:
         return None
     return next(iter(found))
+
+
+def _opt81_numeric_size_rank(
+        runner_class: tuple[str, str, str, str]) -> int | None:
+    """Comparable capacity rank for explicit numeric sizes of one runner class."""
+    size = runner_class[3]
+    return int(size) if size.isdigit() and int(size) > 0 else None
 
 
 def _opt81_executed_steps(job: dict[str, Any]) -> list[str]:
@@ -15815,16 +15827,32 @@ def _detect_opt81_measured_runner_gap(
         if len(classified) < 2:
             _no("runner_label_not_classifiable_by_size", name, excluded=excluded)
             continue
-        qualifying = sorted(
+        standard_qualifying = sorted(
             (lb for lb in classified
              if len(labels[lb]) >= _OPT81_MIN_SAMPLES_PER_LABEL),
             key=lambda lb: (-len(labels[lb]), lb))
-        if len(qualifying) < 2:
+        downsize_qualifying = sorted(
+            (lb for lb in classified
+             if len(labels[lb]) >= _OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL),
+            key=lambda lb: (-len(labels[lb]), lb))
+        # Preserve A1's established eight-sample population. A third label with
+        # only five to seven observations must not block a valid old-style pair;
+        # the lower floor applies only when exactly two labels reach it.
+        if len(standard_qualifying) == 2:
+            qualifying = standard_qualifying
+        elif len(standard_qualifying) > 2:
+            _no("more_than_two_qualifying_runner_labels", name,
+                labels=standard_qualifying)
+            continue
+        elif len(downsize_qualifying) == 2:
+            qualifying = downsize_qualifying
+        elif len(downsize_qualifying) > 2:
+            _no("more_than_two_qualifying_runner_labels", name,
+                labels=downsize_qualifying)
+            continue
+        else:
             _no("fewer_than_min_samples_on_two_labels", name,
                 n={lb: len(labels[lb]) for lb in classified})
-            continue
-        if len(qualifying) > 2:
-            _no("more_than_two_qualifying_runner_labels", name, labels=qualifying)
             continue
         a, b = qualifying
         (cls_a, os_a, arch_a, size_a) = classified[a]
@@ -15853,6 +15881,99 @@ def _detect_opt81_measured_runner_gap(
             continue
         p50 = {lb: _percentile([r["duration_s"] for r in labels[lb]], 50)
                for lb in (a, b)}
+        rank_a, rank_b = (_opt81_numeric_size_rank(classified[lb]) for lb in (a, b))
+        downsize_candidate = (
+            classified[a][0] == classified[b][0]
+            and rank_a is not None and rank_b is not None and rank_a != rank_b
+        )
+        if downsize_candidate:
+            small, large = (a, b) if rank_a < rank_b else (b, a)
+            small_rank = rank_a if small == a else rank_b
+            large_rank = rank_b if large == b else rank_a
+            delta_frac = ((p50[small] - p50[large]) / p50[large]
+                          if p50[large] > 0 else float("inf"))
+            if abs(delta_frac) > _OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC:
+                _no("downsize_slowdown_above_limit", name,
+                    delta_frac=round(delta_frac, 4))
+        downsize_pair = (downsize_candidate
+                         and abs(delta_frac) <= _OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC)
+        if downsize_pair:
+            steps = labels[large][0]["_steps"]
+            rows = [{k: v for k, v in r.items() if k != "_steps"}
+                    for lb in (large, small) for r in labels[lb]]
+            n_large, n_small = len(labels[large]), len(labels[small])
+            cs, cm = classified[large], classified[small]
+            delta_s = p50[large] - p50[small]
+            if delta_s > 0:
+                effect = {"direction": "saving",
+                          "runner_min_per_run": round(delta_s / 60.0, 4)}
+                effect_text = (f"saving {effect['runner_min_per_run']:.2f} "
+                               "runner-minutes per job run")
+            elif delta_s < 0:
+                effect = {"direction": "added_cost",
+                          "runner_min_per_run": round(-delta_s / 60.0, 4)}
+                effect_text = (f"added cost {effect['runner_min_per_run']:.2f} "
+                               "runner-minutes per job run")
+            else:
+                effect = {"direction": "unsized",
+                          "reason": "the two measured medians are equal"}
+                effect_text = "not sized: the two measured medians are equal"
+            evidence = (
+                f"`{name}` ran the same {len(steps)} step(s) on two explicit sizes of "
+                f"one runner class: {n_large} successful run(s) on `{large}` at p50 "
+                f"{p50[large]:.0f}s and {n_small} on the smaller `{small}` at p50 "
+                f"{p50[small]:.0f}s ({abs(delta_frac):.1%} apart). Runner-minute "
+                f"effect: {effect_text}. The smaller class has a lower capacity rank, "
+                "but this audit carries no rate table and does not price it. "
+                f"{_OPT81_DISCLOSURE}")
+            me = _measured_evidence(
+                ["Runner label", "Class", "Successful runs (n)", "p50", "Steps executed"],
+                [[f"`{large}`", _opt81_class_display(cs[0], cs[3]), str(n_large),
+                  f"{p50[large]:.0f}s", str(len(steps))],
+                 [f"`{small}`", _opt81_class_display(cm[0], cm[3]), str(n_small),
+                  f"{p50[small]:.0f}s", str(len(steps))]],
+                summary=evidence,
+                note=("The two interleaved distributions execute the same steps. "
+                      "Downsize only ordinary routes; retain pinned, frozen, "
+                      "compatibility and release routes, and verify memory, reliability, "
+                      "work coverage and latency before switching."))
+            f = _new_finding(
+                "OPT81", "MEDIUM", "A Smaller Runner Is About as Fast", wf_path,
+                name, evidence, _OPT81_FIX_STRATEGY,
+                _catalog_anchor("OPT81", _OPT81_TITLE), start_idx + len(out) + 1,
+                wc_p50=0.0, rm=None,
+                size_note=(f"runner-minute effect: {effect_text}; rate-weighted price "
+                           "change is not sized because the audit carries no rate table"),
+                realization="none", measured_evidence=me)
+            f["sizing_basis"] = "measured"
+            f["runner_minute_effect"] = effect
+            f["faster_runner"] = {
+                "kind": "opt81_downsize", "half": "A1", "job": name,
+                "workflow_file": wf_path,
+                "large": {"label": large, "class": cs[0], "os": cs[1],
+                          "arch": cs[2], "size": cs[3],
+                          "p50_s": _opt81_round(p50[large]), "n": n_large,
+                          "first_run_at": span[large][0], "last_run_at": span[large][1]},
+                "small": {"label": small, "class": cm[0], "os": cm[1],
+                          "arch": cm[2], "size": cm[3],
+                          "p50_s": _opt81_round(p50[small]), "n": n_small,
+                          "first_run_at": span[small][0], "last_run_at": span[small][1]},
+                "large_size_rank": large_rank, "small_size_rank": small_rank,
+                "slowdown_frac": round(delta_frac, 4),
+                "max_abs_delta_frac": _OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC,
+                "min_samples_per_label": _OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL,
+                "step_list_sha": next(iter(shas)), "step_names": list(steps),
+                "rows": rows, "excluded_labels": dict(sorted(excluded.items())),
+                "runner_matrix": matrix, "runner_minute_effect": effect,
+                "disclosure": _OPT81_DISCLOSURE,
+            }
+            out.append(f)
+            continue
+
+        if any(len(labels[lb]) < _OPT81_MIN_SAMPLES_PER_LABEL for lb in (a, b)):
+            _no("fewer_than_min_samples_on_two_labels", name,
+                n={lb: len(labels[lb]) for lb in classified})
+            continue
         slow, fast = (a, b) if (p50[a], a) >= (p50[b], b) else (b, a)
         if p50[slow] == p50[fast]:
             _no("gap_below_floor", name)

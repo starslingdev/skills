@@ -202,6 +202,10 @@ def test_opt81_verifier_constants_stay_coupled_to_the_engine():
     assert vr._VR_OPT81_MIN_SAMPLES_PER_LABEL == cr._OPT81_MIN_SAMPLES_PER_LABEL == 8
     assert vr._VR_OPT81_MIN_GAP_S == cr._OPT81_MIN_GAP_S == 30.0
     assert vr._VR_OPT81_MIN_GAP_FRAC == cr._OPT81_MIN_GAP_FRAC == 0.25
+    assert (vr._VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL
+            == cr._OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL == 5)
+    assert (vr._VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC
+            == cr._OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC == 0.05)
     assert vr._VR_OPT81_COVERED_FRAC == cr._OPT81_COVERED_FRAC
     assert vr._VR_OPT81_CACHE_LEVER_MIN_S == cr._OPT81_CACHE_LEVER_MIN_S
     assert vr._VR_OPT81_CHEAPER_STRUCTURAL == cr._OPT81_CHEAPER_STRUCTURAL
@@ -450,10 +454,81 @@ def test_opt81_a1_gap_below_floor_is_a_verdict_not_a_held_back_candidate():
     assert found == [] and withheld.get("gap_below_floor") == 1
 
 
+def test_opt81_reports_a_smaller_runner_within_five_percent_with_signed_effect():
+    large = [100, 101, 99, 102, 100]
+    small = [103, 104, 102, 105, 103]
+    found, withheld, cands, *_ = _a1(_alt_runs(
+        slow_label="starsling-ubuntu-24.04-4", slow=large,
+        fast_label="starsling-ubuntu-24.04-2", fast=small))
+
+    assert len(found) == 1, (withheld, cands)
+    f = found[0]
+    fr = f["faster_runner"]
+    assert fr["kind"] == "opt81_downsize"
+    assert fr["large"]["size"] == "4" and fr["small"]["size"] == "2"
+    assert fr["slowdown_frac"] == pytest.approx(0.03, abs=0.001)
+    assert f["runner_minute_effect"]["direction"] == "added_cost"
+    assert f["runner_minute_effect"]["runner_min_per_run"] == pytest.approx(0.05)
+    assert f["wall_clock_p50_s"] == 0.0
+    assert cands == []
+
+
+def test_opt81_smaller_runner_faster_is_a_signed_runner_minute_saving():
+    found, *_ = _a1(_alt_runs(
+        slow_label="starsling-ubuntu-24.04-4", slow=[105] * 5,
+        fast_label="starsling-ubuntu-24.04-2", fast=[101] * 5))
+
+    effect = found[0]["runner_minute_effect"]
+    assert effect["direction"] == "saving"
+    assert effect["runner_min_per_run"] == pytest.approx(0.0667, abs=0.0001)
+
+
+def test_opt81_smaller_runner_more_than_five_percent_slower_stays_quiet():
+    found, withheld, _cands, *_ = _a1(_alt_runs(
+        slow_label="starsling-ubuntu-24.04-4", slow=[100] * 5,
+        fast_label="starsling-ubuntu-24.04-2", fast=[107] * 5))
+
+    assert found == []
+    assert withheld.get("downsize_slowdown_above_limit") == 1
+
+
+def test_opt81_downsize_card_carries_signed_effect_and_route_guards():
+    found, *_ = _a1(_alt_runs(
+        slow_label="starsling-ubuntu-24.04-4", slow=[100] * 5,
+        fast_label="starsling-ubuntu-24.04-2", fast=[103] * 5))
+    card = "\n".join(bp._opt81_card(found[0], "https://example.invalid/catalog"))
+
+    assert "smaller `starsling-ubuntu-24.04-2`" in card
+    assert "added cost 0.05 runner-minutes per job run" in card
+    assert all(word in card for word in ("pinned", "frozen", "compatibility"))
+    assert "price" in card and "not sized" in card
+
+
+def test_opt81_verifier_rederives_downsize_shape_and_signed_effect():
+    vr = _load_verify_report()
+    found, *_ = _a1(_alt_runs(
+        slow_label="starsling-ubuntu-24.04-4", slow=[100] * 5,
+        fast_label="starsling-ubuntu-24.04-2", fast=[103] * 5))
+    f = copy.deepcopy(found[0])
+
+    assert vr._opt81_a1_rederived(f) == []
+    f["runner_minute_effect"]["direction"] = "saving"
+    assert any("runner-minute effect" in problem
+               for problem in vr._opt81_a1_rederived(f))
+
+
 def test_opt81_a1_three_qualifying_labels_withhold():
     runs = _runs(extra=lambda i: [_job("bench", "starsling-ubuntu-24.04", 70, 100 + i)])
     found, withheld, cands, *_ = _a1(runs)
     assert found == [] and withheld.get("more_than_two_qualifying_runner_labels") == 1
+
+
+def test_opt81_downsize_floor_does_not_block_an_existing_eight_sample_pair():
+    runs = _runs(extra=lambda i: (
+        [_job("bench", "starsling-ubuntu-24.04-2", 90, 100 + i)] if i < 5 else []))
+    found, withheld, *_ = _a1(runs)
+    assert len(found) == 1, withheld
+    assert found[0]["faster_runner"]["kind"] != "opt81_downsize"
 
 
 def test_opt81_a1_drops_an_unclassifiable_population_and_still_compares():
@@ -1429,6 +1504,33 @@ def test_opt81_a1_credit_survives_the_real_cascade_renders_and_verifies(
     path.write_text(json.dumps(doc), encoding="utf-8")
     r = vr.check_opt81_runner_comparison_rederived(md, path)
     assert r.ok, r.detail
+
+
+def test_opt81_downsize_runs_through_collect_and_full_report_verifier(
+        monkeypatch, tmp_path):
+    """The acceptance shape enters through the GitHub-client boundary, not a
+    renderer-only stamp, and the complete report verifier accepts the result."""
+    vr = _load_verify_report()
+    plan = [leg for pair in zip(
+        [("starsling-ubuntu-24.04-4", 100)] * 5,
+        [("starsling-ubuntu-24.04-2", 103)] * 5,
+    ) for leg in pair]
+    doc = _collect(monkeypatch, plan,
+                   seed={"skill_commit_sha": "installed:unversioned"})
+    findings = [f for f in _o81(doc, "A1")
+                if f["faster_runner"].get("kind") == "opt81_downsize"]
+    assert len(findings) == 1, doc.get("opt81_withheld_by_gate")
+    report = bp.render(doc, {}, {}, {}, "2026-06-08")
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failed = [check for check in vr.run_checks(
+        report, report_path, findings_path, None) if not check.skipped and not check.ok]
+    assert failed == [], [(check.name, check.detail) for check in failed]
 
 
 def test_opt81_a2_fires_through_collect_on_a_pull_request_pole(monkeypatch):

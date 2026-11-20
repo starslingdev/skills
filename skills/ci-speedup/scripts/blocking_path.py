@@ -12200,7 +12200,15 @@ def _opt81_prompt(f: dict[str, Any], url: str,
             f"Where: {wf} ({job}).",
             f"What ci-speedup saw: {_opt81_evidence(f)}"]
     body += ["", _MACHINE_RUNNER_MINUTE_LINE]
-    if half == "A1":
+    if half == "A1" and fr.get("kind") == "opt81_downsize":
+        body += ["", "Do: downsize only the ordinary routes for this job to the "
+                 "smaller label already measured here, keeping every step and all "
+                 "work coverage. Retain pinned, frozen, compatibility and release "
+                 "routes on their required runner. Before switching, verify memory "
+                 "headroom, reliability and latency on the same workload. This audit "
+                 "does not carry a runner rate table, so it does not size the price "
+                 "change."]
+    elif half == "A1":
         body += ["", "Do: find out why some runs of this job use the slower label (a fork "
                  "pull request, an event or a matrix condition can select it on "
                  "purpose); if nothing requires it, move the job to the faster label it "
@@ -12264,31 +12272,59 @@ def _opt81_card(f: dict[str, Any], catalog_url: str,
     if half == "A1":
         out += [f"**🏎️ OPT81 · {title}** - measured from runs this repository already "
                 "made", ""]
-        # `n` counts SUCCESSFUL runs only (A1 compares success-only populations).
-        s, q = fr.get("slow") or {}, fr.get("fast") or {}
-        out += [f"- **Measured:** `{job}` ran {s.get('n')} time(s) on "
-                f"`{_flatten_cell(str(s.get('label')))}` at p50 "
-                f"{_num(s.get('p50_s')) or 0:.0f}s and {q.get('n')} time(s) on "
-                f"`{_flatten_cell(str(q.get('label')))}` at p50 "
-                f"{_num(q.get('p50_s')) or 0:.0f}s, with the same steps on both: "
-                f"{_num(fr.get('gap_s')) or 0:.0f}s faster at the median on "
-                f"`{_flatten_cell(str(q.get('label')))}`.",
-                f"- **Runner-minute effect:** {_OPT81_RUNNER_MIN_UNKNOWN}."]
-        wc = _num(f.get("wall_clock_p50_s")) or 0.0
-        if wc > 0:
-            out.append(f"- **Merge wait:** this job is on the merge-gating path; the "
-                       f"credited wall-clock is {_clock(wc)} after the critical-path "
-                       "floors.")
+        if fr.get("kind") == "opt81_downsize":
+            large, small = fr.get("large") or {}, fr.get("small") or {}
+            effect = fr.get("runner_minute_effect") or f.get("runner_minute_effect") or {}
+            direction = str(effect.get("direction") or "unsized")
+            amount = _num(effect.get("runner_min_per_run"))
+            if direction == "saving" and amount is not None:
+                effect_text = f"saving {amount:.2f} runner-minutes per job run"
+            elif direction == "added_cost" and amount is not None:
+                effect_text = f"added cost {amount:.2f} runner-minutes per job run"
+            else:
+                effect_text = ("not sized: "
+                               + _flatten_cell(str(effect.get("reason") or
+                                                   "the measured medians are equal")))
+            out += [f"- **Measured:** `{job}` ran {large.get('n')} time(s) on "
+                    f"`{_flatten_cell(str(large.get('label')))}` at p50 "
+                    f"{_num(large.get('p50_s')) or 0:.0f}s and {small.get('n')} "
+                    f"time(s) on the smaller `{_flatten_cell(str(small.get('label')))}` "
+                    f"at p50 {_num(small.get('p50_s')) or 0:.0f}s, with the same "
+                    "steps on both.",
+                    f"- **Runner-minute effect:** {effect_text}.",
+                    "- **Price effect:** not sized; this audit carries no runner rate "
+                    "table.",
+                    "- **Merge wait:** not credited; this is a cost and capacity "
+                    "recommendation.",
+                    "- **Guardrail:** downsize only ordinary routes; retain pinned, "
+                    "frozen, compatibility and release routes, and verify memory, "
+                    "reliability, work coverage and latency."]
         else:
-            derivation = [d for d in (f.get("wall_clock_derivation") or [])
-                          if isinstance(d, dict) and d.get("reason")]
-            why = (str(derivation[-1]["reason"]) if derivation
-                   else str(fr.get("credit_reason") or ""))
-            # The generic developer-facing bound ends its reason with a bill-saving
-            # clause; OPT81's runner-minute effect is unknown (stated above), so
-            # that clause would contradict the card.
-            why = re.sub(r";\s*runner-minute \(bill\) saving only\s*$", "", why)
-            out.append(f"- **Merge wait:** not credited ({_flatten_cell(why)}).")
+        # `n` counts SUCCESSFUL runs only (A1 compares success-only populations).
+            s, q = fr.get("slow") or {}, fr.get("fast") or {}
+            out += [f"- **Measured:** `{job}` ran {s.get('n')} time(s) on "
+                    f"`{_flatten_cell(str(s.get('label')))}` at p50 "
+                    f"{_num(s.get('p50_s')) or 0:.0f}s and {q.get('n')} time(s) on "
+                    f"`{_flatten_cell(str(q.get('label')))}` at p50 "
+                    f"{_num(q.get('p50_s')) or 0:.0f}s, with the same steps on both: "
+                    f"{_num(fr.get('gap_s')) or 0:.0f}s faster at the median on "
+                    f"`{_flatten_cell(str(q.get('label')))}`.",
+                    f"- **Runner-minute effect:** {_OPT81_RUNNER_MIN_UNKNOWN}."]
+            wc = _num(f.get("wall_clock_p50_s")) or 0.0
+            if wc > 0:
+                out.append(f"- **Merge wait:** this job is on the merge-gating path; the "
+                           f"credited wall-clock is {_clock(wc)} after the critical-path "
+                           "floors.")
+            else:
+                derivation = [d for d in (f.get("wall_clock_derivation") or [])
+                              if isinstance(d, dict) and d.get("reason")]
+                why = (str(derivation[-1]["reason"]) if derivation
+                       else str(fr.get("credit_reason") or ""))
+                # The generic developer-facing bound ends its reason with a bill-saving
+                # clause; OPT81's runner-minute effect is unknown (stated above), so
+                # that clause would contradict the card.
+                why = re.sub(r";\s*runner-minute \(bill\) saving only\s*$", "", why)
+                out.append(f"- **Merge wait:** not credited ({_flatten_cell(why)}).")
     else:
         out += ["**🏎️ OPT81 · a different or larger runner class, the last lever this "
                 "audit can name for this pole** - advisory, benchmark required, no "
