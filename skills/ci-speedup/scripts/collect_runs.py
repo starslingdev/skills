@@ -29840,7 +29840,7 @@ def _detect_runtime_ts_transpilation(
 
 
 _GO_TEST_COMMAND_RE = re.compile(
-    r"^##\[group\]Run\s+(?:(?:env|sudo|time)\s+)?go\s+test(?:\s|$)",
+    r"^##\[group\]Run\s+(?:(?:env|sudo|time)\s+)?(?:go\s+test|gotestsum)(?:\s|$)",
     re.IGNORECASE)
 _GO_TEST_RESULT_RE = re.compile(
     r"^\s*---\s+(?:PASS|FAIL):\s+(?P<test>Test[A-Za-z0-9_]+)"
@@ -29854,21 +29854,54 @@ _GO_PARALLEL_MAX_FILE_BYTES = 512_000
 
 
 _GO_PACKAGE_RESULT_RE = re.compile(
-    r"^\s*(?:ok|FAIL)\s+(?P<package>[A-Za-z0-9_.\-~/]+)\s+"
-    r"(?:\d+(?:\.\d+)?s|\(cached\)|\[[^\]]*\])")
+    r"^\s*(?P<status>ok|FAIL)\s+(?P<package>[A-Za-z0-9_.\-~/]+)\s+"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)s|\(cached\)|\[[^\]]*\])")
+# gotestsum's default package line: `✓  pkg (1m2.5s)` / `✖  pkg (3.1s)`.
+_GO_GOTESTSUM_PACKAGE_RE = re.compile(
+    "^\\s*[✓✖✔✗]\\s+(?P<package>[A-Za-z0-9_.\\-~/]+)\\s+"
+    r"\((?P<duration>[0-9hms.]+)\)\s*$")
+_GO_DURATION_RE = re.compile(
+    r"^(?:(?P<h>\d+)h)?(?:(?P<m>\d+)m(?!s))?(?:(?P<s>\d+(?:\.\d+)?)s)?"
+    r"(?:(?P<ms>\d+(?:\.\d+)?)ms)?$")
+# A step that is not `go test` itself but may run it: `make <target>` or a
+# repository script. The detector resolves these against the checkout and
+# stays quiet unless the recipe or script is a plain `go test` line.
+_GO_TEST_VIA_RE = re.compile(
+    r"^##\[group\]Run\s+(?P<via>make\s+(?P<target>[A-Za-z0-9_.\-]+)|"
+    r"(?:(?:ba)?sh\s+)?(?P<script>\.?/?[A-Za-z0-9_.\-/]+\.sh))\s*$")
+
+
+def _go_duration_s(text: str) -> float | None:
+    match = _GO_DURATION_RE.match(text)
+    if not match or not any(match.groupdict().values()):
+        return None
+    return (float(match.group("h") or 0) * 3600 + float(match.group("m") or 0) * 60
+            + float(match.group("s") or 0) + float(match.group("ms") or 0) / 1000)
 
 
 def _go_slow_test_results(log: str) -> list[dict[str, Any]]:
-    """Slow top-level Go tests from one verbose long-pole ``go test`` log.
+    """Slow Go tests (or packages) from one long-pole ``go test`` log.
 
-    Each package's results precede its ``ok``/``FAIL <import path>`` line, so
-    a row carries that ``package`` when the log prints it; the source proof
-    then matches within that package only.
+    Reads verbose ``--- PASS: TestX (Ns)`` lines, ``go test -json`` events
+    and, when per-test times are absent, plain ``ok <pkg> Ns`` or gotestsum
+    package lines (``level: package`` rows). Each package's results precede
+    its package line, so a test row carries that ``package`` when the log
+    prints it. A ``make <target>`` or script step is recorded as ``via``; the
+    detector resolves it against the checkout.
     """
     records, _untimestamped, _total = _opt80_log_records(log)
+    via = ""
     if not any(_GO_TEST_COMMAND_RE.search(text) for _stamp, text in records):
-        return []
+        for _stamp, text in records:
+            match = _GO_TEST_VIA_RE.match(text)
+            if match:
+                via = re.sub(r"\s+", " ", match.group("via"))
+                break
+        if not via:
+            return []
     found: dict[tuple[str, str], float] = {}
+    packages: dict[str, float] = {}
+    timed_packages: set[str] = set()
     pending: dict[str, float] = {}
 
     def flush(package: str) -> None:
@@ -29878,16 +29911,61 @@ def _go_slow_test_results(log: str) -> list[dict[str, Any]]:
         pending.clear()
 
     for _stamp, text in records:
+        if text.startswith("{") and '"Action"' in text:
+            try:
+                event = json.loads(text)
+            except ValueError:
+                continue
+            if not isinstance(event, dict) or event.get("Action") not in {"pass", "fail"}:
+                continue
+            package = str(event.get("Package") or "")
+            elapsed = event.get("Elapsed")
+            if not isinstance(elapsed, (int, float)):
+                continue
+            test = event.get("Test")
+            if test:
+                if package:
+                    timed_packages.add(package)
+                if (isinstance(test, str) and "/" not in test
+                        and re.fullmatch(r"Test[A-Za-z0-9_]+", test)
+                        and elapsed >= _GO_PARALLEL_MIN_TEST_S):
+                    key = (test, package)
+                    found[key] = max(float(elapsed), found.get(key, 0.0))
+            elif package:
+                packages[package] = max(float(elapsed), packages.get(package, 0.0))
+            continue
         match = _GO_TEST_RESULT_RE.match(text)
         if match:
             seconds = float(match.group("seconds"))
-            if seconds >= _GO_PARALLEL_MIN_TEST_S:
-                name = match.group("test")
-                pending[name] = max(seconds, pending.get(name, 0.0))
+            pending.setdefault(match.group("test"), 0.0)
+            pending[match.group("test")] = max(seconds, pending[match.group("test")])
             continue
-        package = _GO_PACKAGE_RESULT_RE.match(text)
-        if package:
-            flush(package.group("package"))
+        package_line = _GO_PACKAGE_RESULT_RE.match(text)
+        seconds: float | None = None
+        name = ""
+        if package_line:
+            name = package_line.group("package")
+            if package_line.group("seconds"):
+                seconds = float(package_line.group("seconds"))
+        else:
+            gts = _GO_GOTESTSUM_PACKAGE_RE.match(text)
+            if gts:
+                name = gts.group("package")
+                seconds = _go_duration_s(gts.group("duration"))
+        if name:
+            if pending:
+                timed_packages.add(name)
+            for test_name, test_s in list(pending.items()):
+                if test_s < _GO_PARALLEL_MIN_TEST_S:
+                    del pending[test_name]
+            flush(name)
+            if seconds is not None:
+                packages[name] = max(seconds, packages.get(name, 0.0))
+    if pending:
+        timed_packages.add("")
+    for test_name, test_s in list(pending.items()):
+        if test_s < _GO_PARALLEL_MIN_TEST_S:
+            del pending[test_name]
     flush("")
     rows: list[dict[str, Any]] = []
     for (name, package), seconds in sorted(found.items()):
@@ -29895,6 +29973,16 @@ def _go_slow_test_results(log: str) -> list[dict[str, Any]]:
         if package:
             row["package"] = package
         rows.append(row)
+    if "" not in timed_packages:
+        # Per-test times are absent for these packages: a package row is an
+        # upper bound, and the source read decides which tests qualify.
+        for package, seconds in sorted(packages.items()):
+            if package not in timed_packages and seconds >= _GO_PARALLEL_MIN_TEST_S:
+                rows.append({"package": package, "duration_s": round(seconds, 2),
+                             "level": "package"})
+    if via:
+        for row in rows:
+            row["via"] = via
     return rows
 
 def _go_code_mask(text: str) -> str:
@@ -30283,47 +30371,178 @@ def _go_parallel_source_candidates(
             out[name] = found
     return out
 
+_GO_PLAIN_TEST_LINE_RE = re.compile(
+    r"^\s*(?:exec\s+)?(?:(?:env|time)\s+)?(?:go\s+test|gotestsum)(?:\s|$)")
+
+
+def _go_via_runs_go_test(root: "Path | None", via: str) -> bool:
+    """True when a ``make <target>`` or script step is a plain ``go test`` line."""
+    if root is None:
+        return False
+    make = re.fullmatch(r"make (?P<target>[A-Za-z0-9_.\-]+)", via)
+    try:
+        if make:
+            for name in ("GNUmakefile", "makefile", "Makefile"):
+                path = root / name
+                if path.is_file() and not path.is_symlink():
+                    break
+            else:
+                return False
+            if path.stat().st_size > _GO_PARALLEL_MAX_FILE_BYTES:
+                return False
+            lines = path.read_text(encoding="utf-8").splitlines()
+            target = re.escape(make.group("target"))
+            for index, line in enumerate(lines):
+                if re.match(rf"^{target}\s*:(?!=)", line):
+                    recipe: list[str] = []
+                    for following in lines[index + 1:]:
+                        if not following.startswith("\t"):
+                            break
+                        recipe.append(following[1:].lstrip("@-+ "))
+                    return any(_GO_PLAIN_TEST_LINE_RE.match(r) for r in recipe)
+            return False
+        script = re.sub(r"^(?:(?:ba)?sh\s+)", "", via)
+        path = (root / script.removeprefix("./")).resolve()
+        if (not path.is_relative_to(root.resolve()) or not path.is_file()
+                or path.stat().st_size > _GO_PARALLEL_MAX_FILE_BYTES):
+            return False
+        return any(_GO_PLAIN_TEST_LINE_RE.match(line)
+                   for line in path.read_text(encoding="utf-8").splitlines())
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
+def _go_package_test_proofs(
+    root: "Path | None", package: str,
+) -> list[dict[str, Any]]:
+    """Every proven-independent, serial Test function in one Go package."""
+    if root is None or not package:
+        return []
+    try:
+        paths = sorted(root.rglob("*_test.go"))
+    except OSError:
+        return []
+    directories: dict[Path, str | None] = {}
+    for path in paths[:_GO_PARALLEL_MAX_FILES]:
+        if path.parent not in directories:
+            directories[path.parent] = _go_import_path(root, path.parent)
+    matches = [d for d, imp in directories.items() if imp == package]
+    if len(matches) != 1:
+        return []
+    names: set[str] = set()
+    for path in sorted(matches[0].glob("*_test.go")):
+        try:
+            masked = _go_code_mask(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return []
+        names.update(m.group("test") for m in _GO_TEST_FUNCTION_RE.finditer(masked))
+    definitions, complete = _go_parallel_source_definitions(root, names)
+    proven: list[dict[str, Any]] = []
+    for name in sorted(names):
+        found = _go_parallel_source_match(definitions, complete, name, package)
+        if found:
+            proven.append(found)
+    return proven
+
+
 def _detect_go_test_parallelism(
     pole_logs: list[dict[str, Any]], root: "Path | None", start_idx: int,
 ) -> list[dict[str, Any]]:
-    """Route measured isolated-but-serial Go tests to OPT88."""
+    """Route measured isolated-but-serial Go tests to OPT88.
+
+    Per-test times (verbose or ``-json`` output) size the finding by the
+    slowest proven test. Plain package lines fall back to a static read of
+    the package: the wall-clock effect is then unsized, since the package's
+    measured time is only an upper bound.
+    """
     wanted = {
         str(row.get("test") or "")
         for entry in pole_logs
         for row in (entry.get("go_slow_tests") or [])
-        if isinstance(row, dict)
+        if isinstance(row, dict) and row.get("test")
     }
     definitions, complete = _go_parallel_source_definitions(root, wanted)
+    via_ok: dict[str, bool] = {}
     out: list[dict[str, Any]] = []
     idx = start_idx
     for entry in pole_logs:
         job_s = entry.get("duration_s")
         matched: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        package_level: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
         for row in entry.get("go_slow_tests") or []:
             if not (isinstance(row, dict)
                     and isinstance(row.get("duration_s"), (int, float))
                     and isinstance(job_s, (int, float))
                     and 0 < float(row["duration_s"]) <= float(job_s)):
                 continue
+            via = str(row.get("via") or "")
+            if via:
+                if via not in via_ok:
+                    via_ok[via] = _go_via_runs_go_test(root, via)
+                if not via_ok[via]:
+                    continue
             package = row.get("package")
+            if row.get("level") == "package":
+                proven = _go_package_test_proofs(root, str(package or ""))
+                if proven:
+                    package_level.append((row, proven))
+                continue
             source_row = _go_parallel_source_match(
                 definitions, complete, str(row.get("test") or ""),
                 str(package) if package else None)
             if source_row:
                 matched.append((row, source_row))
-        if not matched:
+        if not matched and not package_level:
             continue
-        matched.sort(key=lambda pair: (-float(pair[0]["duration_s"]),
-                                       str(pair[0]["test"])))
-        rows = [row for row, _source in matched]
-        lead, source = matched[0]
         job = str(entry.get("job") or "")
         workflow = str(entry.get("workflow_file") or "")
         url = str(entry.get("html_url") or "")
-        shown = _link(float(lead["duration_s"]), url)
-        setenv = any(src["setenv_blocker"] for _row, src in matched)
-        kinds = {src["isolation"] for _row, src in matched}
-        names = ", ".join(f"`{row['test']}`" for row in rows[:4])
+        if matched:
+            matched.sort(key=lambda pair: (-float(pair[0]["duration_s"]),
+                                           str(pair[0]["test"])))
+            sources = [src for _row, src in matched]
+            lead, source = matched[0]
+            lead_s = float(lead["duration_s"])
+            names = ", ".join(f"`{row['test']}`" for row, _src in matched[:4])
+            measured_what = (f"measures {names} running serially; the slowest "
+                             f"takes {_link(lead_s, url)}")
+            table = [[f"`{row['test']}`", f"{float(row['duration_s']):.2f}s",
+                      f"`{src['file']}:{src['line']}`",
+                      f"[job log]({url})" if url else "captured job log"]
+                     for row, src in matched]
+            headline = f"The slowest independent serial Go test takes {lead_s:.2f}s."
+            size_note = (
+                f"measured serial test wall {lead_s:.2f}s; "
+                "runner-minute saving: unsized (no same-runner before/after "
+                "timing of the parallel form was collected)")
+            candidate = {**source, "duration_s": lead_s}
+        else:
+            package_level.sort(key=lambda pair: (-float(pair[0]["duration_s"]),
+                                                 str(pair[0]["package"])))
+            lead_row, proven = package_level[0]
+            sources = [src for _row, srcs in package_level for src in srcs]
+            lead_s = float(lead_row["duration_s"])
+            names = ", ".join(f"`{src['test']}`" for src in sources[:4])
+            measured_what = (
+                f"measures package `{lead_row['package']}` taking "
+                f"{_link(lead_s, url)} without per-test times; its source has "
+                f"{names} running serially")
+            table = [[f"`{src['test']}` (package `{row['package']}`)",
+                      f"package {float(row['duration_s']):.2f}s",
+                      f"`{src['file']}:{src['line']}`",
+                      f"[job log]({url})" if url else "captured job log"]
+                     for row, srcs in package_level for src in srcs]
+            headline = (f"Package `{lead_row['package']}` takes {lead_s:.2f}s; "
+                        "per-test times are not in the log.")
+            size_note = (
+                "wall-clock effect: unsized (per-test times not in the log; the "
+                f"package's measured {lead_s:.2f}s is an upper bound); "
+                "runner-minute saving: unsized (no same-runner before/after "
+                "timing of the parallel form was collected)")
+            candidate = {**proven[0], "package": lead_row["package"],
+                         "package_duration_s": lead_s}
+        setenv = any(src["setenv_blocker"] for src in sources)
+        kinds = {src["isolation"] for src in sources}
         owned = {
             frozenset({"resources"}):
                 "its own temp tree, a store opened on that tree, and a test server",
@@ -30332,11 +30551,10 @@ def _detect_go_test_parallelism(
               "either its own temp tree, a store opened on that tree, and a test "
               "server, or its own config and test server")
         evidence = (
-            f"The representative `{job}` Go test log measures {names} running "
-            f"serially; the slowest takes {shown}. Their source gives each table "
-            f"case {owned}, captures no parent-scope or package-level variable, "
-            "makes no other process-global change, and does not opt the test into "
-            "`t.Parallel()`."
+            f"The representative `{job}` Go test log {measured_what}. Their "
+            f"source gives each table case {owned}, captures no parent-scope or "
+            "package-level variable, makes no other process-global change, and "
+            "does not opt the test into `t.Parallel()`."
         )
         if setenv:
             evidence += " `t.Setenv` is the process-global blocker in at least one case."
@@ -30360,12 +30578,8 @@ def _detect_go_test_parallelism(
             + loop_note + verify_note
         )
         measured = _measured_evidence(
-            ["Test", "Measured wall", "Source", "Representative run"],
-            [[f"`{row['test']}`", f"{float(row['duration_s']):.2f}s",
-              f"`{src['file']}:{src['line']}`",
-              f"[job log]({url})" if url else "captured job log"]
-             for row, src in matched],
-            f"The slowest independent serial Go test takes {float(lead['duration_s']):.2f}s.",
+            ["Test", "Measured wall", "Source", "Representative run"], table,
+            headline,
             "Source isolation is a safety gate, not proof of a saving; benchmark before and after.",
         )
         idx += 1
@@ -30373,17 +30587,11 @@ def _detect_go_test_parallelism(
             "OPT88", "MEDIUM", "Independent Go Tests Run Serially",
             workflow, job, evidence, fix,
             "opt88--test-concurrency-is-a-guess-not-a-measurement", idx,
-            wc_p50=0.0, rm=None,
-            size_note=(
-                f"measured serial test wall {float(lead['duration_s']):.2f}s; "
-                "runner-minute saving: unsized (no same-runner before/after timing "
-                "of the parallel form was collected)"),
+            wc_p50=0.0, rm=None, size_note=size_note,
             realization="none", measured_evidence=measured,
         )
         finding["sizing_basis"] = "measured"
-        finding["go_parallel_candidate"] = {
-            **source, "duration_s": float(lead["duration_s"]),
-        }
+        finding["go_parallel_candidate"] = candidate
         out.append(finding)
     return out
 

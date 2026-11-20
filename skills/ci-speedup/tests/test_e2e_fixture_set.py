@@ -946,6 +946,144 @@ def test_go_parallel_setenv_branch_states_only_what_the_source_proves(tmp_path):
     assert "loop variable" in finding["fix_strategy"]
 
 
+def _go_module(tmp_path: Path, test_src: str) -> Path:
+    (tmp_path / "go.mod").write_text("module example.invalid/m\n\ngo 1.22\n")
+    (tmp_path / "srv").mkdir()
+    (tmp_path / "srv" / "srv_test.go").write_text("package srv\n" + test_src)
+    return tmp_path
+
+
+_GO_PLAIN_LOG = """\
+2026-01-28T00:00:00Z ##[group]Run {command}
+2026-01-28T00:01:30Z ok  \texample.invalid/m/srv\t88.50s
+2026-01-28T00:01:31Z ok  \texample.invalid/m/fast\t0.40s
+"""
+
+
+def test_go_slow_results_read_plain_package_lines():
+    rows = cr._go_slow_test_results(_GO_PLAIN_LOG.format(command="go test ./..."))
+    assert rows == [{"package": "example.invalid/m/srv", "duration_s": 88.5,
+                     "level": "package"}]
+
+
+def test_go_slow_results_read_go_test_json():
+    log = (
+        "2026-01-28T00:00:00Z ##[group]Run gotestsum --jsonfile out.json -- ./...\n"
+        '2026-01-28T00:01:29Z {"Action":"pass","Package":"example.invalid/m/srv",'
+        '"Test":"TestCase","Elapsed":88.5}\n'
+        '2026-01-28T00:01:29Z {"Action":"pass","Package":"example.invalid/m/srv",'
+        '"Test":"TestCase/a","Elapsed":44.0}\n'
+        '2026-01-28T00:01:30Z {"Action":"pass","Package":"example.invalid/m/srv",'
+        '"Elapsed":88.6}\n')
+    assert cr._go_slow_test_results(log) == [
+        {"test": "TestCase", "duration_s": 88.5, "package": "example.invalid/m/srv"}]
+
+
+def test_go_slow_results_read_gotestsum_package_lines():
+    log = ("2026-01-28T00:00:00Z ##[group]Run gotestsum ./...\n"
+           "2026-01-28T00:01:30Z ✓  example.invalid/m/srv (1m28.5s)\n"
+           "2026-01-28T00:01:30Z ✓  example.invalid/m/fast (400ms)\n")
+    assert cr._go_slow_test_results(log) == [
+        {"package": "example.invalid/m/srv", "duration_s": 88.5, "level": "package"}]
+
+
+def test_plain_go_test_package_routes_to_unsized_parallel_guidance(tmp_path):
+    """Non-verbose `go test ./...` output plus a static read of the package."""
+    root = _go_module(tmp_path, _go_test_func("TestCase"))
+    rows = cr._go_slow_test_results(_GO_PLAIN_LOG.format(command="go test ./..."))
+    found = cr._detect_go_test_parallelism([_go_entry(rows)], root, 0)
+    assert len(found) == 1
+    finding = found[0]
+    assert finding["go_parallel_candidate"]["file"] == "srv/srv_test.go"
+    assert finding["go_parallel_candidate"]["test"] == "TestCase"
+    assert ("per-test times not in the log; the package's measured 88.50s is an "
+            "upper bound") in finding["size_note"]
+    assert "runner-minute saving: unsized" in finding["size_note"]
+    assert "t.Parallel()" in finding["fix_strategy"]
+
+
+def test_plain_go_test_package_already_parallel_stays_quiet(tmp_path):
+    inside = "        t.Parallel()\n" + _GO_ISOLATED_CASE
+    root = _go_module(tmp_path, _go_test_func("TestCase", inside=inside))
+    rows = cr._go_slow_test_results(_GO_PLAIN_LOG.format(command="go test ./..."))
+    assert cr._detect_go_test_parallelism([_go_entry(rows)], root, 0) == []
+
+
+@pytest.mark.parametrize("makefile, fires", [
+    ("test:\n\tgo test -race ./...\n", True),
+    ("test: lint\n\t@go test ./...\n", True),
+    ("test:\n\t$(MAKE) unit\nunit:\n\tgo test ./...\n", False),
+    ("test:\n\t./scripts/run-tests.sh\n", False),
+    (None, False),
+])
+def test_make_target_resolves_only_a_plain_go_test_recipe(tmp_path, makefile, fires):
+    root = _go_module(tmp_path, _go_test_func("TestCase"))
+    if makefile is not None:
+        (root / "Makefile").write_text(makefile)
+    rows = cr._go_slow_test_results(_GO_PLAIN_LOG.format(command="make test"))
+    assert rows and all(row.get("via") == "make test" for row in rows)
+    found = cr._detect_go_test_parallelism([_go_entry(rows)], root, 0)
+    assert bool(found) is fires
+
+
+@pytest.mark.parametrize("script, fires", [
+    ("#!/bin/sh\nset -e\ngo test -race ./...\n", True),
+    ("#!/bin/sh\nexec ./other.sh\n", False),
+])
+def test_script_step_resolves_only_a_plain_go_test_line(tmp_path, script, fires):
+    root = _go_module(tmp_path, _go_test_func("TestCase"))
+    (root / "scripts").mkdir()
+    (root / "scripts" / "test.sh").write_text(script)
+    rows = cr._go_slow_test_results(
+        _GO_PLAIN_LOG.format(command="./scripts/test.sh"))
+    assert rows and all(row.get("via") == "./scripts/test.sh" for row in rows)
+    found = cr._detect_go_test_parallelism([_go_entry(rows)], root, 0)
+    assert bool(found) is fires
+
+
+def test_unrelated_step_with_package_lines_stays_quiet():
+    assert cr._go_slow_test_results(
+        _GO_PLAIN_LOG.format(command="python -m pytest")) == []
+
+
+def test_plain_go_test_output_routes_through_collect_with_passing_checks(
+        monkeypatch, tmp_path):
+    """Ordinary `go test ./...` output (no -v) reaches OPT88 end to end."""
+    log = """\
+2026-01-28T00:00:00Z ##[group]Run go test -race ./...
+2026-01-28T00:01:29Z ok  \texample.invalid/m/internal/server\t88.50s
+2026-01-28T00:01:30Z ok  \texample.invalid/m/internal/util\t0.31s
+"""
+
+    def fixture(name: str, inside: str) -> Path:
+        path = tmp_path / name
+        shutil.copytree(FIXTURE_ROOT / "serial-chain", path)
+        responses = path / "responses.json"
+        recorded = json.loads(responses.read_text(encoding="utf-8"))
+        recorded["logs"]["1103"] = log
+        responses.write_text(json.dumps(recorded), encoding="utf-8")
+        (path / "go.mod").write_text("module example.invalid/m\n\ngo 1.22\n")
+        source = path / "internal/server/server_test.go"
+        source.parent.mkdir(parents=True)
+        source.write_text("package server\n" + _go_test_func("TestHTTPGroups", inside=inside))
+        return path
+
+    for name, inside, fires in (
+            ("plain-serial", _GO_ISOLATED_CASE, True),
+            ("plain-parallel", "        t.Parallel()\n" + _GO_ISOLATED_CASE, False)):
+        run_root = tmp_path / f"run-{name}"
+        run_root.mkdir()
+        doc, _report, checks = run_fixture(
+            fixture(name, inside), monkeypatch, run_root, max_runs=20)
+        found = [row for row in doc["findings"]
+                 if row.get("pattern") == "OPT88" and row.get("go_parallel_candidate")]
+        assert bool(found) is fires, name
+        if fires:
+            assert found[0]["go_parallel_candidate"]["package"] == (
+                "example.invalid/m/internal/server")
+            assert "is an upper bound" in found[0]["size_note"]
+        assert [check for check in checks if not check.skipped and not check.ok] == []
+
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
     prose = """\
 2026-01-28T00:00:00Z ##[group]Run pnpm test
