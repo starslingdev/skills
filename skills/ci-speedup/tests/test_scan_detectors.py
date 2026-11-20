@@ -1538,6 +1538,24 @@ jobs:
     assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+def test_opt108_setup_before_filtered_handler_still_reports(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  react:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
 def test_opt31_conditional_setup(tmp_path: Path):
     pos = """name: CI
 on: pull_request
