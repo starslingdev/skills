@@ -49,7 +49,8 @@ logger = logging.getLogger("scan")
 SCAN_INCOMPLETE_KINDS = frozenset({
     "workflow-unreadable", "workflow-unparseable", "workflow-not-mapping",
     "parallel-group-unread", "symlink-out-of-tree", "no-workflows-dir",
-    "opt19-file-cap", "opt19-source-unreadable", "turbo-unreadable",
+    "opt19-file-cap", "opt19-source-unreadable", "opt113-file-cap",
+    "opt113-source-unreadable", "turbo-unreadable",
 })
 
 # Detectors proven by cardinality tests to emit one finding per physical
@@ -9121,6 +9122,144 @@ def _detect_opt19(root: Path):
     return [("OPT19", top[0][0], hit, total_s, me)], incomplete
 
 
+# OPT113 — a linked Go test executable (or an output explicitly built by the
+# test) is used as byte payload for an archive, compressor or hash. Source alone
+# cannot price the repeated bytes, so this detector reports the shape but never
+# invents a duration or run frequency.
+_OPT113_FILE_CAP = 8000
+_OPT113_MAX_BYTES = 1_000_000
+_OPT113_TRANSFORM_RE = re.compile(
+    r"\b(?:zip|tar|gzip|zlib|flate|bzip2|lz4|zstd)\."
+    r"(?:NewWriter(?:Level|Size)?|New)\s*\("
+    r"|\b(?:sha1|sha256|sha512|md5|crc32|crc64|fnv)\."
+    r"(?:New|Sum(?:224|256|384|512)?)\s*\(")
+_OPT113_GO_BUILD_RE = re.compile(
+    r"exec\.Command(?:Context)?\([^\n)]{0,500}?['\"]go['\"]\s*,"
+    r"[^\n)]{0,500}?['\"]build['\"][^\n)]{0,500}?['\"]-o['\"]\s*,\s*"
+    r"(?P<output>[A-Za-z_]\w*)")
+_OPT113_EXECUTABLE_ASSIGN_RE = re.compile(
+    r"(?P<input>[A-Za-z_]\w*)\s*,\s*[A-Za-z_]\w*\s*:=\s*"
+    r"os\.Executable\s*\(\s*\)")
+_OPT113_FIXTURE_NAME_RE = re.compile(
+    r"(?:fixture|controller|payload|archive|bundle)", re.I)
+
+
+def _opt113_without_comments(text: str) -> str:
+    # Preserve newlines and offsets so the finding's line/snippet still points
+    # at the real source after comments are ignored.
+    def blank(match: re.Match[str]) -> str:
+        return re.sub(r"[^\n]", " ", match.group(0))
+
+    text = re.sub(r"/\*.*?\*/", blank, text, flags=re.S)
+    return re.sub(r"(?m)//.*$", blank, text)
+
+
+def _opt113_origin(text: str) -> tuple[str, int] | None:
+    for executable in _OPT113_EXECUTABLE_ASSIGN_RE.finditer(text):
+        input_name = executable.group("input")
+        suffix = text[executable.end():]
+        next_function = re.search(r"(?m)^func\s+", suffix)
+        scope = suffix[:next_function.start()] if next_function else suffix
+        # A direct byte read establishes the flow. Otherwise accept a named
+        # fixture helper/variable only when it returns the executable; that
+        # covers helper-based archive builders without treating an unrelated
+        # executable metadata check plus a small archive test as one flow.
+        if re.search(
+                rf"\bos\.(?:Open|ReadFile)\s*\(\s*{re.escape(input_name)}\b",
+                scope):
+            return "the linked Go test executable", executable.start()
+        prefix = text[:executable.start()]
+        function = list(re.finditer(r"\bfunc\s+(?P<name>[A-Za-z_]\w*)\s*\(", prefix))
+        function_name = function[-1].group("name") if function else ""
+        if (_OPT113_FIXTURE_NAME_RE.search(input_name + " " + function_name)
+                and re.search(rf"\breturn\s+{re.escape(input_name)}\b",
+                              scope)):
+            return "the linked Go test executable", executable.start()
+    for built in _OPT113_GO_BUILD_RE.finditer(text):
+        output = re.escape(built.group("output"))
+        if re.search(rf"\bos\.(?:Open|ReadFile)\s*\(\s*{output}\b", text):
+            return "a binary built by the test", built.start()
+    return None
+
+
+def _detect_opt113(root: Path) -> tuple[list[tuple[str, str, Hit]], list[dict]]:
+    hits: list[tuple[str, str, Hit]] = []
+    incomplete: list[dict] = []
+    scanned = 0
+    capped = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in _OPT19_SKIP_DIRS and not d.startswith(".")]
+        for filename in filenames:
+            if not filename.endswith("_test.go"):
+                continue
+            if scanned >= _OPT113_FILE_CAP:
+                capped = True
+                break
+            scanned += 1
+            path = Path(dirpath, filename)
+            rel = path.relative_to(root).as_posix()
+            try:
+                if not _inside_scan_root(path):
+                    continue
+                if path.stat().st_size > _OPT113_MAX_BYTES:
+                    incomplete.append({
+                        "path": rel,
+                        "kind": "opt113-source-unreadable",
+                        "reason": (f"OPT113 source exceeds the {_OPT113_MAX_BYTES}-byte "
+                                   "read bound; fixture input was not classified"),
+                    })
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                incomplete.append({"path": rel, "kind": "opt113-source-unreadable",
+                                   "reason": f"OPT113 source read failed: {exc}"})
+                continue
+            code = _opt113_without_comments(text)
+            transform = _OPT113_TRANSFORM_RE.search(code)
+            origin = _opt113_origin(code)
+            if transform is None or origin is None:
+                continue
+            origin_label, origin_at = origin
+            line = code.count("\n", 0, origin_at) + 1
+            hit = Hit(
+                line=line,
+                affected_jobs=[],
+                evidence=(f"{rel}: {origin_label} is used in a test file that archives, "
+                          "compresses or hashes fixture bytes; runner-minute saving: "
+                          "unsized because source does not reveal the affected test's "
+                          "measured duration or monthly run count"),
+                match_text=origin_label,
+                snippet=text.splitlines()[line - 1].rstrip(),
+                facts={
+                    "fix_strategy": (
+                        "Use a small shared byte fixture for byte/archive/hash contract "
+                        "tests; retain a real executable only where executable metadata "
+                        "is the behavior under test."),
+                    "wall_clock_p50_s": None,
+                    "runner_min_saving": None,
+                    "tier": 2,
+                    "realization": "none",
+                    "size_note": (
+                        "runner-minute saving: unsized (source identifies oversized "
+                        "fixture work but not its measured duration or monthly run count)"),
+                    "oversized_fixture_static": True,
+                },
+            )
+            hits.append(("OPT113", rel, hit))
+        if capped:
+            break
+    if capped:
+        incomplete.append({
+            "path": "<source tree>",
+            "kind": "opt113-file-cap",
+            "reason": (f"OPT113 source scan hit the {_OPT113_FILE_CAP}-file cap after "
+                       f"scanning {scanned} Go test files; remaining fixture inputs "
+                       "were not classified"),
+        })
+    return hits, incomplete
+
+
 # =============================================================================
 # Workflow walk + emit
 # =============================================================================
@@ -10003,6 +10142,21 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         f["realization"] = "direct"
         f["measured_signal"] = hit.evidence
         f["measured_evidence"] = me
+        findings.append(f)
+
+    # --- Go test source pass (OPT113) — categorical until run timings reveal
+    # how much of the affected test is spent moving the oversized bytes. ---
+    opt113_hits, opt113_incomplete = _detect_opt113(root)
+    scan_incomplete.extend(opt113_incomplete)
+    for pat, source_file, hit in opt113_hits:
+        entry = catalog_by_id.get(pat)
+        if entry is None:
+            continue
+        finding_idx += 1
+        f = _emit(entry, hit, source_file, finding_idx)
+        f.update(hit.facts)
+        if hit.snippet:
+            f["evidence_snippet"] = hit.snippet
         findings.append(f)
 
     # Reconcile mutually-exclusive remedies that fired on the SAME physical step

@@ -584,6 +584,60 @@ def test_runtime_typescript_loader_is_sized_from_profiled_long_pole_only(
             if not check.skipped and not check.ok] == []
 
 
+def test_oversized_go_fixture_runs_through_collection_and_full_verifier(
+        monkeypatch, tmp_path):
+    positive = tmp_path / "oversized-go-fixture"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    source = positive / "runtime" / "archive_test.go"
+    source.parent.mkdir()
+    source.write_text('''package runtime
+import ("archive/zip"; "io"; "os"; "testing")
+func fixture(t *testing.T) string {
+    path, err := os.Executable()
+    if err != nil { t.Fatal(err) }
+    return path
+}
+func TestArchive(t *testing.T) {
+    input, _ := os.Open(fixture(t))
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("controller")
+    _, _ = io.Copy(entry, input)
+}
+''', encoding="utf-8")
+    run_root = tmp_path / "run-oversized-go-fixture"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(positive, monkeypatch, run_root, max_runs=20)
+    findings = [row for row in doc["findings"] if row.get("pattern") == "OPT113"]
+    assert findings, "expected oversized executable fixture guidance"
+    finding = findings[0]
+    assert finding.get("wall_clock_p50_s") is None, finding
+    assert finding.get("runner_min_saving") is None, finding
+    assert "runner-minute saving: unsized" in finding.get("size_note", ""), finding
+    assert "small shared byte fixture" in finding.get("fix_strategy", "").lower()
+    assert "OPT113" in report
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    negative = tmp_path / "small-go-fixture"
+    shutil.copytree(positive, negative)
+    (negative / "runtime" / "archive_test.go").write_text('''package runtime
+import ("archive/zip"; "io"; "testing")
+func TestArchive(t *testing.T) {
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("controller")
+    _, _ = entry.Write([]byte("small fixture"))
+}
+''', encoding="utf-8")
+    negative_root = tmp_path / "run-small-go-fixture"
+    negative_root.mkdir()
+    negative_doc, _negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT113"]
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
 def test_runtime_typescript_loader_rejects_unscoped_or_impossible_profile_text():
     """Only a same-step structured profile below job wall is evidence."""
     forged = """\

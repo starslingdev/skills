@@ -3204,6 +3204,117 @@ def test_opt19_python_time_sleep_leading_dot_float(tmp_path: Path):
 
 
 # =============================================================================
+# Phase 2e — OPT113 oversized test fixtures
+# =============================================================================
+
+def test_opt113_finds_test_executable_used_as_archive_fixture(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test -race ./...
+""")
+    source = tmp_path / "runtime" / "archive_test.go"
+    source.parent.mkdir()
+    source.write_text('''package runtime
+
+import (
+    "archive/zip"
+    "io"
+    "os"
+    "testing"
+)
+
+func controllerFixture(t *testing.T) string {
+    path, err := os.Executable()
+    if err != nil { t.Fatal(err) }
+    return path
+}
+
+func TestArchiveController(t *testing.T) {
+    input, err := os.Open(controllerFixture(t))
+    if err != nil { t.Fatal(err) }
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("controller")
+    _, _ = io.Copy(entry, input)
+}
+''', encoding="utf-8")
+
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+    assert findings, "expected oversized executable fixture guidance"
+    assert "small shared byte fixture" in findings[0]["fix_strategy"].lower()
+    assert "runner-minute saving: unsized" in findings[0]["evidence"].lower()
+
+
+def test_opt113_keeps_small_archive_fixture_and_metadata_check_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test -race ./...
+""")
+    small = tmp_path / "small" / "archive_test.go"
+    small.parent.mkdir()
+    small.write_text('''package small
+import ("archive/zip"; "io"; "os"; "path/filepath"; "testing")
+func TestArchiveController(t *testing.T) {
+    path := filepath.Join(t.TempDir(), "controller")
+    _ = os.WriteFile(path, []byte("fixture"), 0755)
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("controller")
+    _, _ = entry.Write([]byte("fixture"))
+}
+''', encoding="utf-8")
+    metadata = tmp_path / "metadata" / "executable_test.go"
+    metadata.parent.mkdir()
+    metadata.write_text('''package metadata
+import ("archive/zip"; "io"; "os"; "testing")
+func TestExecutableMode(t *testing.T) {
+    path, _ := os.Executable()
+    info, _ := os.Stat(path)
+    if info.Mode()&0111 == 0 { t.Fatal("not executable") }
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("small")
+    _, _ = entry.Write([]byte("small fixture"))
+}
+''', encoding="utf-8")
+
+    assert not [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+
+
+def test_opt113_finds_explicitly_built_binary_used_as_compression_fixture(
+        tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: pull_request\njobs: {}\n")
+    source = tmp_path / "bundle" / "bundle_test.go"
+    source.parent.mkdir()
+    source.write_text('''package bundle
+import ("compress/gzip"; "io"; "os"; "os/exec"; "testing")
+func TestCompressedPayload(t *testing.T) {
+    output := t.TempDir() + "/fixture-bin"
+    if err := exec.Command("go", "build", "-o", output, "./cmd/fixture").Run(); err != nil {
+        t.Fatal(err)
+    }
+    input, _ := os.Open(output)
+    writer := gzip.NewWriter(io.Discard)
+    _, _ = io.Copy(writer, input)
+}
+''', encoding="utf-8")
+
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+    assert findings, "expected explicit build-output fixture guidance"
+    assert "binary built by the test" in findings[0]["evidence"]
+
+
+# =============================================================================
 # Evidence quality — findings must carry the VERBATIM matched code, not prose
 # (regression for the "evidence doesn't let a human verify the claim" audit).
 # =============================================================================
