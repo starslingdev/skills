@@ -9021,6 +9021,107 @@ _OPT19_PATTERNS: tuple[tuple[str, "re.Pattern[str]", float], ...] = (
 _OPT19_FILE_CAP = 8000
 
 
+_OPT16_GO_TEST_FUNC_RE = re.compile(
+    r"(?m)^\s*func\s+(?P<name>Test[A-Za-z0-9_]+)\s*\(\s*"
+    r"[A-Za-z_][A-Za-z0-9_]*\s+\*testing\.T\s*\)")
+_OPT16_TEST_BUILD_RE = re.compile(
+    r"exec\.Command(?:Context)?\(\s*(?:[^,\n]+,\s*)?"
+    r'"(?P<tool>go|cargo|npm|pnpm|yarn|bun|npx|vite|webpack|rollup|esbuild)"\s*,\s*'
+    r'"(?P<verb>build|run)"[^\n]*',
+    re.IGNORECASE,
+)
+_OPT16_TEMP_OUTPUT_RE = re.compile(
+    r't\.TempDir\(\).*?(?:"-o"|"--target-dir"|"--outdir"|"--outfile"|'
+    r'"--output(?:-path)?")|'
+    r'(?:"-o"|"--target-dir"|"--outdir"|"--outfile"|"--output(?:-path)?")'
+    r'.*?t\.TempDir\(\)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _opt16_test_build_identity(command: str) -> str:
+    """Normalize only the per-test output argument; retain all build inputs."""
+    normalized = re.sub(
+        r'("(?:-o|--target-dir|--outdir|--outfile|--output(?:-path)?)")'
+        r'\s*,\s*[A-Za-z_][A-Za-z0-9_]*',
+        r'\1, <TEMP_OUTPUT>', command, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
+def _detect_opt16_test_binary_builds(root: Path):
+    """Repeated same-binary builds performed independently by Go tests.
+
+    A package is a source directory plus its declared package name. Each
+    occurrence must sit in a distinct ``Test*`` function, invoke the same build
+    command, and route output through that test's ``t.TempDir``. A shared helper
+    therefore stays quiet: the expensive command appears outside every test.
+    """
+    groups: dict[tuple[str, str, str], list[tuple[str, str, int]]] = {}
+    incomplete: list[dict[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames
+                       if name not in _OPT19_SKIP_DIRS and not name.startswith(".")]
+        for filename in filenames:
+            if not filename.endswith("_test.go"):
+                continue
+            path = Path(dirpath, filename)
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            try:
+                if not _inside_scan_root(path):
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                incomplete.append({"path": rel, "kind": "opt19-source-unreadable",
+                                   "reason": f"OPT16 test source read failed: {exc}"})
+                continue
+            package_match = re.search(r"(?m)^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)", text)
+            if package_match is None:
+                continue
+            functions = list(_OPT16_GO_TEST_FUNC_RE.finditer(text))
+            for index, function in enumerate(functions):
+                end = functions[index + 1].start() if index + 1 < len(functions) else len(text)
+                body = text[function.start():end]
+                if not _OPT16_TEMP_OUTPUT_RE.search(body):
+                    continue
+                for command in _OPT16_TEST_BUILD_RE.finditer(body):
+                    identity = _opt16_test_build_identity(command.group(0))
+                    line = text.count("\n", 0, function.start() + command.start()) + 1
+                    key = (str(Path(dirpath).relative_to(root)),
+                           package_match.group(1), identity)
+                    groups.setdefault(key, []).append(
+                        (rel, function.group("name"), line))
+    hits = []
+    for (_directory, package, identity), occurrences in sorted(groups.items()):
+        tests = sorted({test for _path, test, _line in occurrences})
+        if len(tests) < 2:
+            continue
+        first_path, _first_test, first_line = occurrences[0]
+        shown = ", ".join(tests[:6])
+        evidence = (
+            f"package `{package}` has {len(tests)} tests that each run the same "
+            f"binary build into their own `t.TempDir`: {shown}"
+        )
+        hit = Hit(
+            line=first_line, affected_jobs=[], evidence=evidence,
+            match_text=identity[:160], facts={
+                "source_test_build_repeat": True,
+                "source_test_build_count": len(tests),
+                "source_test_build_tests": tests,
+                "fix_strategy": ("Build the binary once per test process in one "
+                                 "shared helper, reuse that artifact in every named "
+                                 "test, and clean it up at process exit."),
+                "wall_clock_p50_s": None,
+                "runner_min_saving": None,
+                "tier": 2,
+                "realization": "none",
+                "size_note": ("runner-minute saving: unsized (static source proves "
+                              "the repeated build shape but no build duration or monthly "
+                              "execution count is measured)"),
+            })
+        hits.append(("OPT16", first_path, hit))
+    return hits, incomplete
+
+
 def _detect_opt19(root: Path):
     """Return ([(pattern, workflow_file, Hit, total_seconds)], incomplete).
 
@@ -10003,6 +10104,20 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         f["realization"] = "direct"
         f["measured_signal"] = hit.evidence
         f["measured_evidence"] = me
+        findings.append(f)
+
+    # OPT16 source extension: repeated binary builds hidden inside separate Go
+    # tests are not visible in workflow YAML. Keep the static proof uncredited
+    # until a build duration and execution count are measured.
+    opt16_source_hits, opt16_source_incomplete = _detect_opt16_test_binary_builds(root)
+    scan_incomplete.extend(opt16_source_incomplete)
+    for pat, source_path, hit in opt16_source_hits:
+        entry = catalog_by_id.get(pat)
+        if entry is None:
+            continue
+        finding_idx += 1
+        f = _emit(entry, hit, source_path, finding_idx)
+        f.update(hit.facts)
         findings.append(f)
 
     # Reconcile mutually-exclusive remedies that fired on the SAME physical step

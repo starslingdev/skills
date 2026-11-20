@@ -1480,6 +1480,13 @@ upper bound. It can include nearby work in that step, so the report never credit
 more than that duration and requires re-measurement after the duplicate leaf
 command is removed.
 
+Test source can hide the same duplication from both workflow and job-log command
+matching. In one Go package, inspect distinct `Test*` functions for the same
+`exec.Command` build (`go build`, `cargo build`, or a bundler build) whose output
+is routed through that test's own `t.TempDir`. Two or more tests with the same
+build inputs are one OPT16 finding. A shared helper containing the one build,
+different build targets, and builds without per-test temporary output stay quiet.
+
 ```bash
 # For each job in each workflow, check if any command appears in multiple steps
 for f in /tmp/workflows/*.yml; do
@@ -1499,6 +1506,16 @@ then confirm every original test target still builds and runs. If distinct featu
 or platform coverage is intentional, keep both builds. If the rebuild is a
 workaround for stale artifacts, fix the root cause (e.g., cache key, build system
 incremental support) instead.
+
+For repeated builds inside test source, create one once-per-process build helper
+shared by those tests and clean its artifact at process exit. Preserve each test's
+arguments, environment, failure assertions, and isolation around the built binary;
+only construction is shared. Add a helper failure test and run the original tests
+against the shared artifact before deleting their local build paths. Static source
+does not reveal the build duration or monthly execution count, so the runner-minute
+saving remains unsized until before/after timing is collected. A public example
+shares one CLI build across five contract tests in
+[openclaw/crabbox#1674](https://github.com/openclaw/crabbox/pull/1674).
 
 ---
 
