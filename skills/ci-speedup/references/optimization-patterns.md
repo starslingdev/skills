@@ -3416,46 +3416,104 @@ fix_strategy: multi-language-matrix-without-path-filter
 title_template: "Multi-Language Matrix Without Path Filter"
 -->
 
-**Anti-pattern**: A security/static-analysis workflow uses a matrix to run language-specific scanners (CodeQL, Snyk, Semgrep, dependency-scan) but never gates the matrix legs on whether files of THAT language changed. CodeQL Python runs on JS-only PRs, CodeQL JavaScript runs on Python-only PRs — both consume runner time + analysis time for zero signal.
+**Anti-pattern**: A pull-request workflow runs language-specific work when the change touches none of that language's inputs. This includes a security scanner's language matrix and separate Go, Rust, or Python contract/proof jobs. The unused lane still installs its toolchain and runs its checks, consuming runner time for no signal.
 
 **Detection heuristic**:
 
 - Workflow declares a matrix with `language: [javascript, python, ...]` (or similar)
 - Uses `github/codeql-action/init` (or `snyk/actions`, `returntocorp/semgrep-action`, etc.) with `languages: ${{ matrix.language }}`
-- The workflow has NO preceding `dorny/paths-filter` job or per-leg `if:` checking changed file extensions
+- Or an explicit Go, Rust, or Python lane, or a language-neutral contract/proof/conformance lane, installs that toolchain with `setup-go`, `setup-python`, a Rust toolchain action, or `rustup toolchain install`; a generic primary job using Python only to run repository tooling is not enough. The workflow must also run another language's lane (another job installs a different toolchain, such as `setup-node` or `setup-java`) or declare a complete input map; a single-language project's test job runs for every code change, and its non-code pull requests belong to OPT32
+- The workflow has NO preceding `dorny/paths-filter` job or per-leg `if:` checking changed file extensions. For a per-language lane, a gate is an `if:` reading an upstream job output that comes from `dorny/paths-filter`, `tj-actions/changed-files`, a shell step listing changed files (`git diff --name-only`, `gh pr diff --name-only`) into that output, or a `github-script` comparison; an unrelated upstream output is not a gate, nor is an output that gates only another event (`github.event_name != 'schedule' || needs.scope.outputs.rust == 'true'`). An output the scanner cannot read (from a reusable workflow, a local or unrecognized action, or a script whose output keys are not in the workflow) withholds the finding, and a toolchain step that runs only behind a same-job selector's output (`if: steps.filter.outputs.go == 'true'`) is not counted as an install
 - **Activation fidelity**: only flag when the workflow actually runs on every PR — suppress when the `pull_request:` trigger is `types:`-gated to a non-lifecycle activity (e.g. `types: [labeled]`), since the legs then don't run on a normal PR. (Shared `_pr_trigger_runs_every_pr` in `scan.py`; see OPT33.)
+- **Measured admission**: for a per-language job, require an explicit complete input map (for example, a reused scheduled-change action's `paths:` contract), then compare the exact base and head revisions recorded on each sampled run. Credit only the affected job's measured billed-equivalent minutes when every changed path is inside the workflow's declared input universe and outside that language's inputs. A missing map, stale run identity, unknown input, incomplete comparison, failed lookup, or unreadable job time receives no saving credit.
 
-**Fix**: Add a pre-job that uses `dorny/paths-filter@v3` to detect which languages changed, then gate each matrix leg with `if: needs.changes.outputs.<lang> == 'true'`. Example:
+**Fix**: Derive each lane's complete input set from the repository, then select jobs from the exact pull-request comparison. Run every language job when the lookup is missing, incomplete, capped, malformed, or contains an input whose owner is unknown. A lane may be skipped only when the selector finished and proved that lane untouched. Example (fail-open selector, gated lanes, one aggregate required check):
 
 ```yaml
 jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      js: ${{ steps.filter.outputs.js }}
-      python: ${{ steps.filter.outputs.python }}
+      # An empty output (selector failed or never set it) means "run".
+      go: ${{ steps.select.outputs.go || 'true' }}
+      rust: ${{ steps.select.outputs.rust || 'true' }}
+    steps:
+      - id: select
+        continue-on-error: true
+        uses: actions/github-script@<sha>
+        with:
+          script: |
+            const owners = {
+              go: [/\.go$/, /^go\.(mod|sum|work)$/],
+              rust: [/\.rs$/, /^Cargo\.(toml|lock)$/, /^rust-toolchain/],
+            };
+            const shared = [/^testdata\//, /^\.github\/workflows\/ci\.yml$/];
+            const inert = [/^docs\//, /\.md$/];  // proven to feed no lane
+            const hit = (patterns, path) => patterns.some((re) => re.test(path));
+            const run = { go: true, rust: true };   // default: run everything
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo, pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const paths = files.flatMap((f) => [f.filename, f.previous_filename])
+              .filter(Boolean);
+            const known = paths.every((p) => hit(shared, p) || hit(inert, p)
+              || Object.values(owners).some((patterns) => hit(patterns, p)));
+            // listFiles stops at 3000 files: treat a capped or empty list as unknown.
+            if (files.length > 0 && files.length < 3000 && known
+                && !paths.some((p) => hit(shared, p))) {
+              run.go = paths.some((p) => hit(owners.go, p));
+              run.rust = paths.some((p) => hit(owners.rust, p));
+            }
+            core.setOutput('go', String(run.go));
+            core.setOutput('rust', String(run.rust));
+
+  go-contract:
+    needs: changes
+    # Skip only when the selector succeeded AND proved Go untouched.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            js: ['**/*.js', '**/*.ts', '**/*.tsx', 'package.json', 'package-lock.json']
-            python: ['**/*.py', 'pyproject.toml', 'requirements*.txt']
+      - uses: actions/setup-go@<sha>
+      - run: go test ./...
 
-  codeql:
+  rust-contract:
     needs: changes
-    strategy:
-      matrix:
-        language: [javascript, python]
-    if: |
-      (matrix.language == 'javascript' && needs.changes.outputs.js == 'true') ||
-      (matrix.language == 'python'     && needs.changes.outputs.python == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust != 'false') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha>
+      - uses: dtolnay/rust-toolchain@<sha>
+      - run: cargo test --locked
+
+  ci-ok:  # the required status check
+    needs: [changes, go-contract, rust-contract]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          SELECTOR: ${{ needs.changes.result }}
+          GO: ${{ needs.go-contract.result }}/${{ needs.changes.outputs.go }}
+          RUST: ${{ needs.rust-contract.result }}/${{ needs.changes.outputs.rust }}
+        run: |
+          # A lane passes when it ran and succeeded, or when it was skipped
+          # because the selector succeeded and proved it untouched. Any other
+          # skip (a cancelled run, a cancelled selector) fails this check.
+          for lane in "$GO" "$RUST"; do
+            case "$lane" in
+              success/*) ;;
+              skipped/false) [ "$SELECTOR" = success ] || { echo "unproven skip"; exit 1; } ;;
+              *) echo "lane: $lane"; exit 1 ;;
+            esac
+          done
 ```
 
-Caveat: GitHub renders skipped matrix legs as "skipped" (not "passed"). If you have a required-status-check rule on `codeql (javascript)`, change it to `codeql` without the matrix-leg suffix, or make the leg's terminal step a no-op success rather than `if:`-skipping the whole leg. Document the chosen approach in the workflow.
+`dorny/paths-filter` can replace the script when its filters list every input of each lane; give its step `continue-on-error: true` and its job outputs the same `|| 'true'` default. For a scanner matrix, a job-level `if:` cannot read `matrix`: emit the language list from the selector (the full list on any failure) and use `matrix: { language: ${{ fromJSON(needs.changes.outputs.languages) }} }`.
 
-**Real-world example (blen-starter-kit deep-scan)**: `security.yml` runs CodeQL Python and JavaScript on every PR regardless of which app changed. JS-only PRs paid Python init+analyze (~30-60s) for nothing, and vice versa.
+Required checks: a job skipped by its own `if:` reports **Success** to branch protection under its own name, so a gated lane that stays a required check still lets an unrelated pull request merge. That is also why a plain `if: needs.changes.outputs.go == 'true'` is unsafe: when the selector fails, the lane is skipped and its required check reports Success with nothing validated, so the lane condition above runs on any selector result other than a proven `false`. A matrix leg left out of the matrix reports no check at all, so a required `codeql (python)` would stay expected forever; require the `ci-ok` aggregate instead of the per-leg names. `ci-ok` runs under `always()` and accepts a skipped lane only when the selector succeeded and set that lane's output to `false`, so a failed or cancelled lane, a cancelled selector, or a run cancelled before its lanes start fails the required check instead of reporting Success with nothing validated. Do not move this gating into a workflow-level `paths:` filter: a workflow that never starts leaves its required checks pending.
+
+**Public evidence**: [OpenClaw PR #193865](https://github.com/openclaw/openclaw/pull/193865) decides which per-language pull-request jobs to run from the changed paths, and runs every job when the changed-path lookup is unknown or fails.
 
 **Risk**: MEDIUM. If a polyglot file (a Python/JS bridge, or a config that affects both) changes, both legs should still run. The `paths-filter` rules need to be inclusive enough to catch shared config files.
 
