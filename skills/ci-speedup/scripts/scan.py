@@ -4679,6 +4679,28 @@ _OPT31_INSTALL_RE = re.compile(
     r"playwright\s+install|apt-get\s+install|pip\s+install|npm\s+install\s+-g|"
     r"bunx\s+playwright\s+install", re.I)
 _OPT31_GATE_RE = re.compile(r"secrets\.|env\.", re.I)
+_OPT31_NEEDS_RESULT_RE = re.compile(
+    r"needs(?:\.\*|\.[A-Za-z0-9_-]+|\[\s*['\"][^'\"]+['\"]\s*\])\.result",
+    re.I,
+)
+_OPT31_EXPRESSION_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
+_OPT31_NEEDS_EXPRESSION_RE = re.compile(
+    r"^\$\{\{\s*needs(?:\.\*|\.[A-Za-z0-9_-]+|"
+    r"\[\s*['\"][^'\"]+['\"]\s*\])\.result\s*\}\}$",
+    re.I | re.S,
+)
+_OPT31_EARLY_SETUP_RE = re.compile(
+    r"^(?:actions/checkout|[^/@]+/setup-[^/@]+)@", re.I)
+_OPT31_NEEDS_CHECK_LINE_RE = re.compile(
+    r"^(?:printf\b|echo\b|test\b|\[\[?|if\s+\[\[?|elif\s+\[\[?|"
+    r"then\b|else\b|fi\b|case\b|esac\b|exit\s+[1-9]\d*\b|false\b|"
+    r"set\s+-[a-zA-Z]+\b|:)",
+    re.I,
+)
+_OPT31_NEEDS_CHECK_FAIL_RE = re.compile(
+    r"(?:^|\n)\s*(?:test\b|\[\[?|false\b)|\bexit\s+[1-9]\d*\b",
+    re.I,
+)
 
 
 def _opt31_tokens(install_line: str) -> set[str]:
@@ -4696,14 +4718,90 @@ def _opt31_tokens(install_line: str) -> set[str]:
     return toks
 
 
+def _opt31_needs_result_check(step: dict, step_if: str | None) -> bool:
+    """A shell-only result gate that can fail without repository files/tools.
+
+    Every GitHub expression available to the step must be exactly one
+    ``needs.<job>.result`` value. Restrict commands to shell control, output and
+    test builtins so moving the step before checkout/toolchain setup is safe.
+    """
+    run = _run(step)
+    if not run or _uses(step) or step_if:
+        return False
+    continue_on_error = step.get("continue-on-error")
+    if continue_on_error not in (None, False):
+        return False
+    env = step.get("env") if isinstance(step.get("env"), dict) else {}
+    dynamic_text = "\n".join((run, *(str(value) for value in env.values())))
+    expressions = _OPT31_EXPRESSION_RE.findall(dynamic_text)
+    if (not expressions
+            or not all(_OPT31_NEEDS_EXPRESSION_RE.fullmatch(expr.strip())
+                       for expr in expressions)):
+        return False
+    if not any(_OPT31_NEEDS_RESULT_RE.search(expr) for expr in expressions):
+        return False
+    lines = [
+        line.strip() for line in run.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    if (not lines
+            or not all(_OPT31_NEEDS_CHECK_LINE_RE.match(line) for line in lines)
+            or not _OPT31_NEEDS_CHECK_FAIL_RE.search(run)):
+        return False
+    return True
+
+
+def _opt31_early_setup(step: dict, step_if: str | None) -> bool:
+    uses = _uses(step)
+    if not _OPT31_EARLY_SETUP_RE.search(uses):
+        return False
+    # A setup already conditional on producer results does not run on the
+    # unsuccessful path this extension prices. Complex result conditions fail
+    # closed rather than being called unconditional.
+    return not (step_if and _OPT31_NEEDS_RESULT_RE.search(step_if))
+
+
 def _detect_opt31(doc: dict, raw: str) -> list[Hit]:
-    """An unconditional install/setup step whose tool is only consumed by a
-    LATER step gated on a `secrets.`/`env.` condition (catalog OPT31)."""
+    """Setup paid before a conditional consumer or a needs-result failure gate."""
     hits: list[Hit] = []
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
         steps = _steps_with_if(job)
+        result_checks = [
+            i for i, (step, step_if) in enumerate(steps)
+            if _opt31_needs_result_check(step, step_if)
+        ]
+        if result_checks:
+            first_check = min(result_checks)
+            setup_names = [
+                _uses(step).split("@", 1)[0]
+                for step, step_if in steps[:first_check]
+                if _opt31_early_setup(step, step_if)
+            ]
+            if setup_names:
+                check = steps[first_check][0]
+                label = str(check.get("name") or "needs-result check")
+                line = (_line_of_in_job(raw, job_name, label)
+                        or _line_of_in_job(raw, job_name,
+                                           (_run(check).splitlines() or [""])[0].strip())
+                        or 1)
+                hits.append(Hit(
+                    line=line,
+                    affected_jobs=[job_name],
+                    evidence=(
+                        f"job `{job_name}` runs {', '.join(f'`{name}`' for name in setup_names)} "
+                        f"before needs-result check `{label}`, so an unsuccessful dependency "
+                        "pays checkout or toolchain setup before the check fails. Move the "
+                        "needs-only result check before checkout and toolchain setup while "
+                        "preserving its exact success predicate. Runner-minute effect: saving "
+                        "the affected setup compute on unsuccessful dependency runs; not sized "
+                        "until that run share and those setup steps are measured."
+                    ),
+                    match_text=job_name,
+                    snippet=_block_lines(raw, line),
+                ))
+                continue
         for i, (s, s_if) in enumerate(steps):
             if "if" in s or s_if is not None:
                 continue  # gated, on the step or on its enclosing group

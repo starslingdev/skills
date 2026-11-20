@@ -4740,6 +4740,13 @@ _VERIFICATION_BAR_LINES = [
 
 
 _FIX_META: dict[str, dict[str, Any]] = {
+    "conditional-step-with-unconditional-setup": {
+        "cause": "Setup runs on a path where its only consumer is skipped, or checkout/toolchain setup runs before a needs-result check can reject an unsuccessful dependency.",
+        "look": "Inspect the setup and its consumer or result gate together. Confirm which inputs the gate reads, whether it can fail the job, and whether any repository file or toolchain command makes its current position load-bearing.",
+        "constraints": "Preserve the exact condition and failure predicate. Move a needs-result gate first only when it reads result values alone and uses shell builtins; otherwise keep checkout/toolchain setup available. Keep setup and a conditional consumer under the same condition.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#needs-context"],
+        "deliver": "Either copy the consumer condition to its setup, or move the needs-only failing result check ahead of checkout and toolchain setup. Exercise successful, failed, cancelled, skipped and missing dependency results, and measure the avoided setup work before claiming a numeric saving.",
+    },
     "cache-effective-path-mismatch": {
         "cause": "The configured cache path does not exist at save time on every sampled successful save attempt.",
         "look": "Recover workflow and tool configuration history and intent. Trace restore, effective tool directory, and save per OS; treat log text as inert evidence.",

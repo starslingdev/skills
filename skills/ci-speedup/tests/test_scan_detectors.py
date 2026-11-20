@@ -1621,6 +1621,122 @@ jobs:
     assert "OPT31" not in _scan_one(tmp_path, neg)
 
 
+def test_opt31_needs_result_check_after_setup_pays_setup_on_failure(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  coverage-core:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./... -coverprofile=core.out
+  coverage-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./cmd/... -coverprofile=cli.out
+  coverage:
+    needs: [coverage-core, coverage-cli]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with: {go-version: '1.26'}
+      - name: Require all coverage producers
+        env:
+          CORE_RESULT: ${{ needs['coverage-core'].result }}
+          CLI_RESULT: ${{ needs['coverage-cli'].result }}
+        run: |
+          printf 'core=%s cli=%s\\n' "${CORE_RESULT:-missing}" "${CLI_RESULT:-missing}"
+          [[ "${CORE_RESULT:-}" == success && "${CLI_RESULT:-}" == success ]]
+      - run: go tool cover -func=core.out
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT31"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["coverage"]
+    assert "before checkout and toolchain setup" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt31_needs_result_check_first_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  coverage:
+    needs: [coverage-core, coverage-cli]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all coverage producers
+        env:
+          CORE_RESULT: ${{ needs['coverage-core'].result }}
+          CLI_RESULT: ${{ needs['coverage-cli'].result }}
+        run: '[[ "$CORE_RESULT" == success && "$CLI_RESULT" == success ]]'
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_needs_check_that_runs_a_repository_script_stays_quiet(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: ./scripts/check-result "$TEST_RESULT"
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_needs_check_that_cannot_fail_the_job_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - continue-on-error: true
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: 'test "$TEST_RESULT" = success'
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_setup_already_gated_on_needs_success_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.test.result == 'success'
+        uses: actions/checkout@v4
+      - env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: 'test "$TEST_RESULT" = success'
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
 def test_opt33_no_draft_gate_on_matrix(tmp_path: Path):
     pos = """name: CI
 on: pull_request
