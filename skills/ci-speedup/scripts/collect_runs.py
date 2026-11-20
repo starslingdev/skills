@@ -25672,6 +25672,29 @@ _SHARD_CMD_RE = _re.compile(
     _re.IGNORECASE)
 
 
+_GO_RUN_FILTER_RE = _re.compile(
+    r"\bgo\s+test\b[^\n]*?\s-(?:test\.)?(?:run|skip)(?:[=\s]|$)", _re.IGNORECASE)
+
+
+def _go_matrix_run_split(job: dict[str, Any], matrix: Any) -> bool:
+    """A Go job already split into matrix legs by a ``-run``/``-skip`` filter.
+
+    Go has no native shard flag, so a list-then-run split shows up as a matrix
+    whose value reaches ``go test -run`` through the command or the step/job
+    environment.  Such a job is already sharded and must not be told to shard.
+    """
+    if not isinstance(matrix, dict) or not matrix:
+        return False
+    job_env = str(job.get("env") or "")
+    for step in job_walk(job).steps():
+        run = str(step.get("run", "") or "")
+        if not _GO_RUN_FILTER_RE.search(run):
+            continue
+        if "matrix." in f"{run}\n{step.get('env') or ''}\n{job_env}":
+            return True
+    return False
+
+
 def _sharded_bases(doc: dict[str, Any]) -> set[str]:
     """Base job names in this workflow that are ALREADY sharded — via a split/shard
     matrix axis OR a command-line splitter in their run steps — so OPT24 must not flag
@@ -25694,7 +25717,8 @@ def _sharded_bases(doc: dict[str, Any]) -> set[str]:
         cmd_sharded = any(
             _SHARD_CMD_RE.search(str(s.get("run", "") or ""))
             for s in job_walk(job).steps())
-        if not (axis_sharded or cmd_sharded):
+        go_split = _go_matrix_run_split(job, matrix)
+        if not (axis_sharded or cmd_sharded or go_split):
             continue
         name = job.get("name")
         # The gh job base is `name:` when it's a plain literal (no matrix interpolation),

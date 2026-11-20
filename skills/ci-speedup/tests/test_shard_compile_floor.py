@@ -350,6 +350,82 @@ def test_long_go_step_without_one_dominant_package_stays_quiet(
     ]
 
 
+_PRESHARDED_GO_WORKFLOWS = {
+    "matrix-index": """\
+on: pull_request
+jobs:
+  go-tests:
+    name: go tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        part: [0, 1]
+    steps:
+      - run: go test -race -run "$(cat parts/${{ matrix.part }}.txt)" ./internal/cli
+""",
+    "matrix-pattern-env": """\
+on: pull_request
+jobs:
+  go-tests:
+    name: go tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - tests: '^(TestA|TestB)$'
+          - tests: '^(TestC|TestD)$'
+    steps:
+      - env:
+          TESTS: ${{ matrix.tests }}
+        run: go test -race -run "$TESTS" ./internal/cli
+""",
+}
+
+
+def _presharded_go_client(workflow: str) -> type[_Client]:
+    class _PreshardedGoClient(_Client):
+        def json(self, endpoint: str, allow_missing: bool = False):
+            match = re.match(r"repos/o/r/actions/runs/(101|102)/jobs", endpoint)
+            if match:
+                self.queries += 1
+                run_id = int(match.group(1))
+                return {"jobs": [
+                    _job("go tests (0)", run_id, 1900, 1),
+                    _job("go tests (1)", run_id, 1900, 2),
+                ]}
+            if re.match(r"repos/o/r/commits/[^/]+/check-runs", endpoint):
+                self.queries += 1
+                return {"check_runs": []}
+            if endpoint == f"repos/o/r/contents/{_WORKFLOW}":
+                self.queries += 1
+                return {"content": base64.b64encode(workflow.encode()).decode()}
+            return super().json(endpoint, allow_missing)
+
+        def text(self, endpoint: str, allow_missing: bool = False):
+            self.queries += 1
+            return "$ go test -race ./internal/cli\nok example/project/internal/cli 1500.0s"
+
+    return _PreshardedGoClient
+
+
+def test_go_job_already_split_by_matrix_run_expression_stays_quiet(
+        monkeypatch, tmp_path: Path) -> None:
+    for shape, workflow in _PRESHARDED_GO_WORKFLOWS.items():
+        monkeypatch.setattr(cr, "GhClient", _presharded_go_client(workflow))
+        doc = cr.collect({
+            "repo": "o/r",
+            "skill_commit_sha": "installed:unversioned",
+            "workflow_job_graph": {
+                _WORKFLOW: {"go-tests": {"name": "go tests", "needs": []}},
+            },
+            "findings": [],
+        }, "o/r", max_runs=2, shallow_runs=2)
+        assert not [
+            finding for finding in doc["findings"]
+            if finding.get("pattern") == "OPT24"
+        ], shape
+
+
 def test_shard_guidance_names_the_repeated_runner_minute_floor() -> None:
     assert "add roughly" in bp._SHARD_RUNNER_MINUTE_LINE
     assert "pre-test" in bp._SHARD_RUNNER_MINUTE_LINE
