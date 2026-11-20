@@ -14,8 +14,11 @@ import shutil
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 
 def engine_facts(findings: dict[str, Any]) -> dict[str, Any]:
@@ -259,6 +262,175 @@ def load(path: Path) -> dict[str, Any]:
     return value
 
 
+def _recorded_required_checks(recording: Path) -> set[str]:
+    """Read required-check names from recorded classic protection/rulesets."""
+    api = recording / "api"
+    if not api.is_dir():
+        return set()
+
+    def read_payload(path: Path) -> Any:
+        if path.suffix == ".gz":
+            with gzip.open(path, "rt", encoding="utf-8") as stream:
+                return json.load(stream)
+        return json.loads(path.read_text(encoding="utf-8"))
+
+    default_branch = ""
+    manifest_path = recording / "manifest.json"
+    if manifest_path.is_file():
+        manifest = load(manifest_path)
+        repository = str(manifest.get("repository") or "")
+        if repository:
+            base = api / _fixture_name(f"repos/{repository}")
+            for repo_path in (base, Path(str(base) + ".gz")):
+                if not repo_path.is_file():
+                    continue
+                payload = read_payload(repo_path)
+                if isinstance(payload, dict):
+                    default_branch = str(payload.get("default_branch") or "")
+                break
+    names: set[str] = set()
+    candidates = [
+        path for path in api.iterdir()
+        if path.is_file()
+        and ("_protection" in path.name or "_rulesets_" in path.name)
+        and (path.name.endswith(".json") or path.name.endswith(".json.gz"))
+    ]
+    for path in candidates:
+        try:
+            payload = read_payload(path)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if "_rulesets_" in path.name:
+            enforcement = str(payload.get("enforcement") or "")
+            if enforcement and enforcement != "active":
+                continue
+            refs = (payload.get("conditions") or {}).get("ref_name") or {}
+            if default_branch and isinstance(refs, dict):
+                target = f"refs/heads/{default_branch}"
+                includes = [str(value) for value in refs.get("include") or []]
+                excludes = [str(value) for value in refs.get("exclude") or []]
+                if (includes
+                        and "~ALL" not in includes
+                        and "~DEFAULT_BRANCH" not in includes
+                        and not any(fnmatchcase(target, value) for value in includes)):
+                    continue
+                if ("~ALL" in excludes
+                        or "~DEFAULT_BRANCH" in excludes
+                        or any(fnmatchcase(target, value) for value in excludes)):
+                    continue
+        classic = (payload if "_protection_" in path.name
+                   else payload.get("required_status_checks"))
+        if isinstance(classic, dict):
+            names.update(
+                str(name) for name in classic.get("contexts") or [] if name)
+            names.update(
+                str(row.get("context") or "")
+                for row in classic.get("checks") or [] if isinstance(row, dict)
+            )
+        for rule in payload.get("rules") or []:
+            if not isinstance(rule, dict) or rule.get("type") != "required_status_checks":
+                continue
+            parameters = rule.get("parameters") or {}
+            if not isinstance(parameters, dict):
+                continue
+            names.update(
+                str(row.get("context") or "")
+                for row in parameters.get("required_status_checks") or []
+                if isinstance(row, dict)
+            )
+    return {name for name in names if name}
+
+
+def _matches_required_job(job: dict[str, Any], required: str) -> bool:
+    name = str(job.get("name") or "").strip()
+    workflow = str(job.get("workflow") or "").strip()
+    qualified = f"{workflow} / {name}" if workflow and name else name or workflow
+    return (required in {name, qualified}
+            or qualified.endswith(" / " + required)
+            or required.endswith(" / " + name))
+
+
+def _job_name_pattern(template: str) -> re.Pattern[str]:
+    expression = re.compile(r"\$\{\{[^}]+\}\}")
+    pieces: list[str] = []
+    cursor = 0
+    for match in expression.finditer(template):
+        pieces.append(re.escape(template[cursor:match.start()]))
+        pieces.append(r".+?")
+        cursor = match.end()
+    pieces.append(re.escape(template[cursor:]))
+    return re.compile(
+        r"^" + "".join(pieces) + r"(?: \([^)]*\))?(?: / .+)?$")
+
+
+def _required_matches_job_template(
+        workflow: str, template: str, required: str) -> bool:
+    candidates = {required}
+    prefix = workflow + " / "
+    if workflow and required.startswith(prefix):
+        candidates.add(required[len(prefix):])
+    pattern = _job_name_pattern(template)
+    return any(pattern.fullmatch(candidate) for candidate in candidates)
+
+
+def _recorded_gate_job_patterns(
+        recording: Path,
+        required_names: set[str],
+) -> dict[str, list[re.Pattern[str]]]:
+    """Derive required jobs and their `needs:` ancestors from the snapshot."""
+    workflows = recording / "checkout" / ".github" / "workflows"
+    patterns: dict[str, list[re.Pattern[str]]] = {}
+    if not workflows.is_dir():
+        return patterns
+    paths = sorted([*workflows.glob("*.yml"), *workflows.glob("*.yaml")])
+    for path in paths:
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), dict):
+            continue
+        workflow = str(payload.get("name") or path.relative_to(
+            recording / "checkout").as_posix())
+        jobs = payload["jobs"]
+        displays = {
+            str(job_id): str(row.get("name") or job_id)
+            for job_id, row in jobs.items() if isinstance(row, dict)
+        }
+        needed_by: dict[str, list[str]] = {}
+        for job_id, row in jobs.items():
+            if not isinstance(row, dict):
+                continue
+            needs = row.get("needs")
+            needed_by[str(job_id)] = (
+                [str(value) for value in needs]
+                if isinstance(needs, list)
+                else [str(needs)] if needs else []
+            )
+        selected = {
+            job_id for job_id, display in displays.items()
+            if any((_matches_required_job(
+                        {"workflow": workflow, "name": display}, required)
+                    or _required_matches_job_template(
+                        workflow, display, required))
+                for required in required_names)
+        }
+        pending = list(selected)
+        while pending:
+            job_id = pending.pop()
+            for dependency in needed_by.get(job_id, []):
+                if dependency in displays and dependency not in selected:
+                    selected.add(dependency)
+                    pending.append(dependency)
+        if selected:
+            patterns[workflow] = [
+                _job_name_pattern(displays[job_id]) for job_id in sorted(selected)
+            ]
+    return patterns
+
+
 def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[str, Any]:
     """Recompute independent facts over the same public sample definition.
 
@@ -326,14 +498,7 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
         row["jobs"] = [job for index in chosen for job in jobs_by_run[index]]
         return row
 
-    required_names = {
-        str(name) for name in findings.get("required_checks") or [] if name
-    }
-    gate_definition = {
-        str(row.get("name") or "")
-        for row in critical.get("checks") or []
-        if isinstance(row, dict) and row.get("required_reachable") is not False
-    }
+    required_names = _recorded_required_checks(recording)
     in_span = []
     for source in month.get("pr_commits") or []:
         if not isinstance(source, dict):
@@ -342,14 +507,6 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
         if (first and created < first) or (last and created > last):
             continue
         in_span.append(latest_attempt_view(source))
-
-    def matches_required(job: dict[str, Any], required: str) -> bool:
-        name = str(job.get("name") or "").strip()
-        workflow = str(job.get("workflow") or "").strip()
-        qualified = f"{workflow} / {name}" if workflow and name else name or workflow
-        return (required in {name, qualified}
-                or qualified.endswith(" / " + required)
-                or required.endswith(" / " + name))
 
     sample_count = int(critical.get("sampled_pr_count") or 0)
     if critical.get("sample_job_list_cap_hit"):
@@ -361,30 +518,51 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     # supply its requested complete population; a four-commit release gate
     # must not replace an 86-commit ordinary-PR sample.  Re-derive that choice
     # from recording jobs rather than accepting the engine's selected SHAs.
-    representative_required = {
-        name for name in required_names
-        if sum(
-            any(matches_required(job, name)
+    required_counts = {
+        name: sum(
+            any(_matches_required_job(job, name)
                 for job in source.get("jobs") or [] if isinstance(job, dict))
             for source in in_span
-        ) >= int(critical.get("check_present_n_pr") or sample_count)
+        )
+        for name in required_names
     }
+    representative_count = max(required_counts.values(), default=0)
+    requested_count = min(sample_count or representative_count, representative_count)
+    representative_required: set[str] = set()
+    representative_sources = list(in_span)
+    for name, _count in sorted(
+            required_counts.items(), key=lambda item: (-item[1], item[0])):
+        candidates = [
+            source for source in representative_sources
+            if any(_matches_required_job(job, name)
+                   for job in source.get("jobs") or [] if isinstance(job, dict))
+        ]
+        if len(candidates) < requested_count:
+            continue
+        representative_required.add(name)
+        representative_sources = candidates
+    gate_patterns = _recorded_gate_job_patterns(
+        recording, representative_required)
     eligible = []
     for source in in_span:
         jobs = [job for job in source.get("jobs") or [] if isinstance(job, dict)]
         if (representative_required
-                and not all(any(matches_required(job, name) for job in jobs)
+                and not all(any(_matches_required_job(job, name) for job in jobs)
                             for name in representative_required)):
             continue
         if (representative_required
-                and any(any(matches_required(job, name) for job in jobs)
+                and any(any(_matches_required_job(job, name) for job in jobs)
                         for name in required_names - representative_required)):
             continue
         row = dict(source)
-        if required_names and gate_definition:
+        if representative_required:
             row["jobs"] = [
                 job for job in jobs
-                if any(matches_required(job, name) for name in gate_definition)
+                if (any(pattern.fullmatch(str(job.get("name") or ""))
+                        for pattern in gate_patterns.get(
+                            str(job.get("workflow") or ""), []))
+                    or any(_matches_required_job(job, name)
+                           for name in representative_required))
             ]
             included_workflows = {
                 str(job.get("workflow") or "") for job in row["jobs"]
@@ -406,15 +584,11 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # The comparison aligns only the public timestamp span. Commit identities,
-    # check names, and each commit's last-finishing gate all come from the
-    # recording so the engine cannot provide its own answer to the oracle.
-    gate_caps = {
-        str(row.get("name") or ""): float(row.get("p50_s") or 0.0)
-        for row in critical.get("checks") or [] if isinstance(row, dict)
-    }
-    return module.compute(
-        scoped, bookkeeping_cutoff_s=0, gate_caps=gate_caps)
+    # The comparison aligns only the public timestamp span and bounded sample
+    # size. Commit identities, eligible jobs, check names, durations, and each
+    # commit's slowest eligible gate all come from the recording, so the engine
+    # cannot provide its own answer to the oracle.
+    return module.compute(scoped, bookkeeping_cutoff_s=0)
 
 
 def _fixture_name(endpoint: str) -> str:
@@ -445,7 +619,6 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
         month = json.load(stream)
     manifest = load(recording / "manifest.json")
     repository = str(manifest["repository"])
-    recorded_runs_only = bool(manifest.get("replay_recorded_runs_only"))
     workflow_endpoint = f"repos/{repository}/actions/workflows?per_page=100"
     workflow_fixture = destination / _fixture_name(workflow_endpoint)
     if not workflow_fixture.is_file():
@@ -521,12 +694,6 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
                     "pull_request", "pull_request_target", "merge_group"}
                 if is_pr and str(run.get("head_sha") or "") not in month_shas:
                     continue
-                if recorded_runs_only and is_pr and run.get("id"):
-                    jobs_fixture = destination / _fixture_name(
-                        f"repos/{repository}/actions/runs/{int(run['id'])}"
-                        "/jobs?per_page=100")
-                    if not jobs_fixture.is_file():
-                        continue
                 kept_runs.append(run)
             payload["workflow_runs"] = kept_runs
             fixture.write_text(
@@ -614,12 +781,6 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
             jobs = jobs_by_run.get(run_index) or []
             jobs_recorded = (bool(source_run.get("jobs_recorded"))
                              if "jobs_recorded" in source_run else bool(jobs))
-            # A normalized month row can list a workflow whose job endpoint was
-            # never captured.  Recorded-only fixtures omit those run rows rather
-            # than making every sample partial; replay marks every dimension that
-            # consequently shares the normalized month data with the oracle.
-            if recorded_runs_only and not jobs_recorded:
-                continue
             workflow = workflows.get(workflow_name)
             if not workflow:
                 continue
@@ -699,8 +860,9 @@ def _synthesize_month_replay(recording: Path, destination: Path) -> set[str]:
                     "steps": copied_job.get("steps") or [],
                 })
             if not jobs_recorded:
-                # An explicit unrecorded run remains visible as a failed read
-                # unless this recording opted into the recorded-only replay.
+                # Keep the run visible but omit its jobs endpoint. The replay
+                # then treats the missing list as a failed/partial read instead
+                # of silently improving the sample by dropping the run.
                 if copied_run:
                     for filter_suffix in ("", "&filter=all"):
                         endpoint = (

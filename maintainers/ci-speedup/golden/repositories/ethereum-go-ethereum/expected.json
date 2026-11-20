@@ -1,6 +1,6 @@
 {
   "human_review": {
-    "bottom_line_must_contain": "32bit tests",
+    "bottom_line_must_contain": "Lint",
     "minimum_last_finishes": 5,
     "findings_must_appear": [],
     "findings_must_not_appear": [
@@ -9,10 +9,9 @@
     "report_must_contain": [],
     "report_must_not_contain": [],
     "rendered_pole_order": [
-      "Lint",
-      "validate-pr"
+      "Lint"
     ],
-    "review_notes": "Proposed from the public workflow and independent oracle: the lint step is a true predecessor of tests, not redundant setup; the longest meaningful month-wide gate is 32bit tests. Awaiting owner review."
+    "review_notes": "Proposed from the recorded public ruleset and workflow: Lint is a required gate and is the rendered pole retained by the partial replay. The 32bit tests job is downstream of Test, which itself needs Lint, so it must not replace Lint as the required-gate headline. Awaiting owner review."
   },
   "oracle": {
     "bookkeeping_cutoff_s": 60,
