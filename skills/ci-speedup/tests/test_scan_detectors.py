@@ -4046,6 +4046,363 @@ def test_opt32_deploy_test_path_fires_beside_unrelated_production_source(tmp_pat
     assert "'!worker/test/**'" in hits[0]["evidence"]
 
 
+def _opt46_candidate_jobs(tmp_path: Path, content: str) -> list[str]:
+    """Jobs the OPT46 cancelled-run aggregate flavor records as candidates."""
+    _write_workflow(tmp_path, "ci.yml", content)
+    scanned = _scan(tmp_path)
+    assert "OPT46" not in _patterns(scanned), "a static scan never reports it"
+    return [job for c in scanned.get("opt46_aggregate_candidates", [])
+            for job in c["affected_jobs"]]
+
+
+def test_opt46_always_aggregate_starts_after_superseded_run_is_cancelled(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  verdict:
+    needs: [lint, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful checks
+        env:
+          LINT_RESULT: ${{ needs['lint'].result }}
+          TEST_RESULT: ${{ needs['test'].result }}
+        run: |
+          printf 'lint=%s test=%s\\n' \\
+            "${LINT_RESULT:-missing}" "${TEST_RESULT:-missing}"
+          [[ "$LINT_RESULT" == success && "$TEST_RESULT" == success ]]
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    scanned = _scan(tmp_path)
+    # A static scan cannot know whether the aggregate is a required check, so
+    # it records a candidate and reports nothing.
+    assert "OPT46" not in _patterns(scanned)
+    cands = [c for c in scanned["opt46_aggregate_candidates"]
+             if c["affected_jobs"] == ["verdict"]]
+    assert len(cands) == 1
+    assert cands[0]["pattern"] == "OPT46"
+    assert cands[0]["pattern_class"] == "static"
+    assert cands[0]["opt46_check_context"] == "verdict"
+    assert "!cancelled()" not in cands[0]["evidence"]
+
+
+def test_opt46_cancel_aware_aggregate_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  verdict:
+    needs: [lint, test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful checks
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$LINT_RESULT" = success -a "$TEST_RESULT" = success
+"""
+    assert not _opt46_candidate_jobs(tmp_path, workflow)
+
+
+def test_opt46_always_job_with_real_work_is_not_an_aggregate(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    needs: lint
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+"""
+    assert not _opt46_candidate_jobs(tmp_path, workflow)
+
+
+def test_opt46_result_guard_cannot_hide_real_work_in_shell_control_flow(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  verdict-and-test:
+    needs: lint
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect lint result, then test
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+        run: |
+          if npm test; then
+            test "$LINT_RESULT" = success
+          fi
+"""
+    assert not _opt46_candidate_jobs(tmp_path, workflow)
+
+
+def test_opt46_aggregate_without_cancellation_stays_with_measured_detector(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  verdict:
+    needs: [lint, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful checks
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: test "$RESULTS" != '{}'
+"""
+    assert not _opt46_candidate_jobs(tmp_path, workflow)
+
+
+def _opt46_aggregate_workflow(run_block: str) -> str:
+    body = "\n".join(f"          {line}" for line in run_block.splitlines())
+    return f"""name: CI
+on: pull_request
+concurrency:
+  group: ${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number }}}}
+  cancel-in-progress: true
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  verdict:
+    needs: lint
+    if: ${{{{ always() }}}}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        env:
+          LINT_RESULT: ${{{{ needs.lint.result }}}}
+          RESULTS: ${{{{ toJSON(needs) }}}}
+        run: |
+{body}
+"""
+
+
+@pytest.mark.parametrize("run_block", [
+    'test "$LINT_RESULT" = success\nCI=true npm test',
+    'if test "$LINT_RESULT" = success; then npm test; fi',
+    'test "$LINT_RESULT" = success; rm -rf build',
+    'test "$LINT_RESULT" = success || echo `./notify.sh`',
+    'test "$LINT_RESULT" = success && ./scripts/deploy',
+])
+def test_opt46_real_work_after_a_result_check_is_not_an_aggregate(
+        tmp_path: Path, run_block: str):
+    """Every simple command on a line must be a result check, not just the
+    line's first word: real work chained after one stays quiet."""
+    assert not _opt46_candidate_jobs(tmp_path, _opt46_aggregate_workflow(run_block))
+
+
+@pytest.mark.parametrize("run_block", [
+    "echo \"$RESULTS\" | jq -e 'all(.[]; .result == \"success\")'",
+    'if [[ "$LINT_RESULT" == success && -n "$RESULTS" ]]; then exit 0; fi\nexit 1',
+    'echo "lint: $LINT_RESULT" >> "$GITHUB_STEP_SUMMARY"\n'
+    'test "$LINT_RESULT" = success',
+])
+def test_opt46_result_only_verdict_shapes_still_fire(
+        tmp_path: Path, run_block: str):
+    assert _opt46_candidate_jobs(tmp_path, _opt46_aggregate_workflow(run_block))
+
+
+def _opt46_scanned_aggregate(tmp_path: Path, *, job_name: str | None = None,
+                             matrix: bool = False) -> dict:
+    workflow = _opt46_aggregate_workflow('test "$LINT_RESULT" = success')
+    if job_name is not None:
+        workflow = workflow.replace(
+            "  verdict:\n", f"  verdict:\n    name: {job_name}\n", 1)
+    if matrix:
+        workflow = workflow.replace(
+            "  verdict:\n",
+            "  verdict:\n    strategy:\n      matrix:\n        os: [linux]\n", 1)
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    return _scan(tmp_path)
+
+
+def _required(names: set[str], **kwargs) -> "object":
+    import collect_runs as cr
+    return cr.RequiredChecks(frozenset(names), **kwargs)
+
+
+def test_opt46_non_required_aggregate_is_promoted_with_cancel_aware_advice(
+        tmp_path: Path):
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path)
+    promoted = cr._promote_opt46_aggregates(
+        scanned["opt46_aggregate_candidates"],
+        _required({"lint"}, complete=True))
+    assert [f["affected_jobs"] for f in promoted] == [["verdict"]]
+    evidence = promoted[0]["evidence"]
+    assert "check `verdict` is not required" in evidence
+    assert "`if: ${{ !cancelled() }}` is safe here" in evidence
+    assert "failure, cancelled or skipped" in evidence
+    assert "Runner-minute effect: saving" in evidence
+    assert promoted[0]["opt46_required_check_status"] == "not_required"
+
+
+@pytest.mark.parametrize("required", [
+    {"verdict"}, {"ci / verdict"}, {"verdict (linux)"}, {"lint", "verdict"},
+])
+def test_opt46_required_aggregate_keeps_always(tmp_path: Path, required: set):
+    """A skipped required check reads as passing, so a required aggregate is
+    never told to move to `!cancelled()`."""
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path)
+    assert cr._promote_opt46_aggregates(
+        scanned["opt46_aggregate_candidates"],
+        _required(required, complete=True)) == []
+
+
+@pytest.mark.parametrize("read", [
+    None,
+    {"complete": False},
+    {"complete": True, "classic_read": False},
+    {"complete": True, "rulesets_read": False},
+])
+def test_opt46_unknown_required_status_never_recommends_cancelled(
+        tmp_path: Path, read):
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path)
+    required = None if read is None else _required({"lint"}, **read)
+    assert cr._promote_opt46_aggregates(
+        scanned["opt46_aggregate_candidates"], required) == []
+
+
+@pytest.mark.parametrize("shape", [
+    {"job_name": "Verdict ${{ github.event_name }}"}, {"matrix": True}])
+def test_opt46_unreadable_check_name_stays_quiet(tmp_path: Path, shape: dict):
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path, **shape)
+    assert scanned["opt46_aggregate_candidates"]
+    assert cr._promote_opt46_aggregates(
+        scanned["opt46_aggregate_candidates"],
+        _required({"lint"}, complete=True)) == []
+
+
+def test_opt46_named_aggregate_matches_its_display_name(tmp_path: Path):
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path, job_name="All checks")
+    cands = scanned["opt46_aggregate_candidates"]
+    assert cands[0]["opt46_check_context"] == "All checks"
+    assert cr._promote_opt46_aggregates(
+        cands, _required({"All checks"}, complete=True)) == []
+    assert cr._promote_opt46_aggregates(
+        cands, _required({"verdict"}, complete=True))
+
+
+def test_opt46_static_only_report_never_recommends_cancelled(tmp_path: Path):
+    """Without a required-check read the report must not tell anyone to move
+    an aggregate to `!cancelled()`."""
+    import blocking_path as bp
+
+    scanned = _opt46_scanned_aggregate(tmp_path)
+    assert "OPT46" not in _patterns(scanned)
+    assert "!cancelled()" not in bp.render(scanned)
+
+
+def test_opt46_promoted_aggregate_heading_states_an_unsized_saving(
+        tmp_path: Path):
+    """The saving is real but unsized: the group heading must say so with its
+    reason, never `no bill saving`."""
+    import blocking_path as bp
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path)
+    scanned["findings"].extend(cr._promote_opt46_aggregates(
+        scanned.pop("opt46_aggregate_candidates"),
+        _required({"lint"}, complete=True)))
+    finding = next(f for f in scanned["findings"] if f["pattern"] == "OPT46")
+    assert finding["runner_min_unsized_reason"]
+    heading = next(
+        line for line in bp.render(scanned).splitlines()
+        if line.startswith("<summary><strong>OPT46 - "))
+    assert "no bill saving" not in heading
+    assert "runner-minute saving: unsized (" in heading
+
+
+def test_opt46_and_opt32_docs_keep_required_aggregates_on_always():
+    refs = _SKILL_DIR / "references"
+    opt46 = refs / "patterns" / ("opt46-superseded-runs-not-cancelled-"
+                                 "missing-concurrency-or-cancel-.md")
+    opt32 = refs / "patterns" / ("opt32-missing-paths-paths-ignore-on-"
+                                 "expensive-workflows.md")
+    index = " ".join((refs / "optimization-patterns.md").read_text(
+        encoding="utf-8").split())
+    for doc in (opt46, opt32):
+        text = " ".join(doc.read_text(encoding="utf-8").split())
+        assert "cancel one run" not in text, doc.name
+        assert "a job skipped by its `if:` reports success" in text.lower(), doc.name
+    assert "cancel one run" not in index
+    # OPT32's verdict IS the required check, so it keeps `always()`; the index
+    # carries the same paragraph as the pattern file.
+    opt32_text = " ".join(opt32.read_text(encoding="utf-8").split())
+    fail_closed = opt32_text.split("**Fail closed:**")[1].split("**Required")[0]
+    assert "(`if: always()`)" in fail_closed
+    assert "Keep `if: always()` rather than OPT46's `!cancelled()`" in fail_closed
+    assert fail_closed in index
+    opt46_text = " ".join(opt46.read_text(encoding="utf-8").split())
+    assert "(non-required checks only)" in opt46_text
+    assert "keeps `if: always()`" in opt46_text
+
+
 def test_opt5_suppressed_when_pnpm_action_setup_caches(tmp_path: Path):
     neg = """name: CI
 on: push
@@ -4657,6 +5014,257 @@ def test_opt19_python_time_sleep_leading_dot_float(tmp_path: Path):
     assert opt19, "OPT19 should fire on time.sleep(.5)"
     # .5s → 0.5 * 1000ms / 1000 = 0.5s wall-clock
     assert opt19[0]["wall_clock_p50_s"] == 0.5
+
+
+# =============================================================================
+# Phase 2e — OPT113 oversized test fixtures
+# =============================================================================
+
+def test_opt113_finds_test_executable_used_as_archive_fixture(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test -race ./...
+""")
+    source = tmp_path / "runtime" / "archive_test.go"
+    source.parent.mkdir()
+    source.write_text('''package runtime
+
+import (
+    "archive/zip"
+    "io"
+    "os"
+    "testing"
+)
+
+func controllerFixture(t *testing.T) string {
+    path, err := os.Executable()
+    if err != nil { t.Fatal(err) }
+    return path
+}
+
+func TestArchiveController(t *testing.T) {
+    input, err := os.Open(controllerFixture(t))
+    if err != nil { t.Fatal(err) }
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("controller")
+    _, _ = io.Copy(entry, input)
+}
+''', encoding="utf-8")
+
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+    assert findings, "expected oversized executable fixture guidance"
+    assert "small shared byte fixture" in findings[0]["fix_strategy"].lower()
+    assert "runner-minute saving: unsized" in findings[0]["evidence"].lower()
+
+
+def test_opt113_keeps_small_archive_fixture_and_metadata_check_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test -race ./...
+""")
+    small = tmp_path / "small" / "archive_test.go"
+    small.parent.mkdir()
+    small.write_text('''package small
+import ("archive/zip"; "io"; "os"; "path/filepath"; "testing")
+func TestArchiveController(t *testing.T) {
+    path := filepath.Join(t.TempDir(), "controller")
+    _ = os.WriteFile(path, []byte("fixture"), 0755)
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("controller")
+    _, _ = entry.Write([]byte("fixture"))
+}
+''', encoding="utf-8")
+    metadata = tmp_path / "metadata" / "executable_test.go"
+    metadata.parent.mkdir()
+    metadata.write_text('''package metadata
+import ("archive/zip"; "io"; "os"; "testing")
+func TestExecutableMode(t *testing.T) {
+    path, _ := os.Executable()
+    info, _ := os.Stat(path)
+    if info.Mode()&0111 == 0 { t.Fatal("not executable") }
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("small")
+    _, _ = entry.Write([]byte("small fixture"))
+}
+''', encoding="utf-8")
+
+    assert not [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+
+
+def test_opt113_finds_explicitly_built_binary_used_as_compression_fixture(
+        tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: pull_request\njobs: {}\n")
+    source = tmp_path / "bundle" / "bundle_test.go"
+    source.parent.mkdir()
+    source.write_text('''package bundle
+import ("compress/gzip"; "io"; "os"; "os/exec"; "testing")
+func TestCompressedPayload(t *testing.T) {
+    output := t.TempDir() + "/fixture-bin"
+    if err := exec.Command("go", "build", "-o", output, "./cmd/fixture").Run(); err != nil {
+        t.Fatal(err)
+    }
+    input, _ := os.Open(output)
+    writer := gzip.NewWriter(io.Discard)
+    _, _ = io.Copy(writer, input)
+}
+''', encoding="utf-8")
+
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+    assert findings, "expected explicit build-output fixture guidance"
+    assert "binary built by the test" in findings[0]["evidence"]
+
+
+# Near-miss shapes where the real binary IS the contract (signature, ELF /
+# Mach-O header, execution), or where the executable read and the transform
+# are unrelated. OPT113 must stay quiet: a byte fixture cannot replace these.
+_OPT113_NEAR_MISSES = {
+    "signature-of-real-binary": '''package u
+import ("crypto/ed25519"; "crypto/sha256"; "os"; "testing")
+func TestSelfSignature(t *testing.T) {
+    exe, _ := os.Executable()
+    data, _ := os.ReadFile(exe)
+    sum := sha256.Sum256(data)
+    if !ed25519.Verify(pub, sum[:], sig) { t.Fatal("bad sig") }
+}
+''',
+    "elf-header-plus-unrelated-digest": '''package u
+import ("bytes"; "crypto/sha256"; "debug/elf"; "os"; "testing")
+func TestELF(t *testing.T) {
+    exe, _ := os.Executable()
+    data, _ := os.ReadFile(exe)
+    if _, err := elf.NewFile(bytes.NewReader(data)); err != nil { t.Fatal(err) }
+}
+func TestDigest(t *testing.T) { _ = sha256.Sum256([]byte("x")) }
+''',
+    "macho-header-plus-unrelated-digest": '''package u
+import ("crypto/sha256"; "debug/macho"; "os"; "testing")
+func TestMachO(t *testing.T) {
+    exe, _ := os.Executable()
+    f, _ := os.Open(exe)
+    _, _ = macho.NewFile(f)
+}
+func TestDigest(t *testing.T) { _ = sha256.Sum256([]byte("x")) }
+''',
+    "go-build-join-output-and-unrelated-read": '''package u
+import ("crypto/sha256"; "os"; "os/exec"; "path/filepath"; "testing")
+func TestBuildAndRun(t *testing.T) {
+    dir := t.TempDir()
+    _ = exec.Command("go", "build", "-o", filepath.Join(dir, "app"), ".").Run()
+    cfg, _ := os.ReadFile(filepath.Join("testdata", "config.json"))
+    _ = sha256.Sum256(cfg)
+}
+''',
+    "magic-byte-check-plus-unrelated-zip": '''package u
+import ("archive/zip"; "io"; "os"; "testing")
+func TestMagic(t *testing.T) {
+    exe, _ := os.Executable()
+    data, _ := os.ReadFile(exe)
+    if data[0] != 0x7f { t.Fatal("not elf") }
+}
+func TestZip(t *testing.T) {
+    w := zip.NewWriter(io.Discard)
+    e, _ := w.Create("small")
+    _, _ = e.Write([]byte("small"))
+}
+''',
+    "self-update-copies-and-executes-binary": '''package u
+import ("crypto/sha256"; "io"; "os"; "os/exec"; "testing")
+func TestSelfUpdate(t *testing.T) {
+    exe, _ := os.Executable()
+    src, _ := os.Open(exe)
+    dst, _ := os.Create(t.TempDir() + "/copy")
+    _, _ = io.Copy(dst, src)
+    dst.Close()
+    _ = exec.Command(dst.Name(), "-test.run=TestHelper").Run()
+    _ = sha256.Sum256([]byte("update"))
+}
+''',
+    "archived-binary-is-extracted-and-executed": '''package u
+import ("archive/zip"; "io"; "os"; "os/exec"; "testing")
+func TestArchiveRoundTripRuns(t *testing.T) {
+    exe, _ := os.Executable()
+    in, _ := os.Open(exe)
+    w := zip.NewWriter(io.Discard)
+    e, _ := w.Create("bin")
+    _, _ = io.Copy(e, in)
+    out := extract(t)
+    if err := exec.Command(out, "-test.run=TestNone").Run(); err != nil { t.Fatal(err) }
+}
+''',
+    "sidecar-next-to-binary-is-hashed": '''package u
+import ("crypto/sha256"; "os"; "testing")
+func TestSidecar(t *testing.T) {
+    exe, _ := os.Executable()
+    b, _ := os.ReadFile(exe + ".sha256")
+    _ = sha256.Sum256(b)
+}
+''',
+    "testdata-beside-binary-is-hashed": '''package u
+import ("crypto/sha256"; "os"; "path/filepath"; "testing")
+func TestData(t *testing.T) {
+    exe, _ := os.Executable()
+    b, _ := os.ReadFile(filepath.Join(filepath.Dir(exe), "testdata", "x"))
+    _ = sha256.Sum256(b)
+}
+''',
+    "archived-binary-mode-is-asserted": '''package u
+import ("archive/zip"; "io"; "os"; "testing")
+func TestArchivePreservesExecutableBit(t *testing.T) {
+    exe, _ := os.Executable()
+    info, _ := os.Stat(exe)
+    in, _ := os.Open(exe)
+    w := zip.NewWriter(io.Discard)
+    e, _ := w.Create("bin")
+    _, _ = io.Copy(e, in)
+    if info.Mode().Perm()&0o111 == 0 { t.Fatal("not executable") }
+}
+''',
+}
+
+
+@pytest.mark.parametrize("name", sorted(_OPT113_NEAR_MISSES))
+def test_opt113_near_miss_shapes_stay_quiet(tmp_path: Path, name: str):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: pull_request\njobs: {}\n")
+    source = tmp_path / "pkg" / "near_miss_test.go"
+    source.parent.mkdir()
+    source.write_text(_OPT113_NEAR_MISSES[name], encoding="utf-8")
+    assert not [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"], name
+
+
+def test_opt113_finds_executable_hashed_through_streaming_writer(tmp_path: Path):
+    """The plain shape from the issue: the test binary streamed into a hash."""
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: pull_request\njobs: {}\n")
+    source = tmp_path / "pkg" / "digest_test.go"
+    source.parent.mkdir()
+    source.write_text('''package pkg
+import ("crypto/sha256"; "io"; "os"; "testing")
+func TestBundleDigest(t *testing.T) {
+    exe, err := os.Executable()
+    if err != nil { t.Fatal(err) }
+    f, err := os.Open(exe)
+    if err != nil { t.Fatal(err) }
+    h := sha256.New()
+    if _, err := io.Copy(h, f); err != nil { t.Fatal(err) }
+}
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+    assert findings, "expected the executable-to-hash flow to fire"
+    assert findings[0]["evidence_snippet"].strip() == "f, err := os.Open(exe)"
 
 
 # =============================================================================
