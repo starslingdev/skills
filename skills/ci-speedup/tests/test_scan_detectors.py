@@ -2590,6 +2590,101 @@ jobs:
     assert "OPT45" in _scan_one(tmp_path, pos)
 
 
+def test_opt91_xcode_ci_build_writes_index_and_builds_generic_simulator(
+        tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tests
+        run: >-
+          xcodebuild -project App.xcodeproj -scheme AppTests
+          -destination 'generic/platform=iOS Simulator'
+          build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"]
+        if row["pattern"] == "OPT91" and row["affected_jobs"] == ["ios-tests"]
+    ]
+    assert len(findings) == 1
+    assert "COMPILER_INDEX_STORE_ENABLE=NO" in findings[0]["evidence"]
+    assert "host simulator architecture" in findings[0]["evidence"]
+    assert "Runner-minute effect: saving" in findings[0]["evidence"]
+
+
+def test_opt91_xcode_simulator_build_with_both_guards_stays_quiet(tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - name: Build tests
+        run: >-
+          xcodebuild -project App.xcodeproj -scheme AppTests
+          COMPILER_INDEX_STORE_ENABLE=NO ARCHS=arm64
+          -destination 'platform=iOS Simulator,name=iPhone 16'
+          build-for-testing
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_multi_arch_setting_does_not_clear_generic_simulator_waste(
+        tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO
+          ARCHS="arm64 x86_64"
+          -destination 'generic/platform=iOS Simulator'
+          build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT91"
+    ]
+    assert len(findings) == 1
+    assert "host simulator architecture" in findings[0]["evidence"]
+
+
+def test_opt91_generic_archive_destination_is_not_a_simulator_test_waste(
+        tmp_path: Path):
+    workflow = """name: Release
+on: workflow_dispatch
+jobs:
+  archive:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -project App.xcodeproj -scheme App
+          COMPILER_INDEX_STORE_ENABLE=NO
+          -destination 'generic/platform=iOS Simulator'
+          archive
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "release.yml")
+
+
+def test_opt91_xcode_version_probe_is_not_a_build(tmp_path: Path):
+    workflow = """name: Toolchain
+on: pull_request
+jobs:
+  version:
+    runs-on: macos-15
+    steps:
+      - run: xcodebuild -version
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "toolchain.yml")
+
+
 def test_opt5_suppressed_when_pnpm_action_setup_caches(tmp_path: Path):
     neg = """name: CI
 on: push

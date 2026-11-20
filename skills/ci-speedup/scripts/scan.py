@@ -1680,6 +1680,120 @@ def _detect_opt45(doc: dict, raw: str) -> list[Hit]:
     )]
 
 
+# ---- OPT91 extension — Xcode CI index/architecture waste --------------------
+
+_OPT91_XCODEBUILD_RE = re.compile(r"(?:^|\s)(?:xcrun\s+)?xcodebuild(?:\s|$)", re.I)
+_OPT91_INDEX_OFF_RE = re.compile(
+    r"\bCOMPILER_INDEX_STORE_ENABLE\s*=\s*(?:['\"]?NO['\"]?)\b", re.I)
+_OPT91_GENERIC_SIM_RE = re.compile(
+    r"generic\s*/\s*platform\s*=\s*[^'\"\n]*(?:iOS|tvOS|watchOS|visionOS)?\s*Simulator",
+    re.I,
+)
+_OPT91_ARCHS_RE = re.compile(
+    r"\bARCHS\s*=\s*(?:['\"](?:arm64|x86_64)['\"]|"
+    r"(?:arm64|x86_64)(?=\s|$)|"
+    r"\$\(\s*uname\s+-m\s*\)|\$\{\{[^}]*runner\.arch[^}]*\}\})",
+    re.I,
+)
+_OPT91_COMPILE_ACTIONS = frozenset({"build", "test", "archive", "analyze", "build-for-testing"})
+_OPT91_SIMULATOR_ACTIONS = frozenset({"build", "test", "build-for-testing"})
+
+
+def _opt91_xcode_invocations(run: str) -> list[str]:
+    normalized = re.sub(r"\\\s*\n", " ", run)
+    return [
+        segment.strip()
+        for segment in re.split(r"\r?\n|&&|\|\||;", normalized)
+        if _OPT91_XCODEBUILD_RE.search(segment)
+    ]
+
+
+def _opt91_actions(invocation: str) -> set[str]:
+    try:
+        tokens = {token.lower() for token in shlex.split(invocation)}
+    except ValueError:
+        return set()
+    return tokens & _OPT91_COMPILE_ACTIONS
+
+
+def _opt91_env(job: dict, step: dict, doc: dict) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for owner in (doc, job, step):
+        env = owner.get("env") if isinstance(owner, dict) else None
+        if isinstance(env, dict):
+            result.update({str(key): str(value) for key, value in env.items()})
+    return result
+
+
+def _opt91_single_arch(value: str) -> bool:
+    return bool(_OPT91_ARCHS_RE.fullmatch(f"ARCHS={value.strip()}"))
+
+
+def _detect_opt91_xcode_ci(doc: dict, raw: str) -> list[Hit]:
+    """Static Xcode build waste: an unused index store, or a simulator build
+    that leaves a generic destination to compile more than one architecture."""
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        job_issues: set[str] = set()
+        first_command = ""
+        first_step = ""
+        for step in _steps(job):
+            run = _run(step)
+            if not run:
+                continue
+            env = _opt91_env(job, step, doc)
+            index_off_in_env = str(env.get("COMPILER_INDEX_STORE_ENABLE") or "").upper() == "NO"
+            arch_in_env = _opt91_single_arch(str(env.get("ARCHS") or ""))
+            for invocation in _opt91_xcode_invocations(run):
+                actions = _opt91_actions(invocation)
+                if not actions:
+                    continue
+                issues: set[str] = set()
+                if not index_off_in_env and not _OPT91_INDEX_OFF_RE.search(invocation):
+                    issues.add("index")
+                if (actions & _OPT91_SIMULATOR_ACTIONS
+                        and _OPT91_GENERIC_SIM_RE.search(invocation)
+                        and not arch_in_env and not _OPT91_ARCHS_RE.search(invocation)):
+                    issues.add("architecture")
+                if issues:
+                    job_issues.update(issues)
+                    if not first_command:
+                        first_command = invocation
+                        first_step = str(step.get("name") or "Run xcodebuild")
+        if not job_issues:
+            continue
+        issue_text = " and ".join(
+            part for key, part in (
+                ("index", "writes an index store that CI does not read"),
+                ("architecture", "uses a generic simulator destination without one host architecture"),
+            ) if key in job_issues
+        )
+        fixes = []
+        if "index" in job_issues:
+            fixes.append("set `COMPILER_INDEX_STORE_ENABLE=NO`")
+        if "architecture" in job_issues:
+            fixes.append("set `ARCHS` to the host simulator architecture")
+        line = _line_of_in_job(raw, job_name, "xcodebuild")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"job `{job_name}` step `{first_step}` {issue_text}. "
+                f"{' and '.join(fixes)} for CI build/test work; keep generic "
+                "destinations for archive/release builds. Runner-minute effect: "
+                "saving the affected build's measured compute; not sized until "
+                "matched before/after runs isolate these settings and establish "
+                "the workflow run volume."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+            facts={"fix_strategy": "xcode-ci-build-shape"},
+        ))
+    return hits
+
+
 # ---- OPT32 — Missing paths/paths-ignore on Expensive Workflows (P7.1) --------
 
 _ON_LINE_RE = re.compile(r"^(['\"]?on['\"]?\s*:.*)$", re.M)
@@ -6130,7 +6244,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT76", "OPT108"})
+    "OPT39", "OPT76", "OPT91", "OPT108"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -9951,6 +10065,29 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
                 # workflow text, not prose in a yaml fence. Prefer a snippet the
                 # detector set explicitly (e.g. an `on:` block for an absence
                 # finding); otherwise the matched line at hit.line.
+                snippet = hit.snippet or _raw_line(raw, hit.line)
+                if snippet:
+                    f["evidence_snippet"] = snippet
+                findings.append(f)
+
+        # OPT91's primary compiler-profile route remains manual/data-driven.
+        # Its Xcode index/architecture flavor is independently provable from
+        # workflow YAML, so emit only that narrow extension as static and
+        # leave it uncredited until matched build timings exist.
+        opt91_entry = catalog_by_id.get("OPT91")
+        if opt91_entry is not None:
+            opt91_hits = _detect_opt91_xcode_ci(doc, raw)
+            if unreadable_jobs:
+                opt91_hits = _hold_back_unreadable(
+                    "OPT91", opt91_hits, rel, unreadable_jobs)
+            for hit in opt91_hits:
+                finding_idx += 1
+                f = _emit(opt91_entry, hit, rel, finding_idx)
+                f["pattern_class"] = "static"
+                f.update(hit.facts)
+                f["workflow_lanes"] = workflow_lanes.get(rel, [])
+                if workflow_push_scopes.get(rel):
+                    f["workflow_push_scopes"] = workflow_push_scopes[rel]
                 snippet = hit.snippet or _raw_line(raw, hit.line)
                 if snippet:
                     f["evidence_snippet"] = snippet
