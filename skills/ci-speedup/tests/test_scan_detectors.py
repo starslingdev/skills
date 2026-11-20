@@ -1524,6 +1524,27 @@ jobs:
     assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+def test_opt108_unreadable_parallel_group_holds_the_finding_back(tmp_path: Path):
+    """The unread group may hold work every comment needs, so "every step is
+    filtered" cannot be known for the job."""
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          run: node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    _write_workflow(tmp_path, "comment.yml", workflow)
+    data = _scan(tmp_path)
+    assert "OPT108" not in _patterns(data)
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/comment.yml"]
+    assert gaps and "job_has_an_unreadable_parallel_group" in gaps[0]["reason"], gaps
+
+
 def test_opt108_optional_reaction_does_not_make_required_job_skippable(tmp_path: Path):
     workflow = """name: Comment recorder
 on: issue_comment
