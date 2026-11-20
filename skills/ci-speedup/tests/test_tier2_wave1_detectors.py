@@ -2226,7 +2226,8 @@ def test_opt107_reports_dense_default_branch_pushes_with_signed_sizing():
     assert finding["pattern"] == "OPT107"
     assert finding["batchable_run_count"] == 4
     assert finding["credited_run_count"] == 2
-    assert finding["runner_min_saving"] == 20.0
+    assert finding["runner_min_saving"] is None
+    assert finding["sample_runner_min_effect"] == -20.0
     assert "−20 runner-min" in finding["evidence"]
     assert "hourly" in finding["measured_evidence"]["note"].lower()
     assert "repository variable" in finding["measured_evidence"]["note"].lower()
@@ -2249,7 +2250,8 @@ def test_opt107_uses_only_each_credited_runs_own_compute():
         {"on": {"push": {"branches": ["main"]}}}, "main", 0)
 
     assert findings[0]["credited_run_ids"] == ["main-0", "main-1"]
-    assert findings[0]["runner_min_saving"] == 12.0
+    assert findings[0]["runner_min_saving"] is None
+    assert findings[0]["sample_runner_min_effect"] == -12.0
 
 
 def test_opt107_never_batches_release_or_deploy_workflows():

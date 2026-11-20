@@ -43,7 +43,8 @@ quiet.
 credited removable run's own completed-job compute, after reserving conservative
 hourly replacement slots. Developer merge wait is unchanged because the
 pull-request gate stays unchanged. The report states the signed runner-minute
-effect and labels it a sample-window lower bound.
+effect for the fetched sample window. It deliberately leaves the monthly field
+unsized because a run-list page does not prove a complete month.
 
 **Public example**: [OpenClaw pull request
 156783](https://github.com/openclaw/openclaw/pull/156783) batches full

@@ -17924,11 +17924,13 @@ def _detect_opt107_default_branch_batching(
     finding = _new_finding(
         "OPT107", "HIGH", title, wf_path, "", evidence,
         "batch-default-branch-full-ci", _catalog_anchor("OPT107", title),
-        start_idx + 1, wc_p50=0.0, rm=credited,
-        size_note=("runner-minute effect: saving (negative) — the scheduled tip run "
-                   "keeps post-merge validation coverage while earlier superseded "
-                   "tip runs are not started"),
+        start_idx + 1, wc_p50=0.0, rm=None,
+        size_note=(f"monthly runner-minute effect not sized; sampled-window effect: "
+                   f"−{credited:g} runner-min (saving) after reserving hourly "
+                   "replacement validations"),
         realization="none", measured_evidence=measured)
+    finding["sample_runner_min_effect"] = -credited
+    finding["sample_runner_min_saving"] = credited
     finding["batchable_run_count"] = len(batchable)
     finding["credited_run_count"] = credited_n
     finding["credited_run_ids"] = [run_id for run_id, _minutes in credited_runs]
@@ -31895,7 +31897,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # `_DEFAULT_BRANCH_PUSH_SAMPLE_MAX` commits, memoised with every other job read.
     _push_lane = findings_doc.get("default_branch_push_lane") or {}
     _push_jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    if _push_shas and _push_lane.get("status") == "complete":
+    if (_push_shas
+            and _push_lane.get("status") in {"complete", "frequency_incomplete"}):
         _push_rows_by_sha = {
             _sha: [(_push_run_wf.get(str(_run.get("id") or id(_run)), ""), _run)
                    for _run in _push_runs_by_sha[_sha]]

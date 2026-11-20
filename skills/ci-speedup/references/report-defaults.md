@@ -532,8 +532,8 @@ relanded by #333, remains awaiting owner approval.
 default-branch push sample (`_OPT107_MIN_BATCHABLE_SHARE`).
 
 **Report statements:** whether dense post-merge validation is a measured
-runner-minute opportunity and which observed runs contribute to its signed
-sample-window saving.
+runner-minute opportunity, which observed runs contribute to its signed
+sample-window saving, and that no monthly projection was made.
 
 **Reason:** the proposed replacement is an hourly current-tip validation, so a
 successor inside that interval is evidence that a schedule can coalesce work.
