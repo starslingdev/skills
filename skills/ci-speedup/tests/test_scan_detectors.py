@@ -1584,6 +1584,272 @@ jobs:
     assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+def test_opt111_automated_review_runs_on_every_pr_push(tmp_path: Path):
+    workflow = """name: Automated review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    _write_workflow(tmp_path, "review.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT111"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["review"]
+    assert "synchronize" in finding["evidence"]
+    assert "quiet window" in finding["evidence"]
+    assert "explicit re-review" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+    assert (
+        "runner-minute saving: unsized (static finding: the scan samples none of "
+        "the review job's runs" in finding["evidence"]
+    )
+    assert "+" not in finding["evidence"]
+
+
+def test_opt111_review_once_with_explicit_rereview_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: >-
+      github.event_name == 'pull_request' ||
+      contains(github.event.comment.body, '@reviewer re-review')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_explicit_comment_review_job_does_not_inherit_sync_trigger(
+        tmp_path: Path):
+    workflow = """name: Automated review
+on: [pull_request, issue_comment]
+jobs:
+  review:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      contains(github.event.comment.body, '@reviewer re-review')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_non_review_job_on_synchronize_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt111_review_after_a_quiet_window_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for a quiet window
+        run: sleep 10m
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_unreadable_event_guard_holds_back_the_finding(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    if: contains(fromJSON(vars.REVIEW_EVENTS), github.event.action)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+@pytest.mark.parametrize("step", [
+    'run: gh pr review --approve "$PR_URL"',
+    "run: gh api repos/$REPO/pulls/$PR/reviews --jq 'length'",
+    """uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.createReview({pull_number, event: 'APPROVE'})""",
+    """uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.createReview({
+              pull_number,
+              event: 'APPROVE',
+            })""",
+])
+def test_opt111_approval_or_review_read_is_not_an_automated_review(
+        tmp_path: Path, step: str):
+    workflow = f"""name: Approvals
+on: pull_request
+jobs:
+  approvals:
+    runs-on: ubuntu-latest
+    steps:
+      - {step}
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "approve.yml")
+
+
+def test_opt111_posted_comment_review_from_a_command_fires(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          body="$(./scripts/review.sh)"
+          gh api -X POST repos/$REPO/pulls/$PR/reviews -f event=COMMENT -f body="$body"
+"""
+    assert "OPT111" in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_step_guard_reviewing_only_on_open_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - if: github.event.action == 'opened' || github.event.action == 'ready_for_review'
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+@pytest.mark.parametrize("guard", [
+    "contains(github.event.comment.body, '/review')",
+    "github.event.label.name == 'ai-review'",
+    "steps.gate.outputs.review == 'true'",
+])
+def test_opt111_explicit_trigger_or_unread_gate_holds_back(
+        tmp_path: Path, guard: str):
+    workflow = f"""name: Automated review
+on:
+  pull_request:
+    types: [opened, synchronize, labeled]
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: {guard}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+    step_guarded = workflow.replace(f"    if: {guard}\n", "").replace(
+        "      - uses: example/automated-code-review@v2",
+        f"      - id: gate\n        run: ./gate.sh\n"
+        f"      - if: {guard}\n        uses: example/automated-code-review@v2")
+    assert "OPT111" not in _scan_one(tmp_path, step_guarded, "review.yml")
+
+
+def test_opt111_step_guard_admitting_synchronize_still_fires(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.action == 'opened' || github.event.action == 'synchronize'
+        uses: anthropics/claude-code-action@v1
+"""
+    assert "OPT111" in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_quiet_window_in_an_upstream_job_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 300
+  prepare:
+    needs: settle
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ready
+  review:
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+@pytest.mark.parametrize("action", [
+    "example/auto-assign-reviewer-by-files@v1",
+    "example/reviewer-lottery@v3",
+    "example/pr-review-reminder@v1",
+])
+def test_opt111_reviewer_assignment_action_is_not_a_review(
+        tmp_path: Path, action: str):
+    workflow = f"""name: Assign reviewers
+on: pull_request
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {action}
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "assign.yml")
+
+
+def test_opt111_ai_codereviewer_action_fires(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example/ai-codereviewer@main
+"""
+    assert "OPT111" in _scan_one(tmp_path, workflow, "review.yml")
+
+
 _OPT114_LOCK = '{"lockfileVersion": 3, "packages": {}}\n'
 
 

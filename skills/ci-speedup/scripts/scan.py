@@ -5635,6 +5635,245 @@ def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT111 — Automated Review Runs on Every Pull Request Push --------------
+
+_OPT111_REVIEW_USES_RE = re.compile(
+    r"(?:^|/)(?:[^/@]*-)?(?:code[-_]?review(?:er)?|pr[-_]?review|pull[-_]?request[-_]?review|"
+    r"reviewer|ai[-_]?pr[-_]?reviewer)(?:[-_/]|@|$)|"
+    r"(?:coderabbit|greptile|claude-code-action|pr-agent)",
+    re.I,
+)
+# Actions that assign, request, remind or notify reviewers run on
+# synchronize too, but they do not review the change.
+_OPT111_NOT_A_REVIEW_USES_RE = re.compile(
+    r"assign|lottery|remind|request[-_]?review|notif|label", re.I)
+_OPT111_REVIEW_RUN_RE = re.compile(
+    r"\bgh\s+pr\s+review\b|/pulls?/[^\s]+/reviews?\b|"
+    r"\b(?:create|submit|publish|post)[-_ ]?(?:pull[-_ ]request|pr|code)?[-_ ]?review\b",
+    re.I,
+)
+# A review command that only approves, or a REST call that only reads the
+# review list, is an approval gate (e.g. a dependency-bot auto-approve), not
+# a full automated re-review of the pull request.
+_OPT111_APPROVE_RE = re.compile(
+    r"gh\s+pr\s+review\b[^\n]*\s(?:--approve|-a)\b|"
+    r"\bevent\b\W{0,4}\s*[=:]\s*['\"]?APPROVE\b",
+    re.I,
+)
+_OPT111_NON_APPROVE_EVENT_RE = re.compile(
+    r"\bREQUEST_CHANGES\b|\bevent\b\W{0,4}\s*[=:]\s*['\"]?COMMENT\b|"
+    r"gh\s+pr\s+review\b[^\n]*\s(?:--comment|-c|--request-changes|-r)\b",
+    re.I,
+)
+_OPT111_REST_WRITE_RE = re.compile(
+    r"(?:-X|--method)[\s=]*['\"]?POST\b|\s(?:-[fF]|--(?:raw-)?field|--input|-d|--data)[\s=]",
+    re.I,
+)
+_OPT111_QUIET_RE = re.compile(
+    r"\b(?:quiet[-_ ]?(?:period|window)|debounc(?:e|ed|ing)|"
+    r"wait[-_ ]?(?:for[-_ ])?(?:quiet|settled|stable)[-_ ]?(?:head|push|window)?)\b",
+    re.I,
+)
+_OPT111_SLEEP_RE = re.compile(r"(?:^|[;&|]\s*)sleep\s+(\d+)([smh]?)\b", re.I | re.M)
+_OPT111_ACTION_EQ_RE = re.compile(
+    r"github\.event\.action\s*==\s*['\"]([a-z_]+)['\"]|"
+    r"['\"]([a-z_]+)['\"]\s*==\s*github\.event\.action",
+    re.I,
+)
+_OPT111_ACTION_NE_SYNC_RE = re.compile(
+    r"github\.event\.action\s*!=\s*['\"]synchronize['\"]|"
+    r"['\"]synchronize['\"]\s*!=\s*github\.event\.action",
+    re.I,
+)
+_OPT111_EVENT_EQ_RE = re.compile(
+    r"github\.event_name\s*==\s*['\"]([a-z_]+)['\"]|"
+    r"['\"]([a-z_]+)['\"]\s*==\s*github\.event_name",
+    re.I,
+)
+
+
+def _opt111_workflow_synchronizes(on: Any) -> bool:
+    """Whether ``pull_request`` includes ``synchronize``. GitHub's omitted
+    ``types`` list includes it; an explicit list must name it."""
+    if not _on_includes(on, ("pull_request",)):
+        return False
+    if not isinstance(on, dict):
+        return True
+    cfg = on.get("pull_request")
+    if not isinstance(cfg, dict) or "types" not in cfg:
+        return True
+    types = cfg.get("types")
+    values = {types} if isinstance(types, str) else set(types or [])
+    return "synchronize" in values
+
+
+# Fields that exist only on an explicit trigger (a comment, a review, a label
+# event, a dispatch input) or a gate computed at run time (a step or job
+# output). A guard reading one cannot be proved to admit an automatic
+# synchronize review, so the finding is held back.
+_OPT111_EXPLICIT_OR_GATE_RE = re.compile(
+    r"github\.event\.(?:comment|review|issue|label|inputs)\b|"
+    r"(?<![\w.])(?:inputs|steps|needs)\.",
+    re.I,
+)
+
+
+def _opt111_job_synchronizes(job: dict) -> bool:
+    """Fail closed when a job- or step-level activity guard cannot be proved
+    to admit synchronize. This avoids calling an explicit review command an
+    automatic re-review merely because the workflow also listens to pull
+    requests."""
+    condition = job.get("if")
+    if condition is None or isinstance(condition, bool):
+        return condition is not False
+    if not isinstance(condition, str):
+        return False
+    if _OPT111_EXPLICIT_OR_GATE_RE.search(condition):
+        return False
+    if "github.event_name" in condition:
+        events = {
+            (match.group(1) or match.group(2) or "").lower()
+            for match in _OPT111_EVENT_EQ_RE.finditer(condition)
+        }
+        if "pull_request" not in events:
+            return False
+    if "github.event.action" not in condition:
+        return True
+    if _OPT111_ACTION_NE_SYNC_RE.search(condition):
+        return False
+    actions = {
+        (match.group(1) or match.group(2) or "").lower()
+        for match in _OPT111_ACTION_EQ_RE.finditer(condition)
+    }
+    return "synchronize" in actions
+
+
+def _opt111_review_step(step: dict) -> bool:
+    uses = _uses(step)
+    run = _run(step)
+    with_values = step.get("with") if isinstance(step.get("with"), dict) else {}
+    script = str(with_values.get("script") or "")
+    if uses:
+        action = uses.split("@", 1)[0]
+        if (_OPT111_REVIEW_USES_RE.search(uses)
+                and not _OPT111_NOT_A_REVIEW_USES_RE.search(action)):
+            return True
+    text = "\n".join((run, script))
+    if _OPT111_APPROVE_RE.search(text) and not _OPT111_NON_APPROVE_EVENT_RE.search(text):
+        return False
+    return any(
+        _opt111_review_command(line) for line in _opt111_logical_lines(text)
+    )
+
+
+def _opt111_logical_lines(text: str) -> list[str]:
+    """Join shell continuation lines so one command's flags are read together."""
+    return re.sub(r"\\\n\s*", " ", text).splitlines()
+
+
+def _opt111_review_command(line: str) -> bool:
+    """A command posts a non-approval review. ``gh pr review --approve`` and an
+    ``event: 'APPROVE'`` review are approvals; a ``/pulls/N/reviews`` REST call
+    counts only when it writes (POST or request fields), never when it reads."""
+    match = _OPT111_REVIEW_RUN_RE.search(line)
+    if not match or _OPT111_APPROVE_RE.search(line):
+        return False
+    if match.group(0).lower().startswith("/pull"):
+        return bool(_OPT111_REST_WRITE_RE.search(line))
+    return True
+
+
+def _opt111_quiet_step(step: dict) -> bool:
+    """Recognize an explicit quiet/debounce gate before review. A fixed wait
+    of at least one minute counts as a quiet window for classification even
+    though a server-side debounce is cheaper than holding a runner."""
+    text = "\n".join((str(step.get("name") or ""), _uses(step), _run(step)))
+    if _OPT111_QUIET_RE.search(text):
+        return True
+    for match in _OPT111_SLEEP_RE.finditer(_run(step)):
+        value = int(match.group(1))
+        unit = match.group(2).lower()
+        seconds = value * (3600 if unit == "h" else 60 if unit == "m" else 1)
+        if seconds >= 60:
+            return True
+    return False
+
+
+def _opt111_upstream_quiet(jobs: dict, job: dict) -> bool:
+    """A quiet window may live in a job the review job ``needs`` (directly or
+    transitively): a settle job named for it, or one holding a quiet step."""
+    seen: set[str] = set()
+    pending = list(_opt111_needs(job))
+    while pending:
+        name = pending.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        upstream = jobs.get(name)
+        if not isinstance(upstream, dict):
+            continue
+        label = f"{name} {upstream.get('name') or ''}"
+        if _OPT111_QUIET_RE.search(label) or any(
+                _opt111_quiet_step(step) for step in _steps(upstream)):
+            return True
+        pending.extend(_opt111_needs(upstream))
+    return False
+
+
+def _opt111_needs(job: dict) -> list[str]:
+    needs = job.get("needs")
+    if isinstance(needs, str):
+        return [needs]
+    if isinstance(needs, list):
+        return [n for n in needs if isinstance(n, str)]
+    return []
+
+
+def _detect_opt111(doc: dict, raw: str) -> list[Hit]:
+    """A recognizable automated reviewer runs immediately for every PR head
+    update. Require the review action/command itself; ordinary synchronize CI
+    remains quiet. An unreadable activity guard or step group fails closed."""
+    on = doc.get("on") or doc.get(True)
+    if not _opt111_workflow_synchronizes(on):
+        return []
+    hits: list[Hit] = []
+    jobs = _jobs_from_doc(doc)
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict) or not _opt111_job_synchronizes(job):
+            continue
+        if _opt111_upstream_quiet(jobs, job):
+            continue
+        steps = _steps(job)
+        review_indexes = [
+            i for i, step in enumerate(steps)
+            if _opt111_review_step(step) and _opt111_job_synchronizes(step)
+        ]
+        if not review_indexes:
+            continue
+        first_review = min(review_indexes)
+        if any(_opt111_quiet_step(step) for step in steps[:first_review]):
+            continue
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"automated review job `{job_name}` runs on pull-request `synchronize` "
+                "without a quiet window, so fix-up pushes can re-review the whole pull "
+                "request. Review once on open or ready-for-review, debounce head updates "
+                "outside the runner, or require an explicit re-review command while "
+                "preserving the current review policy. Runner-minute effect: saving the "
+                "review job's measured compute on superseded automatic re-reviews; "
+                "runner-minute saving: unsized (static finding: the scan samples none of "
+                "the review job's runs, so neither the count of superseded automatic "
+                "reviews nor their billed minutes is measured)."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+        ))
+    return hits
+
+
 # ---- OPT109 — Failure Reporter Runs on Healthy Pull Requests -----------------
 
 # The only job conditions read as "runs on a healthy run": `always()`, alone or
@@ -7834,7 +8073,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT46", "OPT76", "OPT108", "OPT109"})
+    "OPT39", "OPT46", "OPT76", "OPT108", "OPT109", "OPT111"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -7886,6 +8125,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT108": _detect_opt108,
     "OPT114": _detect_opt114,
     "OPT109": _detect_opt109,
+    "OPT111": _detect_opt111,
     "OPT31": _detect_opt31,
     "OPT32": _detect_opt32,
     "OPT33": _detect_opt33,

@@ -66,6 +66,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT39 — Multi-Language Matrix Without Path Filter (MEDIUM, static) — scanner matrix without path filters
 - OPT40 — Monorepo Job Runs Regardless of Affected App (MEDIUM, static) — app job runs when another app changed
 - OPT108 — Comment Filter Runs After the Runner Starts (HIGH, static) — comment body or author is filtered only after runner allocation
+- OPT111 — Automated Code Review Runs on Every Pull Request Push (MEDIUM, static) — fix-up pushes repeat a full automated review
 - OPT90 — Every Pull Request Pays for Coverage That Could Run After Merge (HIGH, data-driven) — full matrix on PRs, subset would do
 - OPT107 — Default-Branch Full CI Runs Too Often to Stay Current (HIGH, data-driven) — dense post-merge validation can batch against the current tip
 ## Category 8 — Release Workflow
