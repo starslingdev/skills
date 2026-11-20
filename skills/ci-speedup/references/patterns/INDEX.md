@@ -19,6 +19,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT93 — NuGet Restores to a Slower Disk on Windows Runners (MEDIUM, data-driven) — measured cache placement on Windows
 - OPT96 — Cache Never Saved on the Default Branch (MEDIUM, static) — PR caches lack a reachable default-branch save
 - OPT101 — Cache and Build Use Different Directories (MEDIUM, data-driven) — missing cache path on every successful save attempt
+- OPT112 — Restored Go Build Cache Trimmed Before Reuse (HIGH, data-driven) — the same exact Go cache archive makes the job measurably slower once it is past cmd/go's five-day trim limit
 ## Category 2 — Redundancy
 - OPT11 — Redundant Environment Variables (LOW, static) — same env var at two levels
 - OPT12 — Duplicated Setup Across Jobs (MEDIUM, static) — copy-pasted setup steps
@@ -96,7 +97,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT60 — Turbo CI Configuration Missing (LOW, static) — turbo CI settings missing
 - OPT82 — Lint Builds the Whole Type Graph (MEDIUM, data-driven) — type-aware ESLint on a slow lint job
 - OPT103 — Lighthouse CI Audits Every URL N Times Per Pass, One After Another (MEDIUM, data-driven) — passes x URLs x runs, audited one after another
-- OPT106 — Runtime TypeScript Transpilation on the Long Pole (HIGH, data-driven) — profiled runtime loader dominates a tool or test step
+- OPT106 — Runtime TypeScript Transpilation on the Long Pole (HIGH, data-driven) — a heavy long-pole step runs TypeScript through a runtime loader
 ## Category 12 — Build Caching (language-agnostic)
 - OPT61 — Missing Dependency Caching (HIGH, static) — compiled-language deps uncached
 - OPT62 — Build Artifacts Destroyed Before Every Run (HIGH, static) — rm -rf of build dirs every run

@@ -12901,8 +12901,9 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # OPT82 is numberless BY DESIGN (uncredited, benchmark first), not
         # valueless: its card is the only place its rules and its ledger
         # requirement reach the reader, so a lint job that is also a drilled
-        # pole keeps it.
-        if str(f.get("pattern", "")) in {"OPT13", "OPT82"}:
+        # pole keeps it. OPT106's unprofiled form is the same: unsized until
+        # the loader's share is measured, and its card says how to measure it.
+        if str(f.get("pattern", "")) in {"OPT13", "OPT82", "OPT106"}:
             return False
         jobs = f.get("affected_jobs") or ([f.get("job")] if f.get("job") else [])
         if not jobs:
@@ -13022,6 +13023,9 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             ev = _group_evidence(ms, prefer=driver)
         elif pat in {"OPT13", "OPT82"}:
             summary_metric = "uncredited, benchmark first"
+            ev = _group_evidence(ms, compose=True)
+        elif pat == "OPT106":
+            summary_metric = "unsized, measure the loader share first"
             ev = _group_evidence(ms, compose=True)
         elif pat == "OPT32":
             modeled = sum(_num(m.get("runner_min_unrealizable_s")) or 0.0 for m in ms)
