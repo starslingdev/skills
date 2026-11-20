@@ -29837,6 +29837,281 @@ def _detect_runtime_ts_transpilation(
     return out
 
 
+
+# --- OPT106, uninstrumented path -------------------------------------------
+# Issue #397's default detection: a heavy step on a drilled long pole whose
+# RESOLVED command runs TypeScript through a runtime loader. Without a profile
+# the loader's share of the step is unknown, so the finding is unsized on both
+# axes and its fix leads with measuring. The step's p50 is stated only as an
+# upper bound, never credited. Routing reuses OPT83's floors (at least
+# `_OPT83_MIN_STEP_S` seconds and `_OPT83_MIN_SHARE` of the pole's job p50) and
+# OPT84's YAML step join and package-script resolver; anything the read cannot
+# pin down (an expression, a directory change, an unreadable script) stays
+# quiet, never a guessed loader.
+_OPT106_LOADER_BINARIES = frozenset({"tsx", "ts-node", "ts-node-esm"})
+_OPT106_LOADER_MODULES = frozenset({
+    "tsx", "tsx/esm", "tsx/cjs", "ts-node", "ts-node/esm", "ts-node/register",
+    "ts-node/register/transpile-only", "ts-node/esm/transpile-only"})
+_OPT106_NODE_LOADER_FLAGS = frozenset({
+    "--loader", "--experimental-loader", "--import", "-r", "--require"})
+_OPT106_ENV_WRAPPERS = frozenset({"cross-env", "env"})
+_OPT106_RUNNER_PREFIXES: tuple[tuple[str, ...], ...] = (
+    ("npm", "exec", "--"), ("npm", "exec"), ("pnpm", "exec"), ("pnpm", "dlx"),
+    ("yarn", "exec"), ("yarn", "dlx"), ("bun", "x"), ("npx",), ("bunx",))
+_OPT106_ASSIGN_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_OPT106_MAX_EXPANSIONS = 20
+
+
+def _opt106_node_options_loader(value: Any) -> "str | None":
+    """The loader flag a NODE_OPTIONS value carries (`--import tsx`), else None."""
+    import shlex
+    try:
+        toks = shlex.split(str(value or ""))
+    except ValueError:
+        return None
+    for i, tok in enumerate(toks):
+        flag, eq, val = tok.partition("=")
+        if flag not in _OPT106_NODE_LOADER_FLAGS:
+            continue
+        mod = val if eq else (toks[i + 1] if i + 1 < len(toks) else "")
+        if mod in _OPT106_LOADER_MODULES:
+            return f"{flag} {mod}"
+    return None
+
+
+def _opt106_loader_in_tokens(tokens: list[str], env_loader: "str | None",
+                             via_js: bool) -> "str | None":
+    """The runtime TypeScript loader a command's tokens start, else None.
+
+    Leading `VAR=value` assignments and `cross-env` / `env` wrappers are read
+    (a NODE_OPTIONS among them counts like a step/job/workflow one), runner
+    prefixes (`npx`, `pnpm exec`, ...) are stripped, then: a `tsx` / `ts-node`
+    / `ts-node-esm` binary; `node` with `--loader`, `--import`, `-r` or
+    `--require` naming tsx or ts-node; or NODE_OPTIONS carrying such a flag on
+    a `node` process or a JS tool reached through a runner or package script
+    (`via_js`). An `echo`, a comment or any other binary is not a loader."""
+    t = list(tokens)
+    inline_env: "str | None" = None
+    while t:
+        if t[0].rsplit("/", 1)[-1] in _OPT106_ENV_WRAPPERS:
+            t = t[1:]
+            continue
+        if _OPT106_ASSIGN_RE.match(t[0]):
+            name, _eq, val = t[0].partition("=")
+            if name == "NODE_OPTIONS":
+                inline_env = _opt106_node_options_loader(val) or inline_env
+            t = t[1:]
+            continue
+        break
+    for prefix in _OPT106_RUNNER_PREFIXES:
+        if tuple(t[:len(prefix)]) == prefix:
+            t = t[len(prefix):]
+            while t and t[0].startswith("-") and t[0] != "--":
+                t = t[1:]
+            if t[:1] == ["--"]:
+                t = t[1:]
+            via_js = True
+            break
+    if not t:
+        return None
+    binary = t[0].rsplit("/", 1)[-1]
+    if binary in _OPT106_LOADER_BINARIES:
+        return binary
+    env = inline_env or env_loader
+    if binary == "node":
+        for i, tok in enumerate(t[1:], start=1):
+            if not tok.startswith("-"):
+                break
+            flag, eq, val = tok.partition("=")
+            if flag in _OPT106_NODE_LOADER_FLAGS:
+                mod = val if eq else (t[i + 1] if i + 1 < len(t) else "")
+                if mod in _OPT106_LOADER_MODULES:
+                    return f"node {flag} {mod}"
+        return f"NODE_OPTIONS={env}" if env else None
+    if env and via_js and binary not in ("echo", "printf", "#", "true", ":"):
+        return f"NODE_OPTIONS={env}"
+    return None
+
+
+def _opt106_resolve_loader(run: str, wd: str,
+                           scripts_by_dir: dict[str, dict[str, str]],
+                           scripts_unreadable: "frozenset[str]",
+                           walk_complete: bool, env_loader: "str | None",
+                           ) -> "tuple[str, str] | None":
+    """`(loader, command)` for the first runtime TypeScript loader the step's
+    resolved command starts, following package scripts (`pnpm test` ->
+    `tsx --test ...`) the way OPT84 does. None when no resolved command starts
+    one, including when part of the command cannot be followed."""
+    import shlex
+    queue: list[tuple[str, str, list[str], bool, int]] = [(run, wd, [], False, 0)]
+    budget = _OPT106_MAX_EXPANSIONS
+    while queue:
+        cmd, cwd, chain, via, depth = queue.pop(0)
+        res = _resolve_run_leaves(cmd, cwd, scripts_by_dir, scripts_unreadable,
+                                  chain=list(chain), walk_complete=walk_complete)
+        segments: list[tuple[list[str], list[str]]] = []
+        for u in res.unresolved:
+            if u.get("kind") != "delegated":
+                continue
+            try:
+                toks = shlex.split(str(u.get("segment") or ""), comments=True)
+            except ValueError:
+                continue
+            segments.append((toks, list(u.get("chain") or [])))
+        for lf in res.leaves:
+            segments.append((list(lf.get("tokens") or []), list(lf.get("chain") or [])))
+            op = _opt84_opaque_leaf(lf)
+            if (op is not None and op[0] == "expand" and lf.get("wd") is not None
+                    and budget > 0 and depth < _OPT82_MAX_SCRIPT_DEPTH):
+                budget -= 1
+                queue.append((op[1], str(lf["wd"]), list(lf.get("chain") or []),
+                              True, depth + 1))
+        for toks, seg_chain in segments:
+            if toks[:1] == ["#"] or (toks and toks[0].startswith("#")):
+                continue
+            loader = _opt106_loader_in_tokens(toks, env_loader,
+                                              via or bool(seg_chain))
+            if loader is not None:
+                return loader, " ".join(toks)
+    return None
+
+
+def _detect_runtime_ts_loader_steps(
+    poles: list[dict[str, Any]], wf_docs: dict[str, Any],
+    block: "dict[str, Any] | None", start_idx: int,
+    seen: "set[tuple[str, str]] | None" = None,
+) -> list[dict[str, Any]]:
+    """OPT106 without a profile: a heavy long-pole step whose resolved command
+    runs TypeScript through a runtime loader. Unsized on both axes."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    seen = set() if seen is None else seen
+    tal: dict[str, Any] = block if isinstance(block, dict) else {}
+    scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
+                      if isinstance(v, dict)}
+    scripts_unreadable = frozenset(str(d) for d in
+                                   (tal.get("package_scripts_unreadable") or []))
+    walk_complete = tal.get("truncated") is False
+
+    def _finite(v: Any) -> "float | None":
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None
+        return x if math.isfinite(x) else None
+
+    def _defaults_wd(m: Any) -> Any:
+        d = m.get("defaults") if isinstance(m, dict) else None
+        r = d.get("run") if isinstance(d, dict) else None
+        return r.get("working-directory") if isinstance(r, dict) else None
+
+    for p in poles or []:
+        if not isinstance(p, dict):
+            continue
+        wf = str(p.get("workflow_file") or "")
+        job = str(p.get("job") or "")
+        if not wf or not job or (wf, job) in seen:
+            continue
+        job_p50 = _finite(p.get("job_p50_s")) or 0.0
+        steps = [s for s in (p.get("steps") or []) if isinstance(s, dict)]
+        if job_p50 <= 0 or not steps:
+            continue
+        floor = max(_OPT83_MIN_STEP_S, _OPT83_MIN_SHARE * job_p50)
+        cands = []
+        for s in steps:
+            d = _finite(s.get("p50_s"))
+            name = str(s.get("step") or "").strip()
+            if d is not None and name and d >= floor:
+                cands.append((name, d))
+        if not cands:
+            continue
+        doc = wf_docs.get(wf) if isinstance(wf_docs, dict) else None
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        hit = _opt83_match_yaml_job(jobs, job) if isinstance(jobs, dict) else None
+        if hit is None:
+            continue
+        _yaml_key, spec = hit
+        walk = job_walk(spec)
+        by_name: dict[str, list[int]] = {}
+        for i, lf in enumerate(walk.leaves):
+            n = _opt79_yaml_step_display(lf.step)
+            if n:
+                by_name.setdefault(n, []).append(i)
+        for name, p50 in sorted(cands, key=lambda c: -c[1]):
+            idxs = by_name.get(name, [])
+            if len(idxs) != 1:
+                continue
+            st = walk.leaves[idxs[0]].step
+            run = st.get("run")
+            if st.get("uses") or not isinstance(run, str):
+                continue
+            raw_wd = st.get("working-directory",
+                            _defaults_wd(spec) if _defaults_wd(spec) is not None
+                            else _defaults_wd(doc))
+            env_values = [e.get("NODE_OPTIONS") for e in
+                          (st.get("env"), spec.get("env"), doc.get("env"))
+                          if isinstance(e, dict) and "NODE_OPTIONS" in e]
+            if ("${{" in run or "${{" in str(raw_wd or "")
+                    or any("${{" in str(v) for v in env_values[:1])
+                    or _OPT83_CD_RE.search(run)):
+                continue
+            wd_raw = str(raw_wd or "").strip()
+            wd = _opt82_norm_dir(raw_wd)
+            wd = _posixpath.normpath(wd) if wd else ""
+            if wd_raw.startswith(("/", "~")) or wd == ".." or wd.startswith("../"):
+                continue
+            wd = "" if wd == "." else wd
+            env_loader = (_opt106_node_options_loader(env_values[0])
+                          if env_values else None)
+            found = _opt106_resolve_loader(run, wd, scripts_by_dir,
+                                           scripts_unreadable, walk_complete,
+                                           env_loader)
+            if found is None:
+                continue
+            loader, command = found
+            seen.add((wf, job))
+            reason = (f"loader share not measured; the step's measured p50 of "
+                      f"{p50:.1f}s is an upper bound")
+            evidence = (
+                f"Long-pole job `{job}` spends a measured p50 of {p50:.1f}s "
+                f"({100.0 * p50 / job_p50:.0f}% of its {job_p50:.1f}s p50) in step "
+                f"`{name}`, whose resolved command `{command}` runs TypeScript "
+                f"through a runtime loader (`{loader}`). How much of the step the "
+                "loader takes has not been measured.")
+            measured = _measured_evidence(
+                ["Job", "Step", "Step p50", "Job p50", "Loader"],
+                [[f"`{job}`", f"`{name}`", f"{p50:.1f}s", f"{job_p50:.1f}s",
+                  f"`{loader}`"]],
+                (f"The step's {p50:.1f}s p50 bounds what removing runtime "
+                 "transpilation can save; the loader's share is unmeasured."),
+                "Profile one run before crediting any saving.",
+            )
+            idx += 1
+            finding = _new_finding(
+                "OPT106", "HIGH", "Runtime TypeScript Transpilation on the Long Pole",
+                wf, job, evidence,
+                "Measure first: profile one run of this step (`node --cpu-prof`, or "
+                "one instrumented run) to learn the loader's self time. Then "
+                "precompile the exact TypeScript surfaces once (or preload a cached "
+                "transform) and add a guard that fails if any exercised path falls "
+                "back to the runtime loader.",
+                "opt106--runtime-typescript-transpilation-on-the-long-pole", idx,
+                wc_p50=None, rm=None,
+                size_note=(f"wall-clock saving: unsized ({reason}); "
+                           f"runner-minute saving: unsized ({reason})"),
+                realization="none", measured_evidence=measured,
+            )
+            finding["sizing_basis"] = "unmeasured_loader_share"
+            finding["runtime_loader"] = loader
+            finding["runtime_loader_command"] = command
+            finding["runtime_loader_step"] = name
+            finding["runtime_loader_step_p50_s"] = round(p50, 1)
+            finding["runtime_loader_job_p50_s"] = round(job_p50, 1)
+            out.append(finding)
+            break
+    return out
+
+
 _OPT13_VALIDATION_BUILD_LINE_RE = _re.compile(
     r"^[ \t]*(?:(?:pnpm|yarn|bun)(?:\s+run)?\s+"
     r"build(?::(?:ci[-:]?)?artifacts?)?|"
@@ -34673,6 +34948,36 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             if act is not None:
                 f["workflow_activity"] = act
         _o84_next = max(_o84_next, max((int(f["id"][1:]) for f in new), default=_o84_next))
+        findings.extend(new)
+
+    # OPT106 uninstrumented path: a heavy long-pole step whose resolved command
+    # runs TypeScript through a runtime loader. A job the profile path already
+    # reported (sized from its loader profile) is skipped. Unsized; no gh call.
+    _o106_seen = {(str(f.get("workflow_file") or ""),
+                   str((f.get("affected_jobs") or [""])[0]))
+                  for f in findings if str(f.get("pattern")) == "OPT106"}
+    _o106_next = max((int(f["id"][1:]) for f in findings
+                      if f.get("id", "").startswith("f") and f["id"][1:].isdigit()),
+                     default=0)
+    for _o106_pole in list((findings_doc.get("pr_critical_path") or {}).get("poles") or []):
+        try:
+            new = _detect_runtime_ts_loader_steps(
+                [_o106_pole], _wf_docs, findings_doc.get("type_aware_lint"),
+                _o106_next, seen=_o106_seen)
+        except Exception as e:  # noqa: BLE001 — never take the data pass down
+            _o106_p = _o106_pole if isinstance(_o106_pole, dict) else {}
+            _o106_wf = str(_o106_p.get("workflow_file") or "")
+            logger.warning("OPT106 loader-step detector failed on %s: %s: %s",
+                           _o106_wf, type(e).__name__, e)
+            _skip_detectors(_o106_wf, ["OPT106"],
+                            f"the runtime-loader step check failed ({type(e).__name__})")
+            new = []
+        for f in new:
+            act = activity_by_wf.get(str(f.get("workflow_file") or ""))
+            if act is not None:
+                f["workflow_activity"] = act
+        _o106_next = max(_o106_next, max((int(f["id"][1:]) for f in new),
+                                         default=_o106_next))
         findings.extend(new)
 
     # OPT81 A2: the runner-size advisory, the lever of LAST RESORT on a

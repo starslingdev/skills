@@ -230,6 +230,8 @@ REQUIRED_CURRENT_SOURCES = {
     "verify_report.py:_VR_OPT84_INSTALL_MIN_SHARE": 0.15,
     "verify_report.py:_VR_OPT106_MIN_JOB_SHARE": 0.2,
     "verify_report.py:_VR_OPT106_MIN_PROFILE_S": 30.0,
+    "verify_report.py:_VR_OPT106_MIN_STEP_SHARE": 0.15,
+    "verify_report.py:_VR_OPT106_MIN_STEP_S": 20.0,
     "verify_report.py:_VR_PARTIAL_MISS_FLOOR_PCT": 40.0,
     "verify_report.py:_VR_POLE_HOLDS_UP_MIN_COUNT": 2,
     "verify_report.py:_VR_POLE_RECUR_FLOOR": 2,
