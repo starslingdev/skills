@@ -1696,7 +1696,106 @@ def _on_block(raw: str) -> tuple[int, str]:
     return line, _block_lines(raw, line)
 
 
-def _detect_opt32(doc: dict, raw: str) -> list[Hit]:
+_OPT32_TEST_DIR_NAMES = frozenset({"test", "tests", "__tests__", "spec", "specs"})
+_OPT32_PATH_SCAN_DIR_CAP = 10_000
+
+
+def _opt32_test_files(root: Path) -> list[tuple[str, str]]:
+    """Tracked-shape test files as ``(file, test_dir)`` pairs.
+
+    The walk is bounded and skips dependency/build trees. If the bound is hit,
+    return no facts: an unread repository shape is never a clean verdict.
+    """
+    ignored = {".git", ".hg", ".svn", "node_modules", "vendor", ".venv",
+               "venv", "dist", "build", ".cache"}
+    found: list[tuple[str, str]] = []
+    visited = 0
+    for base, dirs, files in os.walk(root, followlinks=False):
+        visited += 1
+        if visited > _OPT32_PATH_SCAN_DIR_CAP:
+            return []
+        dirs[:] = [name for name in dirs if name not in ignored and not name.startswith(".")]
+        base_path = Path(base)
+        try:
+            rel_dir = base_path.relative_to(root)
+        except ValueError:
+            continue
+        parts = rel_dir.parts
+        test_at = next((i for i, part in enumerate(parts)
+                        if part.lower() in _OPT32_TEST_DIR_NAMES), None)
+        if test_at is None:
+            continue
+        test_dir = Path(*parts[:test_at + 1]).as_posix()
+        if files:
+            found.extend(((rel_dir / name).as_posix(), test_dir) for name in files[:20])
+        else:
+            found.append(((rel_dir / "__ci_speedup_test_probe__").as_posix(), test_dir))
+    return found
+
+
+def _detect_opt32_deploy_test_paths(
+    doc: dict, raw: str, root: Path, default_branch: str | None,
+) -> list[Hit]:
+    """A default-branch deploy/release positive path that also selects tests."""
+    if not default_branch or not _is_release_like(doc):
+        return []
+    on = doc.get("on") or doc.get(True)
+    if not isinstance(on, dict) or "push" not in on:
+        return []
+    push = on.get("push")
+    if not isinstance(push, dict) or not _opt96_push_runs_on(push, default_branch):
+        return []
+    raw_paths = push.get("paths")
+    if not isinstance(raw_paths, list) or "paths-ignore" in push:
+        return []
+    paths = [str(pattern) for pattern in raw_paths if isinstance(pattern, str)]
+    if len(paths) != len(raw_paths) or not paths or any("${{" in p for p in paths):
+        return []
+
+    from fnmatch import fnmatchcase
+    offenders: dict[str, tuple[str, str]] = {}
+    for file_path, test_dir in _opt32_test_files(root):
+        selected = False
+        positive = ""
+        for pattern in paths:
+            negative = pattern.startswith("!")
+            if fnmatchcase(file_path, pattern.lstrip("!")):
+                selected = not negative
+                if not negative:
+                    positive = pattern
+        if selected and positive:
+            offenders.setdefault(test_dir, (file_path, positive))
+    if not offenders:
+        return []
+
+    test_dir, (example, positive) = sorted(offenders.items())[0]
+    exclusion = f"!{test_dir}/**"
+    line = _line_of(raw, positive)  # anchor:workflow-level (push paths gate every deploy job)
+    return [Hit(
+        line=line,
+        affected_jobs=list(_jobs_from_doc(doc).keys()),
+        evidence=(
+            f"default-branch deploy/release path `{positive}` also selects test file "
+            f"`{example}`. Add the negated pattern `'{exclusion}'` after the "
+            "positive glob in the same `paths:` list (`paths` and `paths-ignore` "
+            "cannot both be set for one event). Runner-minute effect: saving the "
+            "deploy jobs' compute on test-only default-branch merges; not sized "
+            "until those merges' frequency and the affected jobs' measured compute "
+            "are available."
+        ),
+        match_text="(workflow)",
+        snippet=_on_block(raw)[1],
+        facts={
+            "opt32_deploy_test_paths": True,
+            "non_pr_lane": True,
+            "fix_strategy": "deploy-path-test-exclusion",
+            "title": "Deploy path filter includes test-only changes",
+        },
+    )]
+
+
+def _detect_opt32(doc: dict, raw: str, root: Path | None = None,
+                  default_branch: str | None = None) -> list[Hit]:
     """A PR/push workflow with no `paths:` / `paths-ignore:` filter.
 
     Expensive workflows (long test jobs, build matrices) waste cycles on PRs
@@ -1717,6 +1816,8 @@ def _detect_opt32(doc: dict, raw: str) -> list[Hit]:
     class (the activation-fidelity bug) for this rare unflagged case; revisit if a
     label-triggered heavy workflow is observed in the wild.
     """
+    deploy_path_hits = (_detect_opt32_deploy_test_paths(
+        doc, raw, root, default_branch) if root is not None else [])
     on = doc.get("on") or doc.get(True)
     triggers = []
     for t in ("pull_request", "push"):
@@ -1732,17 +1833,17 @@ def _detect_opt32(doc: dict, raw: str) -> list[Hit]:
             continue
         triggers.append(t)
     if not triggers:
-        return []
+        return deploy_path_hits
     if _on_has_paths_filter(on):
-        return []
+        return deploy_path_hits
     # Already path/change-aware internally → not unfiltered in practice.
     if "dorny/paths-filter" in raw or "tj-actions/changed-files" in raw:
-        return []
+        return deploy_path_hits
     if re.search(r"\bhas_code\b|\bchanges\b\s*:|outputs:\s*\n.*\b(changed|affected)\b",
                  raw):
         # an internal change-detection job already gates the heavy work
         if re.search(r"if:\s*.*needs\.[\w-]*(changes|detect)[\w-]*\.outputs", raw):
-            return []
+            return deploy_path_hits
     on_line, block = _on_block(raw)
     trig = "/".join(triggers)
     # The REQUIRED-status-check caveat only applies to PR-triggered workflows
@@ -1752,7 +1853,7 @@ def _detect_opt32(doc: dict, raw: str) -> list[Hit]:
             "`dorny/paths-filter` gate that returns a neutral pass — a "
             "workflow-level `paths:` filter would strand the required check on "
             "excluded PRs." if "pull_request" in triggers else "")
-    return [Hit(
+    return deploy_path_hits + [Hit(
         line=on_line or 1,
         affected_jobs=list(_jobs_from_doc(doc).keys()),
         evidence=(f"workflow triggers on {trig} but declares no "
@@ -9921,6 +10022,9 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             fn = _DETECTORS.get(entry.pattern)
             if entry.pattern == "OPT61":
                 hits = list(_detect_opt61(doc, raw, saved_keys=repo_cache_saved_keys))
+            elif entry.pattern == "OPT32":
+                hits = list(_detect_opt32(
+                    doc, raw, root=root, default_branch=default_branch))
             elif fn is not None:
                 hits = list(fn(doc, raw))
             elif entry.match or entry.yaml_path:

@@ -96,6 +96,41 @@ def test_opt32_measures_three_of_sixty_through_collect_and_full_verifier(
     assert "modeled upper bound" in report
 
 
+def test_opt32_deploy_test_path_stays_uncredited_through_collect_and_verifier(
+        monkeypatch, tmp_path):
+    client = _PathFilterClient({})
+    monkeypatch.setattr(cr, "GhClient", lambda *a, **k: client)
+    doc = {
+        "repo": "o/r",
+        "findings": [{
+            "id": "f1",
+            "pattern": "OPT32",
+            "pattern_class": "static",
+            "workflow_file": _CI,
+            "title": "Deploy path filter includes test-only changes",
+            "evidence": (
+                "Runner-minute effect: saving deploy compute on test-only "
+                "default-branch merges; not sized until their frequency and "
+                "the deploy jobs' measured compute are available."
+            ),
+            "affected_jobs": ["test"],
+            "opt32_deploy_test_paths": True,
+            "non_pr_lane": True,
+        }],
+    }
+
+    collected = cr.collect(doc, "o/r", max_runs=60, shallow_runs=60)
+    finding = _opt32(collected)
+
+    assert client.changed_file_calls == 0
+    assert "path_filter_measurement" not in finding
+    assert finding["wall_clock_p50_s"] == 0.0
+    assert finding["runner_min_saving"] is None
+    assert "test-only default-branch merge frequency" in finding["size_note"]
+    report = _verify_full(collected, tmp_path)
+    assert "Deploy path filter includes test-only changes" in report
+
+
 def test_opt32_zero_hit_is_also_noticed_and_csv_is_not_skipped(monkeypatch, tmp_path):
     paths = {n: (["docs/x.csv"] if n == 1 else [f"src/file{n}.py"])
              for n in range(1, 61)}

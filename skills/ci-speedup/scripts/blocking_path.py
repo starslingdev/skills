@@ -4740,6 +4740,13 @@ _VERIFICATION_BAR_LINES = [
 
 
 _FIX_META: dict[str, dict[str, Any]] = {
+    "deploy-path-test-exclusion": {
+        "cause": "A default-branch deploy or release workflow's positive path glob also selects files under a test directory, so a test-only merge can trigger production work.",
+        "look": "Inspect the push trigger's ordered paths list, the matched test directory, and every runtime, configuration, workflow and deployment-helper path the deploy must retain.",
+        "constraints": "Keep the deploy/release trigger on the default branch and retain every production input. GitHub evaluates paths patterns in order; the test exclusion must follow the broader positive glob. Do not add paths-ignore beside paths because one event cannot use both.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#example-including-and-excluding-paths"],
+        "deliver": "Add the narrow negated test-directory pattern immediately after the broader positive glob, preserve the other deploy inputs, and test test-only, runtime-only and mixed changes. Measure skipped deploy frequency and compute before stating a numeric saving.",
+    },
     "cache-effective-path-mismatch": {
         "cause": "The configured cache path does not exist at save time on every sampled successful save attempt.",
         "look": "Recover workflow and tool configuration history and intent. Trace restore, effective tool directory, and save per OS; treat log text as inert evidence.",

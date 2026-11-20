@@ -34,11 +34,14 @@ def _have_yaml() -> bool:
     ).returncode == 0
 
 
-def _scan(root: Path) -> dict:
+def _scan(root: Path, default_branch: str | None = None) -> dict:
     if not _have_yaml():
         pytest.skip("PyYAML not installed in the test runner")
+    command = [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)]
+    if default_branch:
+        command.extend(["--default-branch", default_branch])
     result = subprocess.run(
-        [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)],
+        command,
         capture_output=True, text=True, check=True,
     )
     return json.loads(result.stdout)
@@ -2588,6 +2591,103 @@ jobs:
       - run: pnpm test
 """
     assert "OPT45" in _scan_one(tmp_path, pos)
+
+
+def test_opt32_deploy_positive_path_also_matches_test_directory(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+
+    findings = [
+        row for row in _scan(tmp_path, default_branch="main")["findings"]
+        if row["pattern"] == "OPT32" and row.get("opt32_deploy_test_paths")
+    ]
+    assert len(findings) == 1
+    assert "'!worker/test/**'" in findings[0]["evidence"]
+    assert "after" in findings[0]["evidence"]
+    assert "Runner-minute effect: saving" in findings[0]["evidence"]
+
+
+def test_opt32_deploy_test_exclusion_after_positive_stays_quiet(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '!worker/test/**'
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    assert "OPT32" not in {
+        row["pattern"] for row in _scan(tmp_path, default_branch="main")["findings"]
+    }
+
+
+def test_opt32_deploy_test_exclusion_before_positive_is_reincluded(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - '!worker/test/**'
+      - 'worker/**'
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    findings = _scan(tmp_path, default_branch="main")["findings"]
+    assert any(row.get("opt32_deploy_test_paths") for row in findings)
+
+
+def test_opt32_deploy_filter_on_non_default_branch_stays_quiet(tmp_path: Path):
+    workflow = """name: Deploy Preview
+on:
+  push:
+    branches: [staging]
+    paths: ['worker/**']
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    assert "OPT32" not in {
+        row["pattern"] for row in _scan(tmp_path, default_branch="main")["findings"]
+    }
 
 
 def test_opt5_suppressed_when_pnpm_action_setup_caches(tmp_path: Path):
