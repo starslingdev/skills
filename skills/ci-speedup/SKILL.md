@@ -17,8 +17,8 @@ license: MIT
 
 # ci-speedup — CI Optimization Audit for GitHub Actions
 
-Audits a repository's GitHub Actions workflows against a 104-pattern
-catalog — 92 **hygiene/data-driven** patterns plus 12 **structural /
+Audits a repository's GitHub Actions workflows against a 106-pattern
+catalog — 94 **hygiene/data-driven** patterns plus 12 **structural /
 critical-path** patterns routed from the measured long pole — and
 produces a **root-cause-analysis** report with measured impact on two
 axes — developer wall-clock wait and runner-minutes (cloud bill). The
@@ -368,7 +368,7 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    Re-run `run.py` with `--verify-branch <branch>` and one `--verify-changed-file <path>` per changed file; it resumes beside the scratch findings, counts the first cohort as sample one, prints wall-clock and runner-minute cost before rerunning, reuses completed samples, and discards samples when the head moves.
    For cache configuration, key, or image-layer changes, add `--verify-cache-sensitive`: warm reruns are invalid, so it waits for three distinct consecutive default-branch pushes. `CI_SPEEDUP_VERIFY_RUNS=0` disables the phase and verdict.
    Reruns start CI on the user's branch but never change repository contents, create branches, commit, or push.
-   Full rules: [before/after verification](references/before-after-verification-spec.md).
+   Full rules, including the optional `--account-weekly-series` account export: [before/after verification](references/before-after-verification-spec.md).
 
 `scripts/run.py` orchestrates the deterministic phases 2–3; the agent then calls
 `blocking_path.py` to render phase 4 and grounds any catalog gap from the log in
@@ -417,7 +417,7 @@ severity calibration, ≥2-pass agreement; a one-pass-only finding is cut or esc
 
 ## Pattern catalog
 
-Patterns live one per file in `references/patterns/opt<N>-*.md` (104 patterns
+Patterns live one per file in `references/patterns/opt<N>-*.md` (106 patterns
 in 14 categories, from Caching to **Structural / Critical-Path Levers**). Each
 file's frontmatter declares the id, impact tier, finding class (`static` /
 `data-driven` / `structural`), detector and fix strategy slug; structural

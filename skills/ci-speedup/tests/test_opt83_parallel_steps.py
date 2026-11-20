@@ -450,6 +450,30 @@ def test_verifier_passes_an_honest_finding(tmp_path):
     assert c.ok, c.detail
 
 
+def test_separate_job_card_and_verifier_rederive_saving_and_added_cost(tmp_path):
+    y = _SPLIT_YAML
+    steps = [("Lint", "test", 60.0), ("Typecheck", "test", 40.0),
+             ("Checkout", "checkout", 10.0), ("Set up job", "setup", 5.0)]
+    pole = _pole(steps, job_p50=115.0)
+    findings, withheld, _ = _run(y, pole)
+    assert len(findings) == 1, withheld
+    finding = findings[0]
+    report = _head(pole) + "\n".join(bp._opt83_card(finding, "https://x/c.md")) + "\n"
+    doc = {"findings": [finding], "pr_critical_path": {"poles": [pole]}}
+
+    assert "re-derived from measured p50s):** up to 40s" in report
+    assert "added cost, at least +0.25 runner-min per run" in report
+    assert "aggregator job's own pickup" in report
+    assert "one additional concurrent runner" in report
+    assert "always()" in report and "keeps the required check name" in report
+    checked = _check(tmp_path, doc, report)
+    assert checked.ok, checked.detail
+
+    doc["findings"][0]["runner_minute_effect"]["direction"] = "saving"
+    checked = _check(tmp_path, doc, report)
+    assert not checked.ok and "runner-minute effect" in checked.detail
+
+
 @pytest.mark.parametrize("edit,needle", [
     (lambda d: d["findings"][0].__setitem__("wall_clock_p50_s", 50.0), "uncredited"),
     (lambda d: d["findings"][0].__setitem__("runner_min_saving", 12.0), "runner_min_saving"),
@@ -922,13 +946,21 @@ def test_a_working_directory_outside_the_checkout_shares_every_tree(wd):
     _held(y, "siblings_share_a_build_tree", steps)
 
 
-@pytest.mark.parametrize("a,b", [("npx jest --coverage", "npx vitest run --coverage"),
-                                 ("go test -coverprofile=c.out ./a/...",
-                                  "go test -coverprofile=c.out ./b/...")])
+@pytest.mark.parametrize("a,b", [("npx jest --coverage", "npx vitest run --coverage")])
 def test_two_coverage_writers_of_any_common_tool_are_held_back(a, b):
     y = _BASE_YAML.replace("run: npx biome check .", f"run: {a}").replace(
         "run: npx tsc --noEmit", f"run: {b}")
     _held(y, "siblings_share_tool_state")
+
+
+def test_two_go_coverage_steps_use_separate_jobs_instead_of_sharing_state():
+    y = _BASE_YAML.replace(
+        "run: npx biome check .", "run: go test -coverprofile=a.out ./a/...").replace(
+        "run: npx tsc --noEmit", "run: go test -coverprofile=b.out ./b/...").replace(
+        "      - name: Unit tests\n        run: npm test\n", "")
+    out, withheld, _ = _run(y, _pole([s for s in _STEPS if s[0] != "Unit tests"]))
+    assert len(out) == 1, withheld
+    assert out[0]["independent_steps"]["kind"] == "opt83_separate_jobs"
 
 
 # ---- fail-open gaps closed (install, build-tool state, containers, YAML keys) ---
@@ -982,6 +1014,13 @@ jobs:
         run: go test ./c/...
 """
 
+# Two Go test steps with only setup before them and nothing after: the shape the
+# separate-job extension of OPT83 recommends splitting into sibling jobs.
+_SPLIT_YAML = (_GO_YAML.replace("      - name: Start database\n        run: docker compose up -d postgres\n", "")
+               .replace("      - name: Unit tests\n        run: go test ./c/...\n", ""))
+_SPLIT_STEPS = [("Lint", "test", 60.0), ("Typecheck", "test", 40.0),
+                ("Checkout", "checkout", 10.0), ("Set up job", "setup", 5.0)]
+
 
 def test_a_container_started_by_an_earlier_step_is_held_back():
     _held(_GO_YAML, "job_starts_a_container_or_background_server", _NO_INSTALL_STEPS)
@@ -1002,8 +1041,72 @@ def test_a_background_server_before_the_candidates_is_held_back():
 def test_go_tests_with_no_container_or_server_still_fire():
     y = _GO_YAML.replace("        run: docker compose up -d postgres\n",
                          "        run: go mod download\n")
-    out, withheld, _ = _run(y, _pole(_NO_INSTALL_STEPS))
+    # Measured as an install, so the split's duplicated setup is known.
+    out, withheld, _ = _run(y, _pole(_NO_INSTALL_STEPS + [("Start database", "install", 5.0)]))
     assert len(out) == 1, withheld
+
+
+def test_full_runner_go_steps_move_to_separate_parallel_jobs_with_signed_cost():
+    y = _SPLIT_YAML
+    steps = [("Lint", "test", 60.0), ("Typecheck", "test", 40.0),
+             ("Checkout", "checkout", 10.0), ("Set up job", "setup", 5.0)]
+    out, withheld, cands = _run(y, _pole(steps, job_p50=115.0))
+
+    assert len(out) == 1, withheld
+    f = out[0]
+    stamp = f["independent_steps"]
+    assert stamp["kind"] == "opt83_separate_jobs"
+    assert stamp["setup_s"] == 15.0
+    assert f["wall_clock_p50_s"] == 40.0
+    assert f["runner_minute_effect"] == {
+        "direction": "added_cost", "runner_min_per_run": 0.25,
+        "additional_concurrent_runners": 1,
+    }
+    assert "always()" in f["fix_strategy_detail"]
+    assert "keeps the required check name" in f["fix_strategy_detail"]
+    assert cands == []
+
+
+@pytest.mark.parametrize("after", [
+    "      - name: Coverage gate\n        run: go tool cover -func=b.out\n",
+    "      - name: Upload coverage\n        run: ./scripts/upload.sh a.out b.out\n",
+])
+def test_a_later_step_that_may_read_the_moved_output_holds_the_split_back(after):
+    """Moved unchanged to its own runner, a step's coverage file or report is gone
+    from the original job: a later step reading it would fail or check less."""
+    y = _SPLIT_YAML.replace("run: go test ./b/...", "run: go test -coverprofile=b.out ./b/...")
+    _held(y + after, "separate_job_later_step_may_read_moved_output", _SPLIT_STEPS)
+
+
+def test_a_job_output_reading_a_candidate_holds_the_split_back():
+    y = _SPLIT_YAML.replace("    runs-on: ubuntu-latest\n",
+                            "    runs-on: ubuntu-latest\n    outputs:\n"
+                            "      cov: ${{ steps.b.outputs.cov }}\n").replace(
+        "      - name: Typecheck\n", "      - name: Typecheck\n        id: b\n")
+    _held(y, "separate_job_later_step_may_read_moved_output", _SPLIT_STEPS)
+
+
+def test_an_unclassified_step_before_the_candidates_holds_the_split_back():
+    """A sibling job must repeat what the moved step needs; a code-generation step
+    is neither setup, checkout nor install, so the duplicated work is unmeasured."""
+    y = _SPLIT_YAML.replace("      - name: Lint\n",
+                            "      - name: Generate\n        run: go generate ./...\n"
+                            "      - name: Lint\n")
+    steps = _SPLIT_STEPS + [("Generate", "build", 10.0)]
+    _held(y, "separate_job_prerequisite_unclassified", steps)
+
+
+def test_a_matrix_job_holds_the_split_back():
+    y = _SPLIT_YAML.replace("    runs-on: ubuntu-latest\n",
+                            "    runs-on: ubuntu-latest\n    strategy:\n"
+                            "      matrix:\n        go: ['1.22', '1.23']\n")
+    _held(y, "separate_job_matrix_job", _SPLIT_STEPS)
+
+
+def test_steps_that_can_share_one_runner_do_not_get_the_separate_job_variant():
+    out, withheld, _ = _run()
+    assert len(out) == 1, withheld
+    assert out[0]["independent_steps"]["kind"] == "opt83_independent_steps"
 
 
 def test_a_step_with_yaml_boolean_keys_does_not_crash_the_detector():

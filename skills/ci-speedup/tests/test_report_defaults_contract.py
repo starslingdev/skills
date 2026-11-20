@@ -29,7 +29,8 @@ REQUIRED_DECISIONS = {
     "dependency-cache-floor", "cold-cache-miss-threshold",
     "cache-partial-miss-floor",
     "default-branch-batching-window",
-    "ceiling-minimum-gates", "partial-majority-rule",
+    "ceiling-minimum-gates", "partial-majority-rule", "go-fixed-wait-thresholds",
+    "account-weekly-paired-minimum",
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
@@ -97,9 +98,14 @@ REQUIRED_PROVISIONAL_SOURCES = {
 }
 
 REQUIRED_CURRENT_SOURCES = {
+    "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 2,
     "blocking_path.py:_AGG_GATE_TRIVIAL_S": 30.0,
     "blocking_path.py:_ALSO_NOTICED_CAP": 12,
     "blocking_path.py:_CHAIN_MAKESPAN_DIVERGENCE_PCT": 25.0,
+    "collect_runs.py:_OPT19_GO_MIN_INTERVALS": 2,
+    "collect_runs.py:_OPT19_GO_MIN_JOB_SHARE": 0.2,
+    "collect_runs.py:_OPT19_GO_MIN_TEST_SHARE": 0.5,
+    "collect_runs.py:_OPT19_GO_RACE_HELPER_MIN_SPAWNS": 3,
     "blocking_path.py:_FLOOR_COOCCUR_MAJORITY_FRAC": 0.5,
     "blocking_path.py:_FLOOR_NEAR_UNIVERSAL_FRAC": 0.8,
     "blocking_path.py:_MAG_WIDE_REL": 0.25,
