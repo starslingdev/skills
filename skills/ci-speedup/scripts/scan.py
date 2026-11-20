@@ -4858,6 +4858,8 @@ def _opt39_job_languages(job_name: str, job: dict) -> list[str]:
                 and not _OPT39_OPTIONAL_LANE_NAME_RE.search(display)):
             continue
         for step in _steps(job):
+            if _opt39_step_gated_by_selector(job, step):
+                continue
             uses = _uses(step)
             command = str(step.get("run") or "") if isinstance(step, dict) else ""
             action_re = _OPT39_TOOLCHAIN_ACTIONS.get(language)
@@ -4909,44 +4911,131 @@ _OPT39_CHANGED_FILE_LIST_RE = re.compile(
     r"|\bpulls/[^\s/]+/files\b)")
 
 
-def _opt39_has_path_output_gate(doc: dict, job: dict) -> bool:
-    """Whether `job` consumes output from an upstream changed-path selector.
+def _opt39_step_selects_changed_files(step: object, output_name: str | None) -> bool:
+    """Whether one step is a changed-path selector (for `output_name`, if given)."""
+    if not isinstance(step, dict):
+        return False
+    uses = _uses(step)
+    if re.search(r"(?:^|/)(?:dorny/paths-filter|(?:tj-actions|step-security)/"
+                 r"changed-files)@", uses, re.I):
+        return True
+    command = str(step.get("run") or "")
+    if (_OPT39_CHANGED_FILE_LIST_RE.search(command)
+            and (output_name is None
+                 or ("GITHUB_OUTPUT" in command
+                     and re.search(rf"\b{re.escape(output_name)}=", command)))):
+        return True
+    if re.search(r"(?:^|/)actions/github-script@", uses, re.I):
+        with_doc = step.get("with")
+        script = str(with_doc.get("script") or "") if isinstance(with_doc, dict) else ""
+        if (re.search(r"(?:compareCommits|compareCommitsWithBasehead|pulls\.listFiles)",
+                      script)
+                and re.search(r"\bfiles?\b", script)
+                and (output_name is None or re.search(
+                    rf"\bsetOutput\s*\(\s*['\"]{re.escape(output_name)}['\"]", script))):
+            return True
+    return False
 
-    A generic `needs.meta.outputs.version` is not a path gate. Recognize the
-    established paths-filter and changed-files actions, a shell step that lists
-    changed files into that output, and the fail-open GitHub-script form used by
-    repositories that need exact, repository-specific ownership.
+
+def _opt39_step_gated_by_selector(job: dict, step: object) -> bool:
+    """Whether `step` runs only on a same-job changed-path selector's output.
+
+    A toolchain step behind `if: steps.filter.outputs.go == 'true'` is not
+    installed on unrelated pull requests. A repository's own local action is
+    treated the same way, since its selection cannot be read here. A cache-hit
+    or other unrelated step output is not a path gate.
     """
-    condition = str(job.get("if") or "")
-    references = re.findall(
-        r"\bneeds\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)", condition)
-    jobs = doc.get("jobs") if isinstance(doc.get("jobs"), dict) else {}
-    for upstream_name, output_name in references:
-        upstream = jobs.get(upstream_name)
-        if not isinstance(upstream, dict):
+    if not isinstance(step, dict):
+        return False
+    condition = str(step.get("if") or "")
+    ids = re.findall(r"\bsteps\.([A-Za-z0-9_-]+)\.outputs\.", condition)
+    if not ids:
+        return False
+    by_id = {str(other.get("id")): other for other in _steps(job)
+             if isinstance(other, dict) and other.get("id")}
+    for step_id in ids:
+        source = by_id.get(step_id)
+        if source is None:
             continue
-        for step in _steps(upstream):
-            uses = _uses(step)
-            if re.search(r"(?:^|/)(?:dorny/paths-filter|(?:tj-actions|step-security)/"
-                         r"changed-files)@", uses, re.I):
-                return True
-            command = str(step.get("run") or "") if isinstance(step, dict) else ""
-            if (_OPT39_CHANGED_FILE_LIST_RE.search(command)
-                    and "GITHUB_OUTPUT" in command
-                    and re.search(rf"\b{re.escape(output_name)}=", command)):
-                return True
+        if (_opt39_step_selects_changed_files(source, None)
+                or _uses(source).startswith("./")):
+            return True
+    return False
+
+
+def _opt39_output_source_unreadable(upstream: dict, output_name: str) -> bool:
+    """Whether an upstream job output comes from logic this scanner cannot read.
+
+    A local or unrecognized action, or a script that writes `$GITHUB_OUTPUT`
+    without naming the key in the workflow, may well select on changed paths.
+    A literal `key=value` written by an inline `run:` is readable.
+    """
+    outputs = upstream.get("outputs")
+    value = outputs.get(output_name) if isinstance(outputs, dict) else None
+    sources = re.findall(r"\bsteps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)",
+                         str(value or ""))
+    by_id = {str(step.get("id")): step for step in _steps(upstream)
+             if isinstance(step, dict) and step.get("id")}
+    for step_id, key in sources:
+        step = by_id.get(step_id)
+        if step is None:
+            return True
+        uses = _uses(step)
+        if uses:
             if re.search(r"(?:^|/)actions/github-script@", uses, re.I):
                 with_doc = step.get("with")
                 script = str(with_doc.get("script") or "") if isinstance(
                     with_doc, dict) else ""
-                if (re.search(r"(?:compareCommits|compareCommitsWithBasehead|pulls\.listFiles)",
-                              script)
-                        and re.search(r"\bfiles?\b", script)
-                        and re.search(
-                            rf"\bsetOutput\s*\(\s*['\"]{re.escape(output_name)}['\"]",
-                            script)):
-                    return True
+                if re.search(rf"\bsetOutput\s*\(\s*['\"]{re.escape(key)}['\"]",
+                             script):
+                    continue
+            return True
+        if not re.search(rf"\b{re.escape(key)}=", str(step.get("run") or "")):
+            return True
     return False
+
+
+def _opt39_path_gate_state(doc: dict, job: dict) -> str:
+    """Classify `job`'s `if:` as a changed-path gate: gated, ungated or unknown.
+
+    A generic `needs.meta.outputs.version` is not a path gate. Recognize the
+    established paths-filter and changed-files actions, a shell step that lists
+    changed files into that output, and the fail-open GitHub-script form used by
+    repositories that need exact, repository-specific ownership. An output from a
+    reusable workflow, a local or unrecognized action, or a script whose keys
+    are not in the workflow is unknown, and an unknown gate withholds the finding.
+    """
+    condition = str(job.get("if") or "").strip()
+    if condition.startswith("${{") and condition.endswith("}}"):
+        condition = condition[3:-2].strip()
+    # `github.event_name != 'schedule' || needs.scope.outputs.x == 'true'` runs
+    # on every pull request: the output gates only the other event.
+    for alternative in condition.split("||") if "||" in condition else []:
+        alternative = alternative.strip()
+        if (re.fullmatch(r"github\.event_name\s*(?:==|!=)\s*(['\"])[^'\"]*\1",
+                         alternative)
+                and _opt96_condition_allows(alternative, "pull_request", "main")):
+            return "ungated"
+    references = re.findall(
+        r"\bneeds\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)", condition)
+    jobs = doc.get("jobs") if isinstance(doc.get("jobs"), dict) else {}
+    state = "ungated"
+    for upstream_name, output_name in references:
+        upstream = jobs.get(upstream_name)
+        if not isinstance(upstream, dict):
+            continue
+        if upstream.get("uses"):
+            state = "unknown"
+            continue
+        if any(_opt39_step_selects_changed_files(step, output_name)
+               or (isinstance(step, dict)
+                   and re.search(r"(?:^|/)(?:dorny/paths-filter|(?:tj-actions|"
+                                 r"step-security)/changed-files)@", _uses(step), re.I))
+               for step in _steps(upstream)):
+            return "gated"
+        if _opt39_output_source_unreadable(upstream, output_name):
+            state = "unknown"
+    return state
 
 
 def _opt39_trigger_path_language(pattern: str) -> str | None:
@@ -5062,7 +5151,8 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
             continue
         jif = job.get("if")
         leg_gated = isinstance(jif, str) and ("needs." in jif or "matrix.language" in jif)
-        language_path_gated = _opt39_has_path_output_gate(doc, job)
+        language_path_gated = (job_languages and not scanner_matrix
+                               and _opt39_path_gate_state(doc, job) != "ungated")
         if scanner_matrix and (has_paths_filter or leg_gated):
             continue
         if job_languages and (language_path_gated or _opt39_trigger_is_language_scoped(

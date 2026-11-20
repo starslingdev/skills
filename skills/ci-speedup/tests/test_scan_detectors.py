@@ -2285,6 +2285,107 @@ jobs:
     assert _finding(_scan(tmp_path), "OPT39") is not None
 
 
+@pytest.mark.parametrize("selector", [
+    # A repository's own composite action decides the output: unreadable here.
+    """      - id: detect
+        uses: ./.github/actions/detect-changes
+""",
+    # A repository script writes the output: its keys are not in the workflow.
+    """      - id: detect
+        run: ./scripts/ci/changed-languages.sh >> "$GITHUB_OUTPUT"
+""",
+])
+def test_opt39_unreadable_selector_withholds_the_finding(tmp_path: Path, selector: str):
+    """A lane gated on an output the scanner cannot classify may well be gated
+    by changed paths. Withhold the finding rather than call the lane ungated."""
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.detect.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+""" + selector + """  go-test:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+      - run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_reusable_workflow_selector_withholds_the_finding(tmp_path: Path):
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  changes:
+    uses: ./.github/workflows/changes.yml
+  go-test:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+      - run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_step_level_changed_path_gate_stays_quiet(tmp_path: Path):
+    """The toolchain is installed only when a same-job selector saw Go change."""
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go: ['**/*.go', 'go.mod']
+      - if: steps.filter.outputs.go == 'true'
+        uses: actions/setup-go@v5
+      - if: steps.filter.outputs.go == 'true'
+        run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+    # Control: a cache-hit condition on the same step is not a path gate.
+    cache_gated = workflow.replace(
+        "      - if: steps.filter.outputs.go == 'true'\n        uses: actions/setup-go@v5",
+        "      - id: cache\n        uses: actions/cache@v4\n        with:\n"
+        "          path: ~/go\n          key: go\n"
+        "      - if: steps.cache.outputs.cache-hit != 'true'\n"
+        "        uses: actions/setup-go@v5")
+    assert cache_gated != workflow
+    (path / "ci.yml").write_text(cache_gated + _OPT39_NODE_LANE, encoding="utf-8")
+    assert _finding(_scan(tmp_path), "OPT39") is not None
+
+
 def test_opt39_fail_open_github_script_path_gate_stays_quiet(tmp_path: Path):
     workflow = """
 name: Rust proof
