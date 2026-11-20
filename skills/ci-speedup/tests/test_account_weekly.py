@@ -142,3 +142,48 @@ def test_account_weekly_series_requires_the_workload_change(tmp_path: Path) -> N
     completed, _doc = _run_weekly_cli(tmp_path, data)
     assert completed.returncode == 1
     assert "workload_change" in completed.stderr
+
+
+def test_invalid_account_weekly_series_stops_before_the_scan(
+        tmp_path: Path, monkeypatch, capsys) -> None:
+    """A bad export is rejected before scan.py or the gh collection pass run."""
+    import run
+
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("scan/collect ran before the weekly export was validated")
+
+    monkeypatch.setattr(run, "_step", _must_not_run)
+    data = _observations()
+    del data["weeks"][0]["workload_change"]
+    source = tmp_path / "account.json"
+    source.write_text(json.dumps(data), encoding="utf-8")
+
+    rc = run.main([
+        "--root", str(tmp_path), "--out", str(tmp_path / "findings.json"),
+        "--account-weekly-series", str(source),
+        "--skill-commit-sha", "abcdef0", "--commit-sha", "0123456789abcdef",
+    ])
+    assert rc == 1
+    assert "workload_change" in capsys.readouterr().err
+
+
+def test_invalid_account_weekly_series_stops_before_verification_reruns(
+        tmp_path: Path, monkeypatch) -> None:
+    import run
+
+    def _must_not_run(*_args, **_kwargs):
+        raise AssertionError("verification started before the weekly export was validated")
+
+    monkeypatch.setattr(run, "advance_verification", _must_not_run)
+    monkeypatch.setattr(run, "GhVerificationClient", lambda: object())
+    out = tmp_path / "findings.json"
+    out.write_text("{}", encoding="utf-8")
+    source = tmp_path / "account.json"
+    source.write_text("{not json", encoding="utf-8")
+
+    rc = run.main([
+        "--root", str(tmp_path), "--out", str(out), "--repo", "example/repo",
+        "--verify-branch", "fix", "--account-weekly-series", str(source),
+    ])
+    assert rc == 1
+
