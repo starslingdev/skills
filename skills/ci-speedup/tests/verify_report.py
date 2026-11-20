@@ -11016,23 +11016,26 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
         fid = str(f.get("id") or "?")
         cid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", fid)
         ids.add(cid)
+        st = _as_dict(f.get("independent_steps"))
+        separate = st.get("kind") == "opt83_separate_jobs"
         wc = _num(f.get("wall_clock_p50_s"))
-        if wc:
+        if wc and not separate:
             bad.append(f"{fid}: OPT83 carries wall_clock_p50_s {wc} - it is uncredited")
         if f.get("runner_min_saving") is not None:
             bad.append(f"{fid}: OPT83 carries runner_min_saving "
                        f"{f.get('runner_min_saving')!r} - it is uncredited")
-        if f.get("sizing_basis") != "uncredited":
+        expected_basis = "measured" if separate else "uncredited"
+        if f.get("sizing_basis") != expected_basis:
             bad.append(f"{fid}: OPT83 sizing_basis {f.get('sizing_basis')!r}, "
-                       "not 'uncredited'")
-        st = _as_dict(f.get("independent_steps"))
-        if st.get("kind") != "opt83_independent_steps":
+                       f"not {expected_basis!r}")
+        if st.get("kind") not in {"opt83_independent_steps", "opt83_separate_jobs"}:
             bad.append(f"{fid}: missing its opt83_independent_steps block")
             continue
-        ind = _as_dict(st.get("independence"))
-        missing = [k for k in _VR_OPT83_INDEPENDENCE_KEYS if ind.get(k) is not True]
-        if missing:
-            bad.append(f"{fid}: independence facts not stamped true: {missing}")
+        if not separate:
+            ind = _as_dict(st.get("independence"))
+            missing = [k for k in _VR_OPT83_INDEPENDENCE_KEYS if ind.get(k) is not True]
+            if missing:
+                bad.append(f"{fid}: independence facts not stamped true: {missing}")
         wfb = Path(str(f.get("workflow_file") or "")).name
         job = str(st.get("job") or "")
         pole = next((p for p in poles if Path(str(p.get("workflow_file") or "")).name
@@ -11069,7 +11072,29 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
                 bad.append(f"{fid}: step `{sn}` ({ps.get('category')}, {d}s of "
                            f"{job_p50}s) does not qualify as a candidate")
             p50s.append(d)
-        want = round(sum(p50s) - max(p50s), 1) if len(p50s) >= 2 else 0.0
+        if separate and len(p50s) >= 2:
+            moved = str(st.get("moved_step") or "")
+            moved_s = next((d for name, d in zip(names, p50s) if name == moved), None)
+            setup_s = _num(st.get("setup_s"))
+            if moved_s is None or setup_s is None or setup_s < 0:
+                bad.append(f"{fid}: separate-job moved_step/setup_s is incomplete")
+                want = 0.0
+            else:
+                finish = round(max(sum(p50s) - moved_s, moved_s + setup_s), 1)
+                want = round(sum(p50s) - finish, 1)
+                if _num(st.get("parallel_finish_s")) != finish:
+                    bad.append(f"{fid}: parallel_finish_s does not re-derive ({finish})")
+                effect = _as_dict(f.get("runner_minute_effect"))
+                expected_added = round(setup_s / 60.0, 4)
+                if (effect.get("direction") != "added_cost"
+                        or _num(effect.get("runner_min_per_run")) != expected_added
+                        or effect.get("additional_concurrent_runners") != 1):
+                    bad.append(f"{fid}: separate-job runner-minute effect does not "
+                               f"re-derive (added cost {expected_added} per run)")
+                if wc != want:
+                    bad.append(f"{fid}: wall_clock_p50_s {wc!r} != re-derived {want}")
+        else:
+            want = round(sum(p50s) - max(p50s), 1) if len(p50s) >= 2 else 0.0
         if _num(st.get("ceiling_s")) != want:
             bad.append(f"{fid}: ceiling_s {st.get('ceiling_s')!r} != re-derived "
                        f"{want} (sum of the steps' p50s minus the slowest)")
@@ -11104,6 +11129,19 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
                 bad.append(f"{fid}: its anchor is named outside its own section")
                 break
         flat = " ".join(body.split())
+        if separate:
+            effect = _as_dict(f.get("runner_minute_effect"))
+            added = _num(effect.get("runner_min_per_run")) or 0.0
+            for need, what in (
+                    (f"Measured merge-wait reduction:** {want:.0f}s", "measured saving"),
+                    (f"added cost {added:.2f} per run", "signed runner-minute effect"),
+                    ("one additional concurrent runner", "runner-count effect"),
+                    ("always()", "aggregator condition"),
+                    ("every upstream result to be `success`", "aggregator success guard"),
+                    ("keeps the required check name", "required-check guard")):
+                if need not in flat:
+                    bad.append(f"{fid}: separate-job card is missing {what}")
+            continue
         # The label sits on the line that states the bound: the prompt's copy of
         # it does not label a bare number on the card.
         bound_line = next((" ".join(ln.split()) for ln in body.splitlines()

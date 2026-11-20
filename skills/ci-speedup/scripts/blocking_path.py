@@ -12388,6 +12388,28 @@ def _opt83_prompt(f: dict[str, Any], url: str) -> list[str]:
     steps = [s for s in st.get("steps") or [] if isinstance(s, dict)]
     names = ", ".join(f"`{s.get('step')}`" for s in steps)
     ceiling = _num(st.get("ceiling_s")) or 0.0
+    if st.get("kind") == "opt83_separate_jobs":
+        effect = f.get("runner_minute_effect") or {}
+        added = _num(effect.get("runner_min_per_run")) or 0.0
+        moved = _flatten_cell(str(st.get("moved_step") or ""))
+        body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
+                "investigate it in the repo and apply a safe change.", "",
+                f"Where: {wf} (job `{job}`, YAML job `{st.get('yaml_job')}`).",
+                f"What ci-speedup saw: {_flatten_cell(str(f.get('evidence') or ''))}", "",
+                f"Move `{moved}` unchanged into its own sibling job so it runs beside "
+                "the remaining work. Keep every setup and verification command.",
+                "Add one final aggregator job with `if: always()` and `needs:` on every "
+                "sibling. It must fail unless every upstream `result` is `success`, and "
+                "it must keep the required check name that branch protection expects.",
+                f"Measured merge-wait reduction: {ceiling:.0f}s. Runner-minute effect: "
+                f"added cost {added:.2f} per run from duplicated setup, with one "
+                "additional concurrent runner.",
+                "Roll out on the same commits and keep the split only if the measured "
+                "wall-clock gain holds and the added runner cost is accepted.", "",
+                "Read the catalog entry (background, fix recipe, and guardrail):",
+                f"  {url}", "", *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES]
+        return ["#### 🤖 Prompt for your coding agent (OPT83)", "", "```text",
+                *[_fence_safe(line) for line in body], "```"]
     body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
             "investigate it in the repo and apply a safe change.", "",
             f"Pattern: OPT83 - {_flatten_cell(str(f.get('title') or 'OPT83'))} "
@@ -12441,6 +12463,30 @@ def _opt83_card(f: dict[str, Any], catalog_url: str) -> list[str]:
     listing = " · ".join(f"`{_flatten_cell(str(s.get('step')))}` "
                          f"{_num(s.get('p50_s')) or 0:.0f}s" for s in steps)
     ceiling = _num(st.get("ceiling_s")) or 0.0
+    if st.get("kind") == "opt83_separate_jobs":
+        setup = _num(st.get("setup_s")) or 0.0
+        moved = _flatten_cell(str(st.get("moved_step") or ""))
+        effect = f.get("runner_minute_effect") or {}
+        added = _num(effect.get("runner_min_per_run")) or 0.0
+        out = [f'<a id="opt83-{fid}"></a>', "",
+               f"**🔀 OPT83 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**",
+               "", f"- **Where:** `{wf}` ▸ `{job}`",
+               f"- **Steps that run one after another** (workflow order, p50): {listing}",
+               f"- **Change:** move `{moved}` unchanged to one sibling job and run it "
+               "beside the remaining work; add an `always()` aggregator that requires "
+               "every upstream result to be `success` and keeps the required check name.",
+               f"- **Measured merge-wait reduction:** {ceiling:.0f}s (serial candidate "
+               "sum minus the slower of the remaining job and the moved step plus "
+               f"{setup:.0f}s measured setup).",
+               f"- **Runner-minute effect:** added cost {added:.2f} per run from "
+               "duplicated setup; one additional concurrent runner."]
+        if f.get("guardrail"):
+            out.append(f"- **Guardrail:** {_flatten_cell(str(f['guardrail']))}")
+        if f.get("rollout"):
+            out.append(f"- **Rollout:** {_flatten_cell(str(f['rollout']))}")
+        out += [f"- **Catalog (background + fix recipe):** {url}", "",
+                *_opt83_prompt(f, url), ""]
+        return out
     out = [f'<a id="opt83-{fid}"></a>', "",
            f"**🔀 OPT83 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**"
            f" · {_OPT83_SUMMARY}", "",

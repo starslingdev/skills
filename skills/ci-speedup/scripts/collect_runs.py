@@ -20826,6 +20826,8 @@ _OPT83_BUILD_ELSEWHERE_RE = _re.compile(
 # lock (target/, bin/ and obj/, .build, _build, DerivedData), or one coverage
 # data file. Each of these builds before it tests. Two candidates of one family
 # in one tree could collide when run side by side.
+_OPT83_COVERAGE_RE = _re.compile(
+    r"--cov\b|--coverage\b|-coverprofile\b|\bcoverage run\b|\bnyc\b|\bc8\b")
 _OPT83_TOOL_STATE_RES = (
     _re.compile(r"\bcargo\b"),
     _re.compile(r"(^|[\s/])(mvn|mvnw)\b"),
@@ -20835,9 +20837,9 @@ _OPT83_TOOL_STATE_RES = (
     _re.compile(r"\bswift\s+(test|build)\b"),
     _re.compile(r"\bmix\s+(test|compile)\b"),
     _re.compile(r"\bxcodebuild\b"),
-    _re.compile(r"--cov\b|--coverage\b|-coverprofile\b|\bcoverage run\b|\bnyc\b"
-                r"|\bc8\b"),
+    _OPT83_COVERAGE_RE,
 )
+_OPT83_FULL_RUNNER_RE = _re.compile(r"\bgo\s+test\b", _re.I)
 # A Lighthouse audit shares the runner's cores with whatever runs beside it, which skews
 # the scores its budget gates on (OPT103), and each `lhci collect` also clears the shared
 # `.lighthouseci/` folder. So any candidate set with a Lighthouse step is held back,
@@ -21209,13 +21211,112 @@ def _detect_opt83_parallel_steps(
             _no("candidate_has_continue_on_error", wf, job, cand_names)
             continue
         runs_txt = [str(s.get("run") or "") for s in cands]
-        if (spec.get("services")
+        shared_tool_state = any(
+            rx.search(runs_txt[a]) and rx.search(runs_txt[b])
+            and _opt83_same_tree(wds[a], wds[b])
+            for rx in _OPT83_TOOL_STATE_RES
+            for a in range(len(cands)) for b in range(a + 1, len(cands)))
+        full_runner_steps = sum(bool(_OPT83_FULL_RUNNER_RE.search(text))
+                                for text in runs_txt) >= 2
+        # A local container/background service cannot be moved to another runner.
+        # Hold that shape back before considering the separate-job recipe.
+        container_or_background = (spec.get("services")
                 or sum(bool(_OPT83_DOCKER_RE.search(t)) for t in runs_txt) >= 2
                 or any(_OPT83_LIGHTHOUSE_RE.search(t) for t in runs_txt)
-                or any(rx.search(runs_txt[a]) and rx.search(runs_txt[b])
-                       and _opt83_same_tree(wds[a], wds[b])
-                       for rx in _OPT83_TOOL_STATE_RES
-                       for a in range(len(cands)) for b in range(a + 1, len(cands)))):
+                or any(_OPT83_DOCKER_RE.search(str(lf.step.get("run") or ""))
+                       or _OPT83_CONTAINER_ACTION_RE.search(str(lf.step.get("uses") or ""))
+                       for lf in walk.leaves[:max(run) + 1])
+                or any(lf.background for lf in walk.leaves[:min(run)]))
+        if full_runner_steps and container_or_background:
+            _no("job_starts_a_container_or_background_server", wf, job, cand_names)
+            continue
+        if full_runner_steps:
+            # These steps are independent in purpose, but cannot safely share one
+            # workspace or one runner's cores. Put one in a sibling job instead.
+            p50s = [measured[name][1] for name in cand_names]
+            setup_s = round(sum(
+                duration for name, (category, duration) in measured.items()
+                if name not in cand_names and category in {"setup", "checkout", "install"}
+            ), 1)
+            choices = []
+            serial_s = sum(p50s)
+            for index, duration in enumerate(p50s):
+                finish_s = max(serial_s - duration, setup_s + duration)
+                choices.append((serial_s - finish_s, -duration, index, finish_s))
+            saving_s, _neg_duration, moved_index, finish_s = max(choices)
+            saving_s = round(max(0.0, saving_s), 1)
+            if saving_s <= 0:
+                _no("siblings_share_tool_state", wf, job, cand_names)
+                continue
+            moved = cand_names[moved_index]
+            runner_added = round(setup_s / 60.0, 4)
+            listing = ", ".join(
+                f"`{name}` ({duration:.0f}s)" for name, duration in zip(cand_names, p50s))
+            evidence = (
+                f"`{job}` is a measured long pole ({job_p50:.0f}s). {listing} are "
+                "independent checks, but sharing one runner is unsafe because they "
+                "share tool state or each uses the runner's cores. Moving "
+                f"`{moved}` to a sibling job adds {setup_s:.0f}s of measured setup "
+                f"there and re-derives {saving_s:.0f}s of merge-wait reduction; "
+                f"runner-minute effect: added cost {runner_added:.2f} per run from "
+                "the duplicated setup, with one additional concurrent runner.")
+            me = _measured_evidence(
+                ["Step", "Category", "p50", "Working directory"],
+                [[f"`{name}`", measured[name][0], f"{measured[name][1]:.0f}s",
+                  f"`{wds[k]}`"] for k, name in enumerate(cand_names)],
+                summary=evidence,
+                note=("The saving is the serial candidate sum minus the slower of the "
+                      "remaining original job and the moved step plus measured setup."))
+            f = _new_finding(
+                "OPT83", "MEDIUM", "Independent Pole Steps Need Separate Parallel Jobs",
+                wf, job, evidence, _OPT83_FIX_STRATEGY,
+                _catalog_anchor("OPT83", _OPT83_TITLE), start_idx + len(out) + 1,
+                wc_p50=saving_s, rm=None,
+                size_note=(f"measured wall-clock saving {saving_s:.0f}s; runner-minute "
+                           f"effect: added cost {runner_added:.2f} per run from "
+                           "duplicated setup; one additional concurrent runner"),
+                realization="none", measured_evidence=me)
+            f["pattern_class"] = "structural"
+            f["sizing_basis"] = "measured"
+            f["risk"] = "MEDIUM"
+            f["runner_minute_effect"] = {
+                "direction": "added_cost", "runner_min_per_run": runner_added,
+                "additional_concurrent_runners": 1,
+            }
+            f["fix_strategy_detail"] = (
+                "Move the stamped step into its own sibling job, preserve every check, "
+                "and add an always() aggregator that requires every upstream result to "
+                "be success and keeps the required check name.")
+            f["guardrail"] = (
+                "Keep every command and input. The always() aggregator must fail unless "
+                "every upstream job result is success, including cancellation.")
+            f["rollout"] = (
+                "Measure both jobs on the same commits; keep the split only if the "
+                "wall-clock gain holds and the additional runner-minute cost is accepted.")
+            f["independent_steps"] = {
+                "kind": "opt83_separate_jobs", "job": job, "yaml_job": yaml_key,
+                "workflow_file": wf, "pole_check": str(p.get("check") or ""),
+                "job_p50_s": round(job_p50, 1),
+                "steps": [{"step": name, "category": measured[name][0],
+                           "p50_s": round(measured[name][1], 1),
+                           "working_directory": wds[k]}
+                          for k, name in enumerate(cand_names)],
+                "moved_step": moved, "setup_s": setup_s,
+                "parallel_finish_s": round(finish_s, 1),
+                "ceiling_s": saving_s,
+                "ceiling_basis": ("serial candidate sum minus the slower of the "
+                                  "remaining original job and moved step plus setup"),
+                "min_share": _OPT83_MIN_SHARE, "min_step_s": _OPT83_MIN_STEP_S,
+                "separate_job_reason": "full_runner_compute",
+            }
+            out.append(f)
+            continue
+        if shared_tool_state:
+            _no("siblings_share_tool_state", wf, job, cand_names)
+            continue
+        if (spec.get("services")
+                or sum(bool(_OPT83_DOCKER_RE.search(t)) for t in runs_txt) >= 2
+                or any(_OPT83_LIGHTHOUSE_RE.search(t) for t in runs_txt)):
             # Service containers, one Docker daemon, a Lighthouse audit sharing the
             # runner's cores, or one tool's target/ or coverage file in one tree: state the workflow file does not show
             # as a dependency, but that side-by-side steps would share.
