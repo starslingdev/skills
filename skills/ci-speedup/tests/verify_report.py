@@ -13160,7 +13160,7 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
             # job name matches, and the lane-isolation check independently
             # requires zero merge-gate wall-clock credit and a rendered tag.
             continue
-        if pat in {"OPT13", "OPT82"}:
+        if pat in {"OPT13", "OPT82", "OPT106"}:
             # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
             # keeps these benchmark-first cards on their drilled-pole jobs (the
             # card is the only place the measured ceiling and safety proof reach
@@ -15398,6 +15398,52 @@ _VR_OPT106_MIN_PROFILE_S = 30.0
 _VR_OPT106_MIN_JOB_SHARE = 0.2
 
 
+_VR_OPT106_MIN_STEP_S = 20.0
+_VR_OPT106_MIN_STEP_SHARE = 0.15
+
+
+def _vr_opt106_unprofiled_failures(fid: str, finding: dict, jobs: list[str],
+                                   poles: list) -> list[str]:
+    """An OPT106 finding without a loader profile is unsized on both axes, names
+    its true reason, leads its fix with measuring, and sits on a drilled pole
+    step above the step floors with the p50 it states."""
+    failures: list[str] = []
+    step = str(finding.get("runtime_loader_step") or "")
+    p50 = _num(finding.get("runtime_loader_step_p50_s"))
+    job_p50 = _num(finding.get("runtime_loader_job_p50_s"))
+    if finding.get("wall_clock_p50_s") is not None or finding.get("runner_min_saving") is not None:
+        failures.append(f"{fid} credits a saving without a measured loader share")
+    if p50 is None or job_p50 is None or job_p50 <= 0:
+        return failures + [f"{fid} lacks its step and job p50"]
+    reason = (f"loader share not measured; the step's measured p50 of "
+              f"{p50:.1f}s is an upper bound")
+    note = str(finding.get("size_note") or "")
+    if (f"wall-clock saving: unsized ({reason})" not in note
+            or f"runner-minute saving: unsized ({reason})" not in note):
+        failures.append(f"{fid} does not state both axes as unsized with its reason")
+    if not str(finding.get("fix_strategy") or "").startswith("Measure first"):
+        failures.append(f"{fid} fix does not lead with measuring the loader share")
+    if (not str(finding.get("runtime_loader") or "")
+            or not str(finding.get("runtime_loader_command") or "")):
+        failures.append(f"{fid} lacks the loader it resolved")
+    if p50 < _VR_OPT106_MIN_STEP_S or p50 < _VR_OPT106_MIN_STEP_SHARE * job_p50:
+        failures.append(f"{fid} step is below the long-pole step floors")
+    pole = next((p for p in poles if isinstance(p, dict)
+                 and str(p.get("workflow_file") or "")
+                 == str(finding.get("workflow_file") or "")
+                 and jobs and str(p.get("job") or "") == jobs[0]), None)
+    row = next((s for s in _as_list((pole or {}).get("steps"))
+                if isinstance(s, dict) and str(s.get("step") or "").strip() == step),
+               None)
+    pole_p50 = _num((row or {}).get("p50_s"))
+    pole_job = _num((pole or {}).get("job_p50_s"))
+    if (pole_p50 is None or pole_job is None
+            or round(pole_p50, 1) != round(p50, 1)
+            or round(pole_job, 1) != round(job_p50, 1)):
+        failures.append(f"{fid} step p50 is not its drilled pole's measured step")
+    return failures
+
+
 def check_opt106_runtime_loader_provenance(findings_path: Path | None) -> Check:
     """OPT106 credit remains bound to its captured structured pole fact."""
     name = "OPT106 runtime-loader findings retain measured pole provenance"
@@ -15409,10 +15455,14 @@ def check_opt106_runtime_loader_provenance(findings_path: Path | None) -> Check:
     if not findings:
         return Check(name, True, "no OPT106 finding")
     entries = _as_list(_as_dict(data.get("data_bundle")).get("logs"))
+    poles = _as_list(_as_dict(data.get("pr_critical_path")).get("poles"))
     failures: list[str] = []
     for finding in findings:
         fid = str(finding.get("id") or "OPT106")
         jobs = [str(job) for job in _as_list(finding.get("affected_jobs")) if str(job)]
+        if finding.get("sizing_basis") == "unmeasured_loader_share":
+            failures += _vr_opt106_unprofiled_failures(fid, finding, jobs, poles)
+            continue
         matches = [entry for entry in entries if isinstance(entry, dict)
                    and str(entry.get("workflow_file") or "")
                    == str(finding.get("workflow_file") or "")
