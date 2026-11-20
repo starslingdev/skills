@@ -33,6 +33,12 @@ name: Registry scan
 # rule-catalog change that needed no commit of ours. `tests/test_registry_scan_workflow.py`
 # derives the list of files the scan depends on from this file's own `run:` lines and fails
 # if the filter below misses one, so a new script cannot be forgotten here.
+#
+# NO merge_group TRIGGER, deliberately. `registry scan` cannot be a required check: the
+# path filter above leaves it absent on most PRs, and an absent required check blocks a
+# merge. Since the queue never waits for it, a merge_group run would only spend two more
+# calls of the daily allowance per queue entry, on a tree the PR run (or the push run after
+# merge) already scans.
 on:
   pull_request:
     paths:
