@@ -1939,6 +1939,192 @@ jobs:
     assert "OPT31" not in _scan_one(tmp_path, neg)
 
 
+def test_opt31_needs_result_check_after_setup_pays_setup_on_failure(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  coverage-core:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./... -coverprofile=core.out
+  coverage-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./cmd/... -coverprofile=cli.out
+  coverage:
+    needs: [coverage-core, coverage-cli]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with: {go-version: '1.26'}
+      - name: Require all coverage producers
+        env:
+          CORE_RESULT: ${{ needs['coverage-core'].result }}
+          CLI_RESULT: ${{ needs['coverage-cli'].result }}
+        run: |
+          printf 'core=%s cli=%s\\n' "${CORE_RESULT:-missing}" "${CLI_RESULT:-missing}"
+          [[ "${CORE_RESULT:-}" == success && "${CLI_RESULT:-}" == success ]]
+      - run: go tool cover -func=core.out
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT31"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["coverage"]
+    assert "before checkout and toolchain setup" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt31_needs_result_check_first_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  coverage:
+    needs: [coverage-core, coverage-cli]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all coverage producers
+        env:
+          CORE_RESULT: ${{ needs['coverage-core'].result }}
+          CLI_RESULT: ${{ needs['coverage-cli'].result }}
+        run: '[[ "$CORE_RESULT" == success && "$CLI_RESULT" == success ]]'
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_needs_check_that_runs_a_repository_script_stays_quiet(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: ./scripts/check-result "$TEST_RESULT"
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_needs_check_that_cannot_fail_the_job_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - continue-on-error: true
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: 'test "$TEST_RESULT" = success'
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_setup_already_gated_on_needs_success_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.test.result == 'success'
+        uses: actions/checkout@v4
+      - env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: 'test "$TEST_RESULT" = success'
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+_OPT31_MOVE_UNSAFE_GATE = """name: CI
+on: pull_request
+%(wfextra)sjobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+%(jobextra)s    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+%(between)s      - name: Gate
+%(stepextra)s        env:
+          R: ${{ needs.test.result }}
+        run: |
+%(run)s
+"""
+
+_OPT31_MOVE_UNSAFE_CASES = {
+    # Each gate reads something checkout, setup or an earlier step provides,
+    # so moving it first could change the job's verdict.
+    "file-test": dict(run='          [[ "$R" == success && -f go.mod ]]'),
+    "then-runs-script": dict(run=(
+        '          if [ "$R" = success ]; then ./scripts/report.sh; fi\n'
+        '          test "$R" = success')),
+    "and-runs-tool": dict(
+        run='          test "$R" = success && go tool cover -func=c.out'),
+    "pipe-to-script": dict(run='          echo "$R" | ./check'),
+    "command-substitution": dict(
+        run='          [[ "$(cat VERSION)" == 1 && "$R" == success ]]'),
+    "input-redirect": dict(run='          test "$R" = success < input.txt'),
+    "step-working-directory": dict(
+        stepextra="        working-directory: app\n",
+        run='          test "$R" = success'),
+    "job-default-working-directory": dict(
+        jobextra="    defaults:\n      run:\n        working-directory: app\n",
+        run='          test "$R" = success'),
+    "workflow-default-shell": dict(
+        wfextra="defaults:\n  run:\n    shell: pwsh\n",
+        run='          test "$R" = success'),
+    "step-custom-shell": dict(
+        stepextra="        shell: pwsh\n", run='          test "$R" = success'),
+    "variable-from-earlier-step": dict(
+        between='      - run: echo "WANT=success" >> "$GITHUB_ENV"\n',
+        run='          test "$R" = "$WANT"'),
+}
+
+
+def _opt31_move_unsafe_workflow(**parts: str) -> str:
+    fields = {"wfextra": "", "jobextra": "", "between": "", "stepextra": ""}
+    fields.update(parts)
+    return _OPT31_MOVE_UNSAFE_GATE % fields
+
+
+def test_opt31_move_unsafe_fixture_fires_when_gate_is_builtin_only(
+        tmp_path: Path):
+    workflow = _opt31_move_unsafe_workflow(
+        stepextra="        shell: bash\n",
+        run=('          set -euo pipefail\n'
+             '          printf \'%s\\n\' "$R" >> "$GITHUB_STEP_SUMMARY"\n'
+             '          [ "$R" = success ] || { echo "test: $R" >&2; exit 1; }'))
+    assert "OPT31" in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize("case", sorted(_OPT31_MOVE_UNSAFE_CASES))
+def test_opt31_needs_check_that_reads_setup_state_stays_quiet(
+        tmp_path: Path, case: str):
+    workflow = _opt31_move_unsafe_workflow(**_OPT31_MOVE_UNSAFE_CASES[case])
+    assert "OPT31" not in _scan_one(tmp_path, workflow), case
+
+
 def test_opt33_no_draft_gate_on_matrix(tmp_path: Path):
     pos = """name: CI
 on: pull_request

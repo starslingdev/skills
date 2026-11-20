@@ -4925,6 +4925,88 @@ _OPT31_INSTALL_RE = re.compile(
     r"playwright\s+install|apt-get\s+install|pip\s+install|npm\s+install\s+-g|"
     r"bunx\s+playwright\s+install", re.I)
 _OPT31_GATE_RE = re.compile(r"secrets\.|env\.", re.I)
+_OPT31_NEEDS_RESULT_RE = re.compile(
+    r"needs(?:\.\*|\.[A-Za-z0-9_-]+|\[\s*['\"][^'\"]+['\"]\s*\])\.result",
+    re.I,
+)
+_OPT31_EXPRESSION_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
+_OPT31_NEEDS_EXPRESSION_RE = re.compile(
+    r"^\$\{\{\s*needs(?:\.\*|\.[A-Za-z0-9_-]+|"
+    r"\[\s*['\"][^'\"]+['\"]\s*\])\.result\s*\}\}$",
+    re.I | re.S,
+)
+_OPT31_EARLY_SETUP_RE = re.compile(
+    r"^(?:actions/checkout|[^/@]+/setup-[^/@]+)@", re.I)
+# First word of each simple command a movable gate may run: shell control,
+# output and test builtins only, so nothing depends on checkout or setup.
+_OPT31_GATE_COMMANDS = frozenset({
+    "printf", "echo", "test", "[", "[[", "exit", "false", "true", "set", ":",
+    "case", "esac", "fi", "}",
+})
+_OPT31_GATE_KEYWORDS = frozenset({"if", "elif", "then", "else", "!", "{"})
+_OPT31_DOUBLE_BRACKET_RE = re.compile(r"\[\[(.*?)\]\]")
+# Unary test operators that read the filesystem the moved gate would lose.
+_OPT31_FILE_TEST_RE = re.compile(r"(?:^|\s)!?\s*-[bcdefghkpLrsSuwxOGN](?=\s)")
+_OPT31_COMMAND_SPLIT_RE = re.compile(r"\|\||&&|;;|;|\|")
+_OPT31_SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+_OPT31_RUNNER_VARS = frozenset({"CI", "HOME"})
+_OPT31_NEEDS_CHECK_FAIL_RE = re.compile(
+    r"(?:^|\n)\s*(?:test\b|\[\[?|false\b)|\bexit\s+[1-9]\d*\b|"
+    r"(?:\|\||&&)\s*(?:exit\s+[1-9]|false\b)",
+    re.I,
+)
+
+
+def _opt31_env_keys(node: Any) -> set[str]:
+    env = node.get("env") if isinstance(node, dict) else None
+    return {str(k) for k in env} if isinstance(env, dict) else set()
+
+
+def _opt31_run_defaults_movable(*nodes: Any) -> bool:
+    """No working directory and a POSIX shell at every defaults level."""
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        defaults = node.get("defaults")
+        run = defaults.get("run") if isinstance(defaults, dict) else None
+        if run is None:
+            continue
+        if not isinstance(run, dict):
+            return False
+        if run.get("working-directory") not in (None, ""):
+            return False
+        if run.get("shell") not in (None, "bash", "sh"):
+            return False
+    return True
+
+
+def _opt31_builtin_only(run: str) -> bool:
+    """Every simple command is a builtin that reads no file or tool."""
+    if any(token in run for token in ("$(", "`", "<", "\\\n")):
+        return False
+    for raw_line in run.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        spans = _OPT31_DOUBLE_BRACKET_RE.findall(line)
+        if any(_OPT31_FILE_TEST_RE.search(" " + span + " ") for span in spans):
+            return False
+        line = _OPT31_DOUBLE_BRACKET_RE.sub("[[ ]]", line)
+        for segment in _OPT31_COMMAND_SPLIT_RE.split(line):
+            # `>&2` / `2>&1` are redirects; any other lone `&` backgrounds.
+            if "&" in re.sub(r"\d*>&\d", "", segment):
+                return False
+            words = segment.split()
+            while words and words[0] in _OPT31_GATE_KEYWORDS:
+                words = words[1:]
+            if not words:
+                continue
+            if words[0] not in _OPT31_GATE_COMMANDS:
+                return False
+            if (words[0] in ("test", "[")
+                    and _OPT31_FILE_TEST_RE.search(" ".join(words) + " ")):
+                return False
+    return True
 
 
 def _opt31_tokens(install_line: str) -> set[str]:
@@ -4942,14 +5024,100 @@ def _opt31_tokens(install_line: str) -> set[str]:
     return toks
 
 
+def _opt31_needs_result_check(step: dict, step_if: str | None,
+                               job: dict, doc: dict) -> bool:
+    """A shell-only result gate that can fail without repository files/tools.
+
+    Every GitHub expression available to the step must be exactly one
+    ``needs.<job>.result`` value, and every command a shell builtin that reads
+    no file, tool, working directory or variable an earlier step could export,
+    so moving the step before checkout/toolchain setup cannot change its
+    verdict. Anything this cannot classify withholds the finding.
+    """
+    run = _run(step)
+    if not run or _uses(step) or step_if:
+        return False
+    continue_on_error = step.get("continue-on-error")
+    if continue_on_error not in (None, False):
+        return False
+    if step.get("working-directory") not in (None, ""):
+        return False
+    if step.get("shell") not in (None, "bash", "sh"):
+        return False
+    if not _opt31_run_defaults_movable(doc, job):
+        return False
+    env = step.get("env") if isinstance(step.get("env"), dict) else {}
+    dynamic_text = "\n".join((run, *(str(value) for value in env.values())))
+    expressions = _OPT31_EXPRESSION_RE.findall(dynamic_text)
+    if (not expressions
+            or not all(_OPT31_NEEDS_EXPRESSION_RE.fullmatch(expr.strip())
+                       for expr in expressions)):
+        return False
+    if not any(_OPT31_NEEDS_RESULT_RE.search(expr) for expr in expressions):
+        return False
+    script = _OPT31_EXPRESSION_RE.sub("needs_result", run)
+    known_vars = (_opt31_env_keys(step) | _opt31_env_keys(job)
+                  | _opt31_env_keys(doc) | _OPT31_RUNNER_VARS)
+    for name in _OPT31_SHELL_VAR_RE.findall(script):
+        if name not in known_vars and not name.startswith(("GITHUB_", "RUNNER_")):
+            return False  # may come from an earlier step's $GITHUB_ENV
+    if (not _opt31_builtin_only(script)
+            or not _OPT31_NEEDS_CHECK_FAIL_RE.search(script)):
+        return False
+    return True
+
+
+def _opt31_early_setup(step: dict, step_if: str | None) -> bool:
+    uses = _uses(step)
+    if not _OPT31_EARLY_SETUP_RE.search(uses):
+        return False
+    # A setup already conditional on producer results does not run on the
+    # unsuccessful path this extension prices. Complex result conditions fail
+    # closed rather than being called unconditional.
+    return not (step_if and _OPT31_NEEDS_RESULT_RE.search(step_if))
+
+
 def _detect_opt31(doc: dict, raw: str) -> list[Hit]:
-    """An unconditional install/setup step whose tool is only consumed by a
-    LATER step gated on a `secrets.`/`env.` condition (catalog OPT31)."""
+    """Setup paid before a conditional consumer or a needs-result failure gate."""
     hits: list[Hit] = []
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
         steps = _steps_with_if(job)
+        result_checks = [
+            i for i, (step, step_if) in enumerate(steps)
+            if _opt31_needs_result_check(step, step_if, job, doc)
+        ]
+        if result_checks:
+            first_check = min(result_checks)
+            setup_names = [
+                _uses(step).split("@", 1)[0]
+                for step, step_if in steps[:first_check]
+                if _opt31_early_setup(step, step_if)
+            ]
+            if setup_names:
+                check = steps[first_check][0]
+                label = str(check.get("name") or "needs-result check")
+                line = (_line_of_in_job(raw, job_name, label)
+                        or _line_of_in_job(raw, job_name,
+                                           (_run(check).splitlines() or [""])[0].strip())
+                        or 1)
+                hits.append(Hit(
+                    line=line,
+                    affected_jobs=[job_name],
+                    evidence=(
+                        f"job `{job_name}` runs {', '.join(f'`{name}`' for name in setup_names)} "
+                        f"before needs-result check `{label}`, so an unsuccessful dependency "
+                        "pays checkout or toolchain setup before the check fails. Move the "
+                        "needs-only result check before checkout and toolchain setup while "
+                        "preserving its exact success predicate. Runner-minute effect: saving "
+                        "the affected setup compute on unsuccessful dependency runs; not sized "
+                        "until that run share and those setup steps are measured."
+                    ),
+                    match_text=job_name,
+                    snippet=_block_lines(raw, line),
+                ))
+                continue
         for i, (s, s_if) in enumerate(steps):
             if "if" in s or s_if is not None:
                 continue  # gated, on the step or on its enclosing group
