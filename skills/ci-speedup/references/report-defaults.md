@@ -643,6 +643,28 @@ pattern must add its own named minimum and contract entry rather than borrowing
 an unrelated global threshold.
 
 **Approval status:** awaiting owner approval.
+
+### `go-fixed-wait-thresholds`
+
+**Current value:** the measured OPT19 Go poll route needs at least two
+consistent wait intervals; the poll total, or the constant test-body sleep
+total, must account for at least 50% of the measured test (or package) time
+and 20% of the drilled long-pole job. The race-helper route needs at least
+three synchronous call sites that re-exec the test binary (`_OPT19_GO_MIN_INTERVALS`,
+`_OPT19_GO_MIN_TEST_SHARE`, `_OPT19_GO_MIN_JOB_SHARE`, and
+`_OPT19_GO_RACE_HELPER_MIN_SPAWNS`).
+
+**Report statements:** that a Go test is dominated by a fixed production wait,
+or that a race job repeatedly pays the race runtime's default helper-exit sleep.
+
+**Reason:** Repeated equal gaps plus both dominance tests distinguish a fixed
+wait from ordinary slow work. Three helper call sites avoid recommending a race
+option change for a one-off subprocess.
+
+**Proposed decision:** **Keep two intervals, 50%, 20%, and three helpers.**
+
+**Approval status:** awaiting owner approval.
+
 ### `saving-caps`
 
 **Current value:** modeled cache savings use at most 90% of the available cache
@@ -770,6 +792,15 @@ implementation lands.
     "decision": "gate-frequency-interval",
     "planned_sources": {
       "gate_frequency_contract.py:GATE_INTERVAL_Z": 1.96
+    }
+  },
+  "go-fixed-wait-thresholds": {
+    "decision": "go-fixed-wait-thresholds",
+    "sources": {
+      "collect_runs.py:_OPT19_GO_MIN_INTERVALS": 2,
+      "collect_runs.py:_OPT19_GO_MIN_JOB_SHARE": 0.2,
+      "collect_runs.py:_OPT19_GO_MIN_TEST_SHARE": 0.5,
+      "collect_runs.py:_OPT19_GO_RACE_HELPER_MIN_SPAWNS": 3
     }
   },
   "holds-up-threshold": {

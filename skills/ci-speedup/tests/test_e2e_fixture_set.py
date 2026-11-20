@@ -869,6 +869,259 @@ def test_runtime_typescript_loader_states_signed_or_unsized_runner_minute_effect
         assert "not sized because" not in finding["size_note"]
 
 
+def test_go_json_fixed_waits_on_the_long_pole_produce_opt19_but_irregular_work_stays_quiet(
+        monkeypatch, tmp_path):
+    """A repeated production poll interval, not merely a slow Go test, is OPT19."""
+    positive = tmp_path / "go-fixed-wait"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    responses_path = positive / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    base = datetime(2026, 1, 28, tzinfo=timezone.utc)
+    rows = [{"Time": (base + timedelta(seconds=offset)).isoformat(),
+             "Action": "output", "Package": "example/project/cli",
+             "Test": "TestHydrationWait", "Output": "waiting for hydration marker\n"}
+            for offset in (0, 60, 120, 180, 240, 300)]
+    rows.append({"Time": (base + timedelta(seconds=360)).isoformat(),
+                 "Action": "pass", "Package": "example/project/cli",
+                 "Test": "TestHydrationWait", "Elapsed": 360.0})
+    recorded["logs"]["1103"] = "\n".join([
+        "go test -json ./internal/cli", *(json.dumps(row) for row in rows)])
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+
+    run_root = tmp_path / "run-go-fixed-wait"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(positive, monkeypatch, run_root, max_runs=20)
+    findings = [row for row in doc["findings"] if row.get("pattern") == "OPT19"]
+    assert findings, "expected measured Go fixed-wait guidance"
+    finding = findings[0]
+    assert finding.get("go_wait_kind") == "poll-interval", finding
+    assert finding.get("go_fixed_wait_s") == 300.0, finding
+    assert "testing/synctest" in finding.get("fix_strategy", ""), finding
+    assert "runner-minute saving:" in finding.get("size_note", ""), finding
+    assert "Go Test Fixed Wait Dominance" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    negative = tmp_path / "go-irregular-work"
+    shutil.copytree(positive, negative)
+    negative_responses = negative / "responses.json"
+    recorded = json.loads(negative_responses.read_text(encoding="utf-8"))
+    for index, line in enumerate(recorded["logs"]["1103"].splitlines()):
+        if '"Action": "output"' in line:
+            row = json.loads(line)
+            row["Output"] = f"processed fixture batch {index}\n"
+            recorded["logs"]["1103"] = recorded["logs"]["1103"].replace(
+                line, json.dumps(row))
+    negative_responses.write_text(json.dumps(recorded), encoding="utf-8")
+    negative_root = tmp_path / "run-go-irregular-work"
+    negative_root.mkdir()
+    negative_doc, _negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT19"]
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
+_GO_MOD = "module example.invalid/project\n\ngo 1.24\n"
+_GO_SLEEP_TEST = """package cli
+
+import (
+\t"testing"
+\t"time"
+)
+
+const settle = 30 * time.Second
+
+func TestHydrationWait(t *testing.T) {
+\tstartFixture(t)
+\ttime.Sleep(settle)
+\ttime.Sleep(1 * time.Minute) // wait for the hydration marker
+\tassertHydrated(t)
+}
+"""
+_GO_SYNCTEST_TEST = _GO_SLEEP_TEST.replace(
+    "\tstartFixture(t)\n\ttime.Sleep(settle)\n\ttime.Sleep(1 * time.Minute) // wait for the hydration marker\n\tassertHydrated(t)\n",
+    "\tsynctest.Test(t, func(t *testing.T) {\n\t\tstartFixture(t)\n\t\ttime.Sleep(settle)\n"
+    "\t\ttime.Sleep(1 * time.Minute)\n\t\tassertHydrated(t)\n\t})\n")
+
+
+def _go_plain_log(*lines: str, start: str = "2026-01-28T00:15:20") -> str:
+    base = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+    out = []
+    for offset, text in lines:
+        stamp = (base + timedelta(seconds=offset)).strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+        out.append(f"{stamp} {text}")
+    return "\n".join(out)
+
+
+_GO_VERBOSE_SLEEP_LOG = [
+    (0, "##[group]Run go test -v ./..."), (0, "go test -v ./..."),
+    (1, "=== RUN   TestHydrationWait"),
+    (91, "--- PASS: TestHydrationWait (90.40s)"),
+    (92, "ok  \texample.invalid/project/internal/cli\t91.000s"),
+]
+
+
+def _write_go_package(root: Path, rel: str, name: str, source: str) -> None:
+    (root / "go.mod").write_text(_GO_MOD, encoding="utf-8")
+    pkg = root / rel
+    pkg.mkdir(parents=True, exist_ok=True)
+    (pkg / name).write_text(source, encoding="utf-8")
+
+
+def test_plain_go_test_output_and_static_test_sleeps_produce_opt19_but_synctest_stays_quiet(
+        monkeypatch, tmp_path):
+    """Ordinary `go test -v` output plus a `_test.go` read, no -json or marker."""
+    positive = tmp_path / "go-test-sleep"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    _write_go_package(positive, "internal/cli", "wait_test.go", _GO_SLEEP_TEST)
+    responses_path = positive / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["logs"]["1103"] = _go_plain_log(*_GO_VERBOSE_SLEEP_LOG)
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+
+    run_root = tmp_path / "run-go-test-sleep"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(positive, monkeypatch, run_root, max_runs=20)
+    findings = [row for row in doc["findings"] if row.get("pattern") == "OPT19"]
+    assert findings, "expected Go test-sleep guidance from plain go test output"
+    finding = findings[0]
+    assert finding.get("go_wait_kind") == "test-sleep", finding
+    assert finding.get("go_fixed_wait_s") == 90.0, finding
+    assert "internal/cli/wait_test.go" in finding["evidence"], finding
+    assert "testing/synctest" in finding["fix_strategy"], finding
+    assert "production default unchanged" in finding["fix_strategy"], finding
+    assert "runner-minute saving:" in finding["size_note"], finding
+    assert "Go Test Fixed Wait Dominance" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    negative = tmp_path / "go-synctest"
+    shutil.copytree(positive, negative)
+    (negative / "internal/cli/wait_test.go").write_text(_GO_SYNCTEST_TEST, encoding="utf-8")
+    negative_root = tmp_path / "run-go-synctest"
+    negative_root.mkdir()
+    negative_doc, _report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"] if row.get("pattern") == "OPT19"]
+    assert [check for check in negative_checks if not check.skipped and not check.ok] == []
+
+
+def _go_detect(root: Path, log: str, job_s: float = 400.0) -> list[dict]:
+    fact = cr._opt19_go_wait_fact(log, job_s)
+    entry = {"job": "test", "workflow_file": ".github/workflows/ci.yml",
+             "duration_s": job_s, "html_url": "https://example.invalid/job/1",
+             **({"go_fixed_wait": fact} if fact else {})}
+    return cr._detect_opt19_go_waits([entry], {".github/workflows/ci.yml": 100}, 0, root)
+
+
+def test_go_package_line_bounds_serial_test_sleeps_without_verbose_output(tmp_path):
+    _write_go_package(tmp_path, "internal/cli", "wait_test.go", _GO_SLEEP_TEST)
+    log = _go_plain_log((0, "##[group]Run go test ./..."), (0, "go test ./..."),
+                        (92, "ok  \texample.invalid/project/internal/cli\t91.000s"))
+    findings = _go_detect(tmp_path, log)
+    assert [f.get("go_wait_kind") for f in findings] == ["test-sleep"], findings
+    assert findings[0]["go_fixed_wait_s"] == 90.0
+    assert "at most 150.0/month" in findings[0]["size_note"], findings[0]
+    # A cached package ran nothing; a -run filter hides which tests ran.
+    cached = log.replace("\t91.000s", "\t(cached)")
+    assert _go_detect(tmp_path, cached) == []
+    filtered = log.replace("go test ./...", "go test -run TestOther ./...")
+    assert _go_detect(tmp_path, filtered) == []
+
+
+@pytest.mark.parametrize("body", [
+    "\tt.Parallel()\n\ttime.Sleep(settle)\n\ttime.Sleep(1 * time.Minute)\n",
+    "\tfor i := 0; i < 3; i++ {\n\t\ttime.Sleep(settle)\n\t}\n\ttime.Sleep(1 * time.Minute)\n",
+    "\tgo func() {\n\t\ttime.Sleep(settle)\n\t\ttime.Sleep(1 * time.Minute)\n\t}()\n",
+    "\tif testing.Short() {\n\t\tt.Skip(\"slow\")\n\t}\n\ttime.Sleep(settle)\n\ttime.Sleep(1 * time.Minute)\n",
+    "\ttime.Sleep(interval)\n\ttime.Sleep(interval)\n\ttime.Sleep(interval)\n",
+    "\tgo time.Sleep(settle)\n\tgo time.Sleep(1 * time.Minute)\n",
+    "\tselect {\n\tcase <-done:\n\tcase <-time.After(2 * time.Minute):\n\t\tt.Fatal(\"timeout\")\n\t}\n",
+], ids=["parallel", "loop", "goroutine", "skip", "var-interval", "go-stmt", "select-timeout"])
+def test_go_test_sleep_near_misses_stay_quiet(tmp_path, body):
+    source = ("package cli\n\nimport (\n\t\"testing\"\n\t\"time\"\n)\n\n"
+              "const settle = 30 * time.Second\n\nvar interval = 30 * time.Second\n\n"
+              "func TestHydrationWait(t *testing.T) {\n" + body + "}\n")
+    _write_go_package(tmp_path, "internal/cli", "wait_test.go", source)
+    assert _go_detect(tmp_path, _go_plain_log(*_GO_VERBOSE_SLEEP_LOG)) == []
+
+
+def test_plain_verbose_go_output_measures_poll_intervals_from_runner_timestamps():
+    lines = [(0, "##[group]Run go test -v ./internal/cli"), (0, "=== RUN   TestSeedWait")]
+    lines += [(1 + 60 * n, f"    seed_test.go:41: waiting for seed (attempt {n})")
+              for n in range(6)]
+    lines += [(362, "--- PASS: TestSeedWait (361.50s)"),
+              (363, "ok  \texample.invalid/project/internal/cli\t362.000s")]
+    fact = cr._opt19_go_wait_fact(_go_plain_log(*lines), 400.0)
+    assert fact and fact["poll"], fact
+    assert fact["poll"]["fixed_wait_s"] == 300.0
+    assert fact["poll"]["package"] == "example.invalid/project/internal/cli"
+
+
+_GO_HELPER_TEST = """package proc
+
+import (
+\t"os"
+\t"os/exec"
+\t"testing"
+)
+
+func helperCommand(t *testing.T, args ...string) *exec.Cmd {
+\tcs := append([]string{"-test.run=TestHelperProcess", "--"}, args...)
+\tcmd := exec.Command(os.Args[0], cs...)
+\tcmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1")
+\treturn cmd
+}
+
+func TestEcho(t *testing.T) {
+\tif _, err := helperCommand(t, "echo").Output(); err != nil {
+\t\tt.Fatal(err)
+\t}
+}
+
+func TestExit(t *testing.T) {
+\tif err := helperCommand(t, "exit").Run(); err == nil {
+\t\tt.Fatal("expected failure")
+\t}
+\tout, _ := helperCommand(t, "stderr").CombinedOutput()
+\t_ = out
+}
+"""
+_GO_RACE_LOG = [(0, "##[group]Run go test -race ./..."), (0, "go test -race ./..."),
+                (30, "ok  \texample.invalid/project/internal/proc\t29.000s")]
+
+
+def test_go_race_helper_reexecs_from_source_produce_unsized_opt19(tmp_path):
+    _write_go_package(tmp_path, "internal/proc", "proc_test.go", _GO_HELPER_TEST)
+    findings = _go_detect(tmp_path, _go_plain_log(*_GO_RACE_LOG))
+    assert [f.get("go_wait_kind") for f in findings] == ["race-helper-exit"], findings
+    finding = findings[0]
+    assert finding["go_race_helper_sites"] == 3
+    assert finding["runner_min_saving"] is None
+    assert "runner-minute saving: unsized (" in finding["size_note"]
+    assert "only to the environment of the synchronous" in finding["fix_strategy"]
+    assert "Preserve every existing `GORACE` option" in finding["fix_strategy"]
+
+
+@pytest.mark.parametrize("variant", ["no-race", "child-override", "env-override", "async"])
+def test_go_race_helper_near_misses_stay_quiet(tmp_path, variant):
+    source, log = _GO_HELPER_TEST, _go_plain_log(*_GO_RACE_LOG)
+    if variant == "no-race":
+        log = log.replace(" -race", "")
+    elif variant == "child-override":
+        source = source.replace('"GO_WANT_HELPER_PROCESS=1"',
+                                '"GO_WANT_HELPER_PROCESS=1", "GORACE=atexit_sleep_ms=0"')
+    elif variant == "env-override":
+        log = log.replace("go test -race ./...\n",
+                          "go test -race ./...\n2026-01-28T00:15:20.0000000Z   GORACE: "
+                          "atexit_sleep_ms=0\n", 1)
+    else:
+        source = source.replace(".Output()", ".Start()").replace(
+            ".Run()", ".Start()").replace(".CombinedOutput()", ".Start()")
+    _write_go_package(tmp_path, "internal/proc", "proc_test.go", source)
+    assert _go_detect(tmp_path, log) == []
+
+
 def test_slow_isolated_go_cases_route_to_parallel_test_guidance(monkeypatch, tmp_path):
     """A measured serial Go test with isolated cases extends OPT88 through collect."""
     log = """\
