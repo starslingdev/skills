@@ -794,3 +794,24 @@ def test_unread_classic_protection_keeps_advisory_route_unconfirmed(
     assert rulesets_unread["required_checks_classic_read"] is True
     assert rulesets_unread["required_checks_rulesets_read"] is False
     assert rulesets_unread["required_checks_advice_complete"] is False
+
+
+def test_push_lane_check_accepts_a_non_pr_group_ranked_below_the_render_cap(
+        tmp_path: Path):
+    # A busy repository can rank a workflow_dispatch-only hygiene group below the
+    # rendered-group cap. That group is not rendered, so it cannot omit its tag.
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps({
+        "default_branch_push_lane": {"status": "complete", "sample_cap": 10},
+        "findings": [{"pattern": "OPT1", "workflow_lanes": ["workflow_dispatch"]}],
+    }), encoding="utf-8")
+    capped = (
+        "<!-- ci-speedup:default-branch-push-lane -->\nAfter merge, not a merge gate\n"
+        "\n---\n> [!TIP]\n> **+4 more hygiene pattern(s) (13 occurrence(s)) not "
+        "shown** - lower bill saving, kept in the findings JSON so nothing is dropped.\n")
+    check = vr.check_default_branch_push_lane_isolated(capped, findings_path)
+    assert "workflow dispatch lane only tag" not in check.detail, check.detail
+
+    uncapped = capped.split("> [!TIP]", 1)[0]
+    check = vr.check_default_branch_push_lane_isolated(uncapped, findings_path)
+    assert "workflow dispatch lane only tag" in check.detail

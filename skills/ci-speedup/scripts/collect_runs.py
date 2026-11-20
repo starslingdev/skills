@@ -17802,6 +17802,58 @@ def _supersede_static_opt36(findings: list[dict[str, Any]],
         "measured OPT36 schedule-burn finding for the same workflow")
 
 
+_OPT107_SIDE_EFFECT_STEP_RE = _re.compile(
+    r"(\b(npm|pnpm|yarn|cargo|twine|poetry|gem)\s+(publish|upload|push)\b|"
+    r"\bdocker\s+push\b|\bgit\s+push\b|\bgh\s+release\b|\bdeploy\b|"
+    r"\bterraform\s+apply\b|\bkubectl\s+apply\b|\bhelm\s+(upgrade|install)\b|"
+    r"\bmigrat)", _re.IGNORECASE)
+_OPT107_SIDE_EFFECT_USES_RE = _re.compile(
+    r"(deploy|release|publish|pages|docker/build-push|aws-actions/|azure/webapps)",
+    _re.IGNORECASE)
+
+
+def _opt107_side_effect_job_names(wf_doc: dict[str, Any]) -> set[str]:
+    """Lower-cased keys and display names of jobs with commit-specific side effects.
+
+    A job stays on its push event (and out of OPT107's priced validation work)
+    when its key or name reads as release/deploy work, when it targets a
+    deployment `environment`, or when a step runs a publish, push, deploy or
+    migration command or action.  Broad on purpose: an excluded job only lowers
+    the credited saving."""
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    if not isinstance(jobs, dict):
+        return set()
+    names: set[str] = set()
+    for key, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        labels = {str(key)}
+        if isinstance(job.get("name"), str):
+            labels.add(job["name"])
+        side_effect = (any(_RELEASE_LIKE_RE.search(label) for label in labels)
+                       or job.get("environment") not in (None, "", {}))
+        steps = job.get("steps") if isinstance(job.get("steps"), list) else []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            run, uses = step.get("run"), step.get("uses")
+            if ((isinstance(run, str) and _OPT107_SIDE_EFFECT_STEP_RE.search(run))
+                    or (isinstance(uses, str)
+                        and _OPT107_SIDE_EFFECT_USES_RE.search(uses))):
+                side_effect = True
+        if side_effect:
+            names.update(label.strip().lower() for label in labels if label.strip())
+    return names
+
+
+def _opt107_job_is_side_effect(job_name: str, side_effect_names: set[str]) -> bool:
+    """Match a runtime job name (matrix `name (a, b)` or reusable `caller / job`)."""
+    name = job_name.strip().lower()
+    return any(name == label or name.startswith(label + " (")
+               or name.startswith(label + " / ")
+               for label in side_effect_names)
+
+
 def _detect_opt107_default_branch_batching(
     wf_path: str,
     all_runs: list[dict[str, Any]],
@@ -17857,6 +17909,21 @@ def _detect_opt107_default_branch_batching(
         return []
 
     eligible_run_ids = {str(run.get("id") or "") for _start, _end, run in spans}
+    # Deploy, release, publish and migration jobs stay on their push event, so a
+    # mixed workflow prices only its repeatable validation jobs.
+    side_effect_names = _opt107_side_effect_job_names(wf_doc)
+    excluded_jobs: set[str] = set()
+    validation_jobs_by_run: dict[str, list[dict[str, Any]]] = {}
+    for run_id, run_jobs in push_jobs_by_run.items():
+        kept_jobs = []
+        for job in run_jobs:
+            job_name = str(job.get("name") or "")
+            if _opt107_job_is_side_effect(job_name, side_effect_names):
+                excluded_jobs.add(job_name)
+            else:
+                kept_jobs.append(job)
+        validation_jobs_by_run[run_id] = kept_jobs
+    push_jobs_by_run = validation_jobs_by_run
     compute_by_run: dict[str, float] = {}
     for run_id, jobs in push_jobs_by_run.items():
         if run_id not in eligible_run_ids:
@@ -17904,7 +17971,10 @@ def _detect_opt107_default_branch_batching(
         f"{credited_n} run(s) have their own readable compute "
         f"({mean_credited_min:.1f} runner-min/run; {timed_n} timed run(s) total); "
         f"runner-minute effect: −{credited:g} runner-min in the sampled window "
-        "(saving).")
+        "(saving)." + (
+            f" {len(excluded_jobs)} side-effect job(s) "
+            f"({', '.join(sorted(excluded_jobs))}) stay on the push event and are "
+            "not priced." if excluded_jobs else ""))
     measured = _measured_evidence(
         ["Workflow", "Batchable pushes", "Measured compute/run",
          "Credited removals", "Runner-minute effect"],
@@ -17937,6 +18007,7 @@ def _detect_opt107_default_branch_batching(
     finding["batchable_sample_count"] = len(spans)
     finding["batchable_run_share"] = round(share, 4)
     finding["batch_window_s"] = _OPT107_BATCH_WINDOW_S
+    finding["excluded_side_effect_jobs"] = sorted(excluded_jobs)
     finding["measured_signal"] = (
         "default-branch pushes replaced before or within one hour of completion, "
         "less conservative hourly replacements, x each credited run's own completed "

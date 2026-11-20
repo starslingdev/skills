@@ -3577,7 +3577,9 @@ quiet.
 
 **Sizing**: runner-minute effect is a saving (negative usage): the sum of each
 credited removable run's own completed-job compute, after reserving conservative
-hourly replacement slots. Developer merge wait is unchanged because the
+hourly replacement slots. Jobs with commit-specific side effects (a deployment
+`environment`, a deploy/release/publish name, or a publish, push, deploy or
+migration step) stay on their push event and are left out of that compute. Developer merge wait is unchanged because the
 pull-request gate stays unchanged. The report states the signed runner-minute
 effect for the fetched sample window. It deliberately leaves the monthly field
 unsized because a run-list page does not prove a complete month.
