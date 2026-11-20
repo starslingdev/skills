@@ -13,6 +13,7 @@ Run from the repo root:
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import subprocess
@@ -3544,8 +3545,48 @@ def _ctx(event_name, *, ref, head_ref="", ref_name="", default_branch="main"):
     return {"github": {
         "event_name": event_name, "ref": ref, "head_ref": head_ref,
         "ref_name": ref_name or ref.rsplit("/", 1)[-1],
-        "event": {"repository": {"default_branch": default_branch}},
+        "run_id": "run-1", "workflow": "CI",
+        "event": {"repository": {"default_branch": default_branch},
+                  "pull_request": {"number": 7}},
     }}
+
+
+def _gha_interpolate(template: str, ctx: dict) -> str:
+    def replace(match):
+        body = match.group(1).strip()
+        if "||" in body:
+            options = [part.strip() for part in body.split("||")]
+            return str(next((_gha_resolve(part, ctx) for part in options
+                             if _gha_resolve(part, ctx)), ""))
+        return str(_gha_resolve(body, ctx))
+
+    return re.sub(r"\$\{\{\s*(.*?)\s*}}", replace, template)
+
+
+def test_opt46_per_run_non_pr_group_preserves_each_required_validation():
+    yaml = pytest.importorskip("yaml")
+    recipes = []
+    for block in _yaml_blocks(_catalog_section("OPT46")):
+        conc = (yaml.safe_load(block) or {}).get("concurrency")
+        if isinstance(conc, dict) and "github.run_id" in str(conc.get("group", "")):
+            recipes.append(conc)
+
+    assert len(recipes) == 1, "OPT46 needs one copy-pasteable per-run escape hatch"
+    recipe = recipes[0]
+    assert "github.event_name == 'pull_request'" in recipe["cancel-in-progress"]
+
+    pr_a = _ctx("pull_request", ref="refs/pull/7/merge", head_ref="topic")
+    pr_b = _ctx("pull_request", ref="refs/pull/7/merge", head_ref="topic")
+    pr_b["github"]["run_id"] = "run-2"
+    assert _gha_interpolate(recipe["group"], pr_a) == _gha_interpolate(
+        recipe["group"], pr_b)
+
+    push_a = _ctx("push", ref="refs/heads/main", ref_name="main")
+    push_a["github"]["event"]["pull_request"] = {}
+    push_b = copy.deepcopy(push_a)
+    push_b["github"]["run_id"] = "run-2"
+    assert _gha_interpolate(recipe["group"], push_a) != _gha_interpolate(
+        recipe["group"], push_b)
 
 
 def _cancel_predicates() -> dict[str, str]:

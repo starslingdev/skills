@@ -1444,14 +1444,15 @@ def test_opt46_pending_run_replacement_recipe_has_a_per_run_escape_hatch():
     assert finding["runner_min_saving"] > 0
     assert "runner-minute (bill) only" in finding["size_note"]
     assert "one pending run" in guardrail
+    assert "event-and-PR-number" in guardrail
     assert "`github.run_id`" in guardrail
 
     safe = {
         "on": {"push": {}, "pull_request": {}},
         "name": "CI",
         "concurrency": {
-            "group": "${{ github.workflow }}-${{ github.event_name == "
-                     "'pull_request' && github.head_ref || github.run_id }}",
+            "group": "${{ github.workflow }}-${{ github.event_name }}-"
+                     "${{ github.event.pull_request.number || github.run_id }}",
             "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
         },
     }

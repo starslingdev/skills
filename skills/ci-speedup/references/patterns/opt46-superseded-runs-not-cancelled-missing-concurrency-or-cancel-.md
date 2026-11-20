@@ -65,10 +65,13 @@ but give non-PR events a per-run group:
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.run_id }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: >-
+    ${{ github.event_name == 'pull_request'
+    && github.head_ref != github.event.repository.default_branch }}
 ```
 
-This preserves PR supersession by branch while making each `push`,
+This preserves PR supersession by pull-request number while making each `push`,
 `merge_group`, `schedule`, tag, and manual run independent. Do not use this key
 for the widened feature-branch-push recipe below: unique push groups cannot
 cancel superseded feature-branch runs, so that recipe and an every-commit
@@ -105,9 +108,9 @@ Keep the continuation lines at the **same indent** as `${{` (as above). YAML fol
 **Real-world example (2026-05)**: a `Pre-merge` workflow triggered on `push` with `branches-ignore: [main]` and had no top-level concurrency block. 62% of branches had ≥2 runs in a 30-day window. Adding the **widened** block above (this is a Flavor A / push-triggered case) saved an estimated 70-125 min/mo of runner compute.
 
 **Public evidence**: [OpenClaw Crabbox pull request #2286](https://github.com/openclaw/crabbox/pull/2286)
-keeps pull-request runs grouped by branch while adding the run ID to non-PR
-groups, so default-branch and manual validations cannot replace one another in
-the pending slot.
+groups by event and pull-request number, with the run ID as the fallback for
+non-PR events, so default-branch and manual validations cannot replace one
+another in the pending slot.
 
 **Tier-2 render note**: When the detector can prove overlap from real run timestamps, OPT46 is eligible for the first-class runner-minute section only if the finding is stamped `sizing_basis=measured` and carries a `tier2_neutrality` certificate. Modeled or uncertified instances stay in the residual "Also noticed" appendix.
 

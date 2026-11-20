@@ -18430,9 +18430,9 @@ def _detect_opt46_superseded_runs(
               "PENDING-RUN SAFETY: GitHub keeps at most one pending run in a "
               "concurrency group, so a third arrival replaces the second pending run "
               "even when cancellation is disabled. If every non-PR commit must be "
-              "validated, use the catalog's per-run non-PR group key with "
-              "`github.run_id`; do not use the widened cancellation recipe for those "
-              "protected runs."))
+              "validated, use the catalog's event-and-PR-number group with "
+              "`github.run_id` as the non-PR fallback; do not use the widened "
+              "cancellation recipe for those protected runs."))
     f = _new_finding(
         "OPT46", "MEDIUM", title, wf_path, "", evidence,
         "superseded-runs-not-cancelled-missing-concurrency-or-cancel-",

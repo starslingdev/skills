@@ -37,7 +37,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
-- **2026-11-20** — Warn that a concurrency group retains only one pending run, so a third default-branch validation can replace the second even with cancellation disabled, and offer a per-run non-PR group key when every commit must be validated (#421).
+- **2026-11-20** — Warn that a concurrency group retains only one pending run, so a third default-branch validation can replace the second even with cancellation disabled, and offer an event-and-PR-number group with a per-run non-PR fallback when every commit must be validated (#421).
 
 - **2026-11-20** — A residual-appendix finding group holding a finding that runs only off pull requests (release, schedule, `workflow_dispatch`, a tag or default-branch push) now stays visible past the residual-appendix group cap, so its lane disclosure (`... lane only`) cannot be dropped when higher-saving groups fill the cap. A busy repository whose OPT107 findings outrank a `workflow_dispatch`-only group no longer loses that group's lane tag (#406).
 
