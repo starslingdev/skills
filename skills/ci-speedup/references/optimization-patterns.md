@@ -3427,35 +3427,82 @@ title_template: "Multi-Language Matrix Without Path Filter"
 - **Activation fidelity**: only flag when the workflow actually runs on every PR — suppress when the `pull_request:` trigger is `types:`-gated to a non-lifecycle activity (e.g. `types: [labeled]`), since the legs then don't run on a normal PR. (Shared `_pr_trigger_runs_every_pr` in `scan.py`; see OPT33.)
 - **Measured admission**: for a per-language job, require an explicit complete input map (for example, a reused scheduled-change action's `paths:` contract), then compare the exact base and head revisions recorded on each sampled run. Credit only the affected job's measured billed-equivalent minutes when every changed path is inside the workflow's declared input universe and outside that language's inputs. A missing map, stale run identity, unknown input, incomplete comparison, failed lookup, or unreadable job time receives no saving credit.
 
-**Fix**: Derive each lane's complete input set from the repository, then select jobs from the exact pull-request comparison. Run every language job when the lookup is missing, incomplete, capped, malformed, or contains an input whose owner is unknown. A paths-filter pre-job is sufficient for simple repositories; a conservative owner-selection script is safer where languages share generated files or fixtures. Example:
+**Fix**: Derive each lane's complete input set from the repository, then select jobs from the exact pull-request comparison. Run every language job when the lookup is missing, incomplete, capped, malformed, or contains an input whose owner is unknown. A lane may be skipped only when the selector finished and proved that lane untouched. Example (fail-open selector, gated lanes, one aggregate required check):
 
 ```yaml
 jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      js: ${{ steps.filter.outputs.js }}
-      python: ${{ steps.filter.outputs.python }}
+      # An empty output (selector failed or never set it) means "run".
+      go: ${{ steps.select.outputs.go || 'true' }}
+      rust: ${{ steps.select.outputs.rust || 'true' }}
+    steps:
+      - id: select
+        continue-on-error: true
+        uses: actions/github-script@<sha>
+        with:
+          script: |
+            const owners = {
+              go: [/\.go$/, /^go\.(mod|sum|work)$/],
+              rust: [/\.rs$/, /^Cargo\.(toml|lock)$/, /^rust-toolchain/],
+            };
+            const shared = [/^testdata\//, /^\.github\/workflows\/ci\.yml$/];
+            const inert = [/^docs\//, /\.md$/];  // proven to feed no lane
+            const hit = (patterns, path) => patterns.some((re) => re.test(path));
+            const run = { go: true, rust: true };   // default: run everything
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo, pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const paths = files.flatMap((f) => [f.filename, f.previous_filename])
+              .filter(Boolean);
+            const known = paths.every((p) => hit(shared, p) || hit(inert, p)
+              || Object.values(owners).some((patterns) => hit(patterns, p)));
+            // listFiles stops at 3000 files: treat a capped or empty list as unknown.
+            if (files.length > 0 && files.length < 3000 && known
+                && !paths.some((p) => hit(shared, p))) {
+              run.go = paths.some((p) => hit(owners.go, p));
+              run.rust = paths.some((p) => hit(owners.rust, p));
+            }
+            core.setOutput('go', String(run.go));
+            core.setOutput('rust', String(run.rust));
+
+  go-contract:
+    needs: changes
+    # Skip only when the selector succeeded AND proved Go untouched.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            js: ['**/*.js', '**/*.ts', '**/*.tsx', 'package.json', 'package-lock.json']
-            python: ['**/*.py', 'pyproject.toml', 'requirements*.txt']
+      - uses: actions/setup-go@<sha>
+      - run: go test ./...
 
-  codeql:
+  rust-contract:
     needs: changes
-    strategy:
-      matrix:
-        language: [javascript, python]
-    if: |
-      (matrix.language == 'javascript' && needs.changes.outputs.js == 'true') ||
-      (matrix.language == 'python'     && needs.changes.outputs.python == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust != 'false') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha>
+      - uses: dtolnay/rust-toolchain@<sha>
+      - run: cargo test --locked
+
+  ci-ok:  # the required status check
+    needs: [go-contract, rust-contract]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          for result in $RESULTS; do
+            case "$result" in success|skipped) ;; *) echo "lane: $result"; exit 1 ;; esac
+          done
 ```
 
-Caveat: GitHub renders skipped matrix legs and jobs as "skipped" (not "passed"). Keep an unchanged required aggregate check, or deliberately update branch protection so a language-specific required check is not left expected forever. Document the chosen approach in the workflow.
+`dorny/paths-filter` can replace the script when its filters list every input of each lane; give its step `continue-on-error: true` and its job outputs the same `|| 'true'` default. For a scanner matrix, a job-level `if:` cannot read `matrix`: emit the language list from the selector (the full list on any failure) and use `matrix: { language: ${{ fromJSON(needs.changes.outputs.languages) }} }`.
+
+Required checks: a job skipped by its own `if:` reports **Success** to branch protection under its own name, so a gated lane that stays a required check still lets an unrelated pull request merge. That is also why a plain `if: needs.changes.outputs.go == 'true'` is unsafe: when the selector fails, the lane is skipped and its required check reports Success with nothing validated, so the lane condition above runs on any selector result other than a proven `false`. A matrix leg left out of the matrix reports no check at all, so a required `codeql (python)` would stay expected forever; require the `ci-ok` aggregate (which fails on any failed or cancelled lane) instead of the per-leg names. Do not move this gating into a workflow-level `paths:` filter: a workflow that never starts leaves its required checks pending.
 
 **Public evidence**: [OpenClaw PR #193865](https://github.com/openclaw/openclaw/pull/193865) adds fail-open pull-request owner selection for independent TypeScript and Rust contract proofs. Exact, complete comparisons may omit an unaffected owner; deleted, unknown, malformed, capped, or failed comparisons retain both jobs.
 

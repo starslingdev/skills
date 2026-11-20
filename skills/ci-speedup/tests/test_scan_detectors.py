@@ -2020,6 +2020,47 @@ jobs:
     assert "go toolchain" in finding["evidence"]
 
 
+def _opt39_recipe_jobs_yaml() -> str:
+    text = (_SKILL_DIR / "references" / "patterns"
+            / "opt39-multi-language-matrix-without-path-filter.md").read_text(
+                encoding="utf-8")
+    fix = text[text.index("**Fix**:"):]
+    start = fix.index("```yaml\n") + len("```yaml\n")
+    return fix[start:fix.index("\n```", start)]
+
+
+def test_opt39_recipe_example_fails_open_and_counts_as_a_path_gate(tmp_path: Path):
+    """The catalog's own fix must be safe and must silence the finding.
+
+    Each lane runs unless the selector succeeded and proved it untouched, and a
+    repository that adopts the example verbatim is recognized as gated.
+    """
+    jobs = _opt39_recipe_jobs_yaml()
+    lane_conditions = re.findall(r"^    if: (.+)$", jobs, re.M)
+    lane_conditions = [c for c in lane_conditions if "needs.changes" in c]
+    assert len(lane_conditions) == 2
+    for condition in lane_conditions:
+        assert "!cancelled()" in condition
+        assert "needs.changes.result != 'success'" in condition
+        assert "!= 'false'" in condition
+    assert "|| 'true'" in jobs
+    assert "continue-on-error: true" in jobs
+
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    workflow = "name: CI\non:\n  pull_request:\n" + jobs + "\n"
+    (path / "ci.yml").write_text(workflow, encoding="utf-8")
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+    # Control: the same lanes without their gates are the waste OPT39 reports.
+    ungated = re.sub(r"^    if: \$\{\{ !cancelled\(\).*\n", "", workflow, flags=re.M)
+    assert ungated != workflow
+    (path / "ci.yml").write_text(ungated, encoding="utf-8")
+    flagged = [f for f in _scan(tmp_path)["findings"] if f.get("pattern") == "OPT39"]
+    assert sorted(j for f in flagged for j in f["affected_jobs"]) == [
+        "go-contract", "rust-contract"]
+
+
 def test_opt39_per_language_job_with_change_gate_stays_quiet(tmp_path: Path):
     workflow = """
 name: Go contract
