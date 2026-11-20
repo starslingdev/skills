@@ -9136,12 +9136,29 @@ _OPT113_TRANSFORM_RE = re.compile(
 _OPT113_GO_BUILD_RE = re.compile(
     r"exec\.Command(?:Context)?\([^\n)]{0,500}?['\"]go['\"]\s*,"
     r"[^\n)]{0,500}?['\"]build['\"][^\n)]{0,500}?['\"]-o['\"]\s*,\s*"
-    r"(?P<output>[A-Za-z_]\w*)")
+    r"(?P<output>[A-Za-z_]\w*)(?=\s*[,)])")
 _OPT113_EXECUTABLE_ASSIGN_RE = re.compile(
-    r"(?P<input>[A-Za-z_]\w*)\s*,\s*[A-Za-z_]\w*\s*:=\s*"
+    r"(?P<input>[A-Za-z_]\w*)\s*,\s*[A-Za-z_]\w*\s*:?=\s*"
     r"os\.Executable\s*\(\s*\)")
-_OPT113_FIXTURE_NAME_RE = re.compile(
-    r"(?:fixture|controller|payload|archive|bundle)", re.I)
+_OPT113_FUNC_RE = re.compile(
+    r"(?m)^func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(")
+_OPT113_ASSIGN_RE = re.compile(
+    r"(?m)^[ \t]*(?P<names>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:?=\s*"
+    r"(?P<rhs>[^\n]*)")
+# The real binary is itself the contract: its format headers, a signature over
+# it, or running it. A byte fixture cannot stand in, so such a file withholds.
+_OPT113_METADATA_RE = re.compile(
+    r"['\"]debug/(?:elf|macho|pe|buildinfo|plan9obj)['\"]"
+    r"|\b(?:elf|macho|pe|buildinfo)\.(?:Open|NewFile|Read\w*)\s*\("
+    r"|\bVerify\w*\s*\(|\b(?:codesign|signtool|notarytool|cosign|sigstore)\b"
+    r"|\bexec\.Command\s*\(\s*(?![\"`])"
+    r"|\bexec\.CommandContext\s*\([^,\n]*,\s*(?![\"`])"
+    r"|\b(?:os\.StartProcess|syscall\.Exec)\s*\(")
+_OPT113_MODE_ASSERT_RE = re.compile(
+    r"\b(?:Mode|Perm)\s*\(\s*\)[^\n]*(?:&|==|!=)")
+_OPT113_DIRECT_SUM_RE = (
+    r"\b(?:sha1|sha256|sha512|md5|crc32|crc64|fnv)\."
+    r"(?:Sum(?:224|256|384|512)?|Checksum\w*)\s*\(\s*{src}\b")
 
 
 def _opt113_without_comments(text: str) -> str:
@@ -9154,31 +9171,72 @@ def _opt113_without_comments(text: str) -> str:
     return re.sub(r"(?m)//.*$", blank, text)
 
 
-def _opt113_origin(text: str) -> tuple[str, int] | None:
-    for executable in _OPT113_EXECUTABLE_ASSIGN_RE.finditer(text):
-        input_name = executable.group("input")
-        suffix = text[executable.end():]
-        next_function = re.search(r"(?m)^func\s+", suffix)
-        scope = suffix[:next_function.start()] if next_function else suffix
-        # A direct byte read establishes the flow. Otherwise accept a named
-        # fixture helper/variable only when it returns the executable; that
-        # covers helper-based archive builders without treating an unrelated
-        # executable metadata check plus a small archive test as one flow.
-        if re.search(
-                rf"\bos\.(?:Open|ReadFile)\s*\(\s*{re.escape(input_name)}\b",
-                scope):
-            return "the linked Go test executable", executable.start()
-        prefix = text[:executable.start()]
-        function = list(re.finditer(r"\bfunc\s+(?P<name>[A-Za-z_]\w*)\s*\(", prefix))
-        function_name = function[-1].group("name") if function else ""
-        if (_OPT113_FIXTURE_NAME_RE.search(input_name + " " + function_name)
-                and re.search(rf"\breturn\s+{re.escape(input_name)}\b",
-                              scope)):
-            return "the linked Go test executable", executable.start()
-    for built in _OPT113_GO_BUILD_RE.finditer(text):
-        output = re.escape(built.group("output"))
-        if re.search(rf"\bos\.(?:Open|ReadFile)\s*\(\s*{output}\b", text):
-            return "a binary built by the test", built.start()
+def _opt113_functions(text: str) -> list[tuple[str, int, str]]:
+    starts = list(_OPT113_FUNC_RE.finditer(text))
+    return [(m.group("name"), m.start(),
+             text[m.start():starts[i + 1].start() if i + 1 < len(starts) else len(text)])
+            for i, m in enumerate(starts)]
+
+
+def _opt113_flow(text: str) -> tuple[str, int] | None:
+    """Trace the oversized bytes into an archive, compressor or hash.
+
+    A finding needs one function that (1) opens or reads the linked test
+    executable — directly, via a helper that returns it, or a `go build -o`
+    output built in that function — and (2) passes those exact bytes into a
+    writer created by an archive/compression/hash constructor (or a direct
+    digest call). Anything the read cannot tie together withholds. A file that
+    inspects format headers, verifies a signature, executes a binary, or
+    asserts a file mode withholds too: there the real binary is the contract.
+    """
+    if _OPT113_METADATA_RE.search(text):
+        return None
+    functions = _opt113_functions(text)
+    helpers: set[str] = set()
+    for name, _start, body in functions:
+        for exe in _OPT113_EXECUTABLE_ASSIGN_RE.finditer(body):
+            if re.search(rf"\breturn\s+{re.escape(exe.group('input'))}\s*(?:,|$)",
+                         body, re.M):
+                helpers.add(name)
+    for _name, start, body in functions:
+        origins: list[tuple[str, str]] = []
+        # The whole argument must be the origin: `exe + ".sha256"` or
+        # `filepath.Join(filepath.Dir(exe), ...)` names a different file.
+        origins += [(re.escape(m.group("input")) + r"\s*\)", "the linked Go test executable")
+                    for m in _OPT113_EXECUTABLE_ASSIGN_RE.finditer(body)]
+        origins += [(re.escape(h) + r"\s*\([^()\n]*\)\s*\)", "the linked Go test executable")
+                    for h in sorted(helpers)]
+        origins += [(re.escape(m.group("output")) + r"\s*\)", "a binary built by the test")
+                    for m in _OPT113_GO_BUILD_RE.finditer(body)]
+        if not origins:
+            continue
+        sources: list[tuple[str, int, str]] = []
+        sinks: set[str] = set()
+        for assign in _OPT113_ASSIGN_RE.finditer(body):
+            first = assign.group("names").split(",")[0].strip()
+            rhs = assign.group("rhs")
+            for expr, label in origins:
+                if re.match(rf"os\.(?:Open|ReadFile)\s*\(\s*{expr}", rhs):
+                    sources.append((first, assign.start("names"), label))
+                    break
+            if (_OPT113_TRANSFORM_RE.match(rhs)
+                    or any(re.match(rf"{re.escape(k)}\.(?:Create\w*|NewWriter\w*)\s*\(", rhs)
+                           for k in sinks)
+                    or (_OPT113_TRANSFORM_RE.search(rhs)
+                        and any(re.search(rf"\b{re.escape(k)}\b", rhs) for k in sinks))):
+                sinks.add(first)
+        if not sources or _OPT113_MODE_ASSERT_RE.search(body):
+            continue
+        for src, offset, label in sources:
+            s = re.escape(src)
+            sink_alt = "|".join(re.escape(k) for k in sorted(sinks)) or r"(?!x)x"
+            flows = (
+                rf"\bio\.Copy(?:N|Buffer)?\s*\([^,\n]*\b(?:{sink_alt})\b[^,\n]*,[^\n]*\b{s}\b",
+                rf"\b(?:{sink_alt})\.Write\w*\s*\([^\n]*\b{s}\b",
+                _OPT113_DIRECT_SUM_RE.format(src=s),
+            )
+            if any(re.search(f, body) for f in flows):
+                return label, start + offset
     return None
 
 
@@ -9216,17 +9274,16 @@ def _detect_opt113(root: Path) -> tuple[list[tuple[str, str, Hit]], list[dict]]:
                                    "reason": f"OPT113 source read failed: {exc}"})
                 continue
             code = _opt113_without_comments(text)
-            transform = _OPT113_TRANSFORM_RE.search(code)
-            origin = _opt113_origin(code)
-            if transform is None or origin is None:
+            origin = _opt113_flow(code)
+            if origin is None:
                 continue
             origin_label, origin_at = origin
             line = code.count("\n", 0, origin_at) + 1
             hit = Hit(
                 line=line,
                 affected_jobs=[],
-                evidence=(f"{rel}: {origin_label} is used in a test file that archives, "
-                          "compresses or hashes fixture bytes; runner-minute saving: "
+                evidence=(f"{rel}: {origin_label} is read and its bytes are passed "
+                          "into an archive, compressor or hash; runner-minute saving: "
                           "unsized because source does not reveal the affected test's "
                           "measured duration or monthly run count"),
                 match_text=origin_label,

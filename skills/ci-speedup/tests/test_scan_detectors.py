@@ -3314,6 +3314,146 @@ func TestCompressedPayload(t *testing.T) {
     assert "binary built by the test" in findings[0]["evidence"]
 
 
+# Near-miss shapes where the real binary IS the contract (signature, ELF /
+# Mach-O header, execution), or where the executable read and the transform
+# are unrelated. OPT113 must stay quiet: a byte fixture cannot replace these.
+_OPT113_NEAR_MISSES = {
+    "signature-of-real-binary": '''package u
+import ("crypto/ed25519"; "crypto/sha256"; "os"; "testing")
+func TestSelfSignature(t *testing.T) {
+    exe, _ := os.Executable()
+    data, _ := os.ReadFile(exe)
+    sum := sha256.Sum256(data)
+    if !ed25519.Verify(pub, sum[:], sig) { t.Fatal("bad sig") }
+}
+''',
+    "elf-header-plus-unrelated-digest": '''package u
+import ("bytes"; "crypto/sha256"; "debug/elf"; "os"; "testing")
+func TestELF(t *testing.T) {
+    exe, _ := os.Executable()
+    data, _ := os.ReadFile(exe)
+    if _, err := elf.NewFile(bytes.NewReader(data)); err != nil { t.Fatal(err) }
+}
+func TestDigest(t *testing.T) { _ = sha256.Sum256([]byte("x")) }
+''',
+    "macho-header-plus-unrelated-digest": '''package u
+import ("crypto/sha256"; "debug/macho"; "os"; "testing")
+func TestMachO(t *testing.T) {
+    exe, _ := os.Executable()
+    f, _ := os.Open(exe)
+    _, _ = macho.NewFile(f)
+}
+func TestDigest(t *testing.T) { _ = sha256.Sum256([]byte("x")) }
+''',
+    "go-build-join-output-and-unrelated-read": '''package u
+import ("crypto/sha256"; "os"; "os/exec"; "path/filepath"; "testing")
+func TestBuildAndRun(t *testing.T) {
+    dir := t.TempDir()
+    _ = exec.Command("go", "build", "-o", filepath.Join(dir, "app"), ".").Run()
+    cfg, _ := os.ReadFile(filepath.Join("testdata", "config.json"))
+    _ = sha256.Sum256(cfg)
+}
+''',
+    "magic-byte-check-plus-unrelated-zip": '''package u
+import ("archive/zip"; "io"; "os"; "testing")
+func TestMagic(t *testing.T) {
+    exe, _ := os.Executable()
+    data, _ := os.ReadFile(exe)
+    if data[0] != 0x7f { t.Fatal("not elf") }
+}
+func TestZip(t *testing.T) {
+    w := zip.NewWriter(io.Discard)
+    e, _ := w.Create("small")
+    _, _ = e.Write([]byte("small"))
+}
+''',
+    "self-update-copies-and-executes-binary": '''package u
+import ("crypto/sha256"; "io"; "os"; "os/exec"; "testing")
+func TestSelfUpdate(t *testing.T) {
+    exe, _ := os.Executable()
+    src, _ := os.Open(exe)
+    dst, _ := os.Create(t.TempDir() + "/copy")
+    _, _ = io.Copy(dst, src)
+    dst.Close()
+    _ = exec.Command(dst.Name(), "-test.run=TestHelper").Run()
+    _ = sha256.Sum256([]byte("update"))
+}
+''',
+    "archived-binary-is-extracted-and-executed": '''package u
+import ("archive/zip"; "io"; "os"; "os/exec"; "testing")
+func TestArchiveRoundTripRuns(t *testing.T) {
+    exe, _ := os.Executable()
+    in, _ := os.Open(exe)
+    w := zip.NewWriter(io.Discard)
+    e, _ := w.Create("bin")
+    _, _ = io.Copy(e, in)
+    out := extract(t)
+    if err := exec.Command(out, "-test.run=TestNone").Run(); err != nil { t.Fatal(err) }
+}
+''',
+    "sidecar-next-to-binary-is-hashed": '''package u
+import ("crypto/sha256"; "os"; "testing")
+func TestSidecar(t *testing.T) {
+    exe, _ := os.Executable()
+    b, _ := os.ReadFile(exe + ".sha256")
+    _ = sha256.Sum256(b)
+}
+''',
+    "testdata-beside-binary-is-hashed": '''package u
+import ("crypto/sha256"; "os"; "path/filepath"; "testing")
+func TestData(t *testing.T) {
+    exe, _ := os.Executable()
+    b, _ := os.ReadFile(filepath.Join(filepath.Dir(exe), "testdata", "x"))
+    _ = sha256.Sum256(b)
+}
+''',
+    "archived-binary-mode-is-asserted": '''package u
+import ("archive/zip"; "io"; "os"; "testing")
+func TestArchivePreservesExecutableBit(t *testing.T) {
+    exe, _ := os.Executable()
+    info, _ := os.Stat(exe)
+    in, _ := os.Open(exe)
+    w := zip.NewWriter(io.Discard)
+    e, _ := w.Create("bin")
+    _, _ = io.Copy(e, in)
+    if info.Mode().Perm()&0o111 == 0 { t.Fatal("not executable") }
+}
+''',
+}
+
+
+@pytest.mark.parametrize("name", sorted(_OPT113_NEAR_MISSES))
+def test_opt113_near_miss_shapes_stay_quiet(tmp_path: Path, name: str):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: pull_request\njobs: {}\n")
+    source = tmp_path / "pkg" / "near_miss_test.go"
+    source.parent.mkdir()
+    source.write_text(_OPT113_NEAR_MISSES[name], encoding="utf-8")
+    assert not [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"], name
+
+
+def test_opt113_finds_executable_hashed_through_streaming_writer(tmp_path: Path):
+    """The plain shape from the issue: the test binary streamed into a hash."""
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: pull_request\njobs: {}\n")
+    source = tmp_path / "pkg" / "digest_test.go"
+    source.parent.mkdir()
+    source.write_text('''package pkg
+import ("crypto/sha256"; "io"; "os"; "testing")
+func TestBundleDigest(t *testing.T) {
+    exe, err := os.Executable()
+    if err != nil { t.Fatal(err) }
+    f, err := os.Open(exe)
+    if err != nil { t.Fatal(err) }
+    h := sha256.New()
+    if _, err := io.Copy(h, f); err != nil { t.Fatal(err) }
+}
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+    assert findings, "expected the executable-to-hash flow to fire"
+    assert findings[0]["evidence_snippet"].strip() == "f, err := os.Open(exe)"
+
+
 # =============================================================================
 # Evidence quality — findings must carry the VERBATIM matched code, not prose
 # (regression for the "evidence doesn't let a human verify the claim" audit).

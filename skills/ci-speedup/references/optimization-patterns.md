@@ -1895,13 +1895,17 @@ ordinary file bytes. The linked test binary can be many megabytes and grows
 further under instrumentation such as the race detector, so every repeated
 archive pays to move bytes the assertion does not distinguish.
 
-**Detection heuristic**: In a Go `_test.go` file, find `os.Executable()` or an
-output path passed to an explicit `go build -o`, then require an archive,
-compression or cryptographic/hash writer in the same test source. An
-`os.Executable()` call used only for `os.Stat`, mode bits or other executable
-metadata stays quiet. A small byte fixture going through the same archive path
-also stays quiet. If the source cannot identify the fixture origin, withhold the
-finding rather than guessing that a path is a build output.
+**Detection heuristic**: In a Go `_test.go` file, find one function that opens
+or reads the linked test executable (`os.Executable()`, directly or through a
+helper that returns it) or the output of an explicit `go build -o` in that
+function, and passes those same bytes into a writer made by an archive,
+compression or hash constructor (or a direct digest call). A file that inspects
+format headers (`debug/elf`, `debug/macho`, `debug/pe`), verifies a signature,
+executes a binary, or asserts a file mode stays quiet: there the real binary is
+the contract. Reads of a different file beside the executable, and a small byte
+fixture going through the same archive path, also stay quiet. If the source
+cannot tie the executable bytes to the archive or hash, withhold the finding
+rather than guessing.
 
 **Fix recipe (safest first)**:
 
@@ -1924,8 +1928,8 @@ test and its monthly execution count. As a public single-run observation, not a
 general estimate, [openclaw/crabbox#2876](https://github.com/openclaw/crabbox/pull/2876)
 reported its package's race lane falling from 256.401 seconds to 61.720 seconds
 and the enclosing race job from 16m45s to 11m04s — a runner-time saving of
-5m41s for that one observed run. Total CI elapsed time in that comparison did
-not improve, so the detector does not claim a merge-wait saving from source.
+5m41s for that one observed run. The detector does not claim a merge-wait
+saving from source.
 
 **Risk**: MEDIUM. Replacing a real artifact can weaken a test that checks
 permissions, architecture, signing, executable metadata or actual execution.
