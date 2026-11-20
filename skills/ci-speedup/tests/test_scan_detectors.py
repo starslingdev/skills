@@ -1351,6 +1351,52 @@ jobs:
     assert "OPT29" not in _scan_one(tmp_path, neg)
 
 
+def test_opt108_comment_filter_inside_step_still_starts_a_runner(tmp_path: Path):
+    workflow = """name: Comment command
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  react:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    _write_workflow(tmp_path, "comment.yml", workflow)
+
+    finding = next(
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT108"
+    )
+    assert finding["affected_jobs"] == ["react"]
+    assert "job-level `if:`" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt108_comment_filter_at_job_level_skips_the_runner(tmp_path: Path):
+    workflow = """name: Comment command
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  react:
+    if: contains(github.event.comment.body, '/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
 def test_opt31_conditional_setup(tmp_path: Path):
     pos = """name: CI
 on: pull_request

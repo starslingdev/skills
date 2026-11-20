@@ -4547,6 +4547,64 @@ def _detect_opt29(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT108 — Comment Filter Runs After Runner Allocation --------------------
+
+_COMMENT_TRIGGER_GUARD_RE = re.compile(
+    r"github\.(?:event\.comment\.(?:body|user(?:\.(?:login|type))?)|actor)|"
+    r"context\.(?:payload\.comment|actor)",
+    re.I,
+)
+_COMMENT_EARLY_RETURN_RE = re.compile(
+    r"\breturn\b|\bexit\s+0\b|\bprocess\.exit\s*\(\s*0\s*\)",
+    re.I,
+)
+
+
+def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
+    """A comment-triggered job filters body/author input only after GitHub has
+    allocated its runner. Require a readable step-level condition or explicit
+    early return so a job that intentionally handles every comment stays quiet."""
+    on = doc.get("on") or doc.get(True)
+    if not _on_includes(on, ("issue_comment", "pull_request_review_comment")):
+        return []
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        job_if = str(job.get("if") or "")
+        if _COMMENT_TRIGGER_GUARD_RE.search(job_if):
+            continue
+        filtered_inside = False
+        for step, step_if in _steps_with_if(job):
+            if step_if and _COMMENT_TRIGGER_GUARD_RE.search(step_if):
+                filtered_inside = True
+                break
+            with_values = step.get("with") if isinstance(step.get("with"), dict) else {}
+            script = "\n".join((_run(step), str(with_values.get("script") or "")))
+            if (_COMMENT_TRIGGER_GUARD_RE.search(script)
+                    and _COMMENT_EARLY_RETURN_RE.search(script)):
+                filtered_inside = True
+                break
+        if not filtered_inside:
+            continue
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"comment-triggered job `{job_name}` filters comment body or author "
+                "only inside a step and has no equivalent job-level `if:`; move the "
+                "same admission condition to the job while preserving every accepted "
+                "command and actor. Runner-minute effect: saving the affected job's "
+                "measured compute on rejected comments; not sized until matching short "
+                "successful runs confirm the rejected share."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+        ))
+    return hits
+
+
 # ---- OPT31 — Conditional Step With Unconditional Setup -----------------------
 
 _OPT31_INSTALL_RE = re.compile(
@@ -6053,6 +6111,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT28": _detect_opt28,
     "OPT76": _detect_opt76,
     "OPT29": _detect_opt29,
+    "OPT108": _detect_opt108,
     "OPT31": _detect_opt31,
     "OPT32": _detect_opt32,
     "OPT33": _detect_opt33,
