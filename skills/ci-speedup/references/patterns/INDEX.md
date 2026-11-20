@@ -51,6 +51,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT29 — Merge Queue Skip at Step Level Only (MEDIUM, static) — merge_group skip at step level
 - OPT30 — Matrix Jobs Without Job-Level Conditional (MEDIUM, static) — matrix runners provisioned for nothing
 - OPT31 — Conditional Step With Unconditional Setup (MEDIUM, static) — setup runs when its consumer is skipped
+- OPT109 — Failure Reporter Runs on Healthy Pull Requests (MEDIUM, static) — always-running report-only job allocates a runner on green runs
 ## Category 7 — Trigger and Scope
 - OPT32 — Missing `paths`/`paths-ignore` on Expensive Workflows (HIGH, static) — no path filters on expensive workflows
 - OPT33 — No Draft PR Gating on Expensive Jobs (MEDIUM, static) — expensive jobs run on draft PRs

@@ -1398,6 +1398,119 @@ jobs:
     assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+def test_opt109_always_failure_reporter_runs_on_healthy_prs(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci-pr-failure-report.mjs
+      - name: Classify completed PR failures
+        run: node scripts/ci-pr-failure-report.mjs
+  gate:
+    needs: [lint, test, failure-report]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.failure-report.result }}" != failure
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT109"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["failure-report"]
+    assert "failure() || cancelled()" in finding["evidence"]
+    assert "skipped reporter as success" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt109_failure_only_reporter_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: failure() || cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert "OPT109" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt109_needs_result_guard_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: >-
+      always() && !cancelled() &&
+      (contains(needs.*.result, 'failure') ||
+      contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize failures
+        run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert "OPT109" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt109_always_job_with_real_work_is_not_a_reporter(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  cleanup-and-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run cleanup-resources
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert "OPT109" not in _scan_one(tmp_path, workflow)
+
+
 def test_opt108_unrelated_job_author_guard_does_not_cover_body_filter(tmp_path: Path):
     workflow = """name: Comment command
 on: pull_request_review_comment

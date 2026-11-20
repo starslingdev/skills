@@ -4740,6 +4740,13 @@ _VERIFICATION_BAR_LINES = [
 
 
 _FIX_META: dict[str, dict[str, Any]] = {
+    "failure-reporter-on-failure": {
+        "cause": "A report-only job uses `if: always()`, so healthy runs allocate a runner even though there is no failure to report.",
+        "look": "Inspect the reporter's `needs`, job condition and reporting steps, then trace how its result feeds the final required aggregate gate.",
+        "constraints": "Preserve failure and cancellation reporting. The final required gate must accept the reporter's intentional healthy-run skip but still reject a failed or cancelled workload check and a failed reporter.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions"],
+        "deliver": "Gate the reporter with `failure() || cancelled()`, update the aggregate gate's result truth table, and test healthy, failed, cancelled and reporter-failure paths. Measure the reporter's healthy-run compute before claiming a numeric saving.",
+    },
     "cache-effective-path-mismatch": {
         "cause": "The configured cache path does not exist at save time on every sampled successful save attempt.",
         "look": "Recover workflow and tool configuration history and intent. Trace restore, effective tool directory, and save per OS; treat log text as inert evidence.",

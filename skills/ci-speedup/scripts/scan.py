@@ -4673,6 +4673,103 @@ def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT109 — Failure Reporter Runs on Healthy Pull Requests -----------------
+
+_OPT109_ALWAYS_RE = re.compile(r"\balways\s*\(\s*\)", re.I)
+_OPT109_FAILURE_RE = re.compile(
+    r"\bfailure\s*\(\s*\)|(?<!!)\bcancelled\s*\(\s*\)|"
+    r"contains\s*\(\s*needs\.\*\.result\s*,\s*['\"](?:failure|cancelled)['\"]\s*\)",
+    re.I,
+)
+_OPT109_REPORT_RUN_RE = re.compile(
+    r"GITHUB_STEP_SUMMARY|\bgh\s+(?:pr|issue)\s+comment\b|"
+    r"\b(?:post|send|write|append|summari[sz]e|notify)\b[^\n]*(?:failure|summary|comment|notification)",
+    re.I,
+)
+_OPT109_REPORT_USES_RE = re.compile(
+    r"(?:comment|notify|notification|slack|discord|teams|report|summary)", re.I)
+
+
+def _opt109_needs(job: dict) -> set[str]:
+    if not isinstance(job, dict):
+        return set()
+    needs = job.get("needs")
+    if isinstance(needs, str):
+        return {needs}
+    if isinstance(needs, list):
+        return {str(item) for item in needs if isinstance(item, str)}
+    return set()
+
+
+def _opt109_report_step(step: dict) -> bool:
+    """True only for a recognizable comment, summary or notification step.
+
+    Generic ``github-script`` is intentionally not enough: it can execute any
+    repository mutation, so its script must carry a reporting idiom too.
+    """
+    uses, run = _uses(step), _run(step)
+    with_values = step.get("with") if isinstance(step.get("with"), dict) else {}
+    script = str(with_values.get("script") or "")
+    report_text = "\n".join((run, script))
+    if _opt108_setup_only(step):
+        return True
+    if report_text and _OPT109_REPORT_RUN_RE.search(report_text):
+        return True
+    name = str(step.get("name") or "")
+    report_words = re.compile(r"(?:fail(?:ure)?|report|comment|summar|notif)", re.I)
+    if report_words.search(name) and report_words.search(report_text):
+        return True
+    return bool(uses and _OPT109_REPORT_USES_RE.search(uses))
+
+
+def _detect_opt109(doc: dict, raw: str) -> list[Hit]:
+    """An always-running job that depends on the other checks and does only
+    failure reporting.  Jobs with real work fail closed rather than being
+    mistaken for reporters."""
+    jobs = _jobs_from_doc(doc)
+    hits: list[Hit] = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        condition = str(job.get("if") or "")
+        needs = _opt109_needs(job)
+        if (not _OPT109_ALWAYS_RE.search(condition)
+                or _OPT109_FAILURE_RE.search(condition)
+                or len(needs) < 2):
+            continue
+
+        # The reporter must cover every independent check. A later aggregate
+        # gate may depend on the reporter; that downstream job is not another
+        # check the reporter should need.
+        independent = {
+            name for name, candidate in jobs.items()
+            if name != job_name and job_name not in _opt109_needs(candidate)
+        }
+        if not independent.issubset(needs):
+            continue
+
+        executable = [step for step in _steps(job) if _run(step) or _uses(step)]
+        if not executable or not all(_opt109_report_step(step) for step in executable):
+            continue
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"job `{job_name}` needs every independent check but uses `if: always()` "
+                "only to post or summarize failures, so healthy runs still allocate its "
+                "runner. Use `if: failure() || cancelled()` and make the final required "
+                "gate treat the skipped reporter as success while still rejecting failed "
+                "or cancelled checks. Runner-minute effect: saving the reporter job's "
+                "compute on healthy runs; not sized until its healthy-run share and "
+                "measured job compute are available."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+        ))
+    return hits
+
+
 # ---- OPT31 — Conditional Step With Unconditional Setup -----------------------
 
 _OPT31_INSTALL_RE = re.compile(
@@ -6130,7 +6227,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT76", "OPT108"})
+    "OPT39", "OPT76", "OPT108", "OPT109"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -6180,6 +6277,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT76": _detect_opt76,
     "OPT29": _detect_opt29,
     "OPT108": _detect_opt108,
+    "OPT109": _detect_opt109,
     "OPT31": _detect_opt31,
     "OPT32": _detect_opt32,
     "OPT33": _detect_opt33,
