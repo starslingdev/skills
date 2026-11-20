@@ -3092,7 +3092,7 @@ title_template: "Missing `paths`/`paths-ignore` on Expensive Workflows"
 
 **Fix**: Add `paths-ignore` for documentation, markdown files, and other non-code changes. Or use `paths` to restrict to relevant source directories.
 
-**Fail closed:** when a scoped workflow or job is a required check, a job-level `if:` alone is not safe: a failed detector skips the suite, and a skipped required check reads green. Add a cancellation-aware verdict job (`if: ${{ !cancelled() }}`) that `needs:` the detector, every intermediate job whose failure can suppress a suite, and the suites, and make that verdict the required check. Listing jobs in `needs:` is not an assertion: the verdict's step must inspect every dependency result and fail unless the detector succeeded AND each suite either succeeded or was skipped because the detector validly reported unchanged (its output exactly `'false'`). Reject `failure`, `cancelled` and `skipped` dependency results, including an unchanged output written before failure; only cancellation of the whole superseded run should prevent the verdict runner from starting. Before making it the required check, cancel one run on the current head and confirm the verdict does not conclude `skipped`: a skipped required check counts as passing, so keep `if: always()` if it does. A strict "every suite succeeded" assertion is right only when a suite is never skipped on purpose; with intentional skips it turns every unchanged PR red. ci-secure's required-checks-skippable fact lists the assertion forms it can verify.
+**Fail closed:** when a scoped workflow or job is a required check, a job-level `if:` alone is not safe: a failed detector skips the suite, and a skipped required check reads green. Add an always-running verdict job (`if: always()`) that `needs:` the detector, every intermediate job whose failure can suppress a suite, and the suites, and make that verdict the required check. Listing jobs in `needs:` is not an assertion: the verdict's step must inspect every dependency result and fail unless the detector succeeded AND each suite either succeeded or was skipped because the detector validly reported unchanged (its output exactly `'false'`). Reject `failure` and `cancelled` dependency results, and a `skipped` suite unless the detector validly reported unchanged, including an unchanged output written before failure. Keep `if: always()` rather than OPT46's `!cancelled()` here, because the verdict is the required check: a job skipped by its `if:` reports success, and a skipped required check does not block merging, so a head run cancelled without a replacement would pass with nothing validated. A strict "every suite succeeded" assertion is right only when a suite is never skipped on purpose; with intentional skips it turns every unchanged PR red. ci-secure's required-checks-skippable fact lists the assertion forms it can verify.
 
 **Required-status-check caveat (the "Pending" landmine)**: if any check this workflow produces is a required status check, do NOT skip it with `paths`/`paths-ignore` (or `branches:` filters / `[skip ci]`) — a workflow skipped by filtering leaves its required check "Pending" and the PR can never merge; official guidance says not to use path or branch filtering on required workflows. GitHub documents a job-level `if:` restating the filter (a skipped job reports Success and satisfies the gate), but on its own it shares the skipped-reads-green hole above; the safe shape is that `if:` plus the fail-closed verdict job as the required check. The no-op twin-workflow (same workflow AND job name, inverse filter) is a community-known workaround, NOT in any current GitHub docs edition. Treat required-status UNKNOWN as required: when branch protection/rulesets are unreadable (the common case on repos you don't admin), assume every check this workflow produces may be required.
 
@@ -3992,7 +3992,10 @@ This pattern has three flavors around the same supersession mechanism:
    other checks and whose executable steps do nothing except inspect
    `needs.<job>.result`, `needs.*.result` or `toJSON(needs)`. Fail closed on an
    opaque helper, ordinary action, or any build, test, cleanup or deployment
-   command: it is not proven to be an aggregate.
+   command: it is not proven to be an aggregate. Report it only when a complete
+   required-check read shows the aggregate is not a required status check; stay
+   quiet when it is required, when its check name is templated or carries a
+   matrix suffix, or when the read is partial or unreadable.
 
 2. **Quantify wasted compute** — a structural match alone is not enough, and neither is "a branch had ≥2 runs" (sequential commits on a long-lived / default branch each test a distinct commit and were never superseded — cancelling them saves nothing). Measure the runs that ACTUALLY RACED:
    - List runs (all statuses) via `gh api repos/{owner}/{repo}/actions/workflows/{wf}/runs?created=<30d-window>`; group by `head_branch`; within each branch, count a run as **superseded** iff a later-created run **started before it finished** (timestamp overlap of `run_started_at`…`updated_at`). Sequential, non-overlapping runs count 0.
@@ -4004,18 +4007,24 @@ This pattern has three flavors around the same supersession mechanism:
 
 **Fix**: Add a top-level concurrency block, and make the *cancellation* conditional — **never** a bare `cancel-in-progress: true`. This pattern fires on workflows that trigger on `push`, and a bare `true` cancels the in-flight run on `main` or on a release tag the moment the next commit lands — a deploy, a publish, or a migration killed halfway. `cancel-in-progress` accepts an expression ([workflow syntax: `concurrency`](https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#concurrency)), so scope it to the events where a superseded run is genuinely worthless.
 
-**Flavor C fix — cancellation-aware aggregate**: use
-`if: ${{ !cancelled() }}` on the aggregate. Keep its step-level result check:
-the job must still exit non-zero for any required dependency whose result is
-`failure`, `cancelled` or `skipped`. Test both halves independently: an ordinary
-failed dependency still makes the aggregate fail, while cancellation of the
-whole superseded run leaves the aggregate without a runner. When the aggregate
-is a required check, cancel one run on the current head and confirm its check
-does not conclude `skipped` before relying on the new condition: a skipped
-required check counts as passing, so keep `always()` if it does. Runner-minute
-effect is a **saving**: that aggregate job's compute on cancelled runs. Leave it
-unsized until matched cancelled runs show that the runner was allocated and
-measure its compute; do not infer a number from the YAML.
+**Flavor C fix — cancellation-aware aggregate (non-required checks only)**:
+when the aggregate is not a required status check, use
+`if: ${{ !cancelled() }}` on it and leave its step-level result check
+unchanged: the job still runs when a dependency ends `failure`, `cancelled` or
+`skipped`, so the check still rejects every result it rejects today. Test both
+halves independently: an
+ordinary failed dependency still makes the aggregate fail, while cancellation
+of the whole superseded run leaves the aggregate without a runner. A required
+aggregate, or one whose required status cannot be read, keeps `if: always()`.
+A job skipped by its `if:` reports success, and a skipped required check does
+not block merging, so on a required aggregate `!cancelled()` would let a head
+run cancelled without a replacement (a manual cancel, or a concurrency group
+shared with another event) pass with nothing validated. The runner time of a
+seconds-long aggregate on cancelled runs is the price of a cancelled head run
+never passing. Runner-minute effect is a **saving**: that aggregate job's
+compute on cancelled runs. Leave it unsized until matched cancelled runs show
+that the runner was allocated and measure its compute; do not infer a number
+from the YAML.
 
 **Default (PR-scoped)** — correct whenever the racing runs are PR runs:
 

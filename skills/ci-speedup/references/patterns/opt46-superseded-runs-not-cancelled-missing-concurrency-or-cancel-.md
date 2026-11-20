@@ -42,7 +42,10 @@ This pattern has three flavors around the same supersession mechanism:
    other checks and whose executable steps do nothing except inspect
    `needs.<job>.result`, `needs.*.result` or `toJSON(needs)`. Fail closed on an
    opaque helper, ordinary action, or any build, test, cleanup or deployment
-   command: it is not proven to be an aggregate.
+   command: it is not proven to be an aggregate. Report it only when a complete
+   required-check read shows the aggregate is not a required status check; stay
+   quiet when it is required, when its check name is templated or carries a
+   matrix suffix, or when the read is partial or unreadable.
 
 2. **Quantify wasted compute** — a structural match alone is not enough, and neither is "a branch had ≥2 runs" (sequential commits on a long-lived / default branch each test a distinct commit and were never superseded — cancelling them saves nothing). Measure the runs that ACTUALLY RACED:
    - List runs (all statuses) via `gh api repos/{owner}/{repo}/actions/workflows/{wf}/runs?created=<30d-window>`; group by `head_branch`; within each branch, count a run as **superseded** iff a later-created run **started before it finished** (timestamp overlap of `run_started_at`…`updated_at`). Sequential, non-overlapping runs count 0.
@@ -54,18 +57,24 @@ This pattern has three flavors around the same supersession mechanism:
 
 **Fix**: Add a top-level concurrency block, and make the *cancellation* conditional — **never** a bare `cancel-in-progress: true`. This pattern fires on workflows that trigger on `push`, and a bare `true` cancels the in-flight run on `main` or on a release tag the moment the next commit lands — a deploy, a publish, or a migration killed halfway. `cancel-in-progress` accepts an expression ([workflow syntax: `concurrency`](https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#concurrency)), so scope it to the events where a superseded run is genuinely worthless.
 
-**Flavor C fix — cancellation-aware aggregate**: use
-`if: ${{ !cancelled() }}` on the aggregate. Keep its step-level result check:
-the job must still exit non-zero for any required dependency whose result is
-`failure`, `cancelled` or `skipped`. Test both halves independently: an ordinary
-failed dependency still makes the aggregate fail, while cancellation of the
-whole superseded run leaves the aggregate without a runner. When the aggregate
-is a required check, cancel one run on the current head and confirm its check
-does not conclude `skipped` before relying on the new condition: a skipped
-required check counts as passing, so keep `always()` if it does. Runner-minute
-effect is a **saving**: that aggregate job's compute on cancelled runs. Leave it
-unsized until matched cancelled runs show that the runner was allocated and
-measure its compute; do not infer a number from the YAML.
+**Flavor C fix — cancellation-aware aggregate (non-required checks only)**:
+when the aggregate is not a required status check, use
+`if: ${{ !cancelled() }}` on it and leave its step-level result check
+unchanged: the job still runs when a dependency ends `failure`, `cancelled` or
+`skipped`, so the check still rejects every result it rejects today. Test both
+halves independently: an
+ordinary failed dependency still makes the aggregate fail, while cancellation
+of the whole superseded run leaves the aggregate without a runner. A required
+aggregate, or one whose required status cannot be read, keeps `if: always()`.
+A job skipped by its `if:` reports success, and a skipped required check does
+not block merging, so on a required aggregate `!cancelled()` would let a head
+run cancelled without a replacement (a manual cancel, or a concurrency group
+shared with another event) pass with nothing validated. The runner time of a
+seconds-long aggregate on cancelled runs is the price of a cancelled head run
+never passing. Runner-minute effect is a **saving**: that aggregate job's
+compute on cancelled runs. Leave it unsized until matched cancelled runs show
+that the runner was allocated and measure its compute; do not infer a number
+from the YAML.
 
 **Default (PR-scoped)** — correct whenever the racing runs are PR runs:
 
