@@ -12718,7 +12718,7 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # valueless: its card is the only place its rules and its ledger
         # requirement reach the reader, so a lint job that is also a drilled
         # pole keeps it.
-        if str(f.get("pattern", "")) == "OPT82":
+        if str(f.get("pattern", "")) in {"OPT13", "OPT82"}:
             return False
         jobs = f.get("affected_jobs") or ([f.get("job")] if f.get("job") else [])
         if not jobs:
@@ -12836,7 +12836,7 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             wc = _num(driver.get("wall_clock_p50_s")) or 0.0
             summary_metric = f"~{_clock(wc)} wall-clock"
             ev = _group_evidence(ms, prefer=driver)
-        elif pat == "OPT82":
+        elif pat in {"OPT13", "OPT82"}:
             summary_metric = "uncredited, benchmark first"
             ev = _group_evidence(ms, compose=True)
         elif pat == "OPT32":

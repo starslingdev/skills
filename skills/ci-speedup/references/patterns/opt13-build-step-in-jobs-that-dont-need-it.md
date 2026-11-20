@@ -2,7 +2,7 @@
 pattern: OPT13
 impact: MEDIUM
 class: static
-detector: yaml-job-correlated
+detector: manual
 affected_files: '.github/workflows/*.yml,.github/workflows/*.yaml'
 fix_strategy: build-step-in-jobs-that-dont-need-it
 title_template: 'Build Step in Jobs That Don''t Need It'
@@ -23,7 +23,40 @@ category: 2
 # If not, check if the job explicitly runs build before test
 ```
 
-**Fix**: Remove unnecessary build steps. If using Turbo, ensure `turbo.json` task graph is accurate so Turbo skips unneeded builds.
+With `--with-logs`, ci-speedup also recognizes the narrow measured case where a
+step whose own `run:` starts with a lint, test, check, or type-check package
+script echoes a declaration emit, bundle, or full build before its quality
+command, inside that same step. It measures only the build interval printed by
+the tool. A separate build step, a build written into the step's `run:` line, a
+script named for a build (`test-build`), `tsc --noEmit` or `--declaration
+false`, a plain build job, an untimed build, JavaScript/TypeScript
+source that may load Node compiled output, or a quality job without a separate
+non-optional full-build validation job for the same package does not qualify.
+Static, dynamic, and multiline imports of `dist/`, `build/`, or `lib/` count as
+compiled-output consumers, and so does any other string or template literal
+naming one of those paths (a computed `path.resolve('dist/x.js')`, a template
+`import()`, a helper call) unless it is a plain build-config value such as
+`outDir: 'dist'`. A package directory resolves step, then job, then workflow
+`defaults.run.working-directory`. This is evidence of work placement, not proof that a
+production build may be deleted.
+
+The catalog metadata stays static because the broad "does this job need its
+build?" judgment remains manual and is still disclosed as an uncovered scanner
+pattern. Only the fully proven exception above becomes a data-driven finding
+during collection.
+
+**Fix**: Safest first, add a runtime-only build target for the lint/test job and
+keep one full build for the same package in the artifact or validation job.
+Compare the same workload before and after. Remove a build only after the
+guardrails below prove that no runtime consumer or validation surface depends on it. If using Turbo, ensure
+`turbo.json` task graph is accurate so Turbo skips unneeded builds.
+
+**Sizing**: The log-backed finding reports the measured build interval as a
+ceiling, not a credited saving. The corresponding runner-minute ceiling is
+measured seconds × the workflow's 30-day run count ÷ 60. The saving itself is
+not sized until a before/after benchmark measures the runtime-only replacement;
+if run volume is unavailable, the report also withholds the ceiling instead of
+printing a bare zero.
 
 **GUARDRAIL — Framework build steps (`next build`, `nuxt build`, `vite build`, `remix build`, `astro build`, `gatsby build`, `ng build`, `nest build`, `expo export`, `react-scripts build`, `webpack`/`rollup`/`turbopack`/`rspack` production builds, `tsc -b`/project-references full builds, `mvn package`, `gradle assemble`, etc.):**
 
@@ -71,5 +104,11 @@ If ANY non-test source contains the above, the build is load-bearing at runtime 
 **Coverage table addition** (extends the existing framework-build coverage table requirement): for any build-removal finding, the coverage table MUST enumerate Worker-thread spawn sites, `child_process` exec sites, and `require()`/`import()` of `../dist/...` from non-test source. Cite each as either "0 hits" or "N hits at file:line — see Finding N evidence". A missing or empty coverage table is a Phase 6 fail.
 
 **Worked counter-example.** The 2026-05-19 langfuse audit's Finding 15 shipped a "drop `pnpm --filter=worker... run build`" recommendation as a MEDIUM-severity probe, citing ~150 min/mo. The D7 source-code safety check (DB-retry, HTTP-client, service-discovery patterns) returned zero hits, so the probe looked safe. Phase 6 round 2 ran the four-grep set above and found `worker/src/features/tokenisation/worker-thread.ts:4` requires `dist/features/tokenisation/usage.js` via a spawned Node Worker thread (`new Worker(path.join(__dirname, "worker-thread.js"))` inside `async-usage.ts` → `TokenCountWorkerManager`). The finding was INVALIDATED — a build that is load-bearing at runtime (a spawned Worker resolving its target under `dist/`) must never be proposed for removal, even as a probe.
+
+**Public evidence for the broader optimization shape** (the automatic detector
+remains narrower than either change):
+
+- [OpenClaw #121805](https://github.com/openclaw/openclaw/pull/121805)
+- [OpenClaw #134294](https://github.com/openclaw/openclaw/pull/134294)
 
 ---
