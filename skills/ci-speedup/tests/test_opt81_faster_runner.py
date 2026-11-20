@@ -528,6 +528,16 @@ def test_opt81_pinned_or_compatibility_routes_are_never_downsized(job):
     assert cands == []
 
 
+def test_opt81_a_size_matrix_is_never_downsized():
+    """Near miss: both sizes run in every run (a runner matrix). Dropping the large
+    leg would remove a configured leg, not move a route, so it stays quiet."""
+    runs = _runs(slow_label=_LARGE8, slow=[100] * 5, fast_label=_SMALL4,
+                 fast=[103] * 5)
+    found, withheld, cands, *_ = _a1(runs)
+    assert found == [], withheld
+    assert withheld.get("downsize_runner_matrix") == 1 and cands == []
+
+
 def test_opt81_ordinary_job_names_with_route_words_inside_still_fire():
     # Whole words only: "pinpoint" and "compatible-api" are not pinned/release routes.
     for job in ("pinpoint tests", "compatible-api lint"):

@@ -16710,6 +16710,9 @@ def _opt81_downsize_rederived(f: dict) -> list[str]:
             or small_rank >= large_rank):
         out.append(f"OPT81 {fid}: labels are not two explicit ascending sizes of one "
                    "runner class and platform")
+    if fr.get("runner_matrix"):
+        out.append(f"OPT81 {fid}: a size matrix (both sizes in every run) is never a "
+                   "downsize candidate")
     if _vr_opt81_size_stripped_label(ll) != _vr_opt81_size_stripped_label(sl):
         out.append(f"OPT81 {fid}: `{ll}` and `{sl}` are two images, not two sizes of "
                    "one image")

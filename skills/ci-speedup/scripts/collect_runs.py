@@ -15592,6 +15592,7 @@ _OPT81_VERDICT_GATES = frozenset({
     "same_runner_class",
     "downsize_slowdown_above_limit",
     "downsize_pinned_or_compatibility_route",
+    "downsize_runner_matrix",
     # A2 verdicts: a cheaper lever exists, or the shape is not this lever's.
     "a2_not_a_pull_request_workflow",
     "a2_not_on_the_merge_gating_critical_path",
@@ -16008,6 +16009,11 @@ def _detect_opt81_measured_runner_gap(
                 # and there are too few runs for the A1 gap comparison.
                 _no("downsize_slowdown_above_limit", name,
                     delta_frac=round(delta_frac, 4))
+                continue
+            if downsize_pair and matrix:
+                # Both sizes run in every run: a configured size matrix. Dropping
+                # a leg removes a configured run, not a route choice.
+                _no("downsize_runner_matrix", name)
                 continue
             if downsize_pair and (_OPT81_DOWNSIZE_PINNED_ROUTE_RE.search(name)
                                   or _OPT81_DOWNSIZE_PINNED_ROUTE_RE.search(
