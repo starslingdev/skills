@@ -99,7 +99,7 @@ jobs:
 
 Required checks: a job skipped by its own `if:` reports **Success** to branch protection under its own name, so a gated lane that stays a required check still lets an unrelated pull request merge. That is also why a plain `if: needs.changes.outputs.go == 'true'` is unsafe: when the selector fails, the lane is skipped and its required check reports Success with nothing validated, so the lane condition above runs on any selector result other than a proven `false`. A matrix leg left out of the matrix reports no check at all, so a required `codeql (python)` would stay expected forever; require the `ci-ok` aggregate (which fails on any failed or cancelled lane) instead of the per-leg names. Do not move this gating into a workflow-level `paths:` filter: a workflow that never starts leaves its required checks pending.
 
-**Public evidence**: [OpenClaw PR #193865](https://github.com/openclaw/openclaw/pull/193865) adds fail-open pull-request owner selection for independent TypeScript and Rust contract proofs. Exact, complete comparisons may omit an unaffected owner; deleted, unknown, malformed, capped, or failed comparisons retain both jobs.
+**Public evidence**: [OpenClaw PR #193865](https://github.com/openclaw/openclaw/pull/193865) decides which per-language pull-request jobs to run from the changed paths, and runs every job when the changed-path lookup is unknown or fails.
 
 **Risk**: MEDIUM. If a polyglot file (a Python/JS bridge, or a config that affects both) changes, both legs should still run. The `paths-filter` rules need to be inclusive enough to catch shared config files.
 
