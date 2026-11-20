@@ -2054,6 +2054,32 @@ jobs:
     assert _finding(_scan(tmp_path), "OPT39") is None
 
 
+def test_opt39_unrelated_needs_condition_is_not_a_path_gate(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make generate
+  go-contract:
+    name: Go contracts
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is not None
+
+
 def test_opt39_language_scoped_pull_request_trigger_stays_quiet(tmp_path: Path):
     workflow = """
 name: Rust proof

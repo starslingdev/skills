@@ -4932,9 +4932,13 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
             continue
         jif = job.get("if")
         leg_gated = isinstance(jif, str) and ("needs." in jif or "matrix.language" in jif)
+        language_path_gated = (
+            isinstance(jif, str)
+            and re.search(r"\bneeds\.[A-Za-z0-9_-]+\.outputs\.", jif) is not None
+        )
         if scanner_matrix and (has_paths_filter or leg_gated):
             continue
-        if job_languages and (leg_gated or _opt39_trigger_is_language_scoped(
+        if job_languages and (language_path_gated or _opt39_trigger_is_language_scoped(
                 on, job_languages)):
             continue
         if scanner_matrix:
