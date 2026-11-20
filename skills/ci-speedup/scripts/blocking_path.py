@@ -12800,7 +12800,11 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     for pat, ms in shown:
         title = _flatten_cell(ms[0].get("title") or pat)
         rmin = _rmin_of(ms)
-        bill = _fmt_runner_min(rmin) if rmin else "no bill saving"
+        unsized = next((str(m.get("runner_min_unsized_reason")) for m in ms
+                        if m.get("runner_min_unsized_reason")), "")
+        bill = (_fmt_runner_min(rmin) if rmin
+                else f"runner-minute saving: unsized ({_flatten_cell(unsized)})"
+                if unsized else "no bill saving")
         n = len(ms)
         wfs = len({m.get("workflow_file", "") for m in ms if m.get("workflow_file")})
         occ = f"{n} across {wfs} wf" if wfs else f"{n} occurrence"

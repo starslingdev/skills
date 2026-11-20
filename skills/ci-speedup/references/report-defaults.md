@@ -533,7 +533,10 @@ default-branch push sample (`_OPT107_MIN_BATCHABLE_SHARE`).
 
 **Report statements:** whether dense post-merge validation is a measured
 runner-minute opportunity, which observed runs contribute to its signed
-sample-window saving, and that no monthly projection was made.
+sample-window saving, and its monthly estimate (the sample saving scaled by the
+workflow's 30-day default-branch push-run count over the sampled runs, capped at
+its measured 30-day validation compute) or, when that count is unreadable, that
+the monthly saving is unsized and why.
 
 **Reason:** the proposed replacement is an hourly current-tip validation, so a
 successor inside that interval is evidence that a schedule can coalesce work.

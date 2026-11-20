@@ -16676,6 +16676,21 @@ def check_default_branch_push_lane_isolated(
             failures.append(
                 f"report omits the static finding group's {label} tag")
 
+    # A post-merge finding whose saving is real but its monthly figure unsized
+    # (OPT107 without a readable 30-day push count) says so; its group heading
+    # never reads as "no bill saving".
+    unsized_patterns = sorted({
+        str(f.get("pattern") or "")
+        for f in _as_list(data.get("findings"))
+        if isinstance(f, dict) and f.get("runner_min_unsized_reason")
+        and not _num(f.get("runner_min_saving"))
+    } - {""})
+    for pattern in unsized_patterns:
+        if any(line.startswith(f"<summary><strong>{pattern} - ")
+               and "no bill saving" in line for line in report.splitlines()):
+            failures.append(f"{pattern} group heading reads `no bill saving` for an "
+                            "unsized saving")
+
     cap = int(_num(lane.get("sample_cap")) or 0)
     sampled = int(_num(lane.get("sampled_push_count")) or 0)
     if cap != _VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX:

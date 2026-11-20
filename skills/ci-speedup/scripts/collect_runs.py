@@ -17861,8 +17861,16 @@ def _detect_opt107_default_branch_batching(
     wf_doc: dict[str, Any],
     default_branch: str | None,
     start_idx: int,
+    *,
+    monthly_push_volume: "int | None | Callable[[], int | None]" = None,
 ) -> list[dict[str, Any]]:
     """Find dense default-branch validation runs that an hourly tip run can batch.
+
+    `monthly_push_volume` is the workflow's 30-day default-branch push-run count
+    (an int, or a lazy probe paid only once a saving exists).  When it is known,
+    the sample saving scales to a monthly estimate (sample saving x runs_30d /
+    sampled runs), capped at the workflow's measured 30-day validation compute;
+    otherwise the monthly figure is reported unsized with its reason.
 
     A run is batchable only when a later default-branch push starts before it
     finishes or within one hour after it finishes.  The hourly replacement is
@@ -17963,6 +17971,29 @@ def _detect_opt107_default_branch_batching(
     credited_n = len(credited_runs)
     mean_credited_min = credited / credited_n
 
+    sampled_runs = sum(
+        1 for run in all_runs
+        if (str(run.get("event") or "") == "push"
+            and str(run.get("head_branch") or "") == default_branch))
+    volume = (monthly_push_volume() if callable(monthly_push_volume)
+              else monthly_push_volume)
+    monthly: float | None = None
+    monthly_cap: float | None = None
+    unsized_reason = ""
+    if (isinstance(volume, int) and not isinstance(volume, bool) and volume > 0
+            and sampled_runs > 0):
+        mean_validation_min = sum(compute_by_run.values()) / len(compute_by_run)
+        monthly_cap = round(mean_validation_min * volume, 1)
+        monthly = round(min(credited * volume / sampled_runs, monthly_cap), 1)
+        if monthly <= 0:
+            monthly = None
+    if monthly is None:
+        unsized_reason = "30-day default-branch push count unknown"
+    monthly_text = (
+        f"~−{monthly:g} runner-min/mo (estimate from {sampled_runs} sampled runs, "
+        f"x{volume}/{sampled_runs} to the 30-day push volume)" if monthly is not None
+        else f"runner-minute saving: unsized ({unsized_reason})")
+
     title = "Default-Branch Full CI Runs Too Often to Stay Current"
     evidence = (
         f"{len(batchable)} of {len(spans)} sampled default-branch push runs "
@@ -17971,7 +18002,7 @@ def _detect_opt107_default_branch_batching(
         f"{credited_n} run(s) have their own readable compute "
         f"({mean_credited_min:.1f} runner-min/run; {timed_n} timed run(s) total); "
         f"runner-minute effect: −{credited:g} runner-min in the sampled window "
-        "(saving)." + (
+        f"(saving); monthly: {monthly_text}." + (
             f" {len(excluded_jobs)} side-effect job(s) "
             f"({', '.join(sorted(excluded_jobs))}) stay on the push event and are "
             "not priced." if excluded_jobs else ""))
@@ -17981,7 +18012,7 @@ def _detect_opt107_default_branch_batching(
         [[f"`{wf_path}`", f"{len(batchable)} of {len(spans)} ({share * 100:.0f}%)",
           f"{mean_credited_min:.1f} runner-min over {timed_n} timed run(s)",
           str(credited_n),
-          f"−{credited:g} runner-min (saving)"]],
+          f"−{credited:g} runner-min in the sample (saving); {monthly_text}"]],
         summary=evidence,
         note=("Safest-first fix: keep the pull-request gate unchanged; run the full "
               "default-branch suite hourly against the current tip, retain "
@@ -17989,18 +18020,27 @@ def _detect_opt107_default_branch_batching(
               "per-push validation. Do not batch release, deploy, or migration work. "
               "The estimate reserves a conservative number of hourly replacement "
               "runs, then credits only removable runs with their own readable "
-              "completed-job compute. It never extrapolates onto an unreadable run "
-              "or beyond the fetched default-branch run page."))
+              "completed-job compute; it never extrapolates onto an unreadable run. "
+              "The monthly figure scales the sample saving by the workflow's 30-day "
+              "default-branch push-run count over the sampled runs, capped at the "
+              "measured 30-day validation compute, and is an estimate."))
     finding = _new_finding(
         "OPT107", "HIGH", title, wf_path, "", evidence,
         "batch-default-branch-full-ci", _catalog_anchor("OPT107", title),
-        start_idx + 1, wc_p50=0.0, rm=None,
-        size_note=(f"monthly runner-minute effect not sized; sampled-window effect: "
-                   f"−{credited:g} runner-min (saving) after reserving hourly "
-                   "replacement validations"),
+        start_idx + 1, wc_p50=0.0, rm=monthly,
+        size_note=(f"runner-minute effect: saving (negative) — {monthly_text}; "
+                   f"sampled-window effect −{credited:g} runner-min after reserving "
+                   "hourly replacement validations; pull-request wait unchanged"),
         realization="none", measured_evidence=measured)
     finding["sample_runner_min_effect"] = -credited
     finding["sample_runner_min_saving"] = credited
+    if monthly is not None:
+        finding["monthly_estimate_basis"] = {
+            "runs_30d": volume, "sampled_runs": sampled_runs,
+            "sample_saving_min": credited, "cap_min": monthly_cap,
+        }
+    else:
+        finding["runner_min_unsized_reason"] = unsized_reason
     finding["batchable_run_count"] = len(batchable)
     finding["credited_run_count"] = credited_n
     finding["credited_run_ids"] = [run_id for run_id, _minutes in credited_runs]
@@ -33437,9 +33477,19 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     for (run_wf, run_id_value), jobs in _push_jobs_by_run.items()
                     if run_wf == wf_path and run_id_value in _opt107_run_ids
                 }
+                def _opt107_volume(_wf_id: Any = wf_id) -> int | None:
+                    # One count probe, paid only once the sample shows a saving.
+                    if _wf_id is None or not default_branch:
+                        return None
+                    _doc = client.json(_push_volume_endpoint(
+                        repo, _wf_id, default_branch, created_before))
+                    _total = _doc.get("total_count") if isinstance(_doc, dict) else None
+                    return (_total if isinstance(_total, int)
+                            and not isinstance(_total, bool) else None)
+
                 new = _detect_opt107_default_branch_batching(
                     wf_path, all_runs, _opt107_push_jobs, wf_doc, default_branch,
-                    next_id)
+                    next_id, monthly_push_volume=_opt107_volume)
                 next_id = max(
                     next_id,
                     max((int(f["id"][1:]) for f in new), default=next_id))
