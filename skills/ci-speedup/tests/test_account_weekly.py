@@ -164,7 +164,7 @@ def test_invalid_account_weekly_series_stops_before_the_scan(
     rc = run.main([
         "--root", str(tmp_path), "--out", str(tmp_path / "findings.json"),
         "--account-weekly-series", str(source),
-        "--skill-commit-sha", "abcdef0", "--commit-sha", "0123456789abcdef",
+        "--skill-commit-sha", "abcdef0", "--commit-sha", "".join(["01234567"] * 2),
     ])
     assert rc == 1
     assert "workload_change" in capsys.readouterr().err
@@ -207,7 +207,7 @@ def test_paired_comparison_needs_a_workload_statement_and_is_attributed(tmp_path
 
     report = blocking_path.render({
         "repo": "example/repo", "repo_visibility": "private",
-        "skill_commit_sha": "abcdef0", "commit_sha": "0123456789abcdef",
+        "skill_commit_sha": "abcdef0", "commit_sha": "".join(["01234567"] * 2),
         "findings": [], "account_weekly": summary,
         "data_sources": {"gh": "unavailable"},
     })
