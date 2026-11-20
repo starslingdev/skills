@@ -4612,8 +4612,11 @@ def _opt108_setup_only(step: dict) -> bool:
     if uses and not run:
         return bool(_OPT21_SETUP_USES_RE.match(uses))
     if run and not uses:
-        lines = [ln.strip() for ln in run.splitlines() if ln.strip()]
-        return bool(lines) and all(_OPT21_SETUP_LINE_RE.match(ln) for ln in lines)
+        commands = _opt21_run_lines(run)
+        return bool(commands) and all(
+            "|" not in command and _OPT21_SETUP_LINE_RE.match(command)
+            for command in commands
+        )
     return False
 
 

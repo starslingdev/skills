@@ -1464,6 +1464,20 @@ jobs:
     assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+def test_opt108_chained_setup_and_required_work_stays_quiet(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci && node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
 def test_opt108_early_return_unrelated_to_the_comment_stays_quiet(tmp_path: Path):
     workflow = """name: Comment recorder
 on: issue_comment
