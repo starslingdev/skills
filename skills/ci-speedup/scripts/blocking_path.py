@@ -12099,9 +12099,16 @@ def _queue_wait_block(findings: list[dict[str, Any]], catalog_url: str,
 _OPT81_DISCLOSURE = (
     "The publisher of this skill sells CI runners. This finding compares your own "
     "runs on runner classes you already use (A1), or names a class of lever and asks "
-    "you to benchmark before believing any number (A2); it prices only a move "
-    "between two GitHub-hosted sizes, as a ratio of GitHub's published rates, and "
-    "never prices a StarSling runner.")
+    "you to benchmark before believing any number (A2); it never prices a runner.")
+# A measured downsize (OPT81 A1, `faster_runner.kind == "opt81_downsize"`). A STRING
+# CONTRACT: equal to collect_runs' copies and re-checked by verify_report. The skill
+# never prices a runner, so the runner-cost saving is stated and left unsized.
+_OPT81_DOWNSIZE_SAME_SPEED = (
+    "same speed on a smaller runner size: about the same runner-minutes, billed at "
+    "the smaller size's lower rate")
+_OPT81_DOWNSIZE_COST_EFFECT = (
+    "runner-cost saving: unsized (ci-speedup does not price runners; the smaller size "
+    "bills at a lower per-minute rate)")
 _OPT81_RUNNER_MIN_UNKNOWN = (
     "unknown: a different runner class bills differently and this audit carries no "
     "rate table")
@@ -12240,8 +12247,7 @@ def _opt81_prompt(f: dict[str, Any], url: str,
                  "smaller label already measured here, keeping every step and all "
                  "work coverage. Retain pinned, frozen, compatibility and release "
                  "routes on their required runner. Before switching, verify memory "
-                 "headroom, reliability and latency on the same workload, and "
-                 "confirm the price ratio against your current GitHub rate card."]
+                 "headroom, reliability and latency on the same workload."]
     elif half == "A1":
         body += ["", "Do: find out why some runs of this job use the slower label (a fork "
                  "pull request, an event or a matrix condition can select it on "
@@ -12264,23 +12270,6 @@ def _opt81_prompt(f: dict[str, Any], url: str,
              "", _OPT81_DISCLOSURE]
     return ["#### 🤖 Prompt for your coding agent", "", "```text",
             *[_fence_safe(l) for l in body], "```"]
-
-
-def _opt81_downsize_effect_text(effect: dict[str, Any], n_large: Any,
-                                n_small: Any) -> str:
-    """The downsize card's runner-cost sentence. A STRING CONTRACT: equal to
-    collect_runs._opt81_downsize_effect_text and re-rendered by verify_report."""
-    d = str(effect.get("direction") or "unsized")
-    if d not in {"saving", "added_cost"}:
-        return "not sized: " + str(effect.get("reason") or "no price ratio")
-    pct = (_num(effect.get("runner_cost_frac")) or 0.0) * 100.0
-    head = (f"runner-cost saving of {pct:.1f}% per job run" if d == "saving"
-            else f"runner-cost increase of {pct:.1f}% per job run")
-    return (f"{head} (basis: {n_large} and {n_small} interleaved successful runs "
-            f"compared at their medians; price ratio "
-            f"{_num(effect.get('price_ratio')) or 0.0:.4f}, "
-            f"{effect.get('price_basis')}, {effect.get('price_source')}, read "
-            f"{effect.get('price_read')})")
 
 
 def _opt81_card(f: dict[str, Any], catalog_url: str,
@@ -12325,18 +12314,16 @@ def _opt81_card(f: dict[str, Any], catalog_url: str,
                 "made", ""]
         if fr.get("kind") == "opt81_downsize":
             large, small = fr.get("large") or {}, fr.get("small") or {}
-            effect = fr.get("runner_cost_effect") or f.get("runner_cost_effect") or {}
-            effect_text = _opt81_downsize_effect_text(
-                effect, large.get("n"), small.get("n"))
-            out += [f"- **Measured:** `{job}` ran {large.get('n')} time(s) on "
+            out += [f"- **Finding:** {_OPT81_DOWNSIZE_SAME_SPEED}.",
+                    f"- **Measured:** `{job}` ran {large.get('n')} time(s) on "
                     f"`{_flatten_cell(str(large.get('label')))}` at p50 "
                     f"{_num(large.get('p50_s')) or 0:.0f}s and {small.get('n')} "
                     f"time(s) on the smaller `{_flatten_cell(str(small.get('label')))}` "
                     f"at p50 {_num(small.get('p50_s')) or 0:.0f}s, with the same "
                     "steps on both.",
-                    f"- **Runner-cost effect:** {effect_text}.",
-                    "- **Merge wait:** not credited; this is a runner-cost "
-                    "recommendation, not a wall-clock one.",
+                    f"- **Runner-cost effect:** {_OPT81_DOWNSIZE_COST_EFFECT}.",
+                    "- **Merge wait:** not credited; no wall-clock credit for a "
+                    "same-speed downsize.",
                     "- **Guardrail:** downsize only ordinary routes; retain pinned, "
                     "frozen, compatibility and release routes, and verify memory, "
                     "reliability, work coverage and latency."]

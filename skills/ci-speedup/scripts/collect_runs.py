@@ -15861,26 +15861,19 @@ _OPT81_MIN_GAP_FRAC = 0.25
 # paired public evidence population) and may add at most five percent wall time.
 _OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL = 5
 _OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC = 0.05
-# The price ratio a measured downsize is sized with. A STRING-AND-NUMBER CONTRACT
-# mirrored in verify_report.py (pinned by a coupling test): GitHub's published
-# per-minute list rates for its larger runners, keyed (os, arch, cores), as read
-# from the source page on the date below. Only the RATIO of two sizes is used and
-# rendered (small rate / large rate); no dollar amount reaches a report. A size
-# or class with no row here (a StarSling size, a macOS size) leaves the runner-cost
-# effect unsized with that reason, never guessed from capacity.
-_OPT81_PRICE_SOURCE_URL = "https://docs.github.com/en/billing/reference/actions-runner-pricing"
-_OPT81_PRICE_SOURCE_READ = "2026-11-20"
-_OPT81_GITHUB_LARGER_RATE_PER_MIN: dict[tuple[str, str, int], float] = {
-    **{("linux", "x64", c): r for c, r in (
-        (2, 0.006), (4, 0.012), (8, 0.022), (16, 0.042), (32, 0.082), (64, 0.162),
-        (96, 0.252))},
-    **{("linux", "arm64", c): r for c, r in (
-        (2, 0.005), (4, 0.008), (8, 0.014), (16, 0.026), (32, 0.050), (64, 0.098))},
-    **{("windows", "x64", c): r for c, r in (
-        (4, 0.022), (8, 0.042), (16, 0.082), (32, 0.162), (64, 0.322), (96, 0.552))},
-    **{("windows", "arm64", c): r for c, r in (
-        (2, 0.008), (4, 0.014), (8, 0.026), (16, 0.050), (32, 0.098), (64, 0.194))},
-}
+# A measured downsize is never priced (the 2026-07-20 rule: ci-speedup never prices
+# a runner). The smaller size runs about as fast, so it uses about the same
+# runner-minutes billed at its lower per-minute rate; the saving is stated as a
+# runner-cost saving left unsized. A STRING CONTRACT mirrored in blocking_path.py
+# and verify_report.py (pinned by a coupling test).
+_OPT81_DOWNSIZE_SAME_SPEED = (
+    "same speed on a smaller runner size: about the same runner-minutes, billed at "
+    "the smaller size's lower rate")
+_OPT81_DOWNSIZE_UNSIZED_REASON = (
+    "ci-speedup does not price runners; the smaller size bills at a lower "
+    "per-minute rate")
+_OPT81_DOWNSIZE_COST_EFFECT = (
+    f"runner-cost saving: unsized ({_OPT81_DOWNSIZE_UNSIZED_REASON})")
 # A downsize is never recommended for a route that names itself pinned, frozen,
 # a compatibility leg or a release/publish/deploy path: those routes keep their
 # runner on purpose (issue #398's fix recipe). Matched as whole words against
@@ -15924,9 +15917,7 @@ _OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT7
 _OPT81_DISCLOSURE = (
     "The publisher of this skill sells CI runners. This finding compares your own "
     "runs on runner classes you already use (A1), or names a class of lever and asks "
-    "you to benchmark before believing any number (A2); it prices only a move "
-    "between two GitHub-hosted sizes, as a ratio of GitHub's published rates, and "
-    "never prices a StarSling runner.")
+    "you to benchmark before believing any number (A2); it never prices a runner.")
 _OPT81_RUNNER_MIN_UNKNOWN = (
     "unknown: a different runner class bills differently and this audit carries no "
     "rate table")
@@ -16080,65 +16071,6 @@ def _opt81_size_stripped_label(label: str) -> str | None:
                 break
         out.append(tok.lower())
     return " ".join(sorted(out)) or None
-
-
-def _opt81_downsize_cost_effect(
-        large: tuple[str, str, str, str], small: tuple[str, str, str, str],
-        p50_large: float, p50_small: float) -> dict[str, Any]:
-    """The signed runner-cost effect of moving one job run from `large` to
-    `small`: 1 - (p50_small x rate_small) / (p50_large x rate_large), from the
-    published rate ratio. Unsized, with the reason, when either size has no
-    published rate in `_OPT81_GITHUB_LARGER_RATE_PER_MIN`."""
-    rate = {}
-    for side, rc in (("large", large), ("small", small)):
-        r = (_OPT81_GITHUB_LARGER_RATE_PER_MIN.get((rc[1], rc[2], int(rc[3])))
-             if rc[0] == "github-larger" and rc[3].isdigit() else None)
-        rate[side] = r
-    if rate["large"] is None or rate["small"] is None or p50_large <= 0:
-        return {"direction": "unsized",
-                "reason": (f"this audit has no published per-minute rate for these "
-                           f"{_OPT81_CLASS_DISPLAY.get(large[0], large[0])} sizes, so "
-                           "it does not price the change")}
-    ratio = round(rate["small"] / rate["large"], 4)
-    frac = round(1.0 - (p50_small * ratio) / p50_large, 4)
-    direction = "saving" if frac > 0 else ("added_cost" if frac < 0 else "unsized")
-    effect: dict[str, Any] = {
-        "direction": direction,
-        "price_ratio": ratio,
-        "price_basis": (f"the {small[3]}-core to {large[3]}-core per-minute rate ratio "
-                        f"in GitHub's published {large[1].capitalize()} {large[2]} "
-                        "larger-runner list prices"),
-        "price_source": _OPT81_PRICE_SOURCE_URL,
-        "price_read": _OPT81_PRICE_SOURCE_READ,
-    }
-    if direction == "unsized":
-        effect["reason"] = "the two sizes cost the same per run at the measured medians"
-    else:
-        effect["runner_cost_frac"] = abs(frac)
-    return effect
-
-
-def _opt81_downsize_effect_text(effect: dict[str, Any],
-                                n_large: int, n_small: int) -> str:
-    """One sentence for the signed runner-cost effect and its basis. Shared by the
-    engine's evidence and the card (verify_report re-renders it)."""
-    d = str(effect.get("direction") or "unsized")
-    if d not in {"saving", "added_cost"}:
-        return "not sized: " + str(effect.get("reason") or "no price ratio")
-    pct = (_num_or_zero(effect.get("runner_cost_frac"))) * 100.0
-    head = (f"runner-cost saving of {pct:.1f}% per job run" if d == "saving"
-            else f"runner-cost increase of {pct:.1f}% per job run")
-    return (f"{head} (basis: {n_large} and {n_small} interleaved successful runs "
-            f"compared at their medians; price ratio {effect.get('price_ratio'):.4f}, "
-            f"{effect.get('price_basis')}, {effect.get('price_source')}, read "
-            f"{effect.get('price_read')})")
-
-
-def _num_or_zero(v: Any) -> float:
-    try:
-        return float(v)
-    except (TypeError, ValueError):
-        return 0.0
 
 
 def _opt81_executed_steps(job: dict[str, Any]) -> list[str]:
@@ -16381,14 +16313,16 @@ def _detect_opt81_measured_runner_gap(
                     for lb in (large, small) for r in labels[lb]]
             n_large, n_small = len(labels[large]), len(labels[small])
             cs, cm = classified[large], classified[small]
-            effect = _opt81_downsize_cost_effect(cs, cm, p50[large], p50[small])
-            effect_text = _opt81_downsize_effect_text(effect, n_large, n_small)
+            effect = {"direction": "unsized",
+                      "reason": _OPT81_DOWNSIZE_UNSIZED_REASON}
             evidence = (
-                f"`{name}` ran the same {len(steps)} step(s) on two explicit sizes of "
-                f"one runner class and image: {n_large} successful run(s) on `{large}` "
-                f"at p50 {p50[large]:.0f}s and {n_small} on the smaller `{small}` at "
-                f"p50 {p50[small]:.0f}s ({abs(delta_frac):.1%} apart). Runner-cost "
-                f"effect: {effect_text}. {_OPT81_DISCLOSURE}")
+                f"{_OPT81_DOWNSIZE_SAME_SPEED[:1].upper()}{_OPT81_DOWNSIZE_SAME_SPEED[1:]}"
+                f". `{name}` ran the same "
+                f"{len(steps)} step(s) on two explicit sizes of one runner class and "
+                f"image: {n_large} successful run(s) on `{large}` at p50 "
+                f"{p50[large]:.0f}s and {n_small} on the smaller `{small}` at p50 "
+                f"{p50[small]:.0f}s ({abs(delta_frac):.1%} apart). Runner-minute and "
+                f"cost effect: {_OPT81_DOWNSIZE_COST_EFFECT}. {_OPT81_DISCLOSURE}")
             me = _measured_evidence(
                 ["Runner label", "Class", "Successful runs (n)", "p50", "Steps executed"],
                 [[f"`{large}`", _opt81_class_display(cs[0], cs[3]), str(n_large),
@@ -16405,10 +16339,13 @@ def _detect_opt81_measured_runner_gap(
                 name, evidence, _OPT81_FIX_STRATEGY,
                 _catalog_anchor("OPT81", _OPT81_TITLE), start_idx + len(out) + 1,
                 wc_p50=0.0, rm=None,
-                size_note=(f"runner-cost effect: {effect_text}; no merge-wait credit"),
+                size_note=(f"{_OPT81_DOWNSIZE_COST_EFFECT}; no wall-clock credit"),
                 realization="none", measured_evidence=me)
             f["sizing_basis"] = "measured"
             f["runner_cost_effect"] = effect
+            # The report's group heading reads this, so it never says "no bill
+            # saving" for a real saving the skill does not price.
+            f["runner_min_unsized_reason"] = _OPT81_DOWNSIZE_UNSIZED_REASON
             f["faster_runner"] = {
                 "kind": "opt81_downsize", "half": "A1", "job": name,
                 "workflow_file": wf_path,
@@ -16426,7 +16363,7 @@ def _detect_opt81_measured_runner_gap(
                 "min_samples_per_label": _OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL,
                 "step_list_sha": next(iter(shas)), "step_names": list(steps),
                 "rows": rows, "excluded_labels": dict(sorted(excluded.items())),
-                "runner_matrix": matrix, "runner_cost_effect": effect,
+                "runner_matrix": matrix, "runner_cost_effect": dict(effect),
                 "disclosure": _OPT81_DISCLOSURE,
             }
             out.append(f)

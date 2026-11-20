@@ -16532,22 +16532,21 @@ _VR_OPT81_MIN_GAP_S = 30.0
 _VR_OPT81_MIN_GAP_FRAC = 0.25
 _VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL = 5
 _VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC = 0.05
-# Mirror of collect_runs._OPT81_GITHUB_LARGER_RATE_PER_MIN and its source (pinned
-# by a coupling test): GitHub's published larger-runner per-minute list rates.
-_VR_OPT81_PRICE_SOURCE_URL = (
-    "https://docs.github.com/en/billing/reference/actions-runner-pricing")
-_VR_OPT81_PRICE_SOURCE_READ = "2026-11-20"
-_VR_OPT81_GITHUB_LARGER_RATE_PER_MIN: dict = {
-    **{("linux", "x64", c): r for c, r in (
-        (2, 0.006), (4, 0.012), (8, 0.022), (16, 0.042), (32, 0.082), (64, 0.162),
-        (96, 0.252))},
-    **{("linux", "arm64", c): r for c, r in (
-        (2, 0.005), (4, 0.008), (8, 0.014), (16, 0.026), (32, 0.050), (64, 0.098))},
-    **{("windows", "x64", c): r for c, r in (
-        (4, 0.022), (8, 0.042), (16, 0.082), (32, 0.162), (64, 0.322), (96, 0.552))},
-    **{("windows", "arm64", c): r for c, r in (
-        (2, 0.008), (4, 0.014), (8, 0.026), (16, 0.050), (32, 0.098), (64, 0.194))},
-}
+# The 2026-07-20 rule: ci-speedup never prices a runner. A measured downsize states
+# its runner-cost saving unsized, with this reason (mirrors collect_runs and
+# blocking_path, pinned by a coupling test), and no surface of it may carry a
+# price ratio, a rate source or a currency figure.
+_VR_OPT81_DOWNSIZE_SAME_SPEED = (
+    "same speed on a smaller runner size: about the same runner-minutes, billed at "
+    "the smaller size's lower rate")
+_VR_OPT81_DOWNSIZE_UNSIZED_REASON = (
+    "ci-speedup does not price runners; the smaller size bills at a lower "
+    "per-minute rate")
+_VR_OPT81_DOWNSIZE_COST_EFFECT = (
+    f"runner-cost saving: unsized ({_VR_OPT81_DOWNSIZE_UNSIZED_REASON})")
+_VR_OPT81_PRICING_RE = re.compile(
+    r"price[ _]ratio|rate ratio|rate card|runner_cost_frac|price_source|price_read|"
+    r"actions-runner-pricing|docs\.github\.com/en/billing|\$\s?\d|\d\s?USD", re.I)
 _VR_OPT81_COVERED_FRAC = 0.5
 _VR_OPT81_CACHE_LEVER_MIN_S = 30.0
 _VR_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
@@ -16558,9 +16557,7 @@ _VR_OPT81_PRESTART_PATTERNS = frozenset({"OPT43", "OPT97"})
 _VR_OPT81_DISCLOSURE = (
     "The publisher of this skill sells CI runners. This finding compares your own "
     "runs on runner classes you already use (A1), or names a class of lever and asks "
-    "you to benchmark before believing any number (A2); it prices only a move "
-    "between two GitHub-hosted sizes, as a ratio of GitHub's published rates, and "
-    "never prices a StarSling runner.")
+    "you to benchmark before believing any number (A2); it never prices a runner.")
 _VR_OPT81_RUNNER_CLASSES = (
     (re.compile(r"^starsling-(ubuntu|linux)(?:(?:-[\w.]+)+?(-(?P<size>\d+))?)?$", re.I),
      "starsling", "linux"),
@@ -16601,20 +16598,6 @@ _VR_OPT81_RUNNER_MIN_LINE = "**Runner-minute effect:**"
 _VR_OPT81_RUNNER_COST_LINE = "**Runner-cost effect:**"
 
 
-def _vr_opt81_downsize_effect_text(effect: dict, n_large: object,
-                                   n_small: object) -> str:
-    """Re-render of blocking_path._opt81_downsize_effect_text."""
-    d = str(effect.get("direction") or "unsized")
-    if d not in {"saving", "added_cost"}:
-        return "not sized: " + str(effect.get("reason") or "no price ratio")
-    pct = (_num(effect.get("runner_cost_frac")) or 0.0) * 100.0
-    head = (f"runner-cost saving of {pct:.1f}% per job run" if d == "saving"
-            else f"runner-cost increase of {pct:.1f}% per job run")
-    return (f"{head} (basis: {n_large} and {n_small} interleaved successful runs "
-            f"compared at their medians; price ratio "
-            f"{_num(effect.get('price_ratio')) or 0.0:.4f}, "
-            f"{effect.get('price_basis')}, {effect.get('price_source')}, read "
-            f"{effect.get('price_read')})")
 _VR_OPT81_RUNNER_MIN_UNKNOWN = (
     "unknown: a different runner class bills differently and this audit carries no "
     "rate table")
@@ -16921,30 +16904,26 @@ def _opt81_downsize_rederived(f: dict) -> list[str]:
             row.get("step_list_sha") != sha for row in rows):
         out.append(f"OPT81 {fid}: compared runs did not execute the same stamped steps")
 
-    rates = [(_VR_OPT81_GITHUB_LARGER_RATE_PER_MIN.get((rc[1], rc[2], rank))
-              if rc[0] == "github-larger" and rank is not None else None)
-             for rc, rank in ((large_rc, large_rank), (small_rc, small_rank))]
     effect = _as_dict(f.get("runner_cost_effect"))
-    if None in rates or large_p50 <= 0:
-        if effect.get("direction") != "unsized" or any(
-                k in effect for k in ("runner_cost_frac", "price_ratio")):
-            out.append(f"OPT81 {fid}: a size with no published rate must leave the "
-                       "runner-cost effect unsized")
-    else:
-        ratio = round(rates[1] / rates[0], 4)
-        frac = round(1.0 - (small_p50 * ratio) / large_p50, 4)
-        direction = ("saving" if frac > 0 else "added_cost" if frac < 0
-                     else "unsized")
-        if (effect.get("direction") != direction
-                or _num(effect.get("price_ratio")) != ratio
-                or effect.get("price_source") != _VR_OPT81_PRICE_SOURCE_URL
-                or effect.get("price_read") != _VR_OPT81_PRICE_SOURCE_READ
-                or (direction != "unsized"
-                    and abs((_num(effect.get("runner_cost_frac")) or -1.0)
-                            - abs(frac)) > 0.00005)):
-            out.append(f"OPT81 {fid}: runner-cost effect does not re-derive "
-                       f"(direction {direction}, price ratio {ratio}, cost fraction "
-                       f"{abs(frac)})")
+    if effect != {"direction": "unsized", "reason": _VR_OPT81_DOWNSIZE_UNSIZED_REASON}:
+        out.append(f"OPT81 {fid}: a downsize's runner-cost effect must be unsized "
+                   f"(\"{_VR_OPT81_DOWNSIZE_UNSIZED_REASON}\"), never a price or a "
+                   f"sized fraction ({effect!r})")
+    if f.get("runner_min_unsized_reason") != _VR_OPT81_DOWNSIZE_UNSIZED_REASON:
+        out.append(f"OPT81 {fid}: runner_min_unsized_reason is missing or altered, so "
+                   "the group heading would read `no bill saving`")
+    for field in ("evidence", "size_note"):
+        text = str(f.get(field) or "")
+        if _VR_OPT81_DOWNSIZE_COST_EFFECT not in text:
+            out.append(f"OPT81 {fid}: its {field} does not state "
+                       f"\"{_VR_OPT81_DOWNSIZE_COST_EFFECT}\"")
+    if _VR_OPT81_DOWNSIZE_SAME_SPEED not in str(f.get("evidence") or "").lower():
+        out.append(f"OPT81 {fid}: its evidence does not state "
+                   f"\"{_VR_OPT81_DOWNSIZE_SAME_SPEED}\"")
+    m = _VR_OPT81_PRICING_RE.search(json.dumps(f, sort_keys=True, default=str))
+    if m:
+        out.append(f"OPT81 {fid}: a downsize finding carries a price (`{m.group(0)}`); "
+                   "ci-speedup never prices a runner")
     if _as_dict(fr.get("runner_cost_effect")) != effect:
         out.append(f"OPT81 {fid}: the stamped runner-cost effects disagree")
     if "runner_minute_effect" in f or "runner_minute_effect" in fr:
@@ -17085,8 +17064,15 @@ def check_opt81_runner_comparison_rederived(report: str,
                         else _VR_OPT81_RUNNER_MIN_LINE)
             rm_lines = [ln for ln in card.splitlines() if line_key in ln]
             if downsize:
-                want_effect = _vr_opt81_downsize_effect_text(
-                    _as_dict(fr.get("runner_cost_effect")), s.get("n"), q.get("n")) + "."
+                want_effect = f"{_VR_OPT81_DOWNSIZE_COST_EFFECT}."
+                pm = _VR_OPT81_PRICING_RE.search(block)
+                if pm:
+                    bad.append(f"OPT81 {fid}: the downsize card or prompt carries a "
+                               f"price (`{pm.group(0)}`); ci-speedup never prices a "
+                               "runner")
+                if _VR_OPT81_DOWNSIZE_SAME_SPEED not in card.lower():
+                    bad.append(f"OPT81 {fid}: the downsize card does not state "
+                               f"\"{_VR_OPT81_DOWNSIZE_SAME_SPEED}\"")
                 if any(_VR_OPT81_RUNNER_MIN_LINE in ln for ln in card.splitlines()):
                     bad.append(f"OPT81 {fid}: the downsize card states a runner-minute "
                                "effect; its saving is a runner-cost difference")

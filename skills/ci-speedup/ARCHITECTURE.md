@@ -2291,15 +2291,18 @@ failed runs make another label dominant, the gap is stated and the credit held,
 counted as `slow_label_is_not_the_poles_population`. It is pre-capped
 with `bound_within_workflow` (CAP 1) inside the detector and then flows through
 the generic cascade like any credited saving. `runner_min_saving` is always
-`None`: a different runner class bills differently (the 2026-07-20 pricing punt;
-OPT66 stays retired). The one priced exception is the A1 **downsize** shape
-(`faster_runner.kind == "opt81_downsize"`, #429): two numeric core counts of one
-class and one image, five interleaved samples each, medians within 5%. It credits
-no wall-clock and no runner-minutes; `runner_cost_effect` is the signed fraction
-`1 - p50_small x ratio / p50_large`, where the ratio comes from
-`_OPT81_GITHUB_LARGER_RATE_PER_MIN` (GitHub's published larger-runner rates, source
-URL and read date stamped on the finding). A size with no row there is unsized
-with its reason; pinned, frozen, compatibility and release routes are a verdict
+`None`: a different runner class bills differently and the skill carries no rate
+table (the 2026-07-20 pricing punt; OPT66 stays retired). The A1 **downsize**
+shape (`faster_runner.kind == "opt81_downsize"`, #429) is not priced either: two
+numeric core counts of one class and one image, five interleaved samples each,
+medians within 5%. It reads "same speed on a smaller runner size: about the same
+runner-minutes, billed at the smaller size's lower rate", credits no wall-clock
+and no runner-minutes, and states `runner_cost_effect` as unsized ("runner-cost
+saving: unsized (ci-speedup does not price runners; the smaller size bills at a
+lower per-minute rate)"), with the same reason in `runner_min_unsized_reason` so
+the group heading never reads "no bill saving". `verify_report` fails a downsize
+that carries a price ratio, a rate source or a currency figure. Pinned, frozen,
+compatibility and release routes are a verdict
 gate (`downsize_pinned_or_compatibility_route`). Every number is stamped
 with the per-run rows it came from (`faster_runner.rows`: run id, label, run
 time, duration, step-list digest), and

@@ -469,9 +469,32 @@ def _downsize(large=(100, 101, 99, 102, 100), small=(103, 104, 102, 105, 103),
     return _a1(runs)
 
 
-def test_opt81_reports_a_smaller_runner_as_a_signed_runner_cost_saving():
-    """Issue #398: the saving is the price difference between the two sizes, with
-    its basis (paired samples, the price ratio and its source), never wall-clock."""
+_SAME_SPEED = ("same speed on a smaller runner size: about the same runner-minutes, "
+               "billed at the smaller size's lower rate")
+_UNSIZED_REASON = ("ci-speedup does not price runners; the smaller size bills at a "
+                   "lower per-minute rate")
+_COST_EFFECT = f"runner-cost saving: unsized ({_UNSIZED_REASON})"
+_NEVER_PRICES = ("The publisher of this skill sells CI runners. This finding compares "
+                 "your own runs on runner classes you already use (A1), or names a "
+                 "class of lever and asks you to benchmark before believing any number "
+                 "(A2); it never prices a runner.")
+# The 2026-07-20 rule: ci-speedup never prices a runner. No ratio, no rate source,
+# no currency figure, on any downsize surface.
+_PRICING_RE = re.compile(
+    r"price[ _]ratio|rate ratio|rate card|runner_cost_frac|price_source|price_read|"
+    r"actions-runner-pricing|docs\.github\.com/en/billing|\$\s?\d|\d\s?USD", re.I)
+
+
+def _assert_no_pricing(text: str) -> None:
+    m = _PRICING_RE.search(text)
+    assert m is None, f"pricing text {m.group(0)!r} in: ...{text[max(0, m.start() - 80):m.end() + 80]}..."
+
+
+def test_opt81_reports_a_smaller_runner_as_same_speed_with_an_unsized_cost_saving():
+    """Issue #398 under the 2026-07-20 rule: the smaller size runs about as fast, so
+    it uses about the same runner-minutes billed at a lower rate. ci-speedup never
+    prices a runner, so the runner-cost saving is unsized, and nothing is credited
+    as wall-clock or runner-minutes."""
     found, withheld, cands, *_ = _downsize()
 
     assert len(found) == 1, (withheld, cands)
@@ -480,26 +503,28 @@ def test_opt81_reports_a_smaller_runner_as_a_signed_runner_cost_saving():
     assert fr["kind"] == "opt81_downsize"
     assert fr["large"]["size"] == "8" and fr["small"]["size"] == "4"
     assert fr["slowdown_frac"] == pytest.approx(0.03, abs=0.001)
-    effect = f["runner_cost_effect"]
-    assert effect["direction"] == "saving"
-    # 4-core 0.012 / 8-core 0.022 per minute, GitHub's published Linux x64 rates.
-    assert effect["price_ratio"] == pytest.approx(0.5455)
-    assert effect["runner_cost_frac"] == pytest.approx(1 - 103 * 0.5455 / 100, abs=1e-4)
-    assert effect["price_source"] == cr._OPT81_PRICE_SOURCE_URL
+    assert f["runner_cost_effect"] == {"direction": "unsized", "reason": _UNSIZED_REASON}
+    assert fr["runner_cost_effect"] == f["runner_cost_effect"]
+    # The report's group heading reads this, so it never says "no bill saving".
+    assert f["runner_min_unsized_reason"] == _UNSIZED_REASON
     assert "runner_minute_effect" not in f and "runner_minute_effect" not in fr
     assert f["wall_clock_p50_s"] == 0.0 and f.get("runner_min_saving") is None
-    assert "runner-cost saving of 43.8% per job run" in f["evidence"]
-    assert "price ratio 0.5455" in f["evidence"] and "read 2026-11-20" in f["evidence"]
+    assert _SAME_SPEED in f["evidence"].lower()
+    assert _COST_EFFECT in f["evidence"] and _COST_EFFECT in f["size_note"]
+    assert "no wall-clock credit" in f["size_note"]
+    assert fr["disclosure"] == _NEVER_PRICES and _NEVER_PRICES in f["evidence"]
+    _assert_no_pricing(json.dumps(f))
     assert cands == []
 
 
-def test_opt81_downsize_without_a_published_rate_is_unsized_with_its_reason():
+def test_opt81_downsize_is_unsized_the_same_way_for_every_runner_class():
+    """No size is priced, so a StarSling pair reads exactly like a GitHub pair."""
     found, *_ = _downsize(large_label="starsling-ubuntu-24.04-4",
                           small_label="starsling-ubuntu-24.04-2")
-    effect = found[0]["runner_cost_effect"]
-    assert effect["direction"] == "unsized"
-    assert "no published per-minute rate" in effect["reason"]
-    assert "price_ratio" not in effect and "runner_cost_frac" not in effect
+    assert found[0]["runner_cost_effect"] == {"direction": "unsized",
+                                              "reason": _UNSIZED_REASON}
+    assert found[0]["runner_min_unsized_reason"] == _UNSIZED_REASON
+    _assert_no_pricing(json.dumps(found[0]))
 
 
 def test_opt81_smaller_runner_more_than_five_percent_slower_stays_quiet():
@@ -545,46 +570,75 @@ def test_opt81_ordinary_job_names_with_route_words_inside_still_fire():
         assert len(found) == 1, job
 
 
-def test_opt81_downsize_card_states_runner_cost_not_runner_minutes():
+def test_opt81_downsize_card_states_an_unsized_runner_cost_saving_and_no_price():
     found, *_ = _downsize(large=[100] * 5, small=[103] * 5)
     card = "\n".join(bp._opt81_card(found[0], "https://example.invalid/catalog"))
 
     assert f"smaller `{_SMALL4}`" in card
-    assert "**Runner-cost effect:** runner-cost saving of 43.8% per job run" in card
-    assert "price ratio 0.5455" in card and cr._OPT81_PRICE_SOURCE_URL in card
+    assert _SAME_SPEED in card.lower()
+    assert f"**Runner-cost effect:** {_COST_EFFECT}." in card
     assert "**Runner-minute effect:**" not in card
     assert "runner-minutes per job run" not in card
+    assert "**Merge wait:** not credited" in card
     assert all(word in card for word in ("pinned", "frozen", "compatibility"))
+    assert _NEVER_PRICES in card
+    _assert_no_pricing(card)
 
 
-def test_opt81_verifier_rederives_downsize_shape_and_signed_cost_effect():
+def test_opt81_verifier_rejects_any_price_on_a_downsize_finding():
     vr = _load_verify_report()
     found, *_ = _downsize(large=[100] * 5, small=[103] * 5)
-    f = copy.deepcopy(found[0])
+    assert vr._opt81_a1_rederived(found[0]) == []
 
-    assert vr._opt81_a1_rederived(f) == []
-    f["runner_cost_effect"]["direction"] = "added_cost"
-    assert any("runner-cost effect" in problem
-               for problem in vr._opt81_a1_rederived(f))
-    g = copy.deepcopy(found[0])
-    g["runner_cost_effect"]["price_ratio"] = 0.5
-    g["faster_runner"]["runner_cost_effect"]["price_ratio"] = 0.5
-    assert any("runner-cost effect" in problem
-               for problem in vr._opt81_a1_rederived(g))
+    def problems(mutate):
+        f = copy.deepcopy(found[0])
+        mutate(f)
+        return vr._opt81_a1_rederived(f)
+
+    def add_ratio(f):
+        f["runner_cost_effect"]["price_ratio"] = 0.5455
+        f["faster_runner"]["runner_cost_effect"]["price_ratio"] = 0.5455
+    assert any("price" in p for p in problems(add_ratio))
+
+    def add_rate_url(f):
+        f["evidence"] += (" Rates: https://docs.github.com/en/billing/reference/"
+                          "actions-runner-pricing")
+    assert any("price" in p for p in problems(add_rate_url))
+
+    def add_dollars(f):
+        f["size_note"] += "; about $12.40 a month"
+    assert any("price" in p for p in problems(add_dollars))
+
+    def drop_reason(f):
+        del f["runner_min_unsized_reason"]
+    assert any("runner_min_unsized_reason" in p for p in problems(drop_reason))
+
+    def sized(f):
+        f["runner_cost_effect"] = {"direction": "saving", "runner_cost_frac": 0.44}
+        f["faster_runner"]["runner_cost_effect"] = dict(f["runner_cost_effect"])
+    assert problems(sized)
 
 
-def test_opt81_price_table_stays_coupled_to_the_verifier():
+def test_opt81_downsize_text_and_route_gate_stay_coupled_and_carry_no_rate_table():
     vr = _load_verify_report()
-    assert vr._VR_OPT81_GITHUB_LARGER_RATE_PER_MIN == cr._OPT81_GITHUB_LARGER_RATE_PER_MIN
-    assert vr._VR_OPT81_PRICE_SOURCE_URL == cr._OPT81_PRICE_SOURCE_URL
-    assert vr._VR_OPT81_PRICE_SOURCE_READ == cr._OPT81_PRICE_SOURCE_READ
     assert (vr._VR_OPT81_DOWNSIZE_PINNED_ROUTE_RE.pattern
             == cr._OPT81_DOWNSIZE_PINNED_ROUTE_RE.pattern)
-    effect = {"direction": "saving", "runner_cost_frac": 0.4381, "price_ratio": 0.5455,
-              "price_basis": "b", "price_source": "u", "price_read": "d"}
-    assert (vr._vr_opt81_downsize_effect_text(effect, 5, 5)
-            == bp._opt81_downsize_effect_text(effect, 5, 5)
-            == cr._opt81_downsize_effect_text(effect, 5, 5))
+    assert (vr._VR_OPT81_DOWNSIZE_COST_EFFECT == bp._OPT81_DOWNSIZE_COST_EFFECT
+            == cr._OPT81_DOWNSIZE_COST_EFFECT == _COST_EFFECT)
+    assert cr._OPT81_DOWNSIZE_UNSIZED_REASON == _UNSIZED_REASON
+    for mod in (cr, bp, vr):
+        assert not [n for n in vars(mod) if re.search(r"RATE_PER_MIN|PRICE_SOURCE", n)
+                    and "OPT81" in n], mod.__name__
+
+
+def test_opt81_disclosure_never_prices_a_runner_in_every_copy():
+    vr = _load_verify_report()
+    assert cr._OPT81_DISCLOSURE == bp._OPT81_DISCLOSURE == vr._VR_OPT81_DISCLOSURE \
+        == _NEVER_PRICES
+    catalog = (_SKILL_DIR / "references" / "optimization-patterns.md").read_text()
+    for text in (_OPT81_FILE.read_text(), catalog):
+        assert _NEVER_PRICES in text
+        assert "prices only a move" not in text
 
 
 def test_opt81_a1_three_qualifying_labels_withhold():
@@ -1603,6 +1657,13 @@ def test_opt81_downsize_runs_through_collect_and_full_report_verifier(
     failed = [check for check in vr.run_checks(
         report, report_path, findings_path, None) if not check.skipped and not check.ok]
     assert failed == [], [(check.name, check.detail) for check in failed]
+    fid = findings[0]["id"]
+    n, block = vr._opt81_rendered_block(report, fid)
+    assert n == 1
+    _assert_no_pricing(block)
+    assert f"**Runner-cost effect:** {_COST_EFFECT}." in block
+    assert not [ln for ln in report.splitlines()
+                if "OPT81" in ln and "no bill saving" in ln]
 
 
 def test_opt81_a2_fires_through_collect_on_a_pull_request_pole(monkeypatch):
