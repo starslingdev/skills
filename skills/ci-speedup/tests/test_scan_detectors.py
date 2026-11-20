@@ -671,6 +671,75 @@ def select_tests(listing, shard, count):
     assert findings == [], findings
 
 
+_OPT25_TIMING_SORTED_SPLITTERS = {
+    "python-key-duration": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    names = sorted(tests, key=lambda name: -durations[name])
+    return names[shard::count]
+'''),
+    "python-in-place-key": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    tests.sort(key=lambda name: durations.get(name, 0), reverse=True)
+    return tests[shard::count]
+'''),
+    "python-multiline-key": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    names = sorted(
+        tests,
+        key=lambda name: -durations[name],
+    )
+    return names[shard::count]
+'''),
+    "js-timing-comparator": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => timings[b] - timings[a]);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT25_TIMING_SORTED_SPLITTERS))
+def test_opt25_positional_splitter_keeps_timing_sorted_stride_quiet(
+        tmp_path: Path, case: str):
+    """A list sorted by measured duration and dealt round-robin is already a
+    timing-based splitter: inserting a test does not reorder by name."""
+    rel, source = _OPT25_TIMING_SORTED_SPLITTERS[case]
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert hits == [] and incomplete == [], hits
+
+
+_OPT25_NAME_SORTED_SPLITTERS = {
+    "js-default-sort": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort();
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "js-locale-compare": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => a.localeCompare(b));
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "github-scripts-python": (".github/scripts/shard.py", '''\
+def pick(listing, shard, count):
+    names = sorted(listing)
+    return names[shard::count]
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT25_NAME_SORTED_SPLITTERS))
+def test_opt25_finds_name_sorted_positional_splitter_shapes(tmp_path: Path, case: str):
+    rel, source = _OPT25_NAME_SORTED_SPLITTERS[case]
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, _incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert [(pattern, source_path) for pattern, source_path, _hit in hits] == [
+        ("OPT25", rel)]
+    facts = hits[0][2].facts
+    assert "exactly one shard" in facts["fix_strategy"], facts
+
+
 def test_opt18_not_auto_emitted(tmp_path: Path):
     """OPT18 is NOT auto-emitted as a finding: which services a job needs can't
     be determined from the workflow YAML (it needs docker-compose.yml + the test

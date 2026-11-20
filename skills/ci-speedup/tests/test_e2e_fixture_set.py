@@ -543,6 +543,17 @@ def select_tests(listing, shard, count):
     assert "runner-minute effect: roughly neutral" in finding.get("size_note", ""), finding
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+    # The rendered card must carry the recipe and a literally true cost line:
+    # no "no bill saving", no off-critical-path / cloud-bill-cut claim.
+    start = _report.index("<summary><strong>OPT25 - Shard Imbalance</strong>")
+    card = _report[start:_report.index("</details>", start)]
+    summary_line = card.splitlines()[0]
+    assert "runner-minute saving: unsized (" in summary_line, summary_line
+    assert "no bill saving" not in card, card
+    assert "off the merge-gating critical path" not in card, card
+    assert "cloud-bill cut" not in card, card
+    assert "Fix recipe (safest first): Place unlisted tests by a stable hash" in card, card
+    assert "exactly one shard" in card, card
 
     negative = tmp_path / "stable-hash-splitter"
     shutil.copytree(positive, negative)

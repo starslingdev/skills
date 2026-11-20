@@ -9026,9 +9026,56 @@ _OPT25_SPLITTER_PATH_RE = re.compile(r"(?:shard|split|partition)", re.IGNORECASE
 _OPT25_SPLITTER_SUFFIXES = (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
 _OPT25_SORT_ASSIGN_RE = re.compile(
     r"(?m)^\s*(?:const\s+|let\s+|var\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
-    r"\s*=\s*(?:sorted\s*\(|[^\n;]*\.sort\s*\()")
+    r"\s*=\s*(?:(?P<py_sorted>sorted)\s*\(|[^\n;]*\.sort\s*\()(?P<args>[^\n]*)")
 _OPT25_SORT_IN_PLACE_RE = re.compile(
-    r"(?m)^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\.sort\s*\(")
+    r"(?m)^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\.sort\s*\((?P<args>[^\n]*)")
+# Name-order keys. Any other Python `key=` or JavaScript comparator (measured
+# duration, weight, cost) makes a stride over the list a timing-based deal,
+# which is the recommended shape, so it stays quiet.
+_OPT25_NAME_KEY_RE = re.compile(
+    r"\bkey\s*=\s*(?:str|str\.lower|str\.casefold|os\.path\.basename)\s*(?:,|$)")
+_OPT25_PY_KEY_RE = re.compile(r"\bkey\s*=")
+_OPT25_JS_COMPARATOR_RE = re.compile(r"\S")
+
+
+def _opt25_call_args(text: str, start: int, cap: int = 600) -> str:
+    """The sort call's argument text up to its closing parenthesis, across
+    lines, so a `key=` on a continuation line is still read."""
+    depth = 0
+    for offset, char in enumerate(text[start:start + cap]):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                return text[start:start + offset]
+            depth -= 1
+    return text[start:start + cap]
+
+
+def _opt25_sorts_by_name(text: str, assignment: re.Match[str]) -> bool:
+    """True only when the sort orders by test name, not by a measured weight."""
+    args = _opt25_call_args(text, assignment.start("args"))
+    if assignment.groupdict().get("py_sorted"):
+        # Python `sorted(iterable, key=...)`.
+        return (not _OPT25_PY_KEY_RE.search(args)
+                or bool(_OPT25_NAME_KEY_RE.search(args)))
+    if _OPT25_PY_KEY_RE.search(args):
+        # Python in-place `list.sort(key=...)`.
+        return bool(_OPT25_NAME_KEY_RE.search(args))
+    # JavaScript `.sort()` is lexical; a comparator is name order only when it
+    # compares with `localeCompare`.
+    return (not _OPT25_JS_COMPARATOR_RE.search(args)
+            or "localeCompare" in args)
+
+
+_OPT25_POSITIONAL_SIZE_NOTE = (
+    "runner-minute effect: roughly neutral for passing runs because the same "
+    "existing shard jobs run the same tests; any saving from fewer shard "
+    "timeouts and reruns is unsized, and the wall-clock saving is unsized until "
+    "CI per-test timings measure the imbalance")
+_OPT25_POSITIONAL_UNSIZED = (
+    "static source finding; the same shard jobs run the same tests, and no CI "
+    "per-test timings measure the imbalance or timeout reruns")
 
 
 def _opt25_positional_use(text: str, name: str) -> re.Match[str] | None:
@@ -9047,8 +9094,12 @@ def _detect_opt25_positional_splitters(root: Path):
     hits: list[tuple[str, str, Hit]] = []
     incomplete: list[dict[str, str]] = []
     for dirpath, dirnames, filenames in os.walk(root):
+        # `.github/` is the one hidden directory kept: repositories commonly
+        # keep their CI planner scripts in `.github/scripts/`.
         dirnames[:] = [name for name in dirnames
-                       if name not in _OPT19_SKIP_DIRS and not name.startswith(".")]
+                       if name not in _OPT19_SKIP_DIRS
+                       and (not name.startswith(".")
+                            or (name == ".github" and dirpath == str(root)))]
         for filename in filenames:
             if not filename.endswith(_OPT25_SPLITTER_SUFFIXES):
                 continue
@@ -9072,6 +9123,8 @@ def _detect_opt25_positional_splitters(root: Path):
             assignments += list(_OPT25_SORT_IN_PLACE_RE.finditer(text))
             for assignment in assignments:
                 name = assignment.group("name")
+                if not _opt25_sorts_by_name(text, assignment):
+                    continue
                 positional = _opt25_positional_use(text[assignment.end():], name)
                 if positional is None:
                     continue
@@ -9092,11 +9145,15 @@ def _detect_opt25_positional_splitters(root: Path):
                             "then pack a checked-in list of measured slow tests "
                             "heaviest first onto the lightest shard. Take weights from "
                             "per-test timings printed by CI shards and exclude per-shard "
-                            "constants from those weights."),
-                        "size_note": (
-                            "runner-minute effect: roughly neutral because the same "
-                            "existing shard jobs run the same tests; wall-clock saving "
-                            "is unsized until CI per-test timings measure the imbalance"),
+                            "constants from those weights. Every test must land on "
+                            "exactly one shard: listed tests only through the packing, "
+                            "unlisted tests only through the hash, and a listed name "
+                            "that no longer exists is dropped from the list. Add a "
+                            "check that the union of all shards equals the full test "
+                            "listing with no duplicates before relying on the new "
+                            "split."),
+                        "size_note": _OPT25_POSITIONAL_SIZE_NOTE,
+                        "runner_min_unsized_reason": _OPT25_POSITIONAL_UNSIZED,
                     },
                 )
                 hits.append(("OPT25", rel, hit))

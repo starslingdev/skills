@@ -7048,9 +7048,15 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f["realization"] = "none"
         f.setdefault(
             "size_note",
-            "runner-minute effect: roughly neutral because the same existing "
-            "shard jobs run the same tests; wall-clock saving is unsized until "
-            "CI per-test timings measure the imbalance",
+            "runner-minute effect: roughly neutral for passing runs because the "
+            "same existing shard jobs run the same tests; any saving from fewer "
+            "shard timeouts and reruns is unsized, and the wall-clock saving is "
+            "unsized until CI per-test timings measure the imbalance",
+        )
+        f.setdefault(
+            "runner_min_unsized_reason",
+            "static source finding; the same shard jobs run the same tests, and "
+            "no CI per-test timings measure the imbalance or timeout reruns",
         )
         return
     cache_confirmation = f.get("cache_log_confirmation")
