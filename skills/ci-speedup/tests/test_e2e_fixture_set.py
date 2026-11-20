@@ -470,6 +470,12 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
     assert finding["opt13_runner_min_ceiling"] > 0
     assert "runtime-only" in finding["fix_strategy"]
     assert "not sized" in finding["size_note"]
+    # Signed convention (#388): "+N runner-minutes" reads as an added cost, so
+    # the ceiling is worded as a bound on a saving, never as a signed figure.
+    ceiling = finding["opt13_runner_min_ceiling"]
+    assert (f"runner-minute saving: at most {ceiling:.1f}/month (measured build ceiling)"
+            in finding["size_note"])
+    assert "+" not in finding["size_note"]
     assert finding["opt13_validation_build"]["job"] == "build-artifacts"
     assert finding["opt13_source_guard"]["safe"] is True
     assert finding["opt13_source_guard"]["source_files_checked"] == 1

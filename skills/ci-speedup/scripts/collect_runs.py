@@ -29206,8 +29206,9 @@ def _detect_opt13_build_in_scripts(
         url = str(entry.get("html_url") or "")
         shown = _link(float(seconds), url)
         runner_effect = (
-            f"measured ceiling +{runner_min:.1f} runner-minutes/month; saving not sized "
-            "until the runtime-only replacement is benchmarked"
+            f"runner-minute saving: at most {runner_min:.1f}/month (measured build "
+            "ceiling); exact saving not sized until the runtime-only replacement is "
+            "benchmarked"
             if runner_min is not None else
             "runner-minute saving not sized because replacement cost and monthly run volume are unavailable")
         evidence = (
