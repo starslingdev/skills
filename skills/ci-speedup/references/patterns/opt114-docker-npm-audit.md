@@ -16,13 +16,20 @@ reporting, then builds a local Dockerfile whose `RUN npm ci`, `npm install` or
 `npm prune` commands make the same advisory lookup again. Several image layers
 can repeat the request, and a slow advisory service can hold up the image build.
 
-**Detection heuristic**: Require both halves in one readable job: a direct host
-`npm ci` whose flags, environment and repository `.npmrc` keep audit enabled,
-and a local Docker build whose resolved Dockerfile has at least one direct npm
-install/prune command without `--no-audit`. Resolve action and raw `docker build`
-paths inside the checkout. Expressions, remote contexts, unreadable files,
-non-command mentions, a disabled host audit, and Docker commands that already
-disable audit stay quiet.
+**Detection heuristic**: Require both halves in one readable job. The host
+half is a direct `npm ci` that keeps audit on: its flags, step/job/workflow
+environment and every repository `.npmrc` from its effective working directory
+(`defaults.run.working-directory` included) up to the checkout root leave audit
+enabled, and it runs whenever the image build runs (no `if:`, or the build's
+own `if:`). The image half is a local Docker build whose selected stage, or a
+stage it builds from, runs `npm ci`, `npm install` or `npm prune` with audit
+still on after copying in that same host lockfile. Image audit settings are read
+as Docker applies them: `ENV`/`ARG NPM_CONFIG_AUDIT`, `npm config set audit`
+and an `.npmrc` copied into the image, in instruction order; a build-context
+`.npmrc` the Dockerfile never copies does not count. Heredoc bodies and quoted
+text are data, not commands. Expressions, `cd`/`--prefix` directory changes,
+remote contexts, unreadable files, unknown audit values, an unselected stage, a
+separate lockfile, and Docker commands that already disable audit stay quiet.
 
 **Fix recipe (safest first)**:
 
@@ -45,12 +52,11 @@ the job's gating path.
 **Public evidence**:
 
 - [OpenClaw Crabbox pull request #1804](https://github.com/openclaw/crabbox/pull/1804)
-  retained audit reporting in the ordinary host install while adding
-  `--no-audit` to the Dockerfile's install and production prune.
+  is the merged change for this shape.
 - [OpenClaw Crabbox pull request #1807](https://github.com/openclaw/crabbox/pull/1807)
-  reports the original Dockerfile's install at 242.8 seconds and combined
-  build/prune layer at 423.4 seconds, then an exact-head Docker build completing
-  in 24 seconds. Those are that pull request's samples, not a forecast.
+  measured the original Dockerfile reproducing the stall with install at 242.8
+  seconds and build/prune at 423.4 seconds; the Docker build then completed in
+  24 seconds. Those are that pull request's samples, not a forecast.
 
 **Risk**: LOW when the host audit remains mandatory. The change must not disable
 the last advisory report, alter dependency resolution or pruning, or skip the
