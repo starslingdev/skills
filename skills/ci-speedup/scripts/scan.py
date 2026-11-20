@@ -1698,39 +1698,122 @@ def _on_block(raw: str) -> tuple[int, str]:
 
 _OPT32_TEST_DIR_NAMES = frozenset({"test", "tests", "__tests__", "spec", "specs"})
 _OPT32_PATH_SCAN_DIR_CAP = 10_000
+_OPT32_SOURCE_READ_CAP = 5_000
+_OPT32_SOURCE_BYTES = 512 * 1024
+# A file whose own name says it is a test. A test-named directory holding none
+# of these (an OpenAPI `spec/`, a `test` utility package) is not test-only.
+_OPT32_TEST_FILE_RE = re.compile(
+    r"(?:^test_.+\.py$|_test\.[A-Za-z0-9]+$|\.(?:test|spec)\.[A-Za-z0-9]+$"
+    r"|_spec\.rb$|^conftest\.py$|Tests?\.(?:java|kt|cs|swift)$)")
+# A manifest directly in the test-named directory makes it a package that can
+# be built or published on its own, so excluding it could drop a deploy input.
+_OPT32_PACKAGE_MANIFESTS = frozenset({
+    "package.json", "pyproject.toml", "setup.py", "setup.cfg", "go.mod",
+    "Cargo.toml", "pom.xml", "build.gradle", "build.gradle.kts", "Gemfile",
+    "deno.json", "jsr.json"})
+_OPT32_JS_SPEC_RE = re.compile(
+    r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|\bexport\s[^'"\n]*?from\s*)"""
+    r"""['"](\.{1,2}/[^'"\n]*)['"]""")
+_OPT32_PY_IMPORT_RE = re.compile(r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w., ]+))", re.M)
+_OPT32_QUOTED_RE = re.compile(r"""['"`]([^'"`\n]+)['"`]""")
 
 
-def _opt32_test_files(root: Path) -> list[tuple[str, str]]:
-    """Tracked-shape test files as ``(file, test_dir)`` pairs.
+def _opt32_gh_glob_regex(pattern: str) -> re.Pattern[str] | None:
+    """GitHub filter-pattern subset: `*` stays inside one segment, `**` spans
+    segments, `?` is one character. Anything else is unsupported (None), so the
+    caller withholds instead of guessing what the filter selects."""
+    pattern = pattern.strip().lstrip("/")
+    if not pattern or any(c in pattern for c in "[]{}+\\"):
+        return None
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "*":
+            if pattern.startswith("**", i):
+                i += 2
+                if i < len(pattern) and pattern[i] == "/":
+                    out.append("(?:.*/)?")
+                    i += 1
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("".join(out))
 
-    The walk is bounded and skips dependency/build trees. If the bound is hit,
-    return no facts: an unread repository shape is never a clean verdict.
+
+def _opt32_repo_shape(root: Path) -> tuple[dict[str, list[str]], list[str]] | None:
+    """``({test_dir: [test-named files]}, [non-test files])`` from a bounded walk.
+
+    Dependency/build trees are skipped. A test-named directory with a package
+    manifest directly inside is left out (it may ship on its own). When the walk
+    bound is hit, return None: an unread repository shape is never a clean
+    verdict.
     """
     ignored = {".git", ".hg", ".svn", "node_modules", "vendor", ".venv",
                "venv", "dist", "build", ".cache"}
-    found: list[tuple[str, str]] = []
+    tests: dict[str, list[str]] = {}
+    packaged: set[str] = set()
+    sources: list[str] = []
     visited = 0
     for base, dirs, files in os.walk(root, followlinks=False):
         visited += 1
         if visited > _OPT32_PATH_SCAN_DIR_CAP:
-            return []
+            return None
         dirs[:] = [name for name in dirs if name not in ignored and not name.startswith(".")]
-        base_path = Path(base)
         try:
-            rel_dir = base_path.relative_to(root)
+            rel_dir = Path(base).relative_to(root)
         except ValueError:
-            continue
+            return None
         parts = rel_dir.parts
         test_at = next((i for i, part in enumerate(parts)
                         if part.lower() in _OPT32_TEST_DIR_NAMES), None)
         if test_at is None:
+            sources.extend((rel_dir / name).as_posix() for name in files)
             continue
         test_dir = Path(*parts[:test_at + 1]).as_posix()
-        if files:
-            found.extend(((rel_dir / name).as_posix(), test_dir) for name in files[:20])
-        else:
-            found.append(((rel_dir / "__ci_speedup_test_probe__").as_posix(), test_dir))
-    return found
+        if test_at == len(parts) - 1 and _OPT32_PACKAGE_MANIFESTS & set(files):
+            packaged.add(test_dir)
+        named = [(rel_dir / name).as_posix() for name in files
+                 if _OPT32_TEST_FILE_RE.search(name)]
+        if named:
+            tests.setdefault(test_dir, []).extend(named)
+    for test_dir in packaged:
+        tests.pop(test_dir, None)
+    return tests, sources
+
+
+def _opt32_references_test_dir(text: str, source: str, test_dir: str) -> bool | None:
+    """Whether production file ``source`` imports from ``test_dir``.
+
+    Relative JS/TS specifiers are resolved against the importing file; Python
+    imports and other quoted module paths match when they name the directory.
+    None when the file cannot be classified."""
+    name = test_dir.rsplit("/", 1)[-1]
+    src_dir = Path(source).parent
+    for spec in _OPT32_JS_SPEC_RE.findall(text):
+        resolved = os.path.normpath((src_dir / spec).as_posix()).replace(os.sep, "/")
+        if resolved == test_dir or resolved.startswith(test_dir + "/"):
+            return True
+    if source.endswith(".py"):
+        for frm, imp in _OPT32_PY_IMPORT_RE.findall(text):
+            mods = [frm] if frm else [m.strip().split(" ")[0] for m in imp.split(",")]
+            if any(name in mod.split(".") for mod in mods if mod):
+                return True
+        return False
+    for quoted in _OPT32_QUOTED_RE.findall(text):
+        # Go import paths, Ruby require_relative, Rust/C include strings.
+        if quoted.startswith(("http://", "https://")):
+            continue
+        segs = quoted.split("/")
+        if len(segs) > 1 and name in segs and "*" not in quoted:
+            return True
+    return False
 
 
 def _detect_opt32_deploy_test_paths(
@@ -1751,37 +1834,69 @@ def _detect_opt32_deploy_test_paths(
     paths = [str(pattern) for pattern in raw_paths if isinstance(pattern, str)]
     if len(paths) != len(raw_paths) or not paths or any("${{" in p for p in paths):
         return []
+    compiled: list[tuple[bool, str, re.Pattern[str]]] = []
+    for pattern in paths:
+        rx = _opt32_gh_glob_regex(pattern[1:] if pattern.startswith("!") else pattern)
+        if rx is None:
+            return []  # unsupported glob: what the filter selects is unknown
+        compiled.append((pattern.startswith("!"), pattern, rx))
 
-    from fnmatch import fnmatchcase
-    offenders: dict[str, tuple[str, str]] = {}
-    for file_path, test_dir in _opt32_test_files(root):
-        selected = False
-        positive = ""
-        for pattern in paths:
-            negative = pattern.startswith("!")
-            if fnmatchcase(file_path, pattern.lstrip("!")):
+    def final_positive(file_path: str) -> str:
+        """The last positive pattern when the ordered list selects the file."""
+        selected, positive = False, ""
+        for negative, pattern, rx in compiled:
+            if rx.fullmatch(file_path):
                 selected = not negative
                 if not negative:
                     positive = pattern
-        if selected and positive:
-            offenders.setdefault(test_dir, (file_path, positive))
+        return positive if selected else ""
+
+    shape = _opt32_repo_shape(root)
+    if shape is None:
+        return []
+    tests, sources = shape
+    offenders: dict[str, tuple[str, str]] = {}
+    for test_dir, files in tests.items():
+        for file_path in files:
+            positive = final_positive(file_path)
+            if positive:
+                offenders.setdefault(test_dir, (file_path, positive))
+                break
     if not offenders:
         return []
 
+    # A deploy that builds from a test-named directory (a helper imported by
+    # production code) still needs that directory: withhold, never call it safe.
+    selected_sources = [s for s in sources if final_positive(s)]
+    if len(selected_sources) > _OPT32_SOURCE_READ_CAP:
+        return []
+    for source in selected_sources:
+        try:
+            with open(root / source, "rb") as fh:
+                text = fh.read(_OPT32_SOURCE_BYTES).decode("utf-8", "replace")
+        except OSError:
+            return []
+        for test_dir in list(offenders):
+            if _opt32_references_test_dir(text, source, test_dir) is not False:
+                offenders.pop(test_dir)
+        if not offenders:
+            return []
+
     test_dir, (example, positive) = sorted(offenders.items())[0]
-    exclusion = f"!{test_dir}/**"
+    exclusions = ", ".join(f"`'!{d}/**'`" for d in sorted(offenders))
     line = _line_of(raw, positive)  # anchor:workflow-level (push paths gate every deploy job)
     return [Hit(
         line=line,
         affected_jobs=list(_jobs_from_doc(doc).keys()),
         evidence=(
             f"default-branch deploy/release path `{positive}` also selects test file "
-            f"`{example}`. Add the negated pattern `'{exclusion}'` after the "
-            "positive glob in the same `paths:` list (`paths` and `paths-ignore` "
-            "cannot both be set for one event). Runner-minute effect: saving the "
-            "deploy jobs' compute on test-only default-branch merges; not sized "
-            "until those merges' frequency and the affected jobs' measured compute "
-            "are available."
+            f"`{example}`. Add the negated pattern {exclusions} after the last "
+            "positive glob that selects it, in the same `paths:` list (`paths` and "
+            "`paths-ignore` cannot both be set for one event). No non-test file "
+            "the filter selects imports from that directory. Runner-minute effect: "
+            "saving the deploy jobs' compute on test-only default-branch merges; "
+            "not sized until those merges' frequency and the affected jobs' "
+            "measured compute are available."
         ),
         match_text="(workflow)",
         snippet=_on_block(raw)[1],

@@ -2690,6 +2690,71 @@ jobs:
     }
 
 
+_OPT32_DEPLOY_WF = """name: Deploy
+on:
+  push:
+    branches: [main]
+    paths: [{paths}]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+
+
+def _opt32_deploy_hits(root: Path, paths: str, files: dict[str, str]) -> list[dict]:
+    _write_workflow(root, "deploy.yml", _OPT32_DEPLOY_WF.format(paths=paths))
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if text is not None:
+            target.write_text(text)
+    return [row for row in _scan(root, default_branch="main")["findings"]
+            if row.get("opt32_deploy_test_paths")]
+
+
+@pytest.mark.parametrize("paths,files", [
+    # GitHub `*` stays inside one segment: `worker/*` never selects worker/test/.
+    ("'worker/*'", {"worker/test/a.test.ts": "test('a', () => {})\n"}),
+    # An OpenAPI `spec/` the docs deploy ships holds no test-named file.
+    ("'spec/**', 'docs/**'", {"spec/openapi.yaml": "openapi: 3.0.0\n"}),
+    # A test-dir helper imported by production code is a deploy input.
+    ("'worker/**'", {
+        "worker/test/a.test.ts": "test('a', () => {})\n",
+        "worker/test/fixtures.ts": "export const seed = 1\n",
+        "worker/src/index.ts": "import { seed } from '../test/fixtures'\n",
+    }),
+    # A Python test package imported by the service.
+    ("'svc/**'", {
+        "svc/tests/test_api.py": "def test_api(): pass\n",
+        "svc/tests/helpers.py": "SEED = 1\n",
+        "svc/app.py": "from tests.helpers import SEED\n",
+    }),
+    # A test-named package with its own manifest can ship on its own.
+    ("'packages/**'", {
+        "packages/test/package.json": '{"name": "@x/test"}\n',
+        "packages/test/src/index.test.ts": "test('a', () => {})\n",
+        "packages/test/src/index.ts": "export const x = 1\n",
+    }),
+    # Unsupported glob syntax: what the filter selects is unknown.
+    ("'worker/[a-z]*/**'", {"worker/test/a.test.ts": "test('a', () => {})\n"}),
+], ids=["single-star", "openapi-spec", "helper-imported-js",
+        "helper-imported-py", "test-named-package", "unsupported-glob"])
+def test_opt32_deploy_test_path_near_misses_stay_quiet(tmp_path: Path, paths, files):
+    assert _opt32_deploy_hits(tmp_path, paths, files) == []
+
+
+def test_opt32_deploy_test_path_fires_beside_unrelated_production_source(tmp_path: Path):
+    hits = _opt32_deploy_hits(tmp_path, "'worker/**'", {
+        "worker/test/a.test.ts": "import { x } from '../src/index'\n",
+        "worker/src/index.ts": "import { y } from './util'\nexport const x = y\n",
+        "worker/src/util.ts": "export const y = 1\n",
+    })
+    assert len(hits) == 1
+    assert "'!worker/test/**'" in hits[0]["evidence"]
+
+
 def test_opt5_suppressed_when_pnpm_action_setup_caches(tmp_path: Path):
     neg = """name: CI
 on: push

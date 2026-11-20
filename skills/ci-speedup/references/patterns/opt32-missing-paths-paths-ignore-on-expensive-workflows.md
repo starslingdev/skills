@@ -29,9 +29,14 @@ alias_note: 'Alias anchor: findings files stamped before the GFM anchor fix link
 still be too broad. When the default branch is known, inspect a `push` deploy or
 release workflow's ordered positive and negative patterns against test files in
 the repository. Report it when the final matching pattern still includes a file
-under `test`, `tests`, `__tests__`, `spec` or `specs`. Withhold this extension
-when the default branch, path list or repository test shape cannot be read. A
-deploy on another branch is not this finding.
+under `test`, `tests`, `__tests__`, `spec` or `specs` whose own name marks it
+as a test (`*.test.*`, `*.spec.*`, `*_test.*`, `test_*.py`, `*_spec.rb`,
+`conftest.py`, `*Test.java`). Patterns are matched with GitHub semantics (`*`
+stays inside one path segment). Withhold this extension when the default
+branch, path list, a glob construct or the repository test shape cannot be
+read; when the test-named directory holds a package manifest; or when any
+non-test file the filter selects imports from it, because then the deploy
+builds from that directory. A deploy on another branch is not this finding.
 
 **Fix**: Add `paths-ignore` for documentation, markdown files, and other non-code changes. Or use `paths` to restrict to relevant source directories.
 
@@ -62,8 +67,7 @@ merges' frequency and the affected jobs' measured compute are available; PR
 changed-file sampling is not evidence for default-branch push frequency.
 
 **Public deploy-path evidence**: [OpenClaw Crabbox pull request #2839](https://github.com/openclaw/crabbox/pull/2839)
-placed `!worker/test/**` after the broader `worker/**` path while retaining the
-workflow and deployment-helper inputs, so mixed/runtime changes still deploy
-and test-only changes do not.
+uses the negated `'!worker/test/**'` pattern after the positive glob in the
+same `paths:` list of a default-branch deploy workflow.
 
 ---
