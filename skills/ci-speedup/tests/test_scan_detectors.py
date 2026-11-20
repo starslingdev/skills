@@ -636,6 +636,67 @@ jobs:
     assert "OPT16" not in _scan_one(tmp_path, neg)
 
 
+def test_opt16_repeated_analysis_with_different_report_flags(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --config config/knip.config.ts --production --include dependencies
+      - run: pnpm exec knip --config config/knip.config.ts --production --include files,exports
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [finding for finding in _scan(tmp_path)["findings"]
+                if finding["pattern"] == "OPT16"]
+    assert len(findings) == 1
+    assert "run it once and split or filter the combined report" in findings[0]["evidence"]
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        (
+            "pnpm exec knip --config config/knip.config.ts --production --include dependencies",
+            "pnpm exec knip --config config/knip.scripts.config.ts --production --include exports",
+        ),
+        (
+            "pnpm exec knip --config config/knip.config.ts --production --include dependencies",
+            "pnpm exec knip --config config/knip.config.ts --include files",
+        ),
+        (
+            "pnpm exec eslint packages/api --format stylish",
+            "pnpm exec eslint packages/web --format json",
+        ),
+    ],
+)
+def test_opt16_report_flag_variant_keeps_distinct_analysis_scopes_quiet(
+        tmp_path: Path, commands: tuple[str, str]):
+    first, second = commands
+    workflow = f"""name: CI
+on: pull_request
+jobs:
+  analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - run: {first}
+      - run: {second}
+"""
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_one_combined_analysis_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --config config/knip.config.ts --production --include dependencies,files,exports
+"""
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
 def test_opt18_not_auto_emitted(tmp_path: Path):
     """OPT18 is NOT auto-emitted as a finding: which services a job needs can't
     be determined from the workflow YAML (it needs docker-compose.yml + the test

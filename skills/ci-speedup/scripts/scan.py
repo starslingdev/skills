@@ -4154,6 +4154,58 @@ _MANIFEST_MUTATION_RE = re.compile(
     r"apply.*patch", re.I)
 
 
+# Knip computes one project graph, then filters that graph into issue groups or
+# renderings. Re-running the command only to change these selectors repeats the
+# expensive analysis. Keep scope-defining flags such as ``--config`` and
+# ``--production`` in the signature so distinct project scans stay separate.
+_OPT16_KNIP_VALUE_SELECTORS = {"--include", "--reporter", "--format", "--output"}
+_OPT16_KNIP_BOOLEAN_SELECTORS = {
+    "--binaries", "--class-members", "--dependencies", "--dev-dependencies",
+    "--duplicates", "--enum-members", "--exports", "--files",
+    "--include-entry-exports", "--namespace-members", "--ns-exports",
+    "--ns-types", "--optional-peer-dependencies", "--types", "--unlisted",
+    "--unresolved",
+}
+
+
+def _opt16_analysis_signature(command: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Return (scope, selectors) for a supported analysis invocation."""
+    try:
+        tokens = shlex.split(command, comments=True)
+    except ValueError:
+        return None
+    tool_index = next((index for index, token in enumerate(tokens)
+                       if re.fullmatch(r"knip(?:@[^\s]+)?", token)), None)
+    if tool_index is None:
+        return None
+
+    scope: list[str] = []
+    selectors: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        name, equals, value = token.partition("=")
+        if name in _OPT16_KNIP_VALUE_SELECTORS:
+            if equals:
+                selectors.append(f"{name}={value}")
+                index += 1
+                continue
+            if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+                return None
+            selectors.append(f"{name}={tokens[index + 1]}")
+            index += 2
+            continue
+        if token in _OPT16_KNIP_BOOLEAN_SELECTORS:
+            selectors.append(token)
+            index += 1
+            continue
+        scope.append(token)
+        index += 1
+    if not selectors:
+        return None
+    return tuple(scope), tuple(selectors)
+
+
 def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
     """The same EXPENSIVE `run:` command (build/install/test) appears in ≥2
     separate steps of one job — wasteful rebuild (catalog OPT16). Two
@@ -4171,17 +4223,26 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
                          if _MANIFEST_MUTATION_RE.search(_run(s))}
         # key = (command, working-directory) → ordered list of step indices.
         key_to_steps: dict[tuple[str, str], list[int]] = {}
+        analysis_to_steps: dict[
+            tuple[tuple[str, ...], str], list[tuple[int, str, tuple[str, ...]]]
+        ] = {}
         for i, s in enumerate(steps):
             wd = str(s.get("working-directory") or "")
             seen_in_step: set[str] = set()
             for ln in _run(s).splitlines():
                 c = ln.strip()
+                analysis = _opt16_analysis_signature(c)
+                if analysis is not None:
+                    scope, selectors = analysis
+                    analysis_to_steps.setdefault((scope, wd), []).append(
+                        (i, c, selectors))
                 if len(c) < 8 or not _OPT16_EXPENSIVE_RE.search(c):
                     continue
                 if c in seen_in_step:
                     continue
                 seen_in_step.add(c)
                 key_to_steps.setdefault((c, wd), []).append(i)
+        found = False
         for (cmd, wd), idxs in key_to_steps.items():
             if len(idxs) < 2:
                 continue
@@ -4201,7 +4262,32 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
                           f"{len(idxs)} separate steps{wd_note}: `{cmd[:80]}`"),
                 match_text=job_name,
             ))
+            found = True
             break  # one finding per job is enough
+        if found:
+            continue
+
+        for (_scope, wd), invocations in analysis_to_steps.items():
+            # A repeated line inside one wrapper step is outside this static
+            # detector's step-level proof, just like the original OPT16 route.
+            idxs = sorted({index for index, _command, _selectors in invocations})
+            selector_sets = {selectors for _index, _command, selectors in invocations}
+            if len(idxs) < 2 or len(selector_sets) < 2:
+                continue
+            if any(idxs[0] <= mi <= idxs[-1] for mi in mutation_idxs):
+                continue
+            commands = [command for _index, command, _selectors in invocations]
+            wd_note = f" (working-directory `{wd}`)" if wd else ""
+            hits.append(Hit(
+                line=_line_of_in_job(raw, job_name, commands[0]),
+                affected_jobs=[job_name],
+                evidence=(f"job `{job_name}` runs the same Knip analysis in "
+                          f"{len(idxs)} separate steps with only report/include "
+                          f"selectors changed{wd_note}; run it once and split or "
+                          "filter the combined report"),
+                match_text=job_name,
+            ))
+            break
     return hits
 
 

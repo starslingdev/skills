@@ -1456,6 +1456,23 @@ title_template: "Within-Job Duplicate Commands"
 
 **Detection heuristic**:
 
+The static scanner also recognizes repeated Knip analysis in separate steps of
+one job when the project scope is unchanged and only issue-selection or report
+flags differ. Scope-defining arguments such as `--config`, `--production` and
+the working directory must match. A different config, production mode or
+working directory stays quiet. This covers the public
+[OpenClaw #185851](https://github.com/openclaw/openclaw/pull/185851) shape,
+where several report commands rebuilt the same analysis graph.
+
+For this variant, run Knip once with the combined issue selection, then split or
+filter its output while preserving every existing severity policy. Measure the
+old commands and the combined command on the same commit and dependency state.
+The runner-minute effect is a saving only when the combined command uses less
+total runner time; the static finding does not size that saving by itself. The
+public change measured one warm-cache screening pair at 91.28 s before and
+65.91 s after: a 25.37 s (0.423 runner-minute) saving for that sample, not a
+transferable clean-CI median or whole-pipeline estimate.
+
 Job logs can prove the Cargo variant even when the workflow commands differ:
 if two distinct step groups print the same in-repository
 `Compiling <crate> v<version> (<path>)` line, every local crate in the later
