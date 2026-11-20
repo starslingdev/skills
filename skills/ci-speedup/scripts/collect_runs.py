@@ -17805,7 +17805,7 @@ def _supersede_static_opt36(findings: list[dict[str, Any]],
 def _detect_opt107_default_branch_batching(
     wf_path: str,
     all_runs: list[dict[str, Any]],
-    push_jobs_per_run: list[list[dict[str, Any]]],
+    push_jobs_by_run: dict[str, list[dict[str, Any]]],
     wf_doc: dict[str, Any],
     default_branch: str | None,
     start_idx: int,
@@ -17813,18 +17813,22 @@ def _detect_opt107_default_branch_batching(
     """Find dense default-branch validation runs that an hourly tip run can batch.
 
     A run is batchable only when a later default-branch push starts before it
-    finishes or within one hour after it finishes.  The credited compute is the
-    measured mean completed push-run compute for those batchable observations;
-    a truncated run-list therefore under-counts rather than extrapolating.
+    finishes or within one hour after it finishes.  The hourly replacement is
+    charged before any saving: within each dense cluster, only runs beyond a
+    conservative count of hourly validation slots may be removed.  Credit then
+    uses those runs' own readable completed-job compute, never another run's
+    mean and never an unreadable run.
     """
-    if not default_branch or not _on_has_event(_wf_on(wf_doc), "push"):
+    if (not default_branch or not _on_has_event(_wf_on(wf_doc), "push")
+            or _wf_is_release_like(wf_path, wf_doc)):
         return []
 
     spans: list[tuple[_dt.datetime, _dt.datetime, dict[str, Any]]] = []
     for run in all_runs:
+        conclusion = str(run.get("conclusion") or "").lower()
         if (str(run.get("event") or "") != "push"
                 or str(run.get("head_branch") or "") != default_branch
-                or str(run.get("conclusion") or "") in {"cancelled", "skipped"}):
+                or conclusion in {"", "cancelled", "skipped"}):
             continue
         start = _parse_dt(str(run.get("run_started_at") or run.get("created_at") or ""))
         end = _parse_dt(str(run.get("updated_at") or ""))
@@ -17835,44 +17839,88 @@ def _detect_opt107_default_branch_batching(
     if len(spans) < _OPT107_MIN_BATCHABLE_RUNS + 1:
         return []
 
-    batchable: list[dict[str, Any]] = []
-    for index, (_start, end, run) in enumerate(spans[:-1]):
-        next_start = spans[index + 1][0]
-        if (next_start - end).total_seconds() <= _OPT107_BATCH_WINDOW_S:
-            batchable.append(run)
+    clusters: list[list[tuple[_dt.datetime, _dt.datetime, dict[str, Any]]]] = []
+    cluster = [spans[0]]
+    for span in spans[1:]:
+        if (span[0] - cluster[-1][1]).total_seconds() <= _OPT107_BATCH_WINDOW_S:
+            cluster.append(span)
+        else:
+            clusters.append(cluster)
+            cluster = [span]
+    clusters.append(cluster)
+
+    dense_clusters = [rows for rows in clusters if len(rows) > 1]
+    batchable = [run for rows in dense_clusters for _start, _end, run in rows[:-1]]
     share = len(batchable) / len(spans)
     if (len(batchable) < _OPT107_MIN_BATCHABLE_RUNS
             or share < _OPT107_MIN_BATCHABLE_SHARE):
         return []
 
-    per_run_min, timed_n = _mean_run_compute_min(push_jobs_per_run)
-    if per_run_min <= 0 or timed_n < _MIN_TIMED_RUNS:
+    eligible_run_ids = {str(run.get("id") or "") for _start, _end, run in spans}
+    compute_by_run: dict[str, float] = {}
+    for run_id, jobs in push_jobs_by_run.items():
+        if run_id not in eligible_run_ids:
+            continue
+        seconds = sum(
+            duration
+            for job in jobs
+            if (duration := _duration_s(job.get("started_at"), job.get("completed_at")))
+            is not None and duration > 0)
+        if seconds > 0:
+            compute_by_run[run_id] = seconds / 60.0
+    if len(compute_by_run) < _MIN_TIMED_RUNS:
         return []
-    credited = round(len(batchable) * per_run_min, 1)
+
+    credited_runs: list[tuple[str, float]] = []
+    for rows in dense_clusters:
+        span_s = max((rows[-1][0] - rows[0][0]).total_seconds(), 0.0)
+        # Count the first scheduled validation plus every possible hourly tick
+        # across the cluster.  `ceil` deliberately assumes the least favourable
+        # schedule phase, so the saving cannot rely on a lucky cron alignment.
+        replacement_runs = min(
+            len(rows), math.ceil(span_s / _OPT107_BATCH_WINDOW_S) + 1)
+        removable_count = max(len(rows) - replacement_runs, 0)
+        candidates = sorted(
+            ((str(run.get("id") or ""), compute_by_run[str(run.get("id") or "")])
+             for _start, _end, run in rows[:-1]
+             if str(run.get("id") or "") in compute_by_run),
+            key=lambda item: (item[1], item[0]))
+        # Retain the most expensive observations and credit the cheapest
+        # removable ones: the replacement run's cost is never understated.
+        credited_runs.extend(candidates[:removable_count])
+    credited = round(sum(minutes for _run_id_value, minutes in credited_runs), 1)
     if credited <= 0:
         return []
+
+    timed_n = len(compute_by_run)
+    credited_n = len(credited_runs)
+    mean_credited_min = credited / credited_n
 
     title = "Default-Branch Full CI Runs Too Often to Stay Current"
     evidence = (
         f"{len(batchable)} of {len(spans)} sampled default-branch push runs "
         f"({share * 100:.0f}%) were replaced by another push before or within one hour "
-        f"of finishing. Their measured compute is {per_run_min:.1f} runner-min/run "
-        f"over {timed_n} timed run(s); runner-minute effect: −{credited:g} runner-min "
-        "in the sampled window (saving).")
+        f"of finishing. After reserving conservative hourly replacement slots, "
+        f"{credited_n} run(s) have their own readable compute "
+        f"({mean_credited_min:.1f} runner-min/run; {timed_n} timed run(s) total); "
+        f"runner-minute effect: −{credited:g} runner-min in the sampled window "
+        "(saving).")
     measured = _measured_evidence(
         ["Workflow", "Batchable pushes", "Measured compute/run",
-         "Runner-minute effect"],
+         "Credited removals", "Runner-minute effect"],
         [[f"`{wf_path}`", f"{len(batchable)} of {len(spans)} ({share * 100:.0f}%)",
-          f"{per_run_min:.1f} runner-min over {timed_n} timed run(s)",
+          f"{mean_credited_min:.1f} runner-min over {timed_n} timed run(s)",
+          str(credited_n),
           f"−{credited:g} runner-min (saving)"]],
         summary=evidence,
         note=("Safest-first fix: keep the pull-request gate unchanged; run the full "
               "default-branch suite hourly against the current tip, retain "
               "workflow_dispatch, and use a repository variable to switch back to "
               "per-push validation. Do not batch release, deploy, or migration work. "
-              "The estimate is a conservative sampled-window lower bound: it credits "
-              "only observed batchable runs and never extrapolates beyond the fetched "
-              "default-branch run page."))
+              "The estimate reserves a conservative number of hourly replacement "
+              "runs, then credits only removable runs with their own readable "
+              "completed-job compute. It never extrapolates onto an unreadable run "
+              "or beyond the fetched default-branch run page."))
     finding = _new_finding(
         "OPT107", "HIGH", title, wf_path, "", evidence,
         "batch-default-branch-full-ci", _catalog_anchor("OPT107", title),
@@ -17882,17 +17930,22 @@ def _detect_opt107_default_branch_batching(
                    "tip runs are not started"),
         realization="none", measured_evidence=measured)
     finding["batchable_run_count"] = len(batchable)
+    finding["credited_run_count"] = credited_n
+    finding["credited_run_ids"] = [run_id for run_id, _minutes in credited_runs]
     finding["batchable_sample_count"] = len(spans)
     finding["batchable_run_share"] = round(share, 4)
     finding["batch_window_s"] = _OPT107_BATCH_WINDOW_S
     finding["measured_signal"] = (
-        "default-branch pushes replaced before or within one hour of completion "
-        "x measured completed push-run compute")
+        "default-branch pushes replaced before or within one hour of completion, "
+        "less conservative hourly replacements, x each credited run's own completed "
+        "job compute")
     finding["affected_jobs"] = sorted({
         str(job.get("name") or "")
-        for jobs in push_jobs_per_run for job in jobs if str(job.get("name") or "")
+        for run_id, _minutes in credited_runs
+        for job in push_jobs_by_run.get(run_id, [])
+        if str(job.get("name") or "")
     })
-    run_ids = [_run_id(run) for run in batchable if _run_id(run)]
+    run_ids = [run_id for run_id, _minutes in credited_runs]
     if run_ids:
         finding["tier2_sample_run_ids"] = run_ids
     return [finding]
@@ -33100,7 +33153,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 # YAML (which we DO have), so a workflow with no shard/timeout job specs
                 # was never going to run them and must not be reported as missing them.
                 # (OPT57's own skip, incl. its event-scoped page, is recorded below.)
-                _skipped = ["OPT46", "OPT47", "OPT64"]
+                _skipped = ["OPT46", "OPT47", "OPT64", "OPT107"]
                 if _opt35_shard_job_specs(wf_doc):
                     _skipped.insert(0, "OPT35")
                 _skip_detectors(wf_path, _skipped,
@@ -33305,11 +33358,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     if (str(run.get("event") or "") == "push"
                         and str(run.get("head_branch") or "") == str(default_branch or ""))
                 }
-                _opt107_push_jobs = [
-                    list(jobs)
+                _opt107_push_jobs = {
+                    run_id_value: list(jobs)
                     for (run_wf, run_id_value), jobs in _push_jobs_by_run.items()
                     if run_wf == wf_path and run_id_value in _opt107_run_ids
-                ]
+                }
                 new = _detect_opt107_default_branch_batching(
                     wf_path, all_runs, _opt107_push_jobs, wf_doc, default_branch,
                     next_id)

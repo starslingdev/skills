@@ -3557,9 +3557,12 @@ that can restore per-push validation immediately.
 default branch. A run is batchable when a later default-branch push starts
 before it finishes or within one hour afterward. Report only when at least two
 runs and at least 25% of the readable sample are batchable, and when at least
-three completed push runs provide job timing. The estimate credits only the
-observed batchable runs' mean measured compute; a truncated run page is a lower
-bound, never extrapolated into unseen savings. Sparse pushes stay quiet.
+three completed push runs provide job timing. Within each dense cluster, reserve
+the most conservative number of hourly replacement validations, then credit
+only removable runs whose own completed-job compute is readable. A truncated
+run page is a lower bound, never extrapolated into unreadable or unseen runs.
+Sparse pushes and release-, deploy-, publish-, or migration-like workflows stay
+quiet.
 
 **Fix recipe (safest first)**:
 
@@ -3572,11 +3575,11 @@ bound, never extrapolated into unseen savings. Sparse pushes stay quiet.
    commit-specific side effects on their existing event. Only batch repeatable
    validation whose result is meaningful for the current tip.
 
-**Sizing**: runner-minute effect is a saving (negative usage): the number of
-observed batchable runs multiplied by the measured mean completed push-run
-compute. Developer merge wait is unchanged because the pull-request gate stays
-unchanged. The report states the signed runner-minute effect and labels it a
-sample-window lower bound.
+**Sizing**: runner-minute effect is a saving (negative usage): the sum of each
+credited removable run's own completed-job compute, after reserving conservative
+hourly replacement slots. Developer merge wait is unchanged because the
+pull-request gate stays unchanged. The report states the signed runner-minute
+effect and labels it a sample-window lower bound.
 
 **Public example**: [OpenClaw pull request
 156783](https://github.com/openclaw/openclaw/pull/156783) batches full

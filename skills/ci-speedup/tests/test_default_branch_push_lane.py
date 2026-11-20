@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
 import copy
 import json
 import re
@@ -151,6 +152,47 @@ class _PushLaneClient:
         return ""
 
 
+class _DenseValidationClient(_PushLaneClient):
+    """Public-API-shaped dense pushes with readable per-run job compute."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.jobs = {100: [_job("merge-gate", 100, 0, 120)]}
+        for index, _sha in enumerate(_PUSH_SHAS):
+            base = 10000 + index * 1200
+            self.jobs[1000 + index] = [
+                _job("verify", 1000 + index, base, base + 300)]
+            self.jobs[2000 + index] = [
+                _job("publish-image", 2000 + index, base, base + 2100)]
+
+    def _runs(self, workflow_id: int) -> list[dict]:
+        pull_request = {
+            "id": 100, "event": "pull_request", "head_branch": "feature",
+            "head_sha": "pr-sha", "status": "completed", "conclusion": "success",
+            "created_at": _iso(0), "run_started_at": _iso(0), "updated_at": _iso(120),
+        }
+        pushes = []
+        for index, sha in enumerate(_PUSH_SHAS):
+            base = 10000 + index * 1200
+            run_id = (1000 if workflow_id == 1 else 2000) + index
+            duration = 300 if workflow_id == 1 else 2100
+            pushes.append(_push_run(run_id, sha, base, base + duration))
+        return [*reversed(pushes), *([pull_request] if workflow_id == 1 else [])]
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        prefix = "repos/o/r/contents/"
+        if endpoint.startswith(prefix):
+            path = endpoint[len(prefix):]
+            name = "Deploy production" if path == _PUBLISH else "CI"
+            body = (
+                f"name: {name}\n"
+                "on:\n  push:\n    branches: [main]\n  pull_request:\n"
+                "jobs:\n  verify:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: npm test\n")
+            return {"content": base64.b64encode(body.encode()).decode()}
+        return super().json(endpoint, allow_missing=allow_missing)
+
+
 def _doc() -> dict:
     return {
         "repo": "o/r",
@@ -228,6 +270,30 @@ def test_collect_renders_a_capped_default_branch_push_lane_and_verifies(
     mutant = report.replace("2m 00s", "35m 00s", 1)
     check = vr.check_default_branch_push_lane_isolated(mutant, findings_path)
     assert not check.ok
+
+
+def test_dense_default_branch_validation_collects_opt107_and_fully_verifies(
+        monkeypatch, tmp_path: Path):
+    client = _DenseValidationClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(
+        _doc(), "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+
+    matches = [finding for finding in doc["findings"]
+               if finding.get("pattern") == "OPT107"]
+    assert len(matches) == 1
+    finding = matches[0]
+    assert finding["workflow_file"] == _GATE
+    assert finding["credited_run_count"] > 0
+    assert finding["credited_run_ids"]
+    assert finding["runner_min_saving"] > 0
+    assert not any(item.get("workflow_file") == _PUBLISH for item in matches)
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
 
     isolation_mutants = [
         report.replace(

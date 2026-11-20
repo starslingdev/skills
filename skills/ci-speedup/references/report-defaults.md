@@ -536,10 +536,11 @@ runner-minute opportunity and which observed runs contribute to its signed
 sample-window saving.
 
 **Reason:** the proposed replacement is an hourly current-tip validation, so a
-successor inside that interval is the work the schedule would coalesce. The
-count/share gates keep isolated busy periods quiet; the detector also requires
-three completed timed push runs and does not extrapolate beyond the fetched
-page.
+successor inside that interval is evidence that a schedule can coalesce work.
+The count/share gates keep isolated busy periods quiet; the detector also
+requires three completed timed push runs, reserves conservative hourly
+replacement slots, and credits only removable runs with their own readable
+completed-job compute.
 
 **Proposed decision:** **Keep one hour, two runs, and 25%.** This remains
 awaiting owner approval.

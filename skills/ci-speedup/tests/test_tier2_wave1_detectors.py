@@ -2195,11 +2195,13 @@ def _default_push_runs(gap_minutes: int) -> list[dict]:
         start = _dt.datetime(2026, 11, 1, tzinfo=_dt.timezone.utc) + _dt.timedelta(
             minutes=i * gap_minutes)
         end = start + _dt.timedelta(minutes=10)
-        runs.append(_run(
+        run = _run(
             "main", f"tip{i}", "push",
             start.strftime("%Y-%m-%dT%H:%M:%SZ"),
             end.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            run_id=f"main-{i}"))
+            run_id=f"main-{i}")
+        run["conclusion"] = "success"
+        runs.append(run)
     return runs
 
 
@@ -2207,8 +2209,12 @@ def _opt107(runs: list[dict]) -> list[dict]:
     detector = getattr(cr, "_detect_opt107_default_branch_batching", None)
     if detector is None:
         return []
+    jobs_by_run = {
+        str(run["id"]): jobs
+        for run, jobs in zip(runs, _jobs_per_run(n_runs=len(runs), secs=600))
+    }
     return detector(
-        ".github/workflows/ci.yml", runs, _jobs_per_run(n_runs=5, secs=600),
+        ".github/workflows/ci.yml", runs, jobs_by_run,
         {"on": {"push": {"branches": ["main"]}}}, "main", 0)
 
 
@@ -2219,8 +2225,9 @@ def test_opt107_reports_dense_default_branch_pushes_with_signed_sizing():
 
     assert finding["pattern"] == "OPT107"
     assert finding["batchable_run_count"] == 4
-    assert finding["runner_min_saving"] == 40.0
-    assert "−40 runner-min" in finding["evidence"]
+    assert finding["credited_run_count"] == 2
+    assert finding["runner_min_saving"] == 20.0
+    assert "−20 runner-min" in finding["evidence"]
     assert "hourly" in finding["measured_evidence"]["note"].lower()
     assert "repository variable" in finding["measured_evidence"]["note"].lower()
     assert "pull-request gate" in finding["measured_evidence"]["note"].lower()
@@ -2228,6 +2235,33 @@ def test_opt107_reports_dense_default_branch_pushes_with_signed_sizing():
 
 def test_opt107_ignores_default_branch_pushes_without_batchable_waste():
     assert _opt107(_default_push_runs(gap_minutes=120)) == []
+
+
+def test_opt107_uses_only_each_credited_runs_own_compute():
+    runs = _default_push_runs(gap_minutes=20)
+    jobs_by_run = {
+        "main-0": _jobs_per_run(n_runs=1, secs=120)[0],
+        "main-1": _jobs_per_run(n_runs=1, secs=600)[0],
+        "main-2": _jobs_per_run(n_runs=1, secs=1200)[0],
+    }
+    findings = cr._detect_opt107_default_branch_batching(
+        ".github/workflows/ci.yml", runs, jobs_by_run,
+        {"on": {"push": {"branches": ["main"]}}}, "main", 0)
+
+    assert findings[0]["credited_run_ids"] == ["main-0", "main-1"]
+    assert findings[0]["runner_min_saving"] == 12.0
+
+
+def test_opt107_never_batches_release_or_deploy_workflows():
+    runs = _default_push_runs(gap_minutes=20)
+    jobs_by_run = {
+        str(run["id"]): jobs
+        for run, jobs in zip(runs, _jobs_per_run(n_runs=len(runs), secs=600))
+    }
+    assert cr._detect_opt107_default_branch_batching(
+        ".github/workflows/deploy.yml", runs, jobs_by_run,
+        {"name": "Deploy production", "on": {"push": {"branches": ["main"]}}},
+        "main", 0) == []
 
 
 # --- the fetch-failure contract: a FAILED fetch is never served as a real answer ----
@@ -2358,7 +2392,7 @@ def test_collect_skips_run_elimination_when_the_page_stays_unavailable(monkeypat
     # No run-elimination finding may be emitted off an unavailable page — in particular
     # none may carry a zero denominator.
     for f in out["findings"]:
-        if f.get("pattern") in ("OPT35", "OPT46", "OPT47", "OPT57", "OPT64"):
+        if f.get("pattern") in ("OPT35", "OPT46", "OPT47", "OPT57", "OPT64", "OPT107"):
             raise AssertionError(
                 f"{f['pattern']} was emitted although the all-status page was never "
                 "fetched — it can only have been sized against a laundered empty page")
@@ -2368,7 +2402,7 @@ def test_collect_skips_run_elimination_when_the_page_stays_unavailable(monkeypat
         "the detectors were skipped but NOTHING says so — their absence from the "
         "findings is indistinguishable from 'we looked and it was clean'")
     entry = next(e for e in skipped if e["workflow"] == ".github/workflows/ci.yml")
-    assert set(entry["detectors"]) >= {"OPT46", "OPT47", "OPT64"}, (
+    assert set(entry["detectors"]) >= {"OPT46", "OPT47", "OPT64", "OPT107"}, (
         f"the skipped detectors are not named: {entry}")
     assert "run list" in entry["reason"]
 
