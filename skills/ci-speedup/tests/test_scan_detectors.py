@@ -1991,6 +1991,33 @@ jobs:
     assert "OPT39" not in _scan_one(tmp_path, neg, name="codeql.yml")
 
 
+_OPT39_SINGLE_LANGUAGE_GO = """
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+"""
+
+_OPT39_NODE_LANE = """
+  web-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm test
+"""
+
+
 def test_opt39_per_language_job_without_change_gate(tmp_path: Path):
     workflow = """
 name: Go contract
@@ -2009,7 +2036,7 @@ jobs:
 """
     path = tmp_path / ".github" / "workflows"
     path.mkdir(parents=True)
-    (path / "contract.yml").write_text(workflow, encoding="utf-8")
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
 
     finding = _finding(_scan(tmp_path), "OPT39")
 
@@ -2090,7 +2117,7 @@ jobs:
 """
     path = tmp_path / ".github" / "workflows"
     path.mkdir(parents=True)
-    (path / "contract.yml").write_text(workflow, encoding="utf-8")
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
 
     assert _finding(_scan(tmp_path), "OPT39") is None
 
@@ -2116,7 +2143,7 @@ jobs:
 """
     path = tmp_path / ".github" / "workflows"
     path.mkdir(parents=True)
-    (path / "contract.yml").write_text(workflow, encoding="utf-8")
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
 
     assert _finding(_scan(tmp_path), "OPT39") is not None
 
@@ -2144,7 +2171,7 @@ jobs:
 """
     path = tmp_path / ".github" / "workflows"
     path.mkdir(parents=True)
-    (path / "contract.yml").write_text(workflow, encoding="utf-8")
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
 
     assert _finding(_scan(tmp_path), "OPT39") is not None
 
@@ -2179,7 +2206,7 @@ jobs:
 """
     path = tmp_path / ".github" / "workflows"
     path.mkdir(parents=True)
-    (path / "proof.yml").write_text(workflow, encoding="utf-8")
+    (path / "proof.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
 
     assert _finding(_scan(tmp_path), "OPT39") is None
 
@@ -2243,7 +2270,7 @@ jobs:
 """
     path = tmp_path / ".github" / "workflows"
     path.mkdir(parents=True)
-    (path / "mixed.yml").write_text(workflow, encoding="utf-8")
+    (path / "mixed.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
 
     assert _finding(_scan(tmp_path), "OPT39") is None
 
@@ -2267,7 +2294,7 @@ jobs:
 """
     path = tmp_path / ".github" / "workflows"
     path.mkdir(parents=True)
-    (path / "proof.yml").write_text(workflow, encoding="utf-8")
+    (path / "proof.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
 
     assert _finding(_scan(tmp_path), "OPT39") is None
 
@@ -2288,7 +2315,7 @@ jobs:
 """
     path = tmp_path / ".github" / "workflows"
     path.mkdir(parents=True)
-    (path / "runtime.yml").write_text(workflow, encoding="utf-8")
+    (path / "runtime.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
 
     finding = _finding(_scan(tmp_path), "OPT39")
     assert finding is not None
@@ -2309,11 +2336,35 @@ jobs:
 """
     path = tmp_path / ".github" / "workflows"
     path.mkdir(parents=True)
-    (path / "ci.yml").write_text(workflow, encoding="utf-8")
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
 
     finding = _finding(_scan(tmp_path), "OPT39")
     assert finding is not None
     assert finding["opt39_languages"] == ["python"]
+
+
+def test_opt39_single_language_workflow_stays_quiet(tmp_path: Path):
+    """A Go project's only test job is not a per-language lane.
+
+    Every pull request there changes Go or non-code files; the latter is the
+    missing trigger path filter (OPT32), not an unneeded language lane.
+    """
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(_OPT39_SINGLE_LANGUAGE_GO, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_language_lane_beside_another_language_lane_is_detected(tmp_path: Path):
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(
+        _OPT39_SINGLE_LANGUAGE_GO + _OPT39_NODE_LANE, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["affected_jobs"] == ["go-test"]
 
 
 def test_opt39_generic_primary_tooling_job_stays_quiet(tmp_path: Path):

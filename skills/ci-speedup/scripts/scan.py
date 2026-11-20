@@ -4869,6 +4869,39 @@ def _opt39_job_languages(job_name: str, job: dict) -> list[str]:
     return languages
 
 
+_OPT39_OTHER_TOOLCHAIN_ACTIONS = {
+    **_OPT39_TOOLCHAIN_ACTIONS,
+    "node": re.compile(
+        r"(?:^|/)(?:setup-node|setup-bun|setup-deno|pnpm/action-setup)@", re.I),
+    "java": re.compile(r"(?:^|/)setup-java@", re.I),
+    "dotnet": re.compile(r"(?:^|/)setup-dotnet@", re.I),
+    "ruby": re.compile(r"(?:^|/)setup-ruby@", re.I),
+}
+
+
+def _opt39_other_language_lane(doc: dict, job_name: str, languages: list[str]) -> bool:
+    """Whether another job in the workflow installs a different language toolchain.
+
+    A per-language lane only wastes runner time when a pull request can change
+    another language instead. A single-language project's test job runs for every
+    code change; its non-code pull requests are the trigger path filter (OPT32).
+    """
+    for other_name, other in _jobs_from_doc(doc).items():
+        if other_name == job_name or not isinstance(other, dict):
+            continue
+        for step in _steps(other):
+            uses = _uses(step)
+            command = str(step.get("run") or "") if isinstance(step, dict) else ""
+            for language, action_re in _OPT39_OTHER_TOOLCHAIN_ACTIONS.items():
+                if language in languages:
+                    continue
+                command_re = _OPT39_TOOLCHAIN_COMMANDS.get(language)
+                if (action_re.search(uses)
+                        or (command_re is not None and command_re.search(command))):
+                    return True
+    return False
+
+
 def _opt39_has_path_output_gate(doc: dict, job: dict) -> bool:
     """Whether `job` consumes output from an upstream changed-path selector.
 
@@ -5024,6 +5057,11 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
         if job_languages and not _opt96_condition_allows(
                 job.get("if"), "pull_request", "main"):
             continue
+        declared_inputs = (_opt39_declared_input_map(doc, on, job_languages)
+                           if job_languages and not scanner_matrix else None)
+        if (job_languages and not scanner_matrix and declared_inputs is None
+                and not _opt39_other_language_lane(doc, job_name, job_languages)):
+            continue
         if scanner_matrix:
             evidence = (f"job `{job_name}` runs a `language` matrix scanner with no "
                         f"`dorny/paths-filter` gate — every language leg runs on "
@@ -5041,7 +5079,6 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
                 "opt39_job_kind": "per-language-toolchain",
                 "opt39_languages": job_languages,
             }
-            declared_inputs = _opt39_declared_input_map(doc, on, job_languages)
             if declared_inputs is not None:
                 facts["opt39_language_inputs"] = declared_inputs[0]
                 facts["opt39_workflow_inputs"] = declared_inputs[1]
