@@ -29221,11 +29221,14 @@ _OPT13_VALIDATION_BUILD_LINE_RE = _re.compile(
 _OPT13_SOURCE_OUTPUT_RE = _re.compile(
     r"\bnew\s+Worker\s*\(|\bworker_threads\b|\bchild_process\b|"
     r"\.(?:fork|spawn|exec|execFile|execSync)\s*\(|"
-    r"(?:require|import)\s*\([^;]{0,500}?(?:dist|build|lib)/|"
     r"\bimport\s+['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
     r"\bfrom\s+['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
     r"__dirname[^\n]*\.js['\"]",
     _re.IGNORECASE,
+)
+_OPT13_CALL_START_RE = _re.compile(r"\b(?:require|import)\s*\(", _re.IGNORECASE)
+_OPT13_COMPILED_PATH_RE = _re.compile(
+    r"(?:^|[/\\'\"`(\s,])(?:dist|build|lib)[/\\]", _re.IGNORECASE,
 )
 _OPT13_SOURCE_SUFFIXES = frozenset({
     ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
@@ -29257,6 +29260,44 @@ def _opt13_run_directory(
         return None
     normalized = str(path)
     return normalized if normalized not in ("", ".") else "."
+
+
+def _opt13_call_loads_compiled_output(text: str) -> bool:
+    """Whether a require()/import() argument names compiled output.
+
+    Balance the call itself instead of letting a regex read into a following
+    statement.  Quotes may contain parentheses; nested calls such as
+    ``require(path.resolve('dist/runtime.js'))`` remain one argument span.
+    """
+    for match in _OPT13_CALL_START_RE.finditer(text):
+        depth = 1
+        quote = ""
+        escaped = False
+        end = match.end()
+        for index in range(end, len(text)):
+            char = text[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in ("'", '"', "`"):
+                quote = char
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    if _OPT13_COMPILED_PATH_RE.search(text[end:index]):
+                        return True
+                    break
+        else:
+            # An unclosed call cannot be bounded safely.
+            return True
+    return False
 
 
 def _opt13_validation_build_job(
@@ -29355,7 +29396,8 @@ def _opt13_source_output_guard(root: "Path | None") -> dict[str, Any]:
             return {"safe": False, "source_files_checked": checked,
                     "reason": "a source file could not be read"}
         checked += 1
-        if _OPT13_SOURCE_OUTPUT_RE.search(text):
+        if (_OPT13_SOURCE_OUTPUT_RE.search(text)
+                or _opt13_call_loads_compiled_output(text)):
             return {"safe": False, "source_files_checked": checked,
                     "reason": "source may load compiled output"}
     return {"safe": checked > 0, "source_files_checked": checked,

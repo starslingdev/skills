@@ -622,6 +622,12 @@ def test_opt13_source_guard_catches_static_and_multiline_imports(tmp_path):
     source.write_text("import '../dist/register.js';\n", encoding="utf-8")
     assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
 
+    source.write_text(
+        "const runtime = require(\n  '../dist/runtime.js'\n);\n",
+        encoding="utf-8",
+    )
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
 
 def test_opt13_source_guard_catches_computed_and_template_imports(tmp_path):
     src = tmp_path / "src"
@@ -639,11 +645,16 @@ def test_opt13_source_guard_catches_computed_and_template_imports(tmp_path):
     )
     assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
 
-    source.write_text(
-        "const runtime = require(\n  '../dist/runtime.js'\n);\n",
+
+def test_opt13_source_guard_ignores_path_after_unrelated_require(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "runtime.ts").write_text(
+        "const path = require('node:path')\n"
+        "const outputDir = 'dist/'\n",
         encoding="utf-8",
     )
-    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is True
 
 
 def test_pr_sample_day_floor_stays_coupled_through_the_findings_contract(
