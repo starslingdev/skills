@@ -83,21 +83,30 @@ jobs:
       - run: cargo test --locked
 
   ci-ok:  # the required status check
-    needs: [go-contract, rust-contract]
+    needs: [changes, go-contract, rust-contract]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          SELECTOR: ${{ needs.changes.result }}
+          GO: ${{ needs.go-contract.result }}/${{ needs.changes.outputs.go }}
+          RUST: ${{ needs.rust-contract.result }}/${{ needs.changes.outputs.rust }}
         run: |
-          for result in $RESULTS; do
-            case "$result" in success|skipped) ;; *) echo "lane: $result"; exit 1 ;; esac
+          # A lane passes when it ran and succeeded, or when it was skipped
+          # because the selector succeeded and proved it untouched. Any other
+          # skip (a cancelled run, a cancelled selector) fails this check.
+          for lane in "$GO" "$RUST"; do
+            case "$lane" in
+              success/*) ;;
+              skipped/false) [ "$SELECTOR" = success ] || { echo "unproven skip"; exit 1; } ;;
+              *) echo "lane: $lane"; exit 1 ;;
+            esac
           done
 ```
 
 `dorny/paths-filter` can replace the script when its filters list every input of each lane; give its step `continue-on-error: true` and its job outputs the same `|| 'true'` default. For a scanner matrix, a job-level `if:` cannot read `matrix`: emit the language list from the selector (the full list on any failure) and use `matrix: { language: ${{ fromJSON(needs.changes.outputs.languages) }} }`.
 
-Required checks: a job skipped by its own `if:` reports **Success** to branch protection under its own name, so a gated lane that stays a required check still lets an unrelated pull request merge. That is also why a plain `if: needs.changes.outputs.go == 'true'` is unsafe: when the selector fails, the lane is skipped and its required check reports Success with nothing validated, so the lane condition above runs on any selector result other than a proven `false`. A matrix leg left out of the matrix reports no check at all, so a required `codeql (python)` would stay expected forever; require the `ci-ok` aggregate (which fails on any failed or cancelled lane) instead of the per-leg names. Do not move this gating into a workflow-level `paths:` filter: a workflow that never starts leaves its required checks pending.
+Required checks: a job skipped by its own `if:` reports **Success** to branch protection under its own name, so a gated lane that stays a required check still lets an unrelated pull request merge. That is also why a plain `if: needs.changes.outputs.go == 'true'` is unsafe: when the selector fails, the lane is skipped and its required check reports Success with nothing validated, so the lane condition above runs on any selector result other than a proven `false`. A matrix leg left out of the matrix reports no check at all, so a required `codeql (python)` would stay expected forever; require the `ci-ok` aggregate instead of the per-leg names. `ci-ok` runs under `always()` and accepts a skipped lane only when the selector succeeded and set that lane's output to `false`, so a failed or cancelled lane, a cancelled selector, or a run cancelled before its lanes start fails the required check instead of reporting Success with nothing validated. Do not move this gating into a workflow-level `paths:` filter: a workflow that never starts leaves its required checks pending.
 
 **Public evidence**: [OpenClaw PR #193865](https://github.com/openclaw/openclaw/pull/193865) decides which per-language pull-request jobs to run from the changed paths, and runs every job when the changed-path lookup is unknown or fails.
 

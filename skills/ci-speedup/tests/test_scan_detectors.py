@@ -2089,6 +2089,65 @@ def test_opt39_recipe_example_fails_open_and_counts_as_a_path_gate(tmp_path: Pat
         "go-contract", "rust-contract"]
 
 
+def _opt39_run_recipe_aggregate(results: dict[str, str],
+                                outputs: dict[str, str]) -> int:
+    """Run the recipe's `ci-ok` script as GitHub would for one set of outcomes."""
+    import yaml
+
+    jobs = yaml.safe_load(_opt39_recipe_jobs_yaml())["jobs"]
+    aggregate = jobs["ci-ok"]
+    needs = aggregate["needs"]
+    needs = [needs] if isinstance(needs, str) else list(needs)
+
+    def value(expression: str) -> str:
+        expression = expression.strip()
+        if expression == "join(needs.*.result, ' ')":
+            return " ".join(results[name] for name in needs)
+        match = re.fullmatch(r"needs\.([\w-]+)\.result", expression)
+        if match and match.group(1) in needs:
+            return results[match.group(1)]
+        match = re.fullmatch(r"needs\.changes\.outputs\.(\w+)", expression)
+        if match and "changes" in needs:
+            return outputs.get(match.group(1), "")
+        if match:  # `changes` is not a need: GitHub leaves the context empty
+            return ""
+        raise AssertionError(f"unsupported expression in ci-ok: {expression}")
+
+    (step,) = aggregate["steps"]
+    env = {"PATH": "/usr/bin:/bin"}
+    for name, template in (step.get("env") or {}).items():
+        env[name] = re.sub(r"\$\{\{(.*?)\}\}", lambda m: value(m.group(1)),
+                           str(template))
+    return subprocess.run(["bash", "-e", "-c", step["run"]], env=env,
+                          capture_output=True, text=True).returncode
+
+
+@pytest.mark.parametrize(("label", "results", "outputs", "passes"), [
+    ("go untouched, rust ran", {"changes": "success", "go-contract": "skipped",
+                                "rust-contract": "success"},
+     {"go": "false", "rust": "true"}, True),
+    ("selector failed, every lane ran", {"changes": "failure",
+                                         "go-contract": "success",
+                                         "rust-contract": "success"},
+     {"go": "true", "rust": "true"}, True),
+    ("run cancelled before the lanes started", {"changes": "success",
+                                                "go-contract": "skipped",
+                                                "rust-contract": "skipped"},
+     {"go": "true", "rust": "true"}, False),
+    ("selector cancelled", {"changes": "cancelled", "go-contract": "skipped",
+                            "rust-contract": "skipped"}, {}, False),
+    ("a lane failed", {"changes": "success", "go-contract": "failure",
+                       "rust-contract": "success"},
+     {"go": "true", "rust": "true"}, False),
+])
+def test_opt39_recipe_aggregate_never_passes_an_unproven_skip(
+        label, results, outputs, passes):
+    """The required `ci-ok` check accepts a skipped lane only when the selector
+    succeeded and proved that lane untouched. A run cancelled before its lanes
+    start skips them all, and must not report Success on the head commit."""
+    assert (_opt39_run_recipe_aggregate(results, outputs) == 0) is passes, label
+
+
 def test_opt39_per_language_job_with_change_gate_stays_quiet(tmp_path: Path):
     workflow = """
 name: Go contract
