@@ -7764,6 +7764,9 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
     "OPT15": (_RM_DOOR_CLAMP,
               "cross-workflow repeated build — per-run modeled credit clamped to "
               "the affected jobs' measured cost-spine billable"),
+    "OPT106": (_RM_DOOR_CLAMP,
+               "profiled runtime TypeScript loader self time — measured per-run "
+               "credit clamped to the affected job's measured cost-spine billable"),
     # DERIVE — whole-run cancel re-derives hit_rate x the affected jobs' measured
     # billable (implemented by `_reground_whole_run_cancel_saving`, run first).
     "OPT45": (_RM_DOOR_DERIVE,
@@ -29158,6 +29161,8 @@ def _persist_pole_logs(
                 logger.warning("could not save pole magnitude sample %s: %s", mag_fn, e)
                 mag_fn = None
         opt13_fact = _opt13_build_in_quality_log(log)
+        runtime_ts_loader = (leaf0 if leaf0.get("fix_key") == "runtime-ts-transpilation"
+                             else None)
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
             "leaf_fix_key": leaf0.get("fix_key"),
@@ -29167,6 +29172,8 @@ def _persist_pole_logs(
             "sample": [{"html_url": j.get("html_url", ""), "duration_s": round(d, 1)}
                        for d, j in qual],
             **({"opt13_build_in_script": opt13_fact} if opt13_fact else {}),
+            **({"runtime_ts_loader": runtime_ts_loader}
+               if runtime_ts_loader else {}),
         })
         logger.debug("saved pole log for %s -> %s (closest to P50 of %d qualifying "
                      "runs)", job, fn, len(qual))
@@ -29240,6 +29247,73 @@ def _detect_opt13_build_in_scripts(
         finding["opt13_runner_min_ceiling"] = runner_min
         finding["opt13_validation_build"] = validation_job
         finding["opt13_source_guard"] = source_guard
+        if isinstance(runs, int):
+            finding["workflow_runs_30d"] = runs
+        out.append(finding)
+    return out
+
+
+_OPT106_MIN_PROFILE_S = 30.0
+_OPT106_MIN_JOB_SHARE = 0.2
+
+
+def _detect_runtime_ts_transpilation(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Turn a profiler-owned runtime-loader share on a long pole into OPT106."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    for entry in pole_logs:
+        fact = entry.get("runtime_ts_loader")
+        if not isinstance(fact, dict):
+            continue
+        seconds = fact.get("profile_s")
+        job_seconds = entry.get("duration_s")
+        if (not isinstance(seconds, (int, float))
+                or not isinstance(job_seconds, (int, float))
+                or seconds < _OPT106_MIN_PROFILE_S or job_seconds <= 0
+                or seconds / job_seconds < _OPT106_MIN_JOB_SHARE):
+            continue
+        workflow = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        runs = volume_by_workflow.get(workflow)
+        runner_min = (round(float(seconds) * runs / 60.0, 1)
+                      if isinstance(runs, int) and runs > 0 else None)
+        url = str(entry.get("html_url") or "")
+        runner_effect = (
+            f"runner-minute saving: at most {runner_min:.1f}/month from the profiled "
+            "loader ceiling; confirm the realized saving after the replacement"
+            if runner_min is not None else
+            "runner-minute saving not sized because monthly run volume is unavailable")
+        evidence = (
+            f"The representative `{job}` log profiles {float(seconds):.1f}s of runtime "
+            f"TypeScript loader self time inside a {float(job_seconds):.1f}s long-pole job."
+        )
+        measured = _measured_evidence(
+            ["Job", "Loader self time", "Job wall", "Representative run"],
+            [[f"`{job}`", f"{float(seconds):.1f}s", f"{float(job_seconds):.1f}s",
+              f"[job log]({url})" if url else "captured job log"]],
+            (f"A profiler attributes {float(seconds):.1f}s "
+             f"({100.0 * float(seconds) / float(job_seconds):.1f}% of the job) "
+             "to runtime TypeScript loading."),
+            "The loader self time is a ceiling; re-profile after the guarded replacement.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT106", "HIGH", "Runtime TypeScript Transpilation on the Long Pole",
+            workflow, job, evidence,
+            "Precompile the exact TypeScript surfaces once (or preload a cached transform), "
+            "then add a fallback guard that fails if any exercised path invokes the runtime loader.",
+            "opt106--runtime-typescript-transpilation-on-the-long-pole", idx,
+            wc_p50=float(seconds), rm=runner_min,
+            size_note=(f"profiled loader ceiling {float(seconds):.1f}s; {runner_effect}"),
+            realization="tail", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        finding["runtime_loader_profile_s"] = float(seconds)
+        finding["runtime_loader_job_s"] = float(job_seconds)
+        finding["runtime_loader"] = str(fact.get("loader") or "runtime TypeScript loader")
         if isinstance(runs, int):
             finding["workflow_runs_30d"] = runs
         out.append(finding)
@@ -33706,6 +33780,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             cache_effective_paths=findings_doc.get("cache_effective_paths"))
         new = _detect_opt13_build_in_scripts(
             pole_logs, vol_by_wf, next_id, _wf_docs, root)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        new = _detect_runtime_ts_transpilation(pole_logs, vol_by_wf, next_id)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         findings_doc["findings"] = findings

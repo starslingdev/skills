@@ -843,6 +843,15 @@ implementation lands.
       "verify_report.py:_VR_OPT84_INSTALL_MIN_SHARE": 0.15
     }
   },
+  "opt106-profile-minimums": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT106_MIN_PROFILE_S": 30.0,
+      "collect_runs.py:_OPT106_MIN_JOB_SHARE": 0.2,
+      "verify_report.py:_VR_OPT106_MIN_PROFILE_S": 30.0,
+      "verify_report.py:_VR_OPT106_MIN_JOB_SHARE": 0.2
+    }
+  },
   "partial-majority-rule": {
     "decision": "partial-majority-rule",
     "sources": {

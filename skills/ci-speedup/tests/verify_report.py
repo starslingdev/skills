@@ -15243,6 +15243,62 @@ def check_opt13_build_in_script_provenance(findings_path: Path | None) -> Check:
                  if not failures else "; ".join(failures[:8]))
 
 
+_VR_OPT106_MIN_PROFILE_S = 30.0
+_VR_OPT106_MIN_JOB_SHARE = 0.2
+
+
+def check_opt106_runtime_loader_provenance(findings_path: Path | None) -> Check:
+    """OPT106 credit remains bound to its captured profiler-owned pole fact."""
+    name = "OPT106 runtime-loader findings retain measured pole provenance"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    findings = [f for f in _as_list(data.get("findings"))
+                if isinstance(f, dict) and f.get("pattern") == "OPT106"]
+    if not findings:
+        return Check(name, True, "no OPT106 finding", skipped=True)
+    entries = _as_list(_as_dict(data.get("data_bundle")).get("logs"))
+    failures: list[str] = []
+    for finding in findings:
+        fid = str(finding.get("id") or "OPT106")
+        jobs = [str(job) for job in _as_list(finding.get("affected_jobs")) if str(job)]
+        matches = [entry for entry in entries if isinstance(entry, dict)
+                   and str(entry.get("workflow_file") or "")
+                   == str(finding.get("workflow_file") or "")
+                   and jobs and str(entry.get("job") or "") == jobs[0]
+                   and isinstance(entry.get("runtime_ts_loader"), dict)]
+        if len(matches) != 1:
+            failures.append(f"{fid} has {len(matches)} matching pole-log facts")
+            continue
+        entry = matches[0]
+        fact = _as_dict(entry.get("runtime_ts_loader"))
+        seconds = _num(fact.get("profile_s"))
+        job_seconds = _num(entry.get("duration_s"))
+        if (seconds is None or seconds < _VR_OPT106_MIN_PROFILE_S
+                or seconds != _num(finding.get("runtime_loader_profile_s"))):
+            failures.append(f"{fid} loader seconds differ from its qualifying pole-log fact")
+        if (job_seconds is None or job_seconds <= 0
+                or job_seconds != _num(finding.get("runtime_loader_job_s"))
+                or seconds is None
+                or seconds / job_seconds < _VR_OPT106_MIN_JOB_SHARE):
+            failures.append(f"{fid} does not retain a qualifying share of its measured job wall")
+        if (str(fact.get("fix_key") or "") != "runtime-ts-transpilation"
+                or not str(fact.get("loader") or "")):
+            failures.append(f"{fid} lacks the runtime-loader leaf identity")
+        wall = _num(finding.get("wall_clock_p50_s"))
+        if seconds is not None and (wall is None or wall < 0 or wall > seconds):
+            failures.append(f"{fid} wall-clock credit exceeds its profiled loader ceiling")
+        runs = finding.get("workflow_runs_30d")
+        runner_min = _num(finding.get("runner_min_saving"))
+        if (isinstance(runs, int) and runs > 0 and seconds is not None
+                and (runner_min is None or runner_min < 0
+                     or runner_min > round(seconds * runs / 60.0, 1))):
+            failures.append(f"{fid} runner-minute credit exceeds its profiled loader ceiling")
+    return Check(name, not failures,
+                 f"{len(findings)} OPT106 finding(s) retain measured loader provenance"
+                 if not failures else "; ".join(failures[:8]))
+
+
 def _vr_declared_timelines(data: dict, findings_path: Path | None
                            ) -> tuple[bool, list[Path], list[tuple[str, dict | None, str]]]:
     """`(bundle_present, dirs_tried, [(who, timeline | None, why_unreadable)])` for every
@@ -17567,6 +17623,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_windows_setup_guidance(report, findings_path),
         check_data_driven_have_signal(findings_path),
         check_opt13_build_in_script_provenance(findings_path),
+        check_opt106_runtime_loader_provenance(findings_path),
         check_speed_poles_complete(report, findings_path),
         check_aggregation_gate_poles_never_prescribe(report, findings_path),
         check_pole_drill_belongs_to_its_job(report, findings_path),

@@ -417,7 +417,7 @@ severity calibration, ≥2-pass agreement; a one-pass-only finding is cut or esc
 
 ## Pattern catalog
 
-Patterns live one per file in `references/patterns/opt<N>-*.md` (99 patterns
+Patterns live one per file in `references/patterns/opt<N>-*.md` (100 patterns
 in 14 categories, from Caching to **Structural / Critical-Path Levers**). Each
 file's frontmatter declares the id, impact tier, finding class (`static` /
 `data-driven` / `structural`), detector and fix strategy slug; structural
