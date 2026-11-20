@@ -4673,6 +4673,252 @@ def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT109 — Failure Reporter Runs on Healthy Pull Requests -----------------
+
+# The only job conditions read as "runs on a healthy run": `always()`, alone or
+# with `!cancelled()`. Any other term (a result comparison, an event or path
+# guard) may already skip healthy runs, so it is not understood and stays quiet.
+_OPT109_HEALTHY_TERMS = frozenset({"always()", "!cancelled()"})
+# A step condition that runs the step only when an upstream job failed or was
+# cancelled.
+_OPT109_FAILURE_GATE_RE = re.compile(
+    r"(?<!!)\bfailure\s*\(\s*\)|(?<!!)\bcancelled\s*\(\s*\)|"
+    r"(?<!!)contains\s*\(\s*needs\.\*\.result\s*,\s*['\"](?:failure|cancelled)['\"]\s*\)|"
+    r"\.result\s*==\s*['\"](?:failure|cancelled)['\"]",
+    re.I,
+)
+# Reporting that edits, hides or clears an earlier report may be what a green
+# rerun needs (a stale failure comment), so it is not report-only.
+_OPT109_MUTATION_RE = re.compile(
+    r"--edit-last|--delete|\b(?:delete|edit|update|minimi[sz]e|hide|clear|remove|"
+    r"resolve)\w*\b",
+    re.I,
+)
+_OPT109_STATUS_FN_RE = re.compile(r"\b(?:always|cancelled|failure)\s*\(\s*\)", re.I)
+_OPT109_SCRIPT_WORD_RE = re.compile(r"(?:report|summar|comment|notif)", re.I)
+_OPT109_REPORT_USES_RE = re.compile(
+    r"(?:comment|notify|notification|slack|discord|teams|report|summary)", re.I)
+# One shell command (as split by `_opt21_run_lines`) that only reports.
+_OPT109_REPORT_LINE_RES = (
+    # Log or step-summary output: echo / printf / cat / tee, or a `{ ... }`
+    # group redirected into the step summary.
+    re.compile(r"^(?:echo|printf|cat|tee)\b", re.I),
+    re.compile(r"^[{}](?:\s*>>?\s*\"?\$\{?GITHUB_STEP_SUMMARY\}?\"?)?$"),
+    re.compile(r"^gh\s+(?:pr|issue)\s+comment\b", re.I),
+    # A notification webhook.
+    re.compile(r"^curl\b.*(?:hooks\.slack\.com|discord(?:app)?\.com/api/webhooks|"
+               r"\$\{?\w*WEBHOOK\w*\}?)", re.I),
+    # Shell structure around those commands.
+    re.compile(r"^(?:if|elif)\s+\[\[?\s.*\]\]?$|^(?:then|else|fi|exit\s+0)$"),
+)
+_OPT109_SCRIPT_RE = re.compile(
+    r"^(?:(?:node|python3?|bash|sh|bun|deno\s+run|npx\s+tsx|tsx|ruby|pwsh)\s+)?"
+    r"(\.{0,2}/?[\w./-]+\.(?:m?js|cjs|ts|py|sh|rb|ps1))(?:\s|$)",
+    re.I,
+)
+_OPT109_ASSIGN_RE = re.compile(r"^(?:export\s+)?[A-Za-z_]\w*=")
+
+
+def _opt109_needs(job: dict) -> set[str]:
+    if not isinstance(job, dict):
+        return set()
+    needs = job.get("needs")
+    if isinstance(needs, str):
+        return {needs}
+    if isinstance(needs, list):
+        return {str(item) for item in needs if isinstance(item, str)}
+    return set()
+
+
+def _opt109_condition_terms(condition: str) -> list[str] | None:
+    """The `&&` terms of a job condition, or None when it holds anything other
+    than a plain conjunction (`||`, parentheses around alternatives, ...)."""
+    text = condition.strip()
+    wrapped = re.fullmatch(r"\$\{\{(.*)\}\}", text, re.S)
+    if wrapped:
+        text = wrapped.group(1)
+    text = re.sub(r"\s+", "", text).lower()
+    if not text or "||" in text:
+        return None
+    return text.split("&&")
+
+
+def _opt109_runs_on_healthy(condition: str) -> bool:
+    terms = _opt109_condition_terms(condition)
+    return bool(terms) and "always()" in terms and set(terms) <= _OPT109_HEALTHY_TERMS
+
+
+def _opt109_shell_lines(run: str) -> list[str]:
+    """Command lines of a `run:` body with heredoc bodies dropped (the opening
+    line is still checked)."""
+    kept: list[str] = []
+    terminator = None
+    for line in run.splitlines():
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        opened = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", line)
+        if opened:
+            terminator = opened.group(1)
+        kept.append(line)
+    return _opt21_run_lines("\n".join(kept))
+
+
+def _opt109_report_line(command: str) -> bool:
+    if "$(" in command or "`" in command:
+        return False
+    if any(regex.search(command) for regex in _OPT109_REPORT_LINE_RES):
+        return True
+    if _OPT109_ASSIGN_RE.match(command):
+        return True
+    script = _OPT109_SCRIPT_RE.match(command)
+    return bool(script and _OPT109_SCRIPT_WORD_RE.search(script.group(1).rsplit("/", 1)[-1]))
+
+
+def _opt109_report_step(step: dict) -> bool:
+    """True only for a step that does nothing but post, summarize or notify.
+
+    Every shell command in a `run:` block must be a reporting command, so one
+    block that also does real work fails closed. Generic ``github-script`` is
+    accepted only when its script posts a comment or a summary and calls no
+    other API.
+    """
+    uses, run = _uses(step), _run(step)
+    with_values = step.get("with") if isinstance(step.get("with"), dict) else {}
+    text = "\n".join([run, *(str(v) for v in with_values.values())])
+    if _OPT109_MUTATION_RE.search(text):
+        return False
+    if run and not uses:
+        commands = _opt109_shell_lines(run)
+        return bool(commands) and all(_opt109_report_line(c) for c in commands)
+    if uses and not run:
+        if re.match(r"actions/github-script(?:@|$)", uses, re.I):
+            script = str(with_values.get("script") or "")
+            calls = re.findall(r"\.(\w+)\s*\(", script)
+            return (bool(re.search(r"\bcreateComment\b|\bcore\.summary\b", script))
+                    and all(c in {"createComment", "addRaw", "addHeading", "addTable",
+                                  "addList", "addLink", "write", "info", "warning",
+                                  "error", "notice", "join", "map", "filter",
+                                  "stringify"} for c in calls))
+        return bool(_OPT109_REPORT_USES_RE.search(uses))
+    return False
+
+
+def _opt109_closure(start: str, edges: dict[str, set[str]]) -> set[str]:
+    seen: set[str] = set()
+    stack = list(edges.get(start, ()))
+    while stack:
+        name = stack.pop()
+        if name not in seen:
+            seen.add(name)
+            stack.extend(edges.get(name, ()))
+    return seen
+
+
+def _opt109_gate_advice(reporter: str, gates: list[str], jobs: dict) -> str:
+    if not gates:
+        return (
+            "Any required aggregate gate that later reads this job must accept "
+            f"`needs.{reporter}.result` of `success` or `skipped`; every workload "
+            "check must be `success`."
+        )
+    named = ", ".join(f"`{g}`" for g in gates)
+    guarded = all(
+        _OPT109_STATUS_FN_RE.search(str((jobs.get(g) or {}).get("if") or "")) for g in gates)
+    reads_success = []
+    for gate in gates:
+        job = jobs.get(gate) or {}
+        text = "\n".join([str(job.get("if") or ""),
+                          *(_run(step) for step in _steps(job))])
+        if re.search(r"(?:==|!=|=)\s*['\"]?(?:success|skipped)\b|"
+                     r"contains\s*\(\s*needs\.\*\.result\s*,\s*['\"]skipped", text, re.I):
+            reads_success.append(f"`{gate}`")
+    advice = (
+        f"{named} needs this reporter: {'keep' if guarded else 'add'} `if: always()` "
+        "on it (without a status function a skipped need skips the gate, and a "
+        "skipped job reports success to a required check), accept "
+        f"`needs.{reporter}.result` of `success` or `skipped`, and require "
+        "every workload check to be `success` (for example fail when "
+        "`contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')`, "
+        "which a skipped reporter passes)."
+    )
+    if reads_success:
+        advice += (f" {', '.join(reads_success)} currently compares a result against "
+                   "`success` or `skipped`; change that comparison for the reporter.")
+    return advice
+
+
+def _detect_opt109(doc: dict, raw: str) -> list[Hit]:
+    """An always-running job that depends on every independent check and does
+    only failure reporting.  Conditions it cannot read, jobs that do other work
+    and reports that are not failure-only stay quiet (fail closed)."""
+    jobs = _jobs_from_doc(doc)
+    needs_of = {name: _opt109_needs(job) for name, job in jobs.items()}
+    dependants: dict[str, set[str]] = {name: set() for name in jobs}
+    for name, needs in needs_of.items():
+        for need in needs:
+            dependants.setdefault(need, set()).add(name)
+    hits: list[Hit] = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        condition = str(job.get("if") or "")
+        if not _opt109_runs_on_healthy(condition) or len(needs_of[job_name]) < 2:
+            continue
+
+        # Every independent check must be upstream of the reporter, directly or
+        # through another need (a shared `setup` job). Jobs downstream of the
+        # reporter, such as a final aggregate gate, are not checks it reports on.
+        upstream = _opt109_closure(job_name, needs_of)
+        downstream = _opt109_closure(job_name, dependants)
+        independent = set(jobs) - {job_name} - downstream
+        if not independent <= upstream:
+            continue
+
+        executable = [step for step in _steps(job) if _run(step) or _uses(step)]
+        reporting = [step for step in executable if not _opt108_setup_only(step)]
+        if not reporting or not all(_opt109_report_step(step) for step in reporting):
+            continue
+        # The report must be failure-only: the job says so in its id or name, or
+        # every reporting step is gated on a failed or cancelled need. A job that
+        # posts every run's results is wanted on green runs too.
+        label = f"{job_name} {job.get('name') or ''}"
+        if not (re.search(r"fail", label, re.I) or all(
+                _OPT109_FAILURE_GATE_RE.search(str(step.get("if") or ""))
+                for step in reporting)):
+            continue
+
+        terms = _opt109_condition_terms(condition) or []
+        recommendation = "`if: failure() || cancelled()`"
+        if "!cancelled()" in terms:
+            recommendation += (" (or use `if: failure()` to keep the job's existing "
+                               "exclusion of cancelled runs)")
+        gates = sorted(name for name in jobs if job_name in needs_of[name])
+        wall = (
+            " The skip also removes the reporter's queue and run time from the "
+            f"healthy path to {', '.join(f'`{g}`' for g in gates)}."
+            if gates else " No merge-wait effect: no job waits on the reporter."
+        )
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"job `{job_name}` needs every independent check but runs with "
+                f"`if: {condition.strip()}` only to post or summarize failures, so "
+                f"healthy runs still allocate its runner. Fix: use {recommendation}. "
+                + _opt109_gate_advice(job_name, gates, jobs) + wall
+                + " Bill effect: runner-minute saving: unsized (it saves the reporter's "
+                "compute on healthy runs, but this static finding has no measured "
+                "reporter compute or healthy-run share)."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+        ))
+    return hits
+
+
 # ---- OPT31 — Conditional Step With Unconditional Setup -----------------------
 
 _OPT31_INSTALL_RE = re.compile(
@@ -6458,7 +6704,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT76", "OPT108"})
+    "OPT39", "OPT76", "OPT108", "OPT109"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -6508,6 +6754,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT76": _detect_opt76,
     "OPT29": _detect_opt29,
     "OPT108": _detect_opt108,
+    "OPT109": _detect_opt109,
     "OPT31": _detect_opt31,
     "OPT32": _detect_opt32,
     "OPT33": _detect_opt33,
