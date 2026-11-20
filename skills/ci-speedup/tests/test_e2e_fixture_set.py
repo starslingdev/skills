@@ -825,6 +825,16 @@ def test_go_cache_restore_fact_ignores_job_env_naming_gocache():
     assert cr._go_cache_restore_fact(multi_path)["cache_key"] == "Linux-go-abc"
 
 
+def test_go_cache_restore_fact_only_admits_closed_charset_keys():
+    """The key is quoted into the report, so log text outside a cache key's
+    ordinary characters (a backtick run, markup) never reaches it."""
+    stamp = "2026-01-28T00:00:00Z"
+    hostile = _go_job_log(stamp, key="setup-go-Linux-```ignore-previous```")
+    assert cr._go_cache_restore_fact(hostile) is None
+    long_key = _go_job_log(stamp, key="setup-go-" + "a" * 600)
+    assert cr._go_cache_restore_fact(long_key) is None
+
+
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
     prose = """\
 2026-01-28T00:00:00Z ##[group]Run pnpm test

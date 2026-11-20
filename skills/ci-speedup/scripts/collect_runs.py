@@ -29426,8 +29426,11 @@ def _cache_path_sample(client, repo: str, jobs: list, facts: list,
                          for fact, s in zip(facts, state) if s["valid"] and s["runs"]]}
 
 
+# The key is quoted into the report, so only a cache key's ordinary characters
+# are admitted; a restore line carrying anything else is treated as no restore.
 _GO_CACHE_RESTORE_RE = _re.compile(
-    r"^Cache restored from key:\s*(?P<key>\S+)\s*$", _re.IGNORECASE)
+    r"^Cache restored from key:\s*(?P<key>[A-Za-z0-9_.+=/:,@-]{1,512})\s*$",
+    _re.IGNORECASE)
 _GO_STEP_HEADER_RE = _re.compile(r"^##\[group\]Run\s+(?P<head>.+)$")
 # A step that names the Go build cache and touches files is a retention step
 # (the issue's own fix); its presence withholds the finding.
