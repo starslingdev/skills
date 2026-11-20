@@ -1156,7 +1156,8 @@ used before the first Go command so `cmd/go` keeps both populations.
 3. Two successive `go build`, `go test`, or `go vet` command boundaries use
    incompatible race modes: one includes `-race` and the other does not.
 4. The later command's ordinary `go -x` compiler output shows at least 50
-   distinct packages rebuilt over at least 30 measured seconds. A cache hit,
+   distinct packages whose first-to-last invocation spans at least 30 measured
+   seconds. Work after the last compiler invocation is excluded. A cache hit,
    old archive, command shape, or compiler output by itself is not enough.
 5. Missing or ambiguous cache metadata withholds the finding. A fresh archive,
    fewer compiler invocations, or the same race mode on both commands stays
@@ -1179,11 +1180,12 @@ not turn an untrusted cache into executable input, weaken the cache key, skip a
 race or non-race build, or hide a failed restore. On a cache miss, the retention
 step is a no-op. Preserve Go's own cache validation and every existing test flag.
 
-**Sizing**: the timestamped span of the later broad recompilation is the ceiling
-on per-run wall-clock and runner-minute saving. Multiply that span by one named
-30-day workflow-run population, then clamp it to the affected job's measured
-completed-run compute. The realized saving is the same-job before/after
-difference; the report never credits the entire Go test step.
+**Sizing**: the timestamped first-to-last compiler-invocation span measures the
+broad recompilation, excluding later tests and uploads. It is not credited as a
+saving because GitHub's cache API does not expose the archive inventory: an
+exact hit cannot prove that the later command's entries existed before the
+trim. Runner-minute saving is therefore unsized until the same-job before/after
+shows what retention removed; the report never credits the entire Go test step.
 
 **Real-world example (OpenClaw)**, their numbers, not a forecast for another
 repository: openclaw/crabbox [#2833](https://github.com/openclaw/crabbox/pull/2833)

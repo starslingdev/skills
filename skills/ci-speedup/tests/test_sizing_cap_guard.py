@@ -326,8 +326,8 @@ def test_opt24_inline_sizing_respects_physical_bound():
         assert (f.get("wall_clock_p50_s") or 0) > 0  # non-vacuous: it credited a saving
 
 
-def test_opt112_inline_sizing_respects_physical_bound():
-    """OPT112 credits only the measured recompilation span inside its pole job."""
+def test_opt112_inline_sizing_withholds_opaque_archive_credit():
+    """OPT112 does not price contents that GitHub's cache API cannot inventory."""
     entries = [{
         "workflow_file": "ci.yml",
         "job": "go tests",
@@ -344,7 +344,9 @@ def test_opt112_inline_sizing_respects_physical_bound():
     crit = {"long_pole_job": "go tests", "long_pole_p50": 400.0,
             "floor_p50": 90.0, "job_p50": {"go tests": 400.0}}
     assert _physical_bound_violation(findings[0], crit) is None
-    assert findings[0]["wall_clock_p50_s"] == 120.0
+    assert findings[0]["wall_clock_p50_s"] == 0.0
+    assert findings[0].get("runner_min_saving") is None
+    assert "opaque contents" in findings[0]["size_note"]
 
 
 def test_opt25_inline_sizing_respects_physical_bound():

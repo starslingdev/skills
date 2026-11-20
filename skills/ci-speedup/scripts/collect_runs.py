@@ -29477,16 +29477,19 @@ def _go_cache_trim_candidate(log: str) -> dict[str, Any] | None:
         end_index = (commands[command_index + 1][0]
                      if command_index + 1 < len(commands) else len(records))
         rows = records[row_index:end_index]
-        packages = {
-            match.group("package")
-            for _stamp, text in rows
+        compiler_rows = [
+            (stamp, match.group("package"))
+            for stamp, text in rows
             for match in [_GO_COMPILE_PACKAGE_RE.search(text)]
             if match is not None and match.group("package") != "command-line-arguments"
-        }
+        ]
+        packages = {package for _stamp, package in compiler_rows}
         if len(packages) < _OPT112_MIN_RECOMPILED_PACKAGES:
             continue
-        ended = rows[-1][0]
-        seconds = max(0.0, (ended - started).total_seconds())
+        # Measure only timestamped compiler invocations.  The remainder of the
+        # command or job can contain tests, uploads, and other unrelated work.
+        seconds = max(0.0, (
+            compiler_rows[-1][0] - compiler_rows[0][0]).total_seconds())
         if seconds < _OPT112_MIN_RECOMPILE_S:
             continue
         return {
@@ -29983,28 +29986,22 @@ def _detect_go_cache_trim(
         workflow = str(entry.get("workflow_file") or "")
         job = str(entry.get("job") or "")
         runs = volume_by_workflow.get(workflow)
-        runner_min = (round(float(seconds) * runs / 60.0, 1)
-                      if isinstance(runs, int) and not isinstance(runs, bool)
-                      and runs > 0 else None)
-        if runner_min is not None:
-            runner_effect = (
-                f"runner-minute saving: at most {runner_min:.1f}/month (measured "
-                f"recompile ceiling from 1 representative run x {runs} workflow "
-                "runs in 30 days); confirm the realized saving after retaining the cache")
-        elif isinstance(runs, int) and not isinstance(runs, bool) and runs <= 0:
-            runner_effect = (
-                "runner-minute saving: unsized (the 30-day volume window holds no "
-                "runs of this workflow)")
-        else:
-            runner_effect = (
-                "runner-minute saving: unsized (30-day run volume for this workflow "
-                "is unavailable)")
+        # An exact hit proves that an archive was restored, but its inventory is
+        # opaque: it does not prove that the later command's entries existed
+        # before cmd/go's trim.  Keep this as a measured lead and do not credit a
+        # saving until a same-job before/after demonstrates one.
+        runner_min = None
+        runner_effect = (
+            "runner-minute saving: unsized (the restored archive's opaque contents "
+            "do not prove that it held the later command's entries; measure the "
+            "same job before and after retaining the cache)")
         url = str(entry.get("html_url") or "")
         evidence = (
             f"The representative `{job}` run restores an exact Go build-cache archive "
             f"that is {float(age_days):.1f} days old, then recompiles {packages} "
-            f"packages for {_link(float(seconds), url)} after an incompatible Go "
-            "command used the cache first."
+            f"packages over {_link(float(seconds), url)} after an incompatible Go "
+            "command used the cache first. This is consistent with trim loss, but "
+            "the archive inventory is not observable."
         )
         measured = _measured_evidence(
             ["Job", "Archive age", "Recompiled packages", "Measured span",
@@ -30013,9 +30010,9 @@ def _detect_go_cache_trim(
               f"{float(seconds):.1f}s",
               f"[job log]({url})" if url else "captured job log"]],
             (f"An exact restored cache older than Go's five-day trim window is "
-             f"followed by {packages} compiler invocations spanning "
-             f"{float(seconds):.1f}s."),
-            "The measured recompilation span is a ceiling; compare the same job before and after retaining the restored entries.",
+             f"followed by {packages} compiler invocations whose first-to-last "
+             f"timestamp span is {float(seconds):.1f}s."),
+            "The measured recompilation span is an observation, not credited savings; compare the same job before and after retaining the restored entries.",
         )
         idx += 1
         finding = _new_finding(
@@ -30026,11 +30023,11 @@ def _detect_go_cache_trim(
             "flag population instead. Preserve the cache key and test flags, then "
             "compare the same job before and after.",
             "opt112--restored-go-build-cache-trimmed-before-reuse", idx,
-            wc_p50=float(seconds), rm=runner_min,
-            size_note=f"measured recompile ceiling {float(seconds):.1f}s; {runner_effect}",
-            realization="tail", measured_evidence=measured,
+            wc_p50=0.0, rm=runner_min,
+            size_note=f"measured recompile span {float(seconds):.1f}s; {runner_effect}",
+            realization="none", measured_evidence=measured,
         )
-        finding["sizing_basis"] = "measured"
+        finding["sizing_basis"] = "uncredited"
         finding["go_cache_archive_age_days"] = float(age_days)
         finding["go_cache_recompiled_packages"] = packages
         finding["go_cache_recompile_s"] = float(seconds)

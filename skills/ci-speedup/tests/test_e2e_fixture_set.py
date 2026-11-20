@@ -657,7 +657,8 @@ def test_old_restored_go_cache_trim_is_measured_through_collect(monkeypatch, tmp
     """An old exact cache hit plus broad later recompilation produces OPT112."""
     cache_key = "setup-go-Linux-x64-go-1.26.0-deadbeef"
     compile_lines = "\n".join(
-        f"2026-01-28T00:01:10.0000000Z /opt/go/pkg/tool/linux_amd64/compile "
+        f"2026-01-28T00:{(70 + i * 2) // 60:02d}:{(70 + i * 2) % 60:02d}.0000000Z "
+        f"/opt/go/pkg/tool/linux_amd64/compile "
         f"-o $WORK/b{i}/_pkg_.a -p example.org/project/pkg{i}"
         for i in range(60))
     costly_log = f"""\
@@ -692,11 +693,11 @@ def test_old_restored_go_cache_trim_is_measured_through_collect(monkeypatch, tmp
     finding = findings[0]
     assert finding["go_cache_archive_age_days"] >= 5
     assert finding["go_cache_recompiled_packages"] == 60
-    assert finding["go_cache_recompile_s"] == 120.0
-    assert finding["runner_min_saving"] > 0
+    assert finding["go_cache_recompile_s"] == 118.0
+    assert finding.get("runner_min_saving") is None
     assert "Touch every restored" in finding["fix_strategy"]
     assert "runner-minute saving" in finding["size_note"]
-    assert "Restored Go Build Cache" in report
+    assert "opaque contents" in finding["size_note"]
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
     negative = tmp_path / "fresh-restored-go-cache"
@@ -747,6 +748,25 @@ def test_go_cache_trim_candidate_withholds_legitimate_near_misses():
     assert cr._go_cache_trim_candidate(
         log(race_first=True, race_later=False, packages=60).replace(
             "Cache restored from key:", "Documentation: cache key:")) is None
+
+
+def test_go_cache_trim_candidate_excludes_unrelated_tail_work():
+    """A quick compile followed by slow tests or uploads does not clear the gate."""
+    compile_lines = "\n".join(
+        f"2026-01-28T00:01:{10 + i // 6:02d}Z "
+        f"/opt/go/pkg/tool/linux_amd64/compile -o $WORK/b{i}/_pkg_.a "
+        f"-p example.org/pkg{i}"
+        for i in range(60))
+    log = f"""\
+2026-01-28T00:00:00Z Cache restored from key: setup-go-Linux-x64-key
+2026-01-28T00:00:02Z ##[group]Run go test -race ./... -list .
+2026-01-28T00:01:00Z ##[group]Run go build -x ./cmd/tool
+{compile_lines}
+2026-01-28T00:01:20Z ##[group]Run npm test
+2026-01-28T00:04:20Z tests complete
+2026-01-28T00:06:20Z upload complete
+"""
+    assert cr._go_cache_trim_candidate(log) is None
 
 
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
