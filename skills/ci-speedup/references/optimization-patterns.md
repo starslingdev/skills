@@ -1534,6 +1534,32 @@ title_template: "Within-Job Duplicate Commands"
 
 **Detection heuristic**:
 
+The static scanner also recognizes one form of repeated analysis in which
+the runs differ only in report or issue-selection flags. It covers Knip only:
+Knip's `--include`, `--reporter` and issue-type flags (`--files`, `--exports`,
+`--dependencies` and the like) select or render issues from one project
+analysis, so the scanner can tell them apart from scope-defining arguments.
+Other analysis tools run several times over one scope are not flagged by this
+static form. Each step's command is read through the shared run-leaf resolver,
+so package scripts (`pnpm knip:json`, `npm run knip`) and `\`-continued lines
+are followed. Runs in one job match, in one step or in several, when the
+working directory, the step `if:` condition and every other argument
+(`--config`, `--production`, `--workspace` and so on) are identical; a `>`
+redirect of the report counts as output. A different config, production mode,
+workspace, working directory or step condition stays quiet, and so do a run
+with `--fix`, a step that changes directory, and runs in one step that a
+conditional chain (`||`, `if`, `case`) chooses between. Evidence: the public
+[OpenClaw #185851](https://github.com/openclaw/openclaw/pull/185851) change
+took 91.3 s to 65.9 s.
+
+For this form, run Knip once with the combined issue selection, then split or
+filter its output, keeping each selection's pass/fail policy. The
+runner-minute effect is a saving (25.4 s, about 0.42 runner-minutes per run,
+in the cited change), but the finding reports `runner-minute saving: unsized`
+because the combined run still performs the analysis once and its cost is
+specific to each repository. Time the separate runs and the combined run on
+the same commit before crediting minutes.
+
 Job logs can prove the Cargo variant even when the workflow commands differ:
 if two distinct step groups print the same in-repository
 `Compiling <crate> v<version> (<path>)` line, every local crate in the later
@@ -1955,6 +1981,67 @@ pays its prefix once instead of `n` times.
 
 ---
 
+### OPT113 — A Test Fixture Is Much Larger Than Its Contract Needs
+
+<!-- METADATA
+pattern: OPT113
+impact: MEDIUM
+class: static
+detector: go-test-source-correlated
+affected_files: "**/*_test.go"
+fix_strategy: small-contract-fixture
+title_template: "A Test Fixture Is Much Larger Than Its Contract Needs"
+-->
+
+**Anti-pattern**: A test archives, compresses or hashes the linked Go test
+executable, or a binary it just built, when the contract under test only needs
+ordinary file bytes. The linked test binary can be many megabytes and grows
+further under instrumentation such as the race detector, so every repeated
+archive pays to move bytes the assertion does not distinguish.
+
+**Detection heuristic**: In a Go `_test.go` file, find one function that opens
+or reads the linked test executable (`os.Executable()`, directly or through a
+helper that returns it) or the output of an explicit `go build -o` in that
+function, and passes those same bytes into a writer made by an archive,
+compression or hash constructor (or a direct digest call). A file that inspects
+format headers (`debug/elf`, `debug/macho`, `debug/pe`), verifies a signature,
+executes a binary, or asserts a file mode stays quiet: there the real binary is
+the contract. Reads of a different file beside the executable, and a small byte
+fixture going through the same archive path, also stay quiet. If the source
+cannot tie the executable bytes to the archive or hash, withhold the finding
+rather than guessing.
+
+**Fix recipe (safest first)**:
+
+1. State the contract the test exercises: ordinary bytes and their digest,
+   archive layout, executable mode, platform metadata, or the built program's
+   actual behavior.
+2. For byte, digest and layout checks, create one small shared fixture with
+   deterministic bytes and pass it through every existing archive/compression
+   assertion. Keep the modes, inventory entries, stale-hash rejection and
+   extraction checks intact.
+3. Keep a real executable for cases that inspect executable metadata, execute
+   the program, or validate a property that a byte fixture cannot represent.
+4. Compare the affected test lane before and after on the same commit, runner
+   class and instrumentation mode; confirm the test and coverage inventory is
+   unchanged.
+
+**Sizing**: The static finding credits neither wall-clock nor runner-minutes.
+Runner-minute saving is **unsized** until run timings identify the affected
+test and its monthly execution count. As a public single-run observation, not a
+general estimate, [openclaw/crabbox#2876](https://github.com/openclaw/crabbox/pull/2876)
+reported its package's race lane falling from 256.401 seconds to 61.720 seconds
+and the enclosing race job from 16m45s to 11m04s — a runner-time saving of
+5m41s for that one observed run. The detector does not claim a merge-wait
+saving from source.
+
+**Risk**: MEDIUM. Replacing a real artifact can weaken a test that checks
+permissions, architecture, signing, executable metadata or actual execution.
+Keep those cases on real artifacts and shrink only the fixtures whose contract
+is byte content, hashing or archive shape.
+
+---
+
 ## Category 3: Docker
 
 ---
@@ -2043,6 +2130,7 @@ title_template: "Test Source Sleep Dominance (includes Playwright `waitForTimeou
 - **Cypress** — `cy.wait(N)` (note: `cy.wait('@alias')` waiting on a network intercept is OK; numeric ms is the anti-pattern).
 - **Node/Jest/Vitest** — `await new Promise(r => setTimeout(r, N))`, `await sleep(N)`, `await delay(N)` in `*.test.ts` / `*.spec.ts`.
 - **Integration-test fixtures** — `sleep N` in shell wrappers, `time.sleep(N)` in Python tests, fixed waits before assertion retries.
+- **Go tests** — on a drilled long pole whose log runs `go test` (plain, `-v` or `-json`): constant `time.Sleep` / `<-time.After` waits in a `_test.go` body that dominate the measured test or package time; repeated, equally spaced wait/poll/retry output inside one test; or a `-race` job whose test files synchronously re-execute the race-built test binary, so each child pays the race runtime's exit sleep.
 
 **Detection heuristic (run ALL greps; aggregate matches; sum `sleep_ms` across every file)**:
 
@@ -2068,6 +2156,12 @@ grep -rn 'time\.sleep([0-9]' tests/ --include='*.py' 2>/dev/null
 **Aggregation**: Sum `sleep_ms` across EVERY matched file. Compute total sleep per full test run (if test is a single script, sum is the per-run cost; if test is sharded, divide by shard count only if each shard runs a non-overlapping subset). Report the per-run total and the source-of-truth file list in `evidence`.
 
 **Fix**: Replace with event-driven waits. For Playwright: `page.waitForSelector`, `page.waitForLoadState`, `expect(locator).toBeVisible({ timeout })`. For Cypress: `cy.wait('@alias')` on route aliases. For DB/service readiness: ping the service in a bounded retry loop (e.g. `@testcontainers` readiness probes).
+
+For a Go test that reaches production poll intervals or grace periods, run the waiting test on `testing/synctest`'s virtual clock. If that dependency cannot use the virtual clock, expose only the interval as a package variable that the test shortens and restores with `t.Cleanup`; keep the production default and timeout assertions unchanged. For synchronous race-built helper children, preserve every inherited `GORACE` option and append `atexit_sleep_ms=0` only to the child environment. Do not apply that override to the parent race job or asynchronous children.
+
+The Go routes fail closed. A test-body sleep counts only when its duration is a literal or a package `const` (a `var` interval may already be shortened by the tests), it runs unconditionally (not in a loop, branch, `select`, goroutine or closure other than an inline `t.Run` body), and the test does not call `t.Parallel`, skip, return early or use `testing/synctest`; the constant total must be at most, and at least half of, the measured test time (or, without `-v`, the package time from a `go test` line with no `-run`/`-skip` filter; a `(cached)` package ran nothing), and at least one fifth of the job. The poll route needs at least two consistent intervals inside one test, timed by `go test -json` or the runner's own line timestamps, with the same shares. The race route needs a `-race` `go test` (or `GOFLAGS`) line, a package the job ran, at least three synchronous call sites that re-execute `os.Args[0]` (directly or through a helper returning `*exec.Cmd`), no asynchronous `Start`, and no `atexit_sleep_ms` anywhere in the package or the log. Sleep and poll findings state the runner-minute saving as a ceiling from one representative run and the workflow's 30-day run count; the race finding is unsized, because the log does not count helper re-execs.
+
+Public examples cut a detached-seed matrix under `-race` from 558.58 s to 297.99 s (one local run each side) in [openclaw/crabbox#2969](https://github.com/openclaw/crabbox/pull/2969), move fixture waits to virtual time in [openclaw/crabbox#2455](https://github.com/openclaw/crabbox/pull/2455), and remove the race exit sleep only for synchronous helper children in [openclaw/crabbox#1761](https://github.com/openclaw/crabbox/pull/1761).
 
 **Real-world example (mastra golden 2026-04-09)**: 37 `page.waitForTimeout()` calls across `packages/playground/e2e/tests/` totaling 65,500ms per full run. On E2E kitchen-sink (2,368 runs/mo × 65.5s/run) this is 2,585 min/mo. Initial detection required grepping `page.waitForTimeout` in the `packages/playground/e2e/` scope — looking only at `stores/*.test.ts` misses it entirely.
 
@@ -2159,6 +2253,71 @@ each runner's cores and memory against link-time optimisation and parallel links
 and build only the binaries the image ships. Preserve every platform, verify the
 produced binary architecture, test each image natively, and compare total runner
 minutes as well as wall time.
+
+---
+
+### OPT114 — Docker Image Layers Repeat npm Advisory Lookups Already Run by CI
+
+<!-- METADATA
+pattern: OPT114
+impact: MEDIUM
+class: static
+detector: yaml-job-correlated
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,Dockerfile,**/Dockerfile*"
+fix_strategy: avoid-duplicate-docker-npm-audits
+title_template: "Docker image layers repeat npm advisory lookups already run by CI"
+-->
+
+**Anti-pattern**: A CI job runs `npm ci` on the host with npm's default audit
+reporting, then builds a local Dockerfile whose `RUN npm ci`, `npm install` or
+`npm prune` commands make the same advisory lookup again. Several image layers
+can repeat the request, and a slow advisory service can hold up the image build.
+
+**Detection heuristic**: Require both halves in one readable job. The host
+half is a direct `npm ci` that keeps audit on: its flags, step/job/workflow
+environment and every repository `.npmrc` from its effective working directory
+(`defaults.run.working-directory` included) up to the checkout root leave audit
+enabled, and it runs whenever the image build runs (no `if:`, or the build's
+own `if:`). The image half is a local Docker build whose selected stage, or a
+stage it builds from, runs `npm ci`, `npm install` or `npm prune` with audit
+still on after copying in that same host lockfile. Image audit settings are read
+as Docker applies them: `ENV`/`ARG NPM_CONFIG_AUDIT`, `npm config set audit`
+and an `.npmrc` copied into the image, in instruction order; a build-context
+`.npmrc` the Dockerfile never copies does not count. Heredoc bodies and quoted
+text are data, not commands. Expressions, `cd`/`--prefix` directory changes,
+remote contexts, unreadable files, unknown audit values, an unselected stage, a
+separate lockfile, and Docker commands that already disable audit stay quiet.
+
+**Fix recipe (safest first)**:
+
+1. Keep the host `npm ci` audit reporting unchanged so the job still reports
+   advisories once.
+2. Add `--no-audit` only to each image-layer `npm ci`, `npm install` and
+   `npm prune` that the finding names. Preserve lockfile resolution, lifecycle
+   scripts, production pruning and every image input.
+3. Build the old and new image from the same lockfile, compare the application
+   artifacts and installed production package versions/integrities, then run the
+   image's existing smoke or syntax check.
+
+**Sizing**: Runner-minute effect is a **saving** because the same image-build
+runner waits on fewer advisory requests. The static finding is **unsized**: it
+has neither measured Docker-layer duration nor the job's 30-day run count. Use
+matched before/after layer timings to size it; do not import another project's
+numbers as a forecast. Wall-clock also goes down only when these layers are on
+the job's gating path.
+
+**Public evidence**:
+
+- [OpenClaw Crabbox pull request #1804](https://github.com/openclaw/crabbox/pull/1804)
+  is the merged change for this shape.
+- [OpenClaw Crabbox pull request #1807](https://github.com/openclaw/crabbox/pull/1807)
+  measured the original Dockerfile reproducing the stall with install at 242.8
+  seconds and build/prune at 423.4 seconds; the Docker build then completed in
+  24 seconds. Those are that pull request's samples, not a forecast.
+
+**Risk**: LOW when the host audit remains mandatory. The change must not disable
+the last advisory report, alter dependency resolution or pruning, or skip the
+image's parity checks.
 
 ---
 
@@ -2360,7 +2519,7 @@ impact: MEDIUM
 class: static
 detector: bespoke
 risk: MEDIUM
-affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,pyproject.toml,pytest.ini,setup.cfg,.bazelrc,.config/nextest.toml,jest.config.*,vitest.config.*,package.json"
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,**/*_test.go,pyproject.toml,pytest.ini,setup.cfg,.bazelrc,.config/nextest.toml,jest.config.*,vitest.config.*,package.json"
 fix_strategy: measure-test-concurrency
 title_template: "Test concurrency is set by guess, not measurement"
 -->
@@ -2375,7 +2534,7 @@ title_template: "Test concurrency is set by guess, not measurement"
 
 **Detection heuristic**:
 
-A configured Jest `maxWorkers` below 100% is static evidence to measure, never evidence of a saving. A log-level `test-loop-serial` observation can also point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another. In both cases the safe worker count still has to be measured.
+A configured Jest `maxWorkers` below 100% is static evidence to measure, never evidence of a saving. A log-level `test-loop-serial` observation can also point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another. For Go, the long-pole `go test` log (run directly, through `gotestsum`, or through a `make` target or repository script whose recipe is a plain `go test` line) identifies a test taking at least 10 seconds from verbose `--- PASS` lines or `go test -json` events, with its package when the log prints it; the source is matched in that package, and a test name defined in more than one place without a measured package is withheld. Without per-test times, a plain `ok <package> Ns` (or gotestsum) line of at least 10 seconds leads to a static read of that package's tests; the wall-clock effect is then unsized, because the package's measured time is only an upper bound. The source must then prove that its table-driven subtests each create their own `t.TempDir` with a store opened on it and an `httptest` server (or their own config and server, blocked only by `t.Setenv`), omit `t.Parallel()`, capture no parent-scope or package-level variable, and read rows from a literal table that names no variable and opens nothing. A parent `defer`, `t.Setenv` or `t.Chdir`, any `t.Chdir`, `os.Setenv`/`os.Chdir`, global `http` mux or default registration, or other process-global mutation withholds it. Unreadable source or an unclassified resource withholds the Go finding. In every case the safe worker count still has to be measured.
 
 1. The slow step runs tests, and concurrency is set explicitly (serial, or a fixed number), or not at all on a runner whose test tool defaults to serial. Look everywhere it can be set: the test command, the workflow, and the test tool's own config files (for example `local_test_jobs` and a `test_env` thread count such as `RUST_TEST_THREADS` in `.bazelrc`, or pytest, jest and nextest config files).
 2. The setting does not match the runner: compare it with the core count of the job's runner label. If the label is custom and its core count is not documented, measure it first with a one-line probe step (`nproc`, or `[Environment]::ProcessorCount` on Windows).
@@ -2404,9 +2563,10 @@ The table carries no seconds and no modeled saving. Time the settings on the rep
 **Fix recipe**:
 
 1. Separate what cannot share: give each worker its own resource (a per-worker database name, an ephemeral port, a per-worker temp directory), and move tests that truly cannot run concurrently onto a serial lane that still runs in the same command (run the parallel set, then the serial set).
-2. Replace real-time waits with deterministic synchronization, so workers are not idle.
-3. Measure: on the same runner class and commit, with test-result caching off so the tests really run, time the current setting and two or three others (for example the core count and twice it), several runs each. Keep the fastest; stop at the first setting that regresses.
-4. Pin the measured value in configuration, per runner class, with a comment naming the measurement; re-measure when the runner changes.
+2. In Go table tests whose cases already own those resources, pass configuration explicitly instead of calling `t.Setenv` only where the code under test takes that value from the config; a case whose code still reads the environment keeps `t.Setenv` and stays serial. On a module whose `go` directive is below 1.22, copy the loop variable before `t.Run`. Then call `t.Parallel()` at the start of each independent subtest. Keep cases that share process-global state serial.
+3. Replace real-time waits with deterministic synchronization, so workers are not idle.
+4. Measure: on the same runner class and commit, with test-result caching off so the tests really run, time the current setting and two or three others (for example the core count and twice it), several runs each. For Go, include a focused `go test -race` run and confirm the same cases and failures. Keep the fastest; stop at the first setting that regresses.
+5. Pin the measured value in configuration, per runner class, with a comment naming the measurement; re-measure when the runner changes.
 
 **Guardrail**: the same tests pass at every setting compared, and the flake rate does not rise. Watch memory: a setting that runs out of memory on some runs is not faster.
 
@@ -2416,6 +2576,11 @@ The table carries no seconds and no modeled saving. Time the settings on the rep
 
 - openai/codex [#31352](https://github.com/openai/codex/pull/31352) (2026-07-07): "Controlled forced-test-execution measurements in #31339 found that 8 local jobs reduced Bazel elapsed time on every shard by 19–29%, including the slow shard from 835.5s to 609.3s, while 12 jobs regressed." The PR raised the Windows test shards' local test-jobs cap from 4 to 8, the measured best, not the highest value tried.
 - openai/openai-agents-python [#2563](https://github.com/openai/openai-agents-python/pull/2563) (2026-03-01): replaced "real-time waits in several slow tests with deterministic synchronization", moved shard-safe tests onto `pytest-xdist`, and isolated Redis/Dapr-sensitive files onto "a serial lane that still runs automatically". `make tests` "averaged 53.59 seconds before these changes and 14.34 seconds after them", measured "on the same machine" across three warm-cache runs: a local measurement, not a CI run.
+
+**Real-world examples (OpenClaw)**, their numbers and changes, not a forecast for another repository:
+
+- openclaw/crabbox [#1761](https://github.com/openclaw/crabbox/pull/1761) reported two HTTP test groups falling from 88.498 seconds to 42.304 seconds in a focused local race run after independent cases became parallel.
+- openclaw/crabbox [#2455](https://github.com/openclaw/crabbox/pull/2455) opted independent subtests into parallel execution in its slow checkpoint and installer tests.
 
 **Risk**: **MEDIUM**. More workers can expose tests that share state, which shows up as new flakes; the serial lane and the guardrail contain that.
 
@@ -3100,6 +3265,11 @@ title_template: "Conditional Step With Unconditional Setup"
 
 **Anti-pattern**: A step (typically a tool install, browser install, or large download) exists ONLY to support a downstream step that has an `if:` condition gating it. The downstream step is conditionally skipped (e.g., when a secret is missing, when a feature is disabled, on certain branches), but the upstream setup step runs unconditionally — paying the full setup cost for runs where the consumer never executes.
 
+A second form occurs in an aggregate job: a shell-only step reads
+`needs.<job>.result` values and fails when a producer was unsuccessful, but it
+runs after checkout or a `setup-*` action. A failed dependency therefore pays
+for setup before the result gate ends the job.
+
 **Why this is missed by OPT1 (Unnecessary Tool Install)**: OPT1 catches the case where the tool is NEVER invoked in the job. OPT31 catches the case where the tool IS invoked, but only conditionally — and the install step is missing the same condition.
 
 **Detection heuristic**:
@@ -3113,6 +3283,17 @@ title_template: "Conditional Step With Unconditional Setup"
    - `gh auth setup-git` → only used in conditional `gh` calls
 4. Flag if the setup is unconditional but the consumer's `if:` would skip in some fraction of runs.
 5. The savings = `setup_step_p50_seconds × P(consumer skips)`.
+
+For the aggregate-job form, require a result step that reads only literal
+`needs.*.result` values, can exit non-zero, and has no `continue-on-error`.
+Every simple command in it (split on `;`, `&&`, `||` and `|`) must be a shell
+control, output or test builtin, and it must use bash or sh with no
+`working-directory` at step, job or workflow level. Flag only checkout or
+`setup-*` actions before the first such result gate. Withhold the finding when
+the gate runs a repository script or tool, uses command substitution or an
+input redirect, tests a file, reads a variable that is not in step, job or
+workflow `env` (an earlier step may export it), reads another GitHub context or
+an unreadable expression, or when setup already has a needs-result condition.
 
 **Fix**: Copy the `if:` condition from the consumer step onto the setup step (or wrap both in a guard step that exits early). Example:
 
@@ -3135,9 +3316,26 @@ title_template: "Conditional Step With Unconditional Setup"
   run: cd apps/web && bunx playwright test smoke
 ```
 
+For a needs-result gate, move that unchanged gate to the first step, before
+checkout and toolchain setup. Preserve its complete success predicate and test
+successful, failed, cancelled, skipped and missing dependency results.
+
+**Sizing**: Runner-minute effect is a **saving**: the affected setup steps'
+measured billed compute on runs where the conditional consumer is skipped or a
+dependency result is unsuccessful. Do not state a number until both the setup
+time and that run share are measured. A result gate that ends a failed run
+earlier normally does not reduce successful pull-request merge wait.
+
 **Real-world example (blen-starter-kit)**: `ci.yml` `web-quality` job has `Install Playwright Chromium` (line 92, ~16s) followed by `Web smoke e2e` (line 95) gated on `if: env.CLERK_SECRET_KEY != '' && env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY != ''`. PRs from forks (no Clerk secrets) pay 16s for setup that's never consumed.
 
-**Risk**: LOW. The fix is purely defensive — add the same `if:` to the upstream step. If the conditions diverge later, both steps still execute together (consumer just runs without setup, which would surface as a clear error).
+**Public evidence**: [openclaw/crabbox pull request #2868](https://github.com/openclaw/crabbox/pull/2868):
+the coverage gate fails at its first step and skips checkout and Go setup when
+a producer fails.
+
+**Risk**: LOW. The conditional-consumer fix is defensive when both steps keep
+the same condition. Moving a needs-result gate is safe only under the narrower
+shell-only detection above; changing its predicate can instead hide a producer
+failure, so preserve it byte-for-byte.
 
 ---
 
@@ -3238,13 +3436,50 @@ title_template: "Missing `paths`/`paths-ignore` on Expensive Workflows"
 # Flag workflows with >3 jobs and no path filtering
 ```
 
+**Deploy/release overlap extension**: a workflow can already have `paths:` and
+still be too broad. When the default branch is known, inspect a `push` deploy or
+release workflow's ordered positive and negative patterns against test files in
+the repository. Report it when the final matching pattern still includes a file
+under `test`, `tests`, `__tests__`, `spec` or `specs` whose own name marks it
+as a test (`*.test.*`, `*.spec.*`, `*_test.*`, `test_*.py`, `*_spec.rb`,
+`conftest.py`, `*Test.java`). Patterns are matched with GitHub semantics (`*`
+stays inside one path segment). Withhold this extension when the default
+branch, path list, a glob construct or the repository test shape cannot be
+read; when the test-named directory holds a package manifest; or when any
+non-test file the filter selects imports from it, because then the deploy
+builds from that directory. A deploy on another branch is not this finding.
+
 **Fix**: Add `paths-ignore` for documentation, markdown files, and other non-code changes. Or use `paths` to restrict to relevant source directories.
 
-**Fail closed:** when a scoped workflow or job is a required check, a job-level `if:` alone is not safe: a failed detector skips the suite, and a skipped required check reads green. Add an always-running verdict job (`if: always()`) that `needs:` the detector, every intermediate job whose failure can suppress a suite, and the suites, and make that verdict the required check. Listing jobs in `needs:` is not an assertion: the verdict must fail unless the detector succeeded AND each suite either succeeded or was skipped because the detector validly reported unchanged (its output exactly `'false'`). Reject failures and cancellations, including an unchanged output written before failure. A strict "every suite succeeded" assertion is right only when a suite is never skipped on purpose; with intentional skips it turns every unchanged PR red. ci-secure's required-checks-skippable fact lists the assertion forms it can verify.
+For the deploy/release overlap extension, keep the existing positive list and
+add a narrow negated test-directory pattern **after** the broader positive glob,
+for example:
+
+```yaml
+paths:
+  - 'worker/**'
+  - '!worker/test/**'
+```
+
+GitHub evaluates path patterns in order, so placing the negative first lets the
+later positive re-include the test path. One event cannot use both `paths` and
+`paths-ignore`. Preserve every runtime, configuration, workflow and deployment-
+helper path, then test test-only, runtime-only and mixed changes.
+
+**Fail closed:** when a scoped workflow or job is a required check, a job-level `if:` alone is not safe: a failed detector skips the suite, and a skipped required check reads green. Add an always-running verdict job (`if: always()`) that `needs:` the detector, every intermediate job whose failure can suppress a suite, and the suites, and make that verdict the required check. Listing jobs in `needs:` is not an assertion: the verdict's step must inspect every dependency result and fail unless the detector succeeded AND each suite either succeeded or was skipped because the detector validly reported unchanged (its output exactly `'false'`). Reject `failure` and `cancelled` dependency results, and a `skipped` suite unless the detector validly reported unchanged, including an unchanged output written before failure. Keep `if: always()` rather than OPT46's `!cancelled()` here, because the verdict is the required check: a job skipped by its `if:` reports success, and a skipped required check does not block merging, so a head run cancelled without a replacement would pass with nothing validated. A strict "every suite succeeded" assertion is right only when a suite is never skipped on purpose; with intentional skips it turns every unchanged PR red. ci-secure's required-checks-skippable fact lists the assertion forms it can verify.
 
 **Required-status-check caveat (the "Pending" landmine)**: if any check this workflow produces is a required status check, do NOT skip it with `paths`/`paths-ignore` (or `branches:` filters / `[skip ci]`) — a workflow skipped by filtering leaves its required check "Pending" and the PR can never merge; official guidance says not to use path or branch filtering on required workflows. GitHub documents a job-level `if:` restating the filter (a skipped job reports Success and satisfies the gate), but on its own it shares the skipped-reads-green hole above; the safe shape is that `if:` plus the fail-closed verdict job as the required check. The no-op twin-workflow (same workflow AND job name, inverse filter) is a community-known workaround, NOT in any current GitHub docs edition. Treat required-status UNKNOWN as required: when branch protection/rulesets are unreadable (the common case on repos you don't admin), assume every check this workflow produces may be required.
 
 **Real-world example (better-auth)**: e2e.yml runs all 8 jobs on docs-only PRs.
+
+**Deploy-path sizing**: runner-minute effect is a **saving**: the deploy jobs'
+billed compute on test-only default-branch merges. Keep it unsized until those
+merges' frequency and the affected jobs' measured compute are available; PR
+changed-file sampling is not evidence for default-branch push frequency.
+
+**Public deploy-path evidence**: [OpenClaw Crabbox pull request #2839](https://github.com/openclaw/crabbox/pull/2839)
+uses the negated `'!worker/test/**'` pattern after the positive glob in the
+same `paths:` list of a default-branch deploy workflow.
 
 ---
 
@@ -3366,7 +3601,7 @@ fix_strategy: cron-schedule-too-frequent
 title_template: "Cron Schedule Too Frequent"
 -->
 
-**TL;DR**: A scheduled (cron) workflow runs more often than it needs to, piling up runs.
+**TL;DR**: A scheduled (cron) workflow runs more often than it needs to, or reruns scanner categories whose explicitly defined inputs have not changed.
 
 **Anti-pattern**: Cron-triggered workflows running more frequently than necessary for their purpose. Common examples: cleanup/triage jobs running every 5 minutes when every 15-60 minutes would suffice, or scheduled builds running hourly when daily is adequate.
 
@@ -3387,16 +3622,28 @@ done
 
 **Fix**: Increase the cron interval to match the actual operational need. For issue cleanup/triage bots: `*/15` or `*/30` is typically sufficient. For scheduled builds: daily or every 6 hours. Document the rationale for the chosen frequency.
 
+For a multi-category scanner, keep a separate last-successful commit for each category. Before the next scheduled scan, compare that category's current input paths with its own baseline and skip it only when the complete comparison contains no relevant change. If the baseline, compare result, exclusion syntax, or changed-file list is unavailable or incomplete, run the scan. Keep pull-request and manual scans unchanged. This fail-open recipe preserves coverage while avoiding work whose inputs are proven unchanged.
+
 **Real-world example (mastra)**: PR #14432 changed spam issue cleanup from every 5 minutes (`*/5 * * * *`) to every 15 minutes — the job rarely finds new spam within a 5-minute window.
 
+**Public evidence**: openclaw/openclaw#191805 (API requests per tick went from 21 to 3).
+
 **Tier-2 render note**: When run history shows consecutive `event=schedule`
-runs on the same `head_sha`, OPT36 can promote as measured schedule burn. The
+runs on the same `head_sha`, or a complete compare between consecutive scheduled
+runs touches only the scanner's explicit inline `paths-ignore` (every job a CodeQL
+category with resolvable interpreted `languages` and the same inline exclusions, a
+forward `ahead`/`identical` compare, a successful previous scan, renames counted at
+both paths, and workflow/CodeQL-config/local-action paths always relevant), OPT36 can promote
+as measured schedule burn. The
 finding must size only the schedule-event subset, carry `sizing_basis=measured`,
 price from successful schedule-event job timings only, stamp
 `tier2_run_subset_events: ["schedule"]`, and carry a `non_pr_event`
-certificate. Static cron-frequency hits without same-`head_sha` run evidence
-remain modeled residual findings in "Also noticed"; a matching static row on a
-measured workflow is superseded by the measured finding.
+certificate. The measured finding states a signed runner-minute saving and scales
+one sampled schedule-run population to the schedule's 30-day volume. A changed
+relevant path, an unreadable/truncated compare, or exclusions the audit cannot
+classify retains the scan. Static cron-frequency hits without measured redundant
+run evidence remain modeled residual findings in "Also noticed"; a matching
+static row on a measured workflow is superseded by the measured finding.
 
 ---
 
@@ -3791,6 +4038,57 @@ and prove both accepted and rejected cases before removing its inner guard.
 
 ---
 
+### OPT111 — Automated Code Review Runs on Every Pull Request Push
+
+<!-- METADATA
+pattern: OPT111
+impact: MEDIUM
+class: static
+detector: yaml-job-correlated
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: review-once-after-quiet-window
+title_template: "Automated code review runs on every pull request push"
+-->
+
+**Anti-pattern**: An automated code-review action runs for every pull-request
+`synchronize` event. Several fix-up pushes close together can therefore repeat
+the entire review before the author has finished changing the pull request.
+
+**Detection heuristic**: Find a recognizable review action or review-posting
+command in a job whose `pull_request` trigger includes `synchronize`. Require
+the job to run on that activity and require no preceding quiet-window or
+debounce step. Fail closed on an unreadable activity guard or step group.
+Ordinary test, lint and security jobs on `synchronize` are not findings.
+
+**Fix recipe (safest first)**:
+
+1. Review once when the pull request opens or becomes ready for review, and
+   provide an authorized explicit re-review command for later changes.
+2. If automatic re-review is required, debounce head changes outside the
+   hosted runner and review only the latest settled head. Do not spend runner
+   time sleeping merely to create the quiet window.
+3. Preserve the current review policy, authorization and required status.
+   Exercise open, draft-to-ready, synchronize and explicit re-review paths,
+   including a head change while a review is pending.
+
+**Sizing**: Runner-minute effect is a **saving**: the automated review job's
+measured billed compute on automatic re-reviews superseded by a nearby push.
+This is a static finding, so it reports `runner-minute saving: unsized` with
+the reason: the scan reads workflow files only and samples none of the review
+job's runs, so neither the count of superseded automatic reviews nor their
+billed minutes is measured. Review admission can also reduce external model
+usage, but that cost is outside runner-minute sizing and is not estimated here.
+
+**Public evidence**: OpenClaw moved its automated reviewer to review-once with
+an explicit re-review trigger.
+
+**Risk**: MEDIUM. Reducing automatic review frequency can leave a changed head
+unreviewed if ready-state and explicit re-review admission are incomplete.
+Preserve exact-head checks and test every supported review trigger before
+rollout.
+
+---
+
 ### OPT90 — Every Pull Request Pays for Coverage That Could Run After Merge
 
 <!-- METADATA
@@ -4169,10 +4467,14 @@ title_template: "Superseded Runs Not Cancelled (Missing Concurrency or `cancel-i
 
 **Anti-pattern**: A workflow that triggers on `push` (or `pull_request`) for branches where developers commonly push multiple times in quick succession, but the workflow either (a) has **no top-level `concurrency:` block at all**, or (b) has a concurrency group with `cancel-in-progress: false`. In either case, every superseded push run continues to occupy a runner — wasting the entire wall-clock duration of the run for the obsolete commit.
 
-This pattern has two flavors that share the same fix mechanism:
+This pattern has three flavors around the same supersession mechanism:
 
 - **Flavor A — no concurrency block**: workflow triggers on `push` (often with `branches-ignore: [main]` or similar) but has no `concurrency:` block. Common because authors use `concurrency:` for `pull_request` workflows but forget that `push` workflows on branches need it just as much.
 - **Flavor B — `cancel-in-progress: false`**: concurrency group is set but explicitly does not cancel. Stale runs aren't cancelled when a new push arrives.
+- **Flavor C — aggregate runs after cancellation**: cancellation is already on,
+  but an aggregate job uses `if: always()` only to evaluate dependency results.
+  The superseded run still allocates a runner for that aggregate after its useful
+  jobs have been cancelled.
 
 **Detection heuristic**:
 
@@ -4190,6 +4492,15 @@ This pattern has two flavors that share the same fix mechanism:
    grep -rn 'cancel-in-progress: *false' .github/workflows/
    ```
 
+   When cancellation is enabled, also find `if: always()` jobs that `needs:`
+   other checks and whose executable steps do nothing except inspect
+   `needs.<job>.result`, `needs.*.result` or `toJSON(needs)`. Fail closed on an
+   opaque helper, ordinary action, or any build, test, cleanup or deployment
+   command: it is not proven to be an aggregate. Report it only when a complete
+   required-check read shows the aggregate is not a required status check; stay
+   quiet when it is required, when its check name is templated or carries a
+   matrix suffix, or when the read is partial or unreadable.
+
 2. **Quantify wasted compute** — a structural match alone is not enough, and neither is "a branch had ≥2 runs" (sequential commits on a long-lived / default branch each test a distinct commit and were never superseded — cancelling them saves nothing). Measure the runs that ACTUALLY RACED:
    - List runs (all statuses) via `gh api repos/{owner}/{repo}/actions/workflows/{wf}/runs?created=<30d-window>`; group by `head_branch`; within each branch, count a run as **superseded** iff a later-created run **started before it finished** (timestamp overlap of `run_started_at`…`updated_at`). Sequential, non-overlapping runs count 0.
 
@@ -4199,6 +4510,25 @@ This pattern has two flavors that share the same fix mechanism:
    Per-run compute is the **mean** job-minutes of the sampled successful runs (needs ≥3 timed runs to be stable). Extrapolate the sampled count to the 30-day volume by `monthly_volume / sampled_n` in **both** directions (a low-frequency workflow's recent slice spans >30 days and must scale down); compute the remainder ratio on the sampled window and apply it before scaling. Skip dormant workflows (`monthly_volume` 0); a run missing either timestamp contributes nothing and is disclosed as a skip. Report as a range; the superseded attribution is **inference** (the API marks no run "cancelled-by-concurrency").
 
 **Fix**: Add a top-level concurrency block, and make the *cancellation* conditional — **never** a bare `cancel-in-progress: true`. This pattern fires on workflows that trigger on `push`, and a bare `true` cancels the in-flight run on `main` or on a release tag the moment the next commit lands — a deploy, a publish, or a migration killed halfway. `cancel-in-progress` accepts an expression ([workflow syntax: `concurrency`](https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#concurrency)), so scope it to the events where a superseded run is genuinely worthless.
+
+**Flavor C fix — cancellation-aware aggregate (non-required checks only)**:
+when the aggregate is not a required status check, use
+`if: ${{ !cancelled() }}` on it and leave its step-level result check
+unchanged: the job still runs when a dependency ends `failure`, `cancelled` or
+`skipped`, so the check still rejects every result it rejects today. Test both
+halves independently: an
+ordinary failed dependency still makes the aggregate fail, while cancellation
+of the whole superseded run leaves the aggregate without a runner. A required
+aggregate, or one whose required status cannot be read, keeps `if: always()`.
+A job skipped by its `if:` reports success, and a skipped required check does
+not block merging, so on a required aggregate `!cancelled()` would let a head
+run cancelled without a replacement (a manual cancel, or a concurrency group
+shared with another event) pass with nothing validated. The runner time of a
+seconds-long aggregate on cancelled runs is the price of a cancelled head run
+never passing. Runner-minute effect is a **saving**: that aggregate job's
+compute on cancelled runs. Leave it unsized until matched cancelled runs show
+that the runner was allocated and measure its compute; do not infer a number
+from the YAML.
 
 **Default (PR-scoped)** — correct whenever the racing runs are PR runs:
 
@@ -4266,9 +4596,12 @@ Keep the continuation lines at the **same indent** as `${{` (as above). YAML fol
 **Public evidence**: [OpenClaw Crabbox pull request #2286](https://github.com/openclaw/crabbox/pull/2286)
 groups by event and pull-request number, with the run ID as the fallback for
 non-PR events, so default-branch and manual validations cannot replace one
-another in the pending slot.
+another in the pending slot. [OpenClaw Crabbox pull request #2868](https://github.com/openclaw/crabbox/pull/2868)
+replaced `if: always()` on result-aggregating jobs with `if: !cancelled()`; on a
+superseded run, all old work was cancelled and the aggregate jobs acquired no
+runner.
 
-**Tier-2 render note**: When the detector can prove overlap from real run timestamps, OPT46 is eligible for the first-class runner-minute section only if the finding is stamped `sizing_basis=measured` and carries a `tier2_neutrality` certificate. Modeled or uncertified instances stay in the residual "Also noticed" appendix.
+**Tier-2 render note**: When the detector can prove overlap from real run timestamps, OPT46 is eligible for the first-class runner-minute section only if the finding is stamped `sizing_basis=measured` and carries a `tier2_neutrality` certificate. Modeled or uncertified instances, including the static Flavor C candidate before matched cancelled-run measurement, stay in the residual "Also noticed" appendix.
 
 ---
 
@@ -6443,7 +6776,7 @@ fix_strategy: run-independent-pole-steps-in-parallel
 title_template: "Independent steps on the long pole run one after another"
 -->
 
-**TL;DR**: The slowest job gating the merge runs several independent compute steps (say lint, typecheck and unit tests) one after another on one runner. Grouping them to run side by side could cut that job's wall time, by at most the sum of the steps minus the longest. That is an upper bound, not a saving: it is never credited until a benchmark confirms it.
+**TL;DR**: The slowest job gating the merge runs several independent compute steps (say lint, typecheck and unit tests) one after another on one runner. When they can safely share the runner, grouping them side by side has an uncredited upper bound. When two Go test steps each need the runner's cores, move one into a sibling job, preserve the required check through a strict aggregator, and report both the measured merge-wait saving and the added runner-minute cost.
 
 **Anti-pattern**: A drilled long-pole job whose measured step decomposition shows two or more heavy compute steps, adjacent in the workflow file, none of which depends on another's output.
 
@@ -6495,6 +6828,10 @@ steps:
         run: npm test
 ```
 
+**Separate-job extension for Go tests that cannot share one runner**: move one candidate unchanged into a sibling job that runs beside the remaining work. Duplicate the measured setup it needs. Add one final aggregator with `if: always()` and `needs:` on every sibling; it succeeds only when every upstream `result` is `success`, and it keeps the required check name branch protection already expects. A local container or background service is not this recipe because it is not reachable from the sibling runner; that shape remains held back. The split is also held back, with its reason, when a later step or a job output may read what the moved step writes (a coverage gate or report upload would lose its input), when a step before the candidates is not setup, checkout or install (the sibling's duplicated work is then unmeasured), and when the job is a matrix (setup repeats in every cell).
+
+The extension sizes merge wait, re-derived from measured step p50s, as up to the serial candidate sum minus the slower of (a) the remaining candidates in the original job and (b) the moved candidate plus measured setup; the aggregator job's own pickup comes off it. Its runner-minute effect is an **added cost** stated as a floor, at least +(duplicated setup) runner-min per run, since the aggregator job and per-job minute rounding add more, and it states that the workflow uses one additional concurrent runner. Public evidence: openclaw/crabbox#2645 split a Windows gate; openclaw/crabbox#1722 moved an all-module pass beside the race job; openclaw/crabbox#1639 moved coverage out of the serial Go job.
+
 Parallel steps (changelog 2026-06-25) run the group's children concurrently with an implicit wait at the group's end. Sources: [GitHub changelog](https://github.blog/changelog/2026-06-25-actions-steps-can-now-be-run-in-parallel/) and [workflow syntax: `jobs.<job_id>.steps.parallel`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsparallel). **Runner caveat**: GitHub-hosted runners support it; on self-hosted runners, run actions/runner 2.336.0 or newer: its release notes list background steps in 2.335.0 and, in 2.336.0, a fix that stops a cancelled background step from affecting the job result. GitHub publishes no minimum runner version for the feature itself. The feature is documented for github.com and GitHub Enterprise Cloud, not GitHub Enterprise Server. At most 10 background steps run at once (more queue for a free slot); a background step's outputs are visible only after a `wait` or `wait-all` that covers it (this audit assumes the same of its `GITHUB_ENV` and `GITHUB_PATH` writes); the syntax is not usable inside composite actions.
 
 **Mandatory guardrail (this pattern is invalid without it)**: the independence checklist above, a CPU and memory headroom check on the runner, and each step keeping its own log so a failure still names its step.
@@ -6503,7 +6840,7 @@ Parallel steps (changelog 2026-06-25) run the group's children concurrently with
 
 **Conservative rollout (REQUIRED)**: one PR; compare the job's wall time over the next sampled runs; keep the serial form on the merge queue until the gain is measured.
 
-**Sizing — deliberately uncredited**: no `_SIZING` model, no wall-clock or runner-minute saving. The only number is the upper bound (sum of the candidates' p50s minus the largest), which assumes each step keeps its solo speed on one runner; CPU, memory and disk contention can erase it. It is never summed into any total, the headline, Tier 2 or Also noticed. **Benchmark first**: rewrite only those steps as one `parallel:` group on a branch, compare the job's wall time over the next sampled runs, and keep it only if the measured gain holds.
+**Sizing**: the same-runner recipe remains deliberately uncredited: no `_SIZING` model, no wall-clock or runner-minute saving. Its only number is the upper bound (sum of the candidates' p50s minus the largest), which assumes each step keeps its solo speed on one runner; CPU, memory and disk contention can erase it. The separate-job extension re-derives an up-to wall-clock saving from the pole's measured step decomposition and states the duplicated setup as a signed runner-minute added cost per run, as a floor; it never turns that added cost into a saving. **Benchmark first** on the same commits and keep either rewrite only if the measured gain holds.
 
 **Risk**: **MEDIUM** — a missed dependency can turn a green job into an order-dependent one.
 
