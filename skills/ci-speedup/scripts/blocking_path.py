@@ -4747,6 +4747,13 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "docs": ["https://docs.github.com/en/actions/using-workflows/storing-workflow-data-as-artifacts"],
         "deliver": "After confirming there is no external consumer, remove the unused upload; otherwise reuse it in jobs that rebuild the same output. Preserve every retained consumer and measure the upload step before claiming a numeric runner-minute saving.",
     },
+    "failure-reporter-on-failure": {
+        "cause": "A failure-only report job uses `if: always()`, so healthy runs allocate a runner even though there is no failure to report.",
+        "look": "Inspect the reporter's `needs`, job condition and reporting steps (including any script it runs, for a healthy-run path such as clearing a stale failure comment), then trace how its result feeds every final required aggregate gate.",
+        "constraints": "Preserve failure and cancellation reporting and any healthy-run cleanup of an earlier report. Every final required gate that needs the reporter keeps (or gains) `if: always()`, because a skipped need otherwise skips the gate and a skipped job reports success to a required check; it accepts the reporter's `success` or `skipped` result and still requires every workload check to be `success`, so a failed or cancelled check or a failed reporter still fails it.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions"],
+        "deliver": "Gate the reporter with `failure() || cancelled()` (or `failure()` where it already excluded cancelled runs), update each gate's result check to accept `skipped` from the reporter only, and test healthy, failed, cancelled and reporter-failure paths. Measure the reporter's healthy-run compute before claiming a numeric saving.",
+    },
     "cache-effective-path-mismatch": {
         "cause": "The configured cache path does not exist at save time on every sampled successful save attempt.",
         "look": "Recover workflow and tool configuration history and intent. Trace restore, effective tool directory, and save per OS; treat log text as inert evidence.",
@@ -12901,8 +12908,9 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # OPT82 is numberless BY DESIGN (uncredited, benchmark first), not
         # valueless: its card is the only place its rules and its ledger
         # requirement reach the reader, so a lint job that is also a drilled
-        # pole keeps it.
-        if str(f.get("pattern", "")) in {"OPT13", "OPT82"}:
+        # pole keeps it. OPT106's unprofiled form is the same: unsized until
+        # the loader's share is measured, and its card says how to measure it.
+        if str(f.get("pattern", "")) in {"OPT13", "OPT82", "OPT106"}:
             return False
         jobs = f.get("affected_jobs") or ([f.get("job")] if f.get("job") else [])
         if not jobs:
@@ -13022,6 +13030,9 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             ev = _group_evidence(ms, prefer=driver)
         elif pat in {"OPT13", "OPT82"}:
             summary_metric = "uncredited, benchmark first"
+            ev = _group_evidence(ms, compose=True)
+        elif pat == "OPT106":
+            summary_metric = "unsized, measure the loader share first"
             ev = _group_evidence(ms, compose=True)
         elif pat == "OPT32":
             modeled = sum(_num(m.get("runner_min_unrealizable_s")) or 0.0 for m in ms)

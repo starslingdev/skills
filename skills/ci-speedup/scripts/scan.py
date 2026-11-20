@@ -4929,6 +4929,252 @@ def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT109 — Failure Reporter Runs on Healthy Pull Requests -----------------
+
+# The only job conditions read as "runs on a healthy run": `always()`, alone or
+# with `!cancelled()`. Any other term (a result comparison, an event or path
+# guard) may already skip healthy runs, so it is not understood and stays quiet.
+_OPT109_HEALTHY_TERMS = frozenset({"always()", "!cancelled()"})
+# A step condition that runs the step only when an upstream job failed or was
+# cancelled.
+_OPT109_FAILURE_GATE_RE = re.compile(
+    r"(?<!!)\bfailure\s*\(\s*\)|(?<!!)\bcancelled\s*\(\s*\)|"
+    r"(?<!!)contains\s*\(\s*needs\.\*\.result\s*,\s*['\"](?:failure|cancelled)['\"]\s*\)|"
+    r"\.result\s*==\s*['\"](?:failure|cancelled)['\"]",
+    re.I,
+)
+# Reporting that edits, hides or clears an earlier report may be what a green
+# rerun needs (a stale failure comment), so it is not report-only.
+_OPT109_MUTATION_RE = re.compile(
+    r"--edit-last|--delete|\b(?:delete|edit|update|minimi[sz]e|hide|clear|remove|"
+    r"resolve)\w*\b",
+    re.I,
+)
+_OPT109_STATUS_FN_RE = re.compile(r"\b(?:always|cancelled|failure)\s*\(\s*\)", re.I)
+_OPT109_SCRIPT_WORD_RE = re.compile(r"(?:report|summar|comment|notif)", re.I)
+_OPT109_REPORT_USES_RE = re.compile(
+    r"(?:comment|notify|notification|slack|discord|teams|report|summary)", re.I)
+# One shell command (as split by `_opt21_run_lines`) that only reports.
+_OPT109_REPORT_LINE_RES = (
+    # Log or step-summary output: echo / printf / cat / tee, or a `{ ... }`
+    # group redirected into the step summary.
+    re.compile(r"^(?:echo|printf|cat|tee)\b", re.I),
+    re.compile(r"^[{}](?:\s*>>?\s*\"?\$\{?GITHUB_STEP_SUMMARY\}?\"?)?$"),
+    re.compile(r"^gh\s+(?:pr|issue)\s+comment\b", re.I),
+    # A notification webhook.
+    re.compile(r"^curl\b.*(?:hooks\.slack\.com|discord(?:app)?\.com/api/webhooks|"
+               r"\$\{?\w*WEBHOOK\w*\}?)", re.I),
+    # Shell structure around those commands.
+    re.compile(r"^(?:if|elif)\s+\[\[?\s.*\]\]?$|^(?:then|else|fi|exit\s+0)$"),
+)
+_OPT109_SCRIPT_RE = re.compile(
+    r"^(?:(?:node|python3?|bash|sh|bun|deno\s+run|npx\s+tsx|tsx|ruby|pwsh)\s+)?"
+    r"(\.{0,2}/?[\w./-]+\.(?:m?js|cjs|ts|py|sh|rb|ps1))(?:\s|$)",
+    re.I,
+)
+_OPT109_ASSIGN_RE = re.compile(r"^(?:export\s+)?[A-Za-z_]\w*=")
+
+
+def _opt109_needs(job: dict) -> set[str]:
+    if not isinstance(job, dict):
+        return set()
+    needs = job.get("needs")
+    if isinstance(needs, str):
+        return {needs}
+    if isinstance(needs, list):
+        return {str(item) for item in needs if isinstance(item, str)}
+    return set()
+
+
+def _opt109_condition_terms(condition: str) -> list[str] | None:
+    """The `&&` terms of a job condition, or None when it holds anything other
+    than a plain conjunction (`||`, parentheses around alternatives, ...)."""
+    text = condition.strip()
+    wrapped = re.fullmatch(r"\$\{\{(.*)\}\}", text, re.S)
+    if wrapped:
+        text = wrapped.group(1)
+    text = re.sub(r"\s+", "", text).lower()
+    if not text or "||" in text:
+        return None
+    return text.split("&&")
+
+
+def _opt109_runs_on_healthy(condition: str) -> bool:
+    terms = _opt109_condition_terms(condition)
+    return bool(terms) and "always()" in terms and set(terms) <= _OPT109_HEALTHY_TERMS
+
+
+def _opt109_shell_lines(run: str) -> list[str]:
+    """Command lines of a `run:` body with heredoc bodies dropped (the opening
+    line is still checked)."""
+    kept: list[str] = []
+    terminator = None
+    for line in run.splitlines():
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        opened = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", line)
+        if opened:
+            terminator = opened.group(1)
+        kept.append(line)
+    return _opt21_run_lines("\n".join(kept))
+
+
+def _opt109_report_line(command: str) -> bool:
+    if "$(" in command or "`" in command:
+        return False
+    if any(regex.search(command) for regex in _OPT109_REPORT_LINE_RES):
+        return True
+    if _OPT109_ASSIGN_RE.match(command):
+        return True
+    script = _OPT109_SCRIPT_RE.match(command)
+    return bool(script and _OPT109_SCRIPT_WORD_RE.search(script.group(1).rsplit("/", 1)[-1]))
+
+
+def _opt109_report_step(step: dict) -> bool:
+    """True only for a step that does nothing but post, summarize or notify.
+
+    Every shell command in a `run:` block must be a reporting command, so one
+    block that also does real work fails closed. Generic ``github-script`` is
+    accepted only when its script posts a comment or a summary and calls no
+    other API.
+    """
+    uses, run = _uses(step), _run(step)
+    with_values = step.get("with") if isinstance(step.get("with"), dict) else {}
+    text = "\n".join([run, *(str(v) for v in with_values.values())])
+    if _OPT109_MUTATION_RE.search(text):
+        return False
+    if run and not uses:
+        commands = _opt109_shell_lines(run)
+        return bool(commands) and all(_opt109_report_line(c) for c in commands)
+    if uses and not run:
+        if re.match(r"actions/github-script(?:@|$)", uses, re.I):
+            script = str(with_values.get("script") or "")
+            calls = re.findall(r"\.(\w+)\s*\(", script)
+            return (bool(re.search(r"\bcreateComment\b|\bcore\.summary\b", script))
+                    and all(c in {"createComment", "addRaw", "addHeading", "addTable",
+                                  "addList", "addLink", "write", "info", "warning",
+                                  "error", "notice", "join", "map", "filter",
+                                  "stringify"} for c in calls))
+        return bool(_OPT109_REPORT_USES_RE.search(uses))
+    return False
+
+
+def _opt109_closure(start: str, edges: dict[str, set[str]]) -> set[str]:
+    seen: set[str] = set()
+    stack = list(edges.get(start, ()))
+    while stack:
+        name = stack.pop()
+        if name not in seen:
+            seen.add(name)
+            stack.extend(edges.get(name, ()))
+    return seen
+
+
+def _opt109_gate_advice(reporter: str, gates: list[str], jobs: dict) -> str:
+    if not gates:
+        return (
+            "Any required aggregate gate that later reads this job must accept "
+            f"`needs.{reporter}.result` of `success` or `skipped`; every workload "
+            "check must be `success`."
+        )
+    named = ", ".join(f"`{g}`" for g in gates)
+    guarded = all(
+        _OPT109_STATUS_FN_RE.search(str((jobs.get(g) or {}).get("if") or "")) for g in gates)
+    reads_success = []
+    for gate in gates:
+        job = jobs.get(gate) or {}
+        text = "\n".join([str(job.get("if") or ""),
+                          *(_run(step) for step in _steps(job))])
+        if re.search(r"(?:==|!=|=)\s*['\"]?(?:success|skipped)\b|"
+                     r"contains\s*\(\s*needs\.\*\.result\s*,\s*['\"]skipped", text, re.I):
+            reads_success.append(f"`{gate}`")
+    advice = (
+        f"{named} needs this reporter: {'keep' if guarded else 'add'} `if: always()` "
+        "on it (without a status function a skipped need skips the gate, and a "
+        "skipped job reports success to a required check), accept "
+        f"`needs.{reporter}.result` of `success` or `skipped`, and require "
+        "every workload check to be `success` (for example fail when "
+        "`contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')`, "
+        "which a skipped reporter passes)."
+    )
+    if reads_success:
+        advice += (f" {', '.join(reads_success)} currently compares a result against "
+                   "`success` or `skipped`; change that comparison for the reporter.")
+    return advice
+
+
+def _detect_opt109(doc: dict, raw: str) -> list[Hit]:
+    """An always-running job that depends on every independent check and does
+    only failure reporting.  Conditions it cannot read, jobs that do other work
+    and reports that are not failure-only stay quiet (fail closed)."""
+    jobs = _jobs_from_doc(doc)
+    needs_of = {name: _opt109_needs(job) for name, job in jobs.items()}
+    dependants: dict[str, set[str]] = {name: set() for name in jobs}
+    for name, needs in needs_of.items():
+        for need in needs:
+            dependants.setdefault(need, set()).add(name)
+    hits: list[Hit] = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        condition = str(job.get("if") or "")
+        if not _opt109_runs_on_healthy(condition) or len(needs_of[job_name]) < 2:
+            continue
+
+        # Every independent check must be upstream of the reporter, directly or
+        # through another need (a shared `setup` job). Jobs downstream of the
+        # reporter, such as a final aggregate gate, are not checks it reports on.
+        upstream = _opt109_closure(job_name, needs_of)
+        downstream = _opt109_closure(job_name, dependants)
+        independent = set(jobs) - {job_name} - downstream
+        if not independent <= upstream:
+            continue
+
+        executable = [step for step in _steps(job) if _run(step) or _uses(step)]
+        reporting = [step for step in executable if not _opt108_setup_only(step)]
+        if not reporting or not all(_opt109_report_step(step) for step in reporting):
+            continue
+        # The report must be failure-only: the job says so in its id or name, or
+        # every reporting step is gated on a failed or cancelled need. A job that
+        # posts every run's results is wanted on green runs too.
+        label = f"{job_name} {job.get('name') or ''}"
+        if not (re.search(r"fail", label, re.I) or all(
+                _OPT109_FAILURE_GATE_RE.search(str(step.get("if") or ""))
+                for step in reporting)):
+            continue
+
+        terms = _opt109_condition_terms(condition) or []
+        recommendation = "`if: failure() || cancelled()`"
+        if "!cancelled()" in terms:
+            recommendation += (" (or use `if: failure()` to keep the job's existing "
+                               "exclusion of cancelled runs)")
+        gates = sorted(name for name in jobs if job_name in needs_of[name])
+        wall = (
+            " The skip also removes the reporter's queue and run time from the "
+            f"healthy path to {', '.join(f'`{g}`' for g in gates)}."
+            if gates else " No merge-wait effect: no job waits on the reporter."
+        )
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"job `{job_name}` needs every independent check but runs with "
+                f"`if: {condition.strip()}` only to post or summarize failures, so "
+                f"healthy runs still allocate its runner. Fix: use {recommendation}. "
+                + _opt109_gate_advice(job_name, gates, jobs) + wall
+                + " Bill effect: runner-minute saving: unsized (it saves the reporter's "
+                "compute on healthy runs, but this static finding has no measured "
+                "reporter compute or healthy-run share)."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+        ))
+    return hits
+
+
 # ---- OPT31 — Conditional Step With Unconditional Setup -----------------------
 
 _OPT31_INSTALL_RE = re.compile(
@@ -5083,10 +5329,305 @@ def _detect_opt33(doc: dict, raw: str) -> list[Hit]:
 _SCANNER_RE = re.compile(
     r"github/codeql-action|snyk/actions|returntocorp/semgrep|semgrep-action", re.I)
 
+_OPT39_TOOLCHAIN_ACTIONS = {
+    "go": re.compile(r"(?:^|/)setup-go@", re.I),
+    "python": re.compile(r"(?:^|/)setup-python@", re.I),
+    "rust": re.compile(
+        r"(?:^|/)(?:rust-toolchain|setup-rust-toolchain)@", re.I),
+}
+_OPT39_TOOLCHAIN_COMMANDS = {
+    "rust": re.compile(r"\brustup\s+toolchain\s+(?:install|add)\b", re.I),
+}
+_OPT39_LANGUAGE_NAME_RE = {
+    "go": re.compile(r"(?:^|[^a-z])go(?:[^a-z]|$)", re.I),
+    "python": re.compile(r"(?:python|\bpy\b)", re.I),
+    "rust": re.compile(r"(?:rust|cargo)", re.I),
+}
+_OPT39_OPTIONAL_LANE_NAME_RE = re.compile(r"(?:contract|proof|conformance)", re.I)
+
+
+def _opt39_job_languages(job_name: str, job: dict) -> list[str]:
+    """Return toolchains installed by an explicit language or proof lane.
+
+    Generic primary jobs often use Python merely to run repository tooling. A
+    language name or a contract/proof/conformance identity distinguishes the
+    optional per-language lanes covered by OPT39 without requiring both.
+    """
+    display = f"{job_name} {job.get('name') or ''}"
+    languages: list[str] = []
+    for language in _OPT39_TOOLCHAIN_ACTIONS:
+        if (not _OPT39_LANGUAGE_NAME_RE[language].search(display)
+                and not _OPT39_OPTIONAL_LANE_NAME_RE.search(display)):
+            continue
+        for step in _steps(job):
+            if _opt39_step_gated_by_selector(job, step):
+                continue
+            uses = _uses(step)
+            command = str(step.get("run") or "") if isinstance(step, dict) else ""
+            action_re = _OPT39_TOOLCHAIN_ACTIONS.get(language)
+            command_re = _OPT39_TOOLCHAIN_COMMANDS.get(language)
+            if ((action_re is not None and action_re.search(uses))
+                    or (command_re is not None and command_re.search(command))):
+                languages.append(language)
+                break
+    return languages
+
+
+_OPT39_OTHER_TOOLCHAIN_ACTIONS = {
+    **_OPT39_TOOLCHAIN_ACTIONS,
+    "node": re.compile(
+        r"(?:^|/)(?:setup-node|setup-bun|setup-deno|pnpm/action-setup)@", re.I),
+    "java": re.compile(r"(?:^|/)setup-java@", re.I),
+    "dotnet": re.compile(r"(?:^|/)setup-dotnet@", re.I),
+    "ruby": re.compile(r"(?:^|/)setup-ruby@", re.I),
+}
+
+
+def _opt39_other_language_lane(doc: dict, job_name: str, languages: list[str]) -> bool:
+    """Whether another job in the workflow installs a different language toolchain.
+
+    A per-language lane only wastes runner time when a pull request can change
+    another language instead. A single-language project's test job runs for every
+    code change; its non-code pull requests are the trigger path filter (OPT32).
+    """
+    for other_name, other in _jobs_from_doc(doc).items():
+        if other_name == job_name or not isinstance(other, dict):
+            continue
+        for step in _steps(other):
+            uses = _uses(step)
+            command = str(step.get("run") or "") if isinstance(step, dict) else ""
+            for language, action_re in _OPT39_OTHER_TOOLCHAIN_ACTIONS.items():
+                if language in languages:
+                    continue
+                command_re = _OPT39_TOOLCHAIN_COMMANDS.get(language)
+                if (action_re.search(uses)
+                        or (command_re is not None and command_re.search(command))):
+                    return True
+    return False
+
+
+# A shell step that lists the pull request's changed files.
+_OPT39_CHANGED_FILE_LIST_RE = re.compile(
+    r"(?:\bgit\s+diff\b[^\n]*--name-(?:only|status)"
+    r"|\bgh\s+pr\s+diff\b[^\n]*--name-only"
+    r"|\bpulls/[^\s/]+/files\b)")
+
+
+def _opt39_step_selects_changed_files(step: object, output_name: str | None) -> bool:
+    """Whether one step is a changed-path selector (for `output_name`, if given)."""
+    if not isinstance(step, dict):
+        return False
+    uses = _uses(step)
+    if re.search(r"(?:^|/)(?:dorny/paths-filter|(?:tj-actions|step-security)/"
+                 r"changed-files)@", uses, re.I):
+        return True
+    command = str(step.get("run") or "")
+    if (_OPT39_CHANGED_FILE_LIST_RE.search(command)
+            and (output_name is None
+                 or ("GITHUB_OUTPUT" in command
+                     and re.search(rf"\b{re.escape(output_name)}=", command)))):
+        return True
+    if re.search(r"(?:^|/)actions/github-script@", uses, re.I):
+        with_doc = step.get("with")
+        script = str(with_doc.get("script") or "") if isinstance(with_doc, dict) else ""
+        if (re.search(r"(?:compareCommits|compareCommitsWithBasehead|pulls\.listFiles)",
+                      script)
+                and re.search(r"\bfiles?\b", script)
+                and (output_name is None or re.search(
+                    rf"\bsetOutput\s*\(\s*['\"]{re.escape(output_name)}['\"]", script))):
+            return True
+    return False
+
+
+def _opt39_step_gated_by_selector(job: dict, step: object) -> bool:
+    """Whether `step` runs only on a same-job changed-path selector's output.
+
+    A toolchain step behind `if: steps.filter.outputs.go == 'true'` is not
+    installed on unrelated pull requests. A repository's own local action is
+    treated the same way, since its selection cannot be read here. A cache-hit
+    or other unrelated step output is not a path gate.
+    """
+    if not isinstance(step, dict):
+        return False
+    condition = str(step.get("if") or "")
+    ids = re.findall(r"\bsteps\.([A-Za-z0-9_-]+)\.outputs\.", condition)
+    if not ids:
+        return False
+    by_id = {str(other.get("id")): other for other in _steps(job)
+             if isinstance(other, dict) and other.get("id")}
+    for step_id in ids:
+        source = by_id.get(step_id)
+        if source is None:
+            continue
+        if (_opt39_step_selects_changed_files(source, None)
+                or _uses(source).startswith("./")):
+            return True
+    return False
+
+
+def _opt39_output_source_unreadable(upstream: dict, output_name: str) -> bool:
+    """Whether an upstream job output comes from logic this scanner cannot read.
+
+    A local or unrecognized action, or a script that writes `$GITHUB_OUTPUT`
+    without naming the key in the workflow, may well select on changed paths.
+    A literal `key=value` written by an inline `run:` is readable.
+    """
+    outputs = upstream.get("outputs")
+    value = outputs.get(output_name) if isinstance(outputs, dict) else None
+    sources = re.findall(r"\bsteps\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)",
+                         str(value or ""))
+    by_id = {str(step.get("id")): step for step in _steps(upstream)
+             if isinstance(step, dict) and step.get("id")}
+    for step_id, key in sources:
+        step = by_id.get(step_id)
+        if step is None:
+            return True
+        uses = _uses(step)
+        if uses:
+            if re.search(r"(?:^|/)actions/github-script@", uses, re.I):
+                with_doc = step.get("with")
+                script = str(with_doc.get("script") or "") if isinstance(
+                    with_doc, dict) else ""
+                if re.search(rf"\bsetOutput\s*\(\s*['\"]{re.escape(key)}['\"]",
+                             script):
+                    continue
+            return True
+        if not re.search(rf"\b{re.escape(key)}=", str(step.get("run") or "")):
+            return True
+    return False
+
+
+def _opt39_path_gate_state(doc: dict, job: dict) -> str:
+    """Classify `job`'s `if:` as a changed-path gate: gated, ungated or unknown.
+
+    A generic `needs.meta.outputs.version` is not a path gate. Recognize the
+    established paths-filter and changed-files actions, a shell step that lists
+    changed files into that output, and the fail-open GitHub-script form used by
+    repositories that need exact, repository-specific ownership. An output from a
+    reusable workflow, a local or unrecognized action, or a script whose keys
+    are not in the workflow is unknown, and an unknown gate withholds the finding.
+    """
+    condition = str(job.get("if") or "").strip()
+    if condition.startswith("${{") and condition.endswith("}}"):
+        condition = condition[3:-2].strip()
+    # `github.event_name != 'schedule' || needs.scope.outputs.x == 'true'` runs
+    # on every pull request: the output gates only the other event.
+    for alternative in condition.split("||") if "||" in condition else []:
+        alternative = alternative.strip()
+        if (re.fullmatch(r"github\.event_name\s*(?:==|!=)\s*(['\"])[^'\"]*\1",
+                         alternative)
+                and _opt96_condition_allows(alternative, "pull_request", "main")):
+            return "ungated"
+    references = re.findall(
+        r"\bneeds\.([A-Za-z0-9_-]+)\.outputs\.([A-Za-z0-9_-]+)", condition)
+    jobs = doc.get("jobs") if isinstance(doc.get("jobs"), dict) else {}
+    state = "ungated"
+    for upstream_name, output_name in references:
+        upstream = jobs.get(upstream_name)
+        if not isinstance(upstream, dict):
+            continue
+        if upstream.get("uses"):
+            state = "unknown"
+            continue
+        if any(_opt39_step_selects_changed_files(step, output_name)
+               or (isinstance(step, dict)
+                   and re.search(r"(?:^|/)(?:dorny/paths-filter|(?:tj-actions|"
+                                 r"step-security)/changed-files)@", _uses(step), re.I))
+               for step in _steps(upstream)):
+            return "gated"
+        if _opt39_output_source_unreadable(upstream, output_name):
+            state = "unknown"
+    return state
+
+
+def _opt39_trigger_path_language(pattern: str) -> str | None:
+    """Return the known language owner for one conservative PR `paths:` entry."""
+    if pattern.strip().startswith("!"):
+        return None
+    value = pattern.strip().lower().lstrip("/")
+    if not value:
+        return None
+    base = value.rsplit("/", 1)[-1]
+    # The workflow/config itself is a shared input for whichever language job owns
+    # this trigger. It does not make an otherwise language-scoped trigger broad.
+    if value.startswith(".github/workflows/"):
+        return "shared"
+    if (".go" in value or base in {"go.mod", "go.sum", "go.work", "go.work.sum"}):
+        return "go"
+    if (".rs" in value or value.startswith("crates/")
+            or any(token in value for token in (
+                "cargo.toml", "cargo.lock", "rust-toolchain", "rustfmt.toml",
+                "clippy.toml"))):
+        return "rust"
+    if (".py" in value or any(token in value for token in (
+            "pyproject.toml", "requirements", "poetry.lock", "uv.lock",
+            "setup.py", "setup.cfg", "tox.ini"))):
+        return "python"
+    return None
+
+
+def _opt39_trigger_is_language_scoped(on: object, languages: list[str]) -> bool:
+    if not isinstance(on, dict):
+        return False
+    pull_request = on.get("pull_request")
+    paths = pull_request.get("paths") if isinstance(pull_request, dict) else None
+    if isinstance(paths, str):
+        paths = [paths]
+    if not isinstance(paths, list) or not paths:
+        return False
+    owners = [_opt39_trigger_path_language(str(path)) for path in paths]
+    return all(owner == "shared" or owner in languages for owner in owners)
+
+
+def _opt39_declared_input_map(
+        doc: dict, on: object, languages: list[str]) -> tuple[list[str], list[str]] | None:
+    """Return (language inputs, workflow inputs) only for an explicit owner map.
+
+    The public evidence reuses a scheduled-change action's complete `paths:` list
+    for pull-request ownership. A suffix guess is not a complete input contract.
+    """
+    if not isinstance(on, dict):
+        return None
+    pull_request = on.get("pull_request")
+    workflow_paths = pull_request.get("paths") if isinstance(pull_request, dict) else None
+    if isinstance(workflow_paths, str):
+        workflow_paths = [workflow_paths]
+    if (not isinstance(workflow_paths, list) or not workflow_paths
+            or any(not isinstance(path, str) or path.strip().startswith("!")
+                   for path in workflow_paths)):
+        return None
+    language_patterns: list[str] = []
+    language_names = tuple(language.lower() for language in languages)
+    for upstream_name, upstream in _jobs_from_doc(doc).items():
+        if not isinstance(upstream, dict):
+            continue
+        for step in _steps(upstream):
+            uses = _uses(step).lower()
+            with_doc = step.get("with") if isinstance(step, dict) else None
+            if "detect-scheduled-changes" not in uses or not isinstance(with_doc, dict):
+                continue
+            descriptor = " ".join((
+                upstream_name, str(upstream.get("name") or ""),
+                str(step.get("name") or ""), str(with_doc.get("proof-jobs") or ""),
+            )).lower()
+            if not any(language in descriptor for language in language_names):
+                continue
+            paths = with_doc.get("paths")
+            if not isinstance(paths, str):
+                continue
+            candidates = [line.strip() for line in paths.splitlines() if line.strip()]
+            if (not candidates or any(line.startswith("!") or "${{" in line
+                                      for line in candidates)):
+                continue
+            language_patterns.extend(candidates)
+    if not language_patterns:
+        return None
+    return (list(dict.fromkeys(language_patterns)),
+            list(dict.fromkeys(str(path).strip() for path in workflow_paths)))
+
 
 def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
-    """A `language` matrix scanner (CodeQL/Snyk/Semgrep) with no
-    `dorny/paths-filter` gate and no per-leg `if:` (catalog OPT39 heuristic)."""
+    """A language-specific PR job with no changed-path gate (OPT39)."""
     # The finding's claim is "every language leg runs on every PR" — only true if the
     # workflow actually triggers on PRs. A push-only / schedule-only CodeQL workflow runs
     # on ZERO PRs, so the claim would be false (the OPT33 blind spot). Gate on `on:` and
@@ -5105,24 +5646,57 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
             continue
         strategy = job.get("strategy") or {}
         matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
-        if not isinstance(matrix, dict) or "language" not in matrix:
-            continue
-        if not any(_SCANNER_RE.search(_uses(s)) for s in _steps(job)):
+        scanner_matrix = (isinstance(matrix, dict) and "language" in matrix
+                          and any(_SCANNER_RE.search(_uses(s)) for s in _steps(job)))
+        job_languages = _opt39_job_languages(job_name, job)
+        if not scanner_matrix and not job_languages:
             continue
         jif = job.get("if")
         leg_gated = isinstance(jif, str) and ("needs." in jif or "matrix.language" in jif)
-        if has_paths_filter or leg_gated:
+        language_path_gated = (job_languages and not scanner_matrix
+                               and _opt39_path_gate_state(doc, job) != "ungated")
+        if scanner_matrix and (has_paths_filter or leg_gated):
             continue
+        if job_languages and (language_path_gated or _opt39_trigger_is_language_scoped(
+                on, job_languages)):
+            continue
+        if job_languages and not _opt96_condition_allows(
+                job.get("if"), "pull_request", "main"):
+            continue
+        declared_inputs = (_opt39_declared_input_map(doc, on, job_languages)
+                           if job_languages and not scanner_matrix else None)
+        if (job_languages and not scanner_matrix and declared_inputs is None
+                and not _opt39_other_language_lane(doc, job_name, job_languages)):
+            continue
+        if scanner_matrix:
+            evidence = (f"job `{job_name}` runs a `language` matrix scanner with no "
+                        f"`dorny/paths-filter` gate — every language leg runs on "
+                        f"{scope} regardless of which language changed")
+            line = _line_of_in_job(raw, job_name, "language")
+            facts = {"opt39_job_kind": "language-matrix"}
+        else:
+            language_text = ", ".join(job_languages)
+            evidence = (
+                f"job `{job_name}` installs the {language_text} toolchain for "
+                f"{scope} with no changed-path job gate, so it also runs when "
+                f"the pull request changes none of that language's inputs")
+            line = _line_of_in_job(raw, job_name, f"{job_name}:")
+            facts = {
+                "opt39_job_kind": "per-language-toolchain",
+                "opt39_languages": job_languages,
+            }
+            if declared_inputs is not None:
+                facts["opt39_language_inputs"] = declared_inputs[0]
+                facts["opt39_workflow_inputs"] = declared_inputs[1]
         hits.append(Hit(
             # Anchor on THIS job's `language` matrix line, not the file-global
             # first `language` substring elsewhere in the file (the OPT33/OPT29
             # hazard) — e.g. an earlier job's `if: matrix.language` expression.
-            line=_line_of_in_job(raw, job_name, "language"),
+            line=line,
             affected_jobs=[job_name],
-            evidence=(f"job `{job_name}` runs a `language` matrix scanner with no "
-                      f"`dorny/paths-filter` gate — every language leg runs on "
-                      f"{scope} regardless of which language changed"),
+            evidence=evidence,
             match_text=job_name,
+            facts=facts,
         ))
     return hits
 
@@ -6386,7 +6960,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT76", "OPT108"})
+    "OPT39", "OPT76", "OPT108", "OPT109"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -6436,6 +7010,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT76": _detect_opt76,
     "OPT29": _detect_opt29,
     "OPT108": _detect_opt108,
+    "OPT109": _detect_opt109,
     "OPT31": _detect_opt31,
     "OPT32": _detect_opt32,
     "OPT33": _detect_opt33,

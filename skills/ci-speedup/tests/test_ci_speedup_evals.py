@@ -24,11 +24,11 @@ _READING_FIELDS = {"reference_bytes", "reference_lines", "reference_files",
 
 def _agent_readable() -> list[Path]:
     """What the runner's plugin copy mounts: the skill minus evals/,
-    CHANGELOG.md, tests/test_*.py, tests/conftest.py and tests/fixtures/."""
+    CHANGELOG.md, changelog.d/, tests/test_*.py, tests/conftest.py and tests/fixtures/."""
     out = []
     for p in _SKILL.rglob("*"):
         rel = p.relative_to(_SKILL).parts
-        if not p.is_file() or "__pycache__" in rel or rel[0] in ("evals", "CHANGELOG.md"):
+        if not p.is_file() or "__pycache__" in rel or rel[0] in ("evals", "CHANGELOG.md", "changelog.d"):
             continue
         if rel[0] == "tests" and (rel[1] == "fixtures" or rel[-1].startswith("test_")
                                   or rel[-1] == "conftest.py"):
