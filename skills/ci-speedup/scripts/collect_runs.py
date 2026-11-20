@@ -23899,6 +23899,147 @@ def _opt24_log_timestamp(line: str) -> float | None:
         return None
 
 
+# OPT13's narrow automatic path is deliberately log-backed.  The general
+# "does this job need its build output?" question is semantic and remains a
+# manual review; this parser admits only a quality-script invocation whose own
+# log proves both a build/emit command and the quality command that follows it.
+_OPT13_QUALITY_COMMAND_RE = _re.compile(
+    r"(?:^|\s)(?:(?:pnpm|npm|yarn|bun)(?:\s+run)?\s+"
+    r"(?:lint|test|check|typecheck|type-check)\b|"
+    r"(?:vitest|jest|eslint|biome|prettier|pytest)\b)",
+    _re.IGNORECASE,
+)
+_OPT13_BUILD_COMMAND_RE = _re.compile(
+    r"(?:^|\s)(?:vite|next|nuxt|remix|astro|gatsby|ng|nest)\s+build\b|"
+    # A bundler as the command word, never a config-file argument
+    # (`--config webpack.config.test.js`).
+    r"(?:^|\s)(?:webpack|rollup|rspack|turbopack|tsup|esbuild)(?=\s|$)|"
+    # A declaration emit; `--noEmit` and `--declaration false` emit nothing.
+    r"(?:^|\s)tsc\b(?![^\n]*--noEmit\b)[^\n]*"
+    r"(?:--emitDeclarationOnly|--declaration(?!\s+false\b)(?:\s+true)?\b)|"
+    r"(?:^|\s)(?:mvn|mvnw)\s+(?:[^\n]*\s)?package\b|"
+    r"(?:^|\s)(?:gradle|gradlew)\s+(?:[^\n]*\s)?assemble\b",
+    _re.IGNORECASE,
+)
+_OPT13_BUILD_SUMMARY_RE = _re.compile(
+    r"\bbuilt\s+in\s+(\d+(?:\.\d+)?)\s*(ms|s|sec(?:onds?)?|m|min(?:utes?)?)\b",
+    _re.IGNORECASE,
+)
+_OPT13_LOADS_BUILD_OUTPUT_RE = _re.compile(
+    r"(?:^|\s)(?:node|deno|bun|vitest|jest|mocha|ava)\b[^\n]*"
+    r"(?:^|[\s'\"/(])(?:\.\.?/|/[^\s'\"]*/)?(?:dist|build|lib)/|"
+    r"(?:require|import)\s*\([^\n]*(?:^|/)(?:dist|build|lib)/|"
+    r"\bfrom\s+['\"][^'\"]*(?:^|/)(?:dist|build|lib)/",
+    _re.IGNORECASE,
+)
+
+
+def _opt13_command_text(line: str) -> str | None:
+    """Return command text only; package-manager banners and output stay inert."""
+    clean = _OPT24_LOG_TS_RE.sub("", line).strip()
+    marker = _re.match(r"^(?:##\[command\]|[>$+]\s+)", clean)
+    if marker is None:
+        return None
+    return clean[marker.end():].strip()
+
+
+def _opt13_build_label(command: str) -> str:
+    """Closed-vocabulary label: never copy untrusted job-log text to a report."""
+    for pattern, label in (
+        (r"\bvite\s+build\b", "vite build"),
+        (r"\bnext\s+build\b", "next build"),
+        (r"\bnuxt\s+build\b", "nuxt build"),
+        (r"\b(?:remix|astro|gatsby|ng|nest)\s+build\b", "framework build"),
+        (r"\b(?:webpack|rollup|rspack|turbopack|tsup|esbuild)\b", "bundle build"),
+        (r"\btsc\b", "TypeScript declaration emit"),
+        (r"\b(?:mvn|mvnw)\b", "Maven package build"),
+        (r"\b(?:gradle|gradlew)\b", "Gradle assemble build"),
+    ):
+        if _re.search(pattern, command, _re.IGNORECASE):
+            return label
+    return "build"
+
+
+# A GitHub step header, and the `run:` of a step whose FIRST command invokes a
+# quality package script (`pnpm test`, `npm run lint:ci`, `yarn typecheck`).
+# A script whose own name says it builds (`test-build`, `lint:build`) hides
+# nothing, and neither does a build written into the step's `run:` line.
+_OPT13_STEP_RE = _re.compile(r"^##\[group\]Run\s+(.*)$")
+_OPT13_QUALITY_STEP_RE = _re.compile(
+    r"^(?:pnpm|npm|yarn|bun)(?:\s+(?:run|-{1,2}[\w-]+(?:=\S+)?))*\s+"
+    r"(?:lint|test|check|typecheck|type-check)\b(?![\w:-]*build)",
+    _re.IGNORECASE,
+)
+
+
+def _opt13_build_in_quality_log(log: str) -> dict[str, Any] | None:
+    """A measured build hidden inside a lint/test wrapper, or ``None``.
+
+    The job log is split at GitHub step headers (``##[group]Run ...``) and
+    only a step whose own ``run:`` starts with a quality package script is
+    read, so a build step beside a test step never pairs with that test step's
+    commands.  Fail closed when any command in the log loads compiled output.
+    A framework build can validate more than the quality command, so the
+    emitted recipe shrinks it to a runtime-only target and keeps one full
+    validation build; it never recommends deleting the only production-build
+    gate.
+    """
+    lines = log.splitlines()
+    if any(_OPT13_LOADS_BUILD_OUTPUT_RE.search(command)
+           for command in (_opt13_command_text(line) for line in lines)
+           if command is not None):
+        return None
+    steps: list[tuple[str, list[str]]] = []
+    for line in lines:
+        header = _OPT13_STEP_RE.match(_OPT24_LOG_TS_RE.sub("", line).strip())
+        if header:
+            steps.append((header.group(1).strip(), []))
+        elif steps:
+            steps[-1][1].append(line)
+    for run, step_lines in steps:
+        if not _OPT13_QUALITY_STEP_RE.search(run):
+            continue
+        fact = _opt13_build_in_quality_step(step_lines)
+        if fact is not None:
+            return fact
+    return None
+
+
+def _opt13_build_in_quality_step(lines: list[str]) -> dict[str, Any] | None:
+    """The build-then-quality proof inside one quality-script step's lines."""
+    records = [(_opt24_log_timestamp(line), _opt13_command_text(line),
+                _OPT24_LOG_TS_RE.sub("", line).strip())
+               for line in lines]
+    build_at = next((index for index, (_stamp, command, _text) in enumerate(records)
+                     if command is not None and _OPT13_BUILD_COMMAND_RE.search(command)), None)
+    if build_at is None:
+        return None
+    seconds: float | None = None
+    quality_after: int | None = None
+    for index in range(build_at + 1, len(records)):
+        _stamp, command, text = records[index]
+        match = _OPT13_BUILD_SUMMARY_RE.search(text)
+        if match:
+            value = float(match.group(1))
+            unit = match.group(2).lower()
+            seconds = value / 1000.0 if unit == "ms" else value * 60.0 if unit[0] == "m" else value
+            continue
+        if command is not None and _OPT13_QUALITY_COMMAND_RE.search(command):
+            quality_after = index
+            break
+        # A different command means the following summary/quality command no
+        # longer bounds this build.  Omit instead of folding unrelated work
+        # (sleep, setup, another script) into the measured interval.
+        if command is not None:
+            return None
+    if quality_after is None or seconds is None or seconds <= 0:
+        return None
+    return {
+        "build_command": _opt13_build_label(str(records[build_at][1])),
+        "build_s": round(seconds, 1),
+    }
+
+
 def _opt24_static_job_name(name: str) -> str:
     """The stable part of a workflow job name that contains matrix expressions."""
     static = _re.sub(r"\$\{\{.*?\}\}", "", name)
@@ -29016,6 +29157,7 @@ def _persist_pole_logs(
             except OSError as e:
                 logger.warning("could not save pole magnitude sample %s: %s", mag_fn, e)
                 mag_fn = None
+        opt13_fact = _opt13_build_in_quality_log(log)
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
             "leaf_fix_key": leaf0.get("fix_key"),
@@ -29024,10 +29166,318 @@ def _persist_pole_logs(
             "duration_s": round(repr_dur, 1), "selected": "nearest-p50",
             "sample": [{"html_url": j.get("html_url", ""), "duration_s": round(d, 1)}
                        for d, j in qual],
+            **({"opt13_build_in_script": opt13_fact} if opt13_fact else {}),
         })
         logger.debug("saved pole log for %s -> %s (closest to P50 of %d qualifying "
                      "runs)", job, fn, len(qual))
     return manifest
+
+
+def _detect_opt13_build_in_scripts(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int, workflow_docs: dict[str, Any], root: "Path | None",
+) -> list[dict[str, Any]]:
+    """Turn conservative, measured pole-log facts into OPT13 findings."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    source_guard: dict[str, Any] | None = None
+    for entry in pole_logs:
+        fact = entry.get("opt13_build_in_script")
+        if not isinstance(fact, dict):
+            continue
+        seconds = fact.get("build_s")
+        if not isinstance(seconds, (int, float)) or seconds <= 0:
+            continue
+        wf = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        validation_job = _opt13_validation_build_job(workflow_docs, wf, job)
+        if validation_job is None:
+            continue
+        if source_guard is None:
+            source_guard = _opt13_source_output_guard(root)
+        if not source_guard.get("safe"):
+            continue
+        entry["opt13_validation_build"] = validation_job
+        entry["opt13_source_guard"] = source_guard
+        command = str(fact.get("build_command") or "build")
+        runs = volume_by_workflow.get(wf)
+        runner_min = (round(float(seconds) * runs / 60.0, 1)
+                      if isinstance(runs, int) and runs > 0 else None)
+        url = str(entry.get("html_url") or "")
+        shown = _link(float(seconds), url)
+        runner_effect = (
+            f"runner-minute saving: at most {runner_min:.1f}/month (measured build "
+            "ceiling); exact saving not sized until the runtime-only replacement is "
+            "benchmarked"
+            if runner_min is not None else
+            "runner-minute saving not sized because replacement cost and monthly run volume are unavailable")
+        evidence = (
+            f"The representative `{job}` log runs `{command}` inside its quality "
+            f"script; the build itself takes {shown}. A separate "
+            f"`{validation_job['job']}` job retains the full validation build, and "
+            f"{source_guard['source_files_checked']} source file(s) passed the compiled-output backstop."
+        )
+        measured = _measured_evidence(
+            ["Job", "Build command", "Measured build", "Representative run"],
+            [[f"`{job}`", f"`{command}`", f"{float(seconds):.1f}s",
+              f"[job log]({url})" if url else "captured job log"]],
+            f"The quality script spends {float(seconds):.1f}s in build work.",
+            "The measured build interval is a ceiling only; benchmark the runtime-only replacement before crediting a saving.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT13", "MEDIUM", "Build Step in Jobs That Don't Need It",
+            wf, job, evidence,
+            "Add a runtime-only build target for this quality job first; keep the full build "
+            "once in the artifacts/validation job, then compare the same workload before and after.",
+            "opt13--build-step-in-jobs-that-dont-need-it", idx,
+            wc_p50=None, rm=None,
+            size_note=(f"measured build ceiling {float(seconds):.1f}s; {runner_effect}"),
+            realization="none", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        finding["opt13_wall_clock_ceiling_s"] = float(seconds)
+        finding["opt13_runner_min_ceiling"] = runner_min
+        finding["opt13_validation_build"] = validation_job
+        finding["opt13_source_guard"] = source_guard
+        if isinstance(runs, int):
+            finding["workflow_runs_30d"] = runs
+        out.append(finding)
+    return out
+
+
+_OPT13_VALIDATION_BUILD_LINE_RE = _re.compile(
+    r"^[ \t]*(?:(?:pnpm|yarn|bun)(?:\s+run)?\s+"
+    r"build(?::(?:ci[-:]?)?artifacts?)?|"
+    r"npm\s+run\s+build(?::(?:ci[-:]?)?artifacts?)?|"
+    r"(?:vite|next|nuxt|remix|astro|gatsby|ng|nest)\s+build"
+    r"(?:\s+--[\w-]+(?:=\S+)?)*|"
+    r"(?:webpack|rollup|rspack|turbopack|tsup|esbuild)(?:\s+--[\w-]+(?:=\S+)?)*|"
+    r"(?:mvn|mvnw)\s+(?:[^\n]*\s)?package|"
+    r"(?:gradle|gradlew)\s+(?:[^\n]*\s)?assemble)\s*$",
+    _re.IGNORECASE,
+)
+_OPT13_SOURCE_OUTPUT_RE = _re.compile(
+    r"\bnew\s+Worker\s*\(|\bworker_threads\b|\bchild_process\b|"
+    r"\.(?:fork|spawn|exec|execFile|execSync)\s*\(|"
+    r"\bimport\s+['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
+    r"\bfrom\s+['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
+    r"__dirname[^\n]*\.js['\"]",
+    _re.IGNORECASE,
+)
+# Generic backstop beside the named forms above: ANY string or template
+# literal naming a `dist/`, `build/` or `lib/` path segment withholds the
+# finding (computed paths such as `require(path.resolve('dist/x.js'))`,
+# template imports, `new URL('../build/cli.mjs', ...)`, a helper the guard
+# cannot follow).  Only a literal that is plainly a build-config value on its
+# own line (`outDir: 'dist'`, `ignores: ['dist/']`) is classified as inert; a
+# false "safe" is worse than a withheld finding.
+_OPT13_SOURCE_LITERAL_RE = _re.compile(r"""(['"])((?:(?!\1)[^\n\\]|\\.)*)\1|`([^`]*)`""")
+_OPT13_OUTPUT_SEGMENT_RE = _re.compile(r"(?:^|[/\\])(?:dist|build|lib)(?:[/\\]|$)",
+                                       _re.IGNORECASE)
+_OPT13_INERT_CONFIG_PREFIX_RE = _re.compile(
+    r"\b(?:outDir|outdir|outFile|outfile|distDir|ignores|ignorePatterns|exclude)"
+    r"""\s*:\s*\[?\s*(?:(?:'[^'\n]*'|"[^"\n]*")\s*,\s*)*$""")
+
+
+def _opt13_source_names_output(text: str) -> bool:
+    """True when a literal names build output outside an inert config value."""
+    for match in _OPT13_SOURCE_LITERAL_RE.finditer(text):
+        body = match.group(2) if match.group(2) is not None else match.group(3) or ""
+        if not _OPT13_OUTPUT_SEGMENT_RE.search(body):
+            continue
+        if match.group(3) is None:
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            if _OPT13_INERT_CONFIG_PREFIX_RE.search(text[line_start:match.start()]):
+                continue
+        return True
+    return False
+
+
+_OPT13_CALL_START_RE = _re.compile(r"\b(?:require|import)\s*\(", _re.IGNORECASE)
+_OPT13_COMPILED_PATH_RE = _re.compile(
+    r"(?:^|[/\\'\"`(\s,])(?:dist|build|lib)[/\\]", _re.IGNORECASE,
+)
+_OPT13_SOURCE_SUFFIXES = frozenset({
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+})
+
+
+def _opt13_run_directory(
+    job: dict[str, Any], step: dict[str, Any], workflow: dict[str, Any] | None = None,
+) -> str | None:
+    """Repository-relative directory for a run step, or ``None`` if dynamic/unsafe."""
+    value = step.get("working-directory")
+    if value is None:
+        defaults = job.get("defaults")
+        run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+        value = (run_defaults or {}).get("working-directory") \
+            if isinstance(run_defaults, dict) else None
+    if value is None and isinstance(workflow, dict):
+        defaults = workflow.get("defaults")
+        run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+        value = (run_defaults or {}).get("working-directory") \
+            if isinstance(run_defaults, dict) else None
+    if value is None:
+        return "."
+    if not isinstance(value, str) or "${{" in value:
+        return None
+    from pathlib import PurePosixPath
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    normalized = str(path)
+    return normalized if normalized not in ("", ".") else "."
+
+
+def _opt13_call_loads_compiled_output(text: str) -> bool:
+    """Whether a require()/import() argument names compiled output.
+
+    Balance the call itself instead of letting a regex read into a following
+    statement.  Quotes may contain parentheses; nested calls such as
+    ``require(path.resolve('dist/runtime.js'))`` remain one argument span.
+    """
+    for match in _OPT13_CALL_START_RE.finditer(text):
+        depth = 1
+        quote = ""
+        escaped = False
+        end = match.end()
+        for index in range(end, len(text)):
+            char = text[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in ("'", '"', "`"):
+                quote = char
+            elif char == "/" and index + 1 < len(text) \
+                    and text[index + 1] in ("/", "*"):
+                # Comments need a JavaScript parser to distinguish their
+                # punctuation from the argument grammar.  Withhold rather than
+                # risk a `)` in prose hiding a later compiled-output path.
+                return True
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    if _OPT13_COMPILED_PATH_RE.search(text[end:index]):
+                        return True
+                    break
+        else:
+            # An unclosed call cannot be bounded safely.
+            return True
+    return False
+
+
+def _opt13_validation_build_job(
+    workflow_docs: dict[str, Any], affected_workflow: str, affected_job: str,
+) -> dict[str, str] | None:
+    """Name a separate job that keeps the full validation build."""
+    doc = workflow_docs.get(affected_workflow)
+    jobs = (doc or {}).get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return None
+    affected_spec: dict[str, Any] | None = None
+    for key, candidate in jobs.items():
+        if not isinstance(candidate, dict):
+            continue
+        name = str(candidate.get("name") or key)
+        static_name = _opt24_static_job_name(name) if "${{" in name else ""
+        if (affected_job in {str(key), name}
+                or (static_name and (affected_job == static_name
+                                     or affected_job.startswith(static_name + " ")))):
+            affected_spec = candidate
+            break
+    if affected_spec is None:
+        return None
+    run_steps = [step for step in (affected_spec.get("steps") or [])
+                 if isinstance(step, dict) and isinstance(step.get("run"), str)]
+    quality_dirs = {
+        directory
+        for step in run_steps
+        for directory in [_opt13_run_directory(affected_spec, step, doc)]
+        if directory is not None and any(
+            _OPT13_QUALITY_COMMAND_RE.search(line)
+            for line in str(step.get("run") or "").splitlines()
+        )
+    }
+    if not quality_dirs:
+        # The invoked package script can be hidden behind make or another
+        # wrapper in YAML.  A job whose run steps all share one static directory
+        # still gives the job-scoped log one unambiguous package boundary.
+        quality_dirs = {
+            directory
+            for step in run_steps
+            for directory in [_opt13_run_directory(affected_spec, step, doc)]
+            if directory is not None
+        }
+    # A log is job-scoped, so multiple or dynamic quality-step directories
+    # cannot be bound to the measured command safely.
+    if len(quality_dirs) != 1:
+        return None
+    affected_dir = next(iter(quality_dirs))
+    for key, spec in jobs.items():
+        if (not isinstance(spec, dict) or spec.get("if") is not None
+                or spec.get("continue-on-error") not in (None, False)):
+            continue
+        name = str(spec.get("name") or key)
+        static_name = _opt24_static_job_name(name) if "${{" in name else ""
+        if (affected_job in {str(key), name}
+                or (static_name and (affected_job == static_name
+                                     or affected_job.startswith(static_name + " ")))):
+            continue
+        steps = [step for step in (spec.get("steps") or []) if isinstance(step, dict)]
+        for step in steps:
+            if (step.get("if") is not None
+                    or step.get("continue-on-error") not in (None, False)):
+                continue
+            if (_opt13_run_directory(spec, step, doc) == affected_dir
+                    and any(_OPT13_VALIDATION_BUILD_LINE_RE.fullmatch(line)
+                            for line in str(step.get("run") or "").splitlines())):
+                return {"workflow_file": str(affected_workflow), "job": name}
+    return None
+
+
+def _opt13_source_output_guard(root: "Path | None") -> dict[str, Any]:
+    """Whole-repository D11 backstop; any possible runtime consumer withholds."""
+    if root is None or not root.is_dir():
+        return {"safe": False, "source_files_checked": 0,
+                "reason": "repository source was unavailable"}
+    checked = 0
+    for path in root.rglob("*"):
+        try:
+            relative_parts = path.relative_to(root).parts
+        except ValueError:
+            return {"safe": False, "source_files_checked": checked,
+                    "reason": "a source path escaped the repository root"}
+        if (path.is_symlink() or not path.is_file()
+                or path.suffix.lower() not in _OPT13_SOURCE_SUFFIXES
+                or any(part in {".git", "node_modules", "dist", "build",
+                                "test", "tests", "__tests__"} for part in relative_parts)
+                or ".test." in path.name or ".spec." in path.name):
+            continue
+        try:
+            if path.stat().st_size > 1_000_000:
+                return {"safe": False, "source_files_checked": checked,
+                        "reason": "a source file was too large to inspect"}
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {"safe": False, "source_files_checked": checked,
+                    "reason": "a source file could not be read"}
+        checked += 1
+        if (_OPT13_SOURCE_OUTPUT_RE.search(text)
+                or _opt13_call_loads_compiled_output(text)
+                or _opt13_source_names_output(text)):
+            return {"safe": False, "source_files_checked": checked,
+                    "reason": "source may load compiled output"}
+    return {"safe": checked > 0, "source_files_checked": checked,
+            "reason": "no compiled-output runtime consumer was found" if checked else
+                      "no readable source file was available to inspect"}
 
 
 # =============================================================================
@@ -33254,6 +33704,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             opt96_findings=[f for f in findings if f.get("pattern") == "OPT96"],
             wf_docs=_wf_docs,
             cache_effective_paths=findings_doc.get("cache_effective_paths"))
+        new = _detect_opt13_build_in_scripts(
+            pole_logs, vol_by_wf, next_id, _wf_docs, root)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        findings_doc["findings"] = findings
     _opt96_check_default_branch(findings_doc, default_branch)
     _ground_opt96(findings, drill_poles or poles, _wf_docs,
                   fetch_gaps={str(g.get("workflow_file")) for g in _sample_gaps()})

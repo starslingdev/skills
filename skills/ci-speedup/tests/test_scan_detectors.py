@@ -3448,7 +3448,8 @@ def test_opt45_opt46_name_the_group_key_vs_cancel_predicate_tension():
 def test_coverage_honest_with_zero_parseable_workflows(tmp_path: Path):
     """No workflows at all must NOT report full coverage — the uncovered set
     (incl. the OPT13/OPT15 judgment pair) is a property of the catalog, not of
-    what parsed."""
+    what parsed. OPT13's narrow measured exception does not make its broad
+    semantic scanner coverage complete."""
     (tmp_path / ".github" / "workflows").mkdir(parents=True)
     data = _scan(tmp_path)
     without = set(data["catalog_patterns_without_detector"])
