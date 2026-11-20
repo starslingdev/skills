@@ -5921,6 +5921,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     # detector's numbers instead of overwriting with a static hit_rate.
     "OPT46": {"model": "measured"},  # superseded runs — measured (was dead hit_rate 0.4)
     "OPT47": {"model": "measured"},  # push+PR double-trigger — measured
+    "OPT107": {"model": "measured"},  # dense default-branch validation — measured
     # Stack-Specific.
     "OPT52": {"model": "direct", "default_s": 30.0},  # turbo missing outputs
     "OPT53": {"model": "direct", "default_s": 30.0},  # turbo unstable env vars
@@ -11723,6 +11724,9 @@ _PUSH_LANE_RARE_PER_30D = 8
 _SUCCESS_ONLY_CAVEAT_MIN_RUNS = 10
 _SUCCESS_ONLY_CAVEAT_FAILURE_RATE = 0.20
 _MIN_TIMED_RUNS = 3  # a per-run compute mean needs ≥3 timed runs to be stable
+_OPT107_BATCH_WINDOW_S = 60.0 * 60.0
+_OPT107_MIN_BATCHABLE_RUNS = 2
+_OPT107_MIN_BATCHABLE_SHARE = 0.25
 # Deliberately BROAD: this is the safety carve-out for run-cancellation fixes,
 # so a false positive (skip a real finding) is acceptable but a false negative
 # (advise cancel-in-progress on a deploy → corrupt a partial deploy/tag/publish)
@@ -17796,6 +17800,102 @@ def _supersede_static_opt36(findings: list[dict[str, Any]],
     _supersede_static_pattern(
         findings, measured, "OPT36",
         "measured OPT36 schedule-burn finding for the same workflow")
+
+
+def _detect_opt107_default_branch_batching(
+    wf_path: str,
+    all_runs: list[dict[str, Any]],
+    push_jobs_per_run: list[list[dict[str, Any]]],
+    wf_doc: dict[str, Any],
+    default_branch: str | None,
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Find dense default-branch validation runs that an hourly tip run can batch.
+
+    A run is batchable only when a later default-branch push starts before it
+    finishes or within one hour after it finishes.  The credited compute is the
+    measured mean completed push-run compute for those batchable observations;
+    a truncated run-list therefore under-counts rather than extrapolating.
+    """
+    if not default_branch or not _on_has_event(_wf_on(wf_doc), "push"):
+        return []
+
+    spans: list[tuple[_dt.datetime, _dt.datetime, dict[str, Any]]] = []
+    for run in all_runs:
+        if (str(run.get("event") or "") != "push"
+                or str(run.get("head_branch") or "") != default_branch
+                or str(run.get("conclusion") or "") in {"cancelled", "skipped"}):
+            continue
+        start = _parse_dt(str(run.get("run_started_at") or run.get("created_at") or ""))
+        end = _parse_dt(str(run.get("updated_at") or ""))
+        if start is None or end is None or end < start:
+            continue
+        spans.append((start, end, run))
+    spans.sort(key=lambda item: (item[0], str(item[2].get("id") or "")))
+    if len(spans) < _OPT107_MIN_BATCHABLE_RUNS + 1:
+        return []
+
+    batchable: list[dict[str, Any]] = []
+    for index, (_start, end, run) in enumerate(spans[:-1]):
+        next_start = spans[index + 1][0]
+        if (next_start - end).total_seconds() <= _OPT107_BATCH_WINDOW_S:
+            batchable.append(run)
+    share = len(batchable) / len(spans)
+    if (len(batchable) < _OPT107_MIN_BATCHABLE_RUNS
+            or share < _OPT107_MIN_BATCHABLE_SHARE):
+        return []
+
+    per_run_min, timed_n = _mean_run_compute_min(push_jobs_per_run)
+    if per_run_min <= 0 or timed_n < _MIN_TIMED_RUNS:
+        return []
+    credited = round(len(batchable) * per_run_min, 1)
+    if credited <= 0:
+        return []
+
+    title = "Default-Branch Full CI Runs Too Often to Stay Current"
+    evidence = (
+        f"{len(batchable)} of {len(spans)} sampled default-branch push runs "
+        f"({share * 100:.0f}%) were replaced by another push before or within one hour "
+        f"of finishing. Their measured compute is {per_run_min:.1f} runner-min/run "
+        f"over {timed_n} timed run(s); runner-minute effect: −{credited:g} runner-min "
+        "in the sampled window (saving).")
+    measured = _measured_evidence(
+        ["Workflow", "Batchable pushes", "Measured compute/run",
+         "Runner-minute effect"],
+        [[f"`{wf_path}`", f"{len(batchable)} of {len(spans)} ({share * 100:.0f}%)",
+          f"{per_run_min:.1f} runner-min over {timed_n} timed run(s)",
+          f"−{credited:g} runner-min (saving)"]],
+        summary=evidence,
+        note=("Safest-first fix: keep the pull-request gate unchanged; run the full "
+              "default-branch suite hourly against the current tip, retain "
+              "workflow_dispatch, and use a repository variable to switch back to "
+              "per-push validation. Do not batch release, deploy, or migration work. "
+              "The estimate is a conservative sampled-window lower bound: it credits "
+              "only observed batchable runs and never extrapolates beyond the fetched "
+              "default-branch run page."))
+    finding = _new_finding(
+        "OPT107", "HIGH", title, wf_path, "", evidence,
+        "batch-default-branch-full-ci", _catalog_anchor("OPT107", title),
+        start_idx + 1, wc_p50=0.0, rm=credited,
+        size_note=("runner-minute effect: saving (negative) — the scheduled tip run "
+                   "keeps post-merge validation coverage while earlier superseded "
+                   "tip runs are not started"),
+        realization="none", measured_evidence=measured)
+    finding["batchable_run_count"] = len(batchable)
+    finding["batchable_sample_count"] = len(spans)
+    finding["batchable_run_share"] = round(share, 4)
+    finding["batch_window_s"] = _OPT107_BATCH_WINDOW_S
+    finding["measured_signal"] = (
+        "default-branch pushes replaced before or within one hour of completion "
+        "x measured completed push-run compute")
+    finding["affected_jobs"] = sorted({
+        str(job.get("name") or "")
+        for jobs in push_jobs_per_run for job in jobs if str(job.get("name") or "")
+    })
+    run_ids = [_run_id(run) for run in batchable if _run_id(run)]
+    if run_ids:
+        finding["tier2_sample_run_ids"] = run_ids
+    return [finding]
 
 
 def _detect_opt46_superseded_runs(
@@ -31741,6 +31841,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # commits' job lists are the lane's only new API reads: at most the runs of
     # `_DEFAULT_BRANCH_PUSH_SAMPLE_MAX` commits, memoised with every other job read.
     _push_lane = findings_doc.get("default_branch_push_lane") or {}
+    _push_jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
     if _push_shas and _push_lane.get("status") == "complete":
         _push_rows_by_sha = {
             _sha: [(_push_run_wf.get(str(_run.get("id") or id(_run)), ""), _run)
@@ -33198,6 +33299,25 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     findings.extend(new)
 
             if all_runs is not None:
+                _opt107_run_ids = {
+                    str(run.get("id") or "")
+                    for run in all_runs
+                    if (str(run.get("event") or "") == "push"
+                        and str(run.get("head_branch") or "") == str(default_branch or ""))
+                }
+                _opt107_push_jobs = [
+                    list(jobs)
+                    for (run_wf, run_id_value), jobs in _push_jobs_by_run.items()
+                    if run_wf == wf_path and run_id_value in _opt107_run_ids
+                ]
+                new = _detect_opt107_default_branch_batching(
+                    wf_path, all_runs, _opt107_push_jobs, wf_doc, default_branch,
+                    next_id)
+                next_id = max(
+                    next_id,
+                    max((int(f["id"][1:]) for f in new), default=next_id))
+                findings.extend(new)
+
                 new = _detect_opt46_superseded_runs(
                     wf_path, all_runs, jobs_per_run, wf_doc, monthly, next_id)
                 next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))

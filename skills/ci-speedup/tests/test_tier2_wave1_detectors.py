@@ -2187,6 +2187,49 @@ def test_opt46_output_composes_with_pr1_stamps():
     assert f["tier2_neutrality"]["proof"] == "post_completion_waste"  # detector cert survives
 
 
+# ========================= OPT107 default-branch batching =========================
+
+def _default_push_runs(gap_minutes: int) -> list[dict]:
+    runs = []
+    for i in range(5):
+        start = _dt.datetime(2026, 11, 1, tzinfo=_dt.timezone.utc) + _dt.timedelta(
+            minutes=i * gap_minutes)
+        end = start + _dt.timedelta(minutes=10)
+        runs.append(_run(
+            "main", f"tip{i}", "push",
+            start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            run_id=f"main-{i}"))
+    return runs
+
+
+def _opt107(runs: list[dict]) -> list[dict]:
+    detector = getattr(cr, "_detect_opt107_default_branch_batching", None)
+    if detector is None:
+        return []
+    return detector(
+        ".github/workflows/ci.yml", runs, _jobs_per_run(n_runs=5, secs=600),
+        {"on": {"push": {"branches": ["main"]}}}, "main", 0)
+
+
+def test_opt107_reports_dense_default_branch_pushes_with_signed_sizing():
+    findings = _opt107(_default_push_runs(gap_minutes=20))
+    assert findings, "dense default-branch pushes should produce OPT107"
+    finding = findings[0]
+
+    assert finding["pattern"] == "OPT107"
+    assert finding["batchable_run_count"] == 4
+    assert finding["runner_min_saving"] == 40.0
+    assert "−40 runner-min" in finding["evidence"]
+    assert "hourly" in finding["measured_evidence"]["note"].lower()
+    assert "repository variable" in finding["measured_evidence"]["note"].lower()
+    assert "pull-request gate" in finding["measured_evidence"]["note"].lower()
+
+
+def test_opt107_ignores_default_branch_pushes_without_batchable_waste():
+    assert _opt107(_default_push_runs(gap_minutes=120)) == []
+
+
 # --- the fetch-failure contract: a FAILED fetch is never served as a real answer ----
 #
 # The rule the pipeline states in `_fetch_run_jobs` and `_JobFetchMemo`: a fetch that
