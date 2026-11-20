@@ -2279,6 +2279,42 @@ def test_opt107_does_not_price_side_effect_jobs_in_a_mixed_workflow():
     assert findings[0]["affected_jobs"] == ["test"]
 
 
+def test_opt107_evidence_names_one_sample_population_for_share_and_scaling():
+    # Five completed pushes plus one cancelled push: the share counts completed
+    # runs, the monthly scale counts every sampled push run, and the evidence
+    # names both so its two denominators never disagree silently.
+    runs = _default_push_runs(gap_minutes=20)
+    cancelled = dict(runs[-1], id="main-x", head_sha="tipx", conclusion="cancelled")
+    runs.append(cancelled)
+    jobs_by_run = {
+        str(run["id"]): jobs
+        for run, jobs in zip(runs, _jobs_per_run(n_runs=len(runs), secs=600))
+    }
+    findings = cr._detect_opt107_default_branch_batching(
+        ".github/workflows/ci.yml", runs, jobs_by_run,
+        {"on": {"push": {"branches": ["main"]}}}, "main", 0,
+        monthly_push_volume=60)
+    evidence = findings[0]["evidence"]
+    assert "4 of 5 completed default-branch push runs (of 6 sampled)" in evidence
+    assert "estimate from 6 sampled runs, x60/6" in evidence
+    assert findings[0]["monthly_estimate_basis"]["sampled_runs"] == 6
+
+
+def test_opt107_gives_a_true_reason_when_the_monthly_estimate_rounds_to_zero():
+    runs = _default_push_runs(gap_minutes=20)
+    jobs_by_run = {
+        str(run["id"]): [_span_job("test", 3)] for run in runs
+    }
+    findings = cr._detect_opt107_default_branch_batching(
+        ".github/workflows/ci.yml", runs, jobs_by_run,
+        {"on": {"push": {"branches": ["main"]}}}, "main", 0,
+        monthly_push_volume=1)
+    assert findings[0]["runner_min_saving"] is None
+    reason = findings[0]["runner_min_unsized_reason"]
+    assert "unknown" not in reason
+    assert reason == "monthly estimate rounds to zero runner-minutes"
+
+
 def test_opt107_never_batches_release_or_deploy_workflows():
     runs = _default_push_runs(gap_minutes=20)
     jobs_by_run = {

@@ -17987,7 +17987,8 @@ def _detect_opt107_default_branch_batching(
         monthly = round(min(credited * volume / sampled_runs, monthly_cap), 1)
         if monthly <= 0:
             monthly = None
-    if monthly is None:
+            unsized_reason = "monthly estimate rounds to zero runner-minutes"
+    if monthly is None and not unsized_reason:
         unsized_reason = "30-day default-branch push count unknown"
     monthly_text = (
         f"~−{monthly:g} runner-min/mo (estimate from {sampled_runs} sampled runs, "
@@ -17996,8 +17997,8 @@ def _detect_opt107_default_branch_batching(
 
     title = "Default-Branch Full CI Runs Too Often to Stay Current"
     evidence = (
-        f"{len(batchable)} of {len(spans)} sampled default-branch push runs "
-        f"({share * 100:.0f}%) were replaced by another push before or within one hour "
+        f"{len(batchable)} of {len(spans)} completed default-branch push runs "
+        f"(of {sampled_runs} sampled) ({share * 100:.0f}%) were replaced by another push before or within one hour "
         f"of finishing. After reserving conservative hourly replacement slots, "
         f"{credited_n} run(s) have their own readable compute "
         f"({mean_credited_min:.1f} runner-min/run; {timed_n} timed run(s) total); "
@@ -18009,7 +18010,9 @@ def _detect_opt107_default_branch_batching(
     measured = _measured_evidence(
         ["Workflow", "Batchable pushes", "Measured compute/run",
          "Credited removals", "Runner-minute effect"],
-        [[f"`{wf_path}`", f"{len(batchable)} of {len(spans)} ({share * 100:.0f}%)",
+        [[f"`{wf_path}`",
+          f"{len(batchable)} of {len(spans)} completed, of {sampled_runs} sampled "
+          f"({share * 100:.0f}%)",
           f"{mean_credited_min:.1f} runner-min over {timed_n} timed run(s)",
           str(credited_n),
           f"−{credited:g} runner-min in the sample (saving); {monthly_text}"]],
