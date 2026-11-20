@@ -4166,7 +4166,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
-  the 99-pattern catalog, one file per pattern (frontmatter + body); the source
+  the 100-pattern catalog, one file per pattern (frontmatter + body); the source
   of truth for detection and the report's TL;DR / pattern background. The
   single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
   is compiled from `references/patterns/` by

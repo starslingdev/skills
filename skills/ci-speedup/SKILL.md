@@ -17,8 +17,8 @@ license: MIT
 
 # ci-speedup — CI Optimization Audit for GitHub Actions
 
-Audits a repository's GitHub Actions workflows against a 99-pattern
-catalog — 87 **hygiene/data-driven** patterns plus 12 **structural /
+Audits a repository's GitHub Actions workflows against a 100-pattern
+catalog — 88 **hygiene/data-driven** patterns plus 12 **structural /
 critical-path** patterns routed from the measured long pole — and
 produces a **root-cause-analysis** report with measured impact on two
 axes — developer wall-clock wait and runner-minutes (cloud bill). The

@@ -15256,7 +15256,7 @@ def check_opt106_runtime_loader_provenance(findings_path: Path | None) -> Check:
     findings = [f for f in _as_list(data.get("findings"))
                 if isinstance(f, dict) and f.get("pattern") == "OPT106"]
     if not findings:
-        return Check(name, True, "no OPT106 finding", skipped=True)
+        return Check(name, True, "no OPT106 finding")
     entries = _as_list(_as_dict(data.get("data_bundle")).get("logs"))
     failures: list[str] = []
     for finding in findings:
@@ -15670,6 +15670,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "android-emulator-shard": "test",
     "gradle-test-parallelism": "test",
     "lighthouse-serial-audits": frozenset({"scan", "test"}),
+    "runtime-ts-transpilation": frozenset({"scan", "test"}),
     "eslint-no-cache": "scan",
     "turbo-remote-cache": "build",
     "turbo-partial-cache": "build",

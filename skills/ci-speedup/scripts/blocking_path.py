@@ -7720,6 +7720,7 @@ _LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "gradle-test-parallelism": "test",
     # `scan` by tool name; `test` when the step name also says so ("Lighthouse tests").
     "lighthouse-serial-audits": frozenset({"scan", "test"}),
+    "runtime-ts-transpilation": frozenset({"scan", "test"}),
     "eslint-no-cache": "scan",
     "turbo-remote-cache": "build",
     "turbo-partial-cache": "build",
