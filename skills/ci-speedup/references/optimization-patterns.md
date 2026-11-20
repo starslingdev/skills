@@ -5481,17 +5481,28 @@ simulator build/test uses a generic destination without one host architecture.
 **Static Xcode CI check**:
 
 1. Inspect workflow `run:` steps that invoke `xcodebuild` for `build`, `test`,
-   `build-for-testing`, `archive` or `analyze`. A version probe and
-   `test-without-building` do not compile and stay quiet.
-2. Flag a compiling invocation unless the command or effective workflow/job/step
-   environment sets `COMPILER_INDEX_STORE_ENABLE=NO`.
+   `build-for-testing`, `archive` or `analyze`. A version probe, a listing or
+   `-showBuildSettings` call, `test-without-building`, and an option value that
+   spells an action (`-derivedDataPath build`) do not compile and stay quiet.
+2. Flag the index store when the build uses an unoptimized configuration (no
+   `-configuration` on a non-archive action, or a Debug one), which is where
+   Xcode's `Default` setting writes it, unless the command, the effective
+   workflow/job/step environment, or a repository `.xcconfig` or
+   `project.pbxproj` sets `COMPILER_INDEX_STORE_ENABLE=NO`. An archive, a
+   Release build and a templated configuration stay quiet. A job whose steps
+   read the index store (Periphery, an IndexStoreDB tool, a copied
+   `Index.noindex` DataStore) stays quiet.
 3. On simulator build/test work, also flag a `generic/platform=… Simulator`
-   destination unless `ARCHS` selects one architecture (`arm64`, `x86_64`, the
-   host's `uname -m`, or a runner-architecture expression). A multiple-architecture
-   value does not clear the finding. Keep a generic device destination for an
-   archive/release build; it is not this simulator-test waste.
-4. Fail closed on an unreadable parallel step group. An invocation hidden in a
-   helper or source program is not classified from workflow YAML.
+   destination unless one architecture is selected: `ARCHS` set to `arm64`,
+   `x86_64`, the host's `uname -m` or a runner-architecture expression,
+   `-arch`, `EXCLUDED_ARCHS`, or a repository setting. A multiple-architecture
+   `ARCHS` value does not clear the finding. Keep a generic device destination
+   for an archive/release build; it is not this simulator-test waste.
+4. Withhold the finding when the workflow text cannot classify an input: a
+   setting taken from a shell variable, a `-xcconfig` file or
+   `XCODE_XCCONFIG_FILE`, an unreadable repository settings file, or an
+   unreadable parallel step group. An invocation hidden in a helper or source
+   program is not classified from workflow YAML.
 
 **Fix recipe**:
 
@@ -5510,13 +5521,11 @@ back independently if output parity changes.
 
 **Guardrail**: a release-profile setting changes the product, not just the build. Measure the runtime and size of what ships before changing it, and keep the shipped artifact on the settings that were measured. A profile setting used only to speed up CI must not silently become the release setting.
 
-**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured compile share of the step; the saving is what the next profile and the next sampled runs show. For the static Xcode flavor, the runner-minute effect is a **saving**, but it remains unsized until matched before/after runs isolate these settings and the workflow's run volume is known. The public result below is evidence that the lever can matter, not a forecast for another repository.
+**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured compile share of the step; the saving is what the next profile and the next sampled runs show. For the static Xcode flavor, the runner-minute effect is a **saving** of part of the build's compile time, never the whole step; the finding reads `runner-minute saving: unsized (no matched before/after builds isolate these settings, and this static check does not read the workflow's run volume)`. The public result below is evidence that the lever can matter, not a forecast for another repository.
 
 **Public Xcode evidence**: [OpenClaw pull request #187136](https://github.com/openclaw/openclaw/pull/187136)
-disabled the compiler index store and selected the host architecture for a
-Debug simulator build while preserving its project, scheme, test selection and
-signing behavior. Its reported median improvement is not reused as another
-repository's saving.
+made this change to its Xcode CI build and reports the median build time down
+45.8%. That is their result, not a forecast for your repository.
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 
