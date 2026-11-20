@@ -33,7 +33,11 @@ false`, a plain build job, an untimed build, JavaScript/TypeScript
 source that may load Node compiled output, or a quality job without a separate
 non-optional full-build validation job for the same package does not qualify.
 Static, dynamic, and multiline imports of `dist/`, `build/`, or `lib/` count as
-compiled-output consumers. This is evidence of work placement, not proof that a
+compiled-output consumers, and so does any other string or template literal
+naming one of those paths (a computed `path.resolve('dist/x.js')`, a template
+`import()`, a helper call) unless it is a plain build-config value such as
+`outDir: 'dist'`. A package directory resolves step, then job, then workflow
+`defaults.run.working-directory`. This is evidence of work placement, not proof that a
 production build may be deleted.
 
 The catalog metadata stays static because the broad "does this job need its

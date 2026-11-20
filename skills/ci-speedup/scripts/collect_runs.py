@@ -29265,19 +29265,58 @@ _OPT13_SOURCE_OUTPUT_RE = _re.compile(
     r"__dirname[^\n]*\.js['\"]",
     _re.IGNORECASE,
 )
+# Generic backstop beside the named forms above: ANY string or template
+# literal naming a `dist/`, `build/` or `lib/` path segment withholds the
+# finding (computed paths such as `require(path.resolve('dist/x.js'))`,
+# template imports, `new URL('../build/cli.mjs', ...)`, a helper the guard
+# cannot follow).  Only a literal that is plainly a build-config value on its
+# own line (`outDir: 'dist'`, `ignores: ['dist/']`) is classified as inert; a
+# false "safe" is worse than a withheld finding.
+_OPT13_SOURCE_LITERAL_RE = _re.compile(r"""(['"])((?:(?!\1)[^\n\\]|\\.)*)\1|`([^`]*)`""")
+_OPT13_OUTPUT_SEGMENT_RE = _re.compile(r"(?:^|[/\\])(?:dist|build|lib)(?:[/\\]|$)",
+                                       _re.IGNORECASE)
+_OPT13_INERT_CONFIG_PREFIX_RE = _re.compile(
+    r"\b(?:outDir|outdir|outFile|outfile|distDir|ignores|ignorePatterns|exclude)"
+    r"""\s*:\s*\[?\s*(?:(?:'[^'\n]*'|"[^"\n]*")\s*,\s*)*$""")
+
+
+def _opt13_source_names_output(text: str) -> bool:
+    """True when a literal names build output outside an inert config value."""
+    for match in _OPT13_SOURCE_LITERAL_RE.finditer(text):
+        body = match.group(2) if match.group(2) is not None else match.group(3) or ""
+        if not _OPT13_OUTPUT_SEGMENT_RE.search(body):
+            continue
+        if match.group(3) is None:
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            if _OPT13_INERT_CONFIG_PREFIX_RE.search(text[line_start:match.start()]):
+                continue
+        return True
+    return False
+
+
 _OPT13_SOURCE_SUFFIXES = frozenset({
     ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
 })
 
 
-def _opt13_run_directory(job: dict[str, Any], step: dict[str, Any]) -> str | None:
-    """Repository-relative directory for a run step, or ``None`` if dynamic/unsafe."""
+def _opt13_run_directory(job: dict[str, Any], step: dict[str, Any],
+                         workflow: dict[str, Any] | None = None) -> str | None:
+    """Repository-relative directory for a run step, or ``None`` if dynamic/unsafe.
+
+    Resolved the way the runner does: the step's ``working-directory``, else
+    the job's ``defaults.run``, else the workflow's ``defaults.run``.
+    """
+    def _default_dir(owner: Any) -> Any:
+        defaults = owner.get("defaults") if isinstance(owner, dict) else None
+        run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+        return (run_defaults.get("working-directory")
+                if isinstance(run_defaults, dict) else None)
+
     value = step.get("working-directory")
     if value is None:
-        defaults = job.get("defaults")
-        run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
-        value = (run_defaults or {}).get("working-directory") \
-            if isinstance(run_defaults, dict) else None
+        value = _default_dir(job)
+    if value is None:
+        value = _default_dir(workflow)
     if value is None:
         return "."
     if not isinstance(value, str) or "${{" in value:
@@ -29316,7 +29355,7 @@ def _opt13_validation_build_job(
     quality_dirs = {
         directory
         for step in run_steps
-        for directory in [_opt13_run_directory(affected_spec, step)]
+        for directory in [_opt13_run_directory(affected_spec, step, doc)]
         if directory is not None and any(
             _OPT13_QUALITY_COMMAND_RE.search(line)
             for line in str(step.get("run") or "").splitlines()
@@ -29329,7 +29368,7 @@ def _opt13_validation_build_job(
         quality_dirs = {
             directory
             for step in run_steps
-            for directory in [_opt13_run_directory(affected_spec, step)]
+            for directory in [_opt13_run_directory(affected_spec, step, doc)]
             if directory is not None
         }
     # A log is job-scoped, so multiple or dynamic quality-step directories
@@ -29352,7 +29391,7 @@ def _opt13_validation_build_job(
             if (step.get("if") is not None
                     or step.get("continue-on-error") not in (None, False)):
                 continue
-            if (_opt13_run_directory(spec, step) == affected_dir
+            if (_opt13_run_directory(spec, step, doc) == affected_dir
                     and any(_OPT13_VALIDATION_BUILD_LINE_RE.fullmatch(line)
                             for line in str(step.get("run") or "").splitlines())):
                 return {"workflow_file": str(affected_workflow), "job": name}
@@ -29386,7 +29425,7 @@ def _opt13_source_output_guard(root: "Path | None") -> dict[str, Any]:
             return {"safe": False, "source_files_checked": checked,
                     "reason": "a source file could not be read"}
         checked += 1
-        if _OPT13_SOURCE_OUTPUT_RE.search(text):
+        if _OPT13_SOURCE_OUTPUT_RE.search(text) or _opt13_source_names_output(text):
             return {"safe": False, "source_files_checked": checked,
                     "reason": "source may load compiled output"}
     return {"safe": checked > 0, "source_files_checked": checked,

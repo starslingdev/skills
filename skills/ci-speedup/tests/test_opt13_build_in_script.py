@@ -85,3 +85,65 @@ def test_tsc_type_check_is_not_a_validation_build():
         "types": {"steps": [{"run": "tsc --noEmit --declaration"}]},
     }}}
     assert cr._opt13_validation_build_job(docs, "ci.yml", "test") is None
+
+
+@pytest.mark.parametrize("source", [
+    "const r = require(path.resolve('dist/runtime.js'));\n",
+    "const r = await import(`../dist/runtime.js`);\n",
+    "const r = require(\n  '../dist/runtime.js'\n);\n",
+    "import '../dist/register.js';\n",
+    "const p = path.join(__dirname, 'dist', 'worker.js');\nawait import(p);\n",
+    "const file = new URL('../build/cli.mjs', import.meta.url);\nawait import(file);\n",
+    "const target = resolveOutput('lib/index.js');\nloadPlugin(target);\n",
+])
+def test_source_guard_withholds_any_load_like_mention_of_build_output(tmp_path, source):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "index.js").write_text(source, encoding="utf-8")
+    guard = cr._opt13_source_output_guard(tmp_path)
+    assert guard["safe"] is False
+
+
+def test_source_guard_stays_safe_for_source_that_never_names_build_output(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "index.ts").write_text(
+        "import { join } from 'node:path';\n"
+        "import { greet } from './greet';\n"
+        "export const here = join(process.cwd(), 'src');\n",
+        encoding="utf-8")
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is True
+
+
+def test_workflow_default_working_directory_binds_quality_and_validation():
+    docs = {"ci.yml": {
+        "defaults": {"run": {"working-directory": "packages/app"}},
+        "jobs": {
+            "test": {"steps": [{"run": "pnpm test"}]},
+            "build": {"steps": [{"run": "pnpm build",
+                                 "working-directory": "packages/app"}]},
+        },
+    }}
+    assert cr._opt13_validation_build_job(docs, "ci.yml", "test") == {
+        "workflow_file": "ci.yml", "job": "build"}
+
+
+def test_workflow_default_does_not_override_a_job_default():
+    docs = {"ci.yml": {
+        "defaults": {"run": {"working-directory": "packages/app"}},
+        "jobs": {
+            "test": {"defaults": {"run": {"working-directory": "packages/web"}},
+                     "steps": [{"run": "pnpm test"}]},
+            "build": {"steps": [{"run": "pnpm build"}]},
+        },
+    }}
+    assert cr._opt13_validation_build_job(docs, "ci.yml", "test") is None
+
+
+@pytest.mark.parametrize("source", [
+    "export default { build: { outDir: 'dist' } };\n",
+    "export default [{ ignores: ['dist/', 'build/'] }];\n",
+])
+def test_source_guard_classifies_plain_build_config_values_as_inert(tmp_path, source):
+    (tmp_path / "vite.config.ts").write_text(source, encoding="utf-8")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "index.ts").write_text("export const a = 1;\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is True
