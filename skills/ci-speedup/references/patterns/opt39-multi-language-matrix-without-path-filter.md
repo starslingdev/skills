@@ -17,7 +17,7 @@ category: 7
 
 - Workflow declares a matrix with `language: [javascript, python, ...]` (or similar)
 - Uses `github/codeql-action/init` (or `snyk/actions`, `returntocorp/semgrep-action`, etc.) with `languages: ${{ matrix.language }}`
-- Or a job installs a Go, Rust, or Python toolchain with `setup-go`, `setup-python`, a Rust toolchain action, or `rustup toolchain install`
+- Or an explicit Go, Rust, or Python lane, or a language-neutral contract/proof/conformance lane, installs that toolchain with `setup-go`, `setup-python`, a Rust toolchain action, or `rustup toolchain install`; a generic primary job using Python only to run repository tooling is not enough
 - The workflow has NO preceding `dorny/paths-filter` job or per-leg `if:` checking changed file extensions
 - **Activation fidelity**: only flag when the workflow actually runs on every PR — suppress when the `pull_request:` trigger is `types:`-gated to a non-lifecycle activity (e.g. `types: [labeled]`), since the legs then don't run on a normal PR. (Shared `_pr_trigger_runs_every_pr` in `scan.py`; see OPT33.)
 - **Measured admission**: for a per-language job, require an explicit complete input map (for example, a reused scheduled-change action's `paths:` contract), then compare the exact base and head revisions recorded on each sampled run. Credit only the affected job's measured billed-equivalent minutes when every changed path is inside the workflow's declared input universe and outside that language's inputs. A missing map, stale run identity, unknown input, incomplete comparison, failed lookup, or unreadable job time receives no saving credit.

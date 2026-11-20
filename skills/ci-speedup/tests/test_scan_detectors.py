@@ -2254,13 +2254,13 @@ jobs:
     assert finding["opt39_languages"] == ["rust"]
 
 
-def test_opt39_neutral_job_name_still_detects_its_language_setup(tmp_path: Path):
+def test_opt39_neutral_contract_job_still_detects_its_language_setup(tmp_path: Path):
     workflow = """
 name: CI
 on:
   pull_request:
 jobs:
-  test:
+  contract-proof:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/setup-python@v6
@@ -2273,6 +2273,25 @@ jobs:
     finding = _finding(_scan(tmp_path), "OPT39")
     assert finding is not None
     assert finding["opt39_languages"] == ["python"]
+
+
+def test_opt39_generic_primary_tooling_job_stays_quiet(tmp_path: Path):
+    workflow = """
+name: CI guard
+on:
+  pull_request:
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v6
+      - run: python maintainers/scan.py
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
 
 
 def test_opt62_clean_on_self_hosted(tmp_path: Path):

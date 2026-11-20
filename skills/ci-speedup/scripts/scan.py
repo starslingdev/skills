@@ -4836,10 +4836,27 @@ _OPT39_TOOLCHAIN_ACTIONS = {
 _OPT39_TOOLCHAIN_COMMANDS = {
     "rust": re.compile(r"\brustup\s+toolchain\s+(?:install|add)\b", re.I),
 }
-def _opt39_job_languages(job: dict) -> list[str]:
-    """Return the known language toolchains installed by one pull-request job."""
+_OPT39_LANGUAGE_NAME_RE = {
+    "go": re.compile(r"(?:^|[^a-z])go(?:[^a-z]|$)", re.I),
+    "python": re.compile(r"(?:python|\bpy\b)", re.I),
+    "rust": re.compile(r"(?:rust|cargo)", re.I),
+}
+_OPT39_OPTIONAL_LANE_NAME_RE = re.compile(r"(?:contract|proof|conformance)", re.I)
+
+
+def _opt39_job_languages(job_name: str, job: dict) -> list[str]:
+    """Return toolchains installed by an explicit language or proof lane.
+
+    Generic primary jobs often use Python merely to run repository tooling. A
+    language name or a contract/proof/conformance identity distinguishes the
+    optional per-language lanes covered by OPT39 without requiring both.
+    """
+    display = f"{job_name} {job.get('name') or ''}"
     languages: list[str] = []
     for language in _OPT39_TOOLCHAIN_ACTIONS:
+        if (not _OPT39_LANGUAGE_NAME_RE[language].search(display)
+                and not _OPT39_OPTIONAL_LANE_NAME_RE.search(display)):
+            continue
         for step in _steps(job):
             uses = _uses(step)
             command = str(step.get("run") or "") if isinstance(step, dict) else ""
@@ -4993,7 +5010,7 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
         matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
         scanner_matrix = (isinstance(matrix, dict) and "language" in matrix
                           and any(_SCANNER_RE.search(_uses(s)) for s in _steps(job)))
-        job_languages = _opt39_job_languages(job)
+        job_languages = _opt39_job_languages(job_name, job)
         if not scanner_matrix and not job_languages:
             continue
         jif = job.get("if")
