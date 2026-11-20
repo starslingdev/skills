@@ -559,6 +559,16 @@ def test_opt13_requires_a_separate_validation_build_and_clean_source_guard(tmp_p
             "declarations": {"steps": [{"run": "tsc --emitDeclarationOnly"}]},
         }}}, "ci.yml", "test") is None
     assert cr._opt13_validation_build_job(
+        {"ci.yml": {
+            "defaults": {"run": {"working-directory": "packages/app"}},
+            "jobs": {
+                "test": {"steps": [{"run": "pnpm test"}]},
+                "artifacts": {"steps": [{"run": "vite build",
+                                            "working-directory": "packages/app"}]},
+            },
+        }}, "ci.yml", "test") == {
+            "workflow_file": "ci.yml", "job": "artifacts"}
+    assert cr._opt13_validation_build_job(
         {"ci.yml": {"jobs": {
             "test": {"steps": [{"run": "pnpm test",
                                    "working-directory": "packages/app"}]},
@@ -610,6 +620,23 @@ def test_opt13_source_guard_catches_static_and_multiline_imports(tmp_path):
     src.mkdir()
     source = src / "runtime.ts"
     source.write_text("import '../dist/register.js';\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+
+def test_opt13_source_guard_catches_computed_and_template_imports(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    source = src / "runtime.ts"
+    source.write_text(
+        "const runtime = require(path.resolve('dist/runtime.js'));\n",
+        encoding="utf-8",
+    )
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+    source.write_text(
+        "const runtime = await import(`../dist/runtime.js`);\n",
+        encoding="utf-8",
+    )
     assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
 
     source.write_text(

@@ -29221,7 +29221,7 @@ _OPT13_VALIDATION_BUILD_LINE_RE = _re.compile(
 _OPT13_SOURCE_OUTPUT_RE = _re.compile(
     r"\bnew\s+Worker\s*\(|\bworker_threads\b|\bchild_process\b|"
     r"\.(?:fork|spawn|exec|execFile|execSync)\s*\(|"
-    r"(?:require|import)\s*\(\s*['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
+    r"(?:require|import)\s*\([^;]{0,500}?(?:dist|build|lib)/|"
     r"\bimport\s+['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
     r"\bfrom\s+['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
     r"__dirname[^\n]*\.js['\"]",
@@ -29232,11 +29232,18 @@ _OPT13_SOURCE_SUFFIXES = frozenset({
 })
 
 
-def _opt13_run_directory(job: dict[str, Any], step: dict[str, Any]) -> str | None:
+def _opt13_run_directory(
+    job: dict[str, Any], step: dict[str, Any], workflow: dict[str, Any] | None = None,
+) -> str | None:
     """Repository-relative directory for a run step, or ``None`` if dynamic/unsafe."""
     value = step.get("working-directory")
     if value is None:
         defaults = job.get("defaults")
+        run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+        value = (run_defaults or {}).get("working-directory") \
+            if isinstance(run_defaults, dict) else None
+    if value is None and isinstance(workflow, dict):
+        defaults = workflow.get("defaults")
         run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
         value = (run_defaults or {}).get("working-directory") \
             if isinstance(run_defaults, dict) else None
@@ -29278,7 +29285,7 @@ def _opt13_validation_build_job(
     quality_dirs = {
         directory
         for step in run_steps
-        for directory in [_opt13_run_directory(affected_spec, step)]
+        for directory in [_opt13_run_directory(affected_spec, step, doc)]
         if directory is not None and any(
             _OPT13_QUALITY_COMMAND_RE.search(line)
             for line in str(step.get("run") or "").splitlines()
@@ -29291,7 +29298,7 @@ def _opt13_validation_build_job(
         quality_dirs = {
             directory
             for step in run_steps
-            for directory in [_opt13_run_directory(affected_spec, step)]
+            for directory in [_opt13_run_directory(affected_spec, step, doc)]
             if directory is not None
         }
     # A log is job-scoped, so multiple or dynamic quality-step directories
@@ -29314,7 +29321,7 @@ def _opt13_validation_build_job(
             if (step.get("if") is not None
                     or step.get("continue-on-error") not in (None, False)):
                 continue
-            if (_opt13_run_directory(spec, step) == affected_dir
+            if (_opt13_run_directory(spec, step, doc) == affected_dir
                     and any(_OPT13_VALIDATION_BUILD_LINE_RE.fullmatch(line)
                             for line in str(step.get("run") or "").splitlines())):
                 return {"workflow_file": str(affected_workflow), "job": name}
