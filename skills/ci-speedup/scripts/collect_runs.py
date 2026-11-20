@@ -6562,6 +6562,11 @@ def _opt39_exact_changed_files(
     pull = pulls[0]
     base = (pull.get("base") or {}).get("sha") if isinstance(pull.get("base"), dict) else None
     head = (pull.get("head") or {}).get("sha") if isinstance(pull.get("head"), dict) else None
+    # The run tested its own commit. A pull request's recorded head can be a
+    # later push, so price the run's commit whenever the run names one.
+    run_head = run.get("head_sha")
+    if isinstance(run_head, str) and re.fullmatch(r"[0-9a-fA-F]{40}", run_head):
+        head = run_head
     if not (isinstance(base, str) and isinstance(head, str)
             and re.fullmatch(r"[0-9a-fA-F]{40}", base)
             and re.fullmatch(r"[0-9a-fA-F]{40}", head)):

@@ -255,6 +255,36 @@ def test_opt39_without_a_complete_input_map_stays_unsized(monkeypatch, tmp_path)
     _verify_full(doc, tmp_path)
 
 
+class _MovedHeadClient(_PathFilterClient):
+    """Each run's own commit differs from the pull request's recorded head."""
+
+    def json(self, endpoint, allow_missing=False):
+        response = super().json(endpoint, allow_missing)
+        if isinstance(response, dict) and "workflow_runs" in response:
+            for i, run in enumerate(response["workflow_runs"], 1):
+                run["head_sha"] = f"{i + 1000:040x}"
+        return response
+
+
+def test_opt39_compares_each_run_at_its_own_head_commit(monkeypatch):
+    # The pull request's later head touched only docs; the commit each run
+    # actually tested changed Go. Pricing the later diff would credit a saving.
+    paths = {number: [f"docs/guide-{number}.md"] for number in range(1, 61)}
+    paths.update({number + 1000: [f"internal/check_{number}.go"]
+                  for number in range(1, 61)})
+    client = _MovedHeadClient(paths)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], **_OPT39_INPUT_FACTS,
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    assert not any(f.get("pattern") == "OPT39" for f in doc["findings"]), (
+        "OPT39 priced a pull request's later diff instead of the run's own commit")
+
+
 class _NoVolumeClient(_PathFilterClient):
     """The workflow's 30-day run-count probe is unreadable."""
 
