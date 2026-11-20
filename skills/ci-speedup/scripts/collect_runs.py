@@ -6535,6 +6535,252 @@ def _measure_opt32_path_filters(
                                + measured + coverage + suffix)
 
 
+_OPT39_LANGUAGE_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "go": (".go",),
+    "python": (".py", ".pyi"),
+    "rust": (".rs",),
+}
+def _opt39_paths_classification(
+        paths: list[str], language_inputs: list[str], workflow_inputs: list[str]) -> str:
+    """Classify exact-run paths against an explicit, complete owner map."""
+    if not paths:
+        return "unknown"
+    for path in paths:
+        if any(_opt32_glob_matches(path, pattern) for pattern in language_inputs):
+            return "relevant"
+        if not any(_opt32_glob_matches(path, pattern) for pattern in workflow_inputs):
+            return "unknown"
+    return "irrelevant"
+
+
+def _opt39_exact_changed_files(
+        client: GhClient, repo: str, run: dict[str, Any]) -> list[str] | None:
+    """Read the exact base/head comparison captured on one historical PR run."""
+    pulls = run.get("pull_requests")
+    if not isinstance(pulls, list) or not pulls or not isinstance(pulls[0], dict):
+        return None
+    pull = pulls[0]
+    base = (pull.get("base") or {}).get("sha") if isinstance(pull.get("base"), dict) else None
+    head = (pull.get("head") or {}).get("sha") if isinstance(pull.get("head"), dict) else None
+    # The run tested its own commit. A pull request's recorded head can be a
+    # later push, so price the run's commit whenever the run names one.
+    run_head = run.get("head_sha")
+    if isinstance(run_head, str) and re.fullmatch(r"[0-9a-fA-F]{40}", run_head):
+        head = run_head
+    if not (isinstance(base, str) and isinstance(head, str)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", base)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", head)):
+        return None
+    doc = client.json(f"repos/{repo}/compare/{base}...{head}")
+    files = doc.get("files") if isinstance(doc, dict) else None
+    if not isinstance(files, list) or not files or len(files) >= 300:
+        return None
+    paths: list[str] = []
+    supported = {"added", "modified", "removed", "renamed", "copied", "changed",
+                 "unchanged"}
+    for row in files:
+        if not isinstance(row, dict) or row.get("status") not in supported:
+            return None
+        filename = row.get("filename")
+        previous = row.get("previous_filename")
+        if not isinstance(filename, str) or not filename:
+            return None
+        if row.get("status") == "renamed" and not isinstance(previous, str):
+            return None
+        if previous is not None and not isinstance(previous, str):
+            return None
+        paths.append(filename)
+        if previous:
+            paths.append(previous)
+    return paths
+
+
+def _opt39_unsized(finding: dict[str, Any], reason: str, **counts: Any) -> None:
+    finding["language_path_measurement"] = {
+        "status": "unmeasured", "reason": reason, **counts}
+    finding["wall_clock_p50_s"] = 0.0
+    finding["runner_min_saving"] = None
+    finding["runner_minute_effect"] = {"direction": "unsized", "reason": reason}
+    finding["tier"] = 2
+    finding["realization"] = "none"
+    finding["sizing_basis"] = "measured"
+    finding["size_note"] = (
+        f"runner-minute saving not sized ({reason}); changed-path lookup must "
+        "run the job whenever it is unknown or fails")
+
+
+def _measure_opt39_language_jobs(
+    client: GhClient,
+    repo: str,
+    findings: list[dict[str, Any]],
+    sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
+    jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
+    vol_by_wf: dict[str, int | None],
+    job_graph: Any,
+) -> None:
+    """Measure OPT39 per-language jobs from the sampled PRs and their job compute."""
+    targets = [
+        finding for finding in findings
+        if finding.get("pattern") == "OPT39"
+        and finding.get("opt39_job_kind") == "per-language-toolchain"
+    ]
+
+    def withhold(finding: dict[str, Any]) -> None:
+        if finding in findings:
+            findings.remove(finding)
+
+    for finding in targets:
+        workflow = str(finding.get("workflow_file") or "")
+        languages = {
+            str(language).lower() for language in finding.get("opt39_languages") or []
+            if str(language).lower() in _OPT39_LANGUAGE_SUFFIXES
+        }
+        if not languages:
+            withhold(finding)
+            continue
+        language_inputs = [
+            str(pattern) for pattern in finding.get("opt39_language_inputs") or []
+            if isinstance(pattern, str) and pattern.strip()
+        ]
+        workflow_inputs = [
+            str(pattern) for pattern in finding.get("opt39_workflow_inputs") or []
+            if isinstance(pattern, str) and pattern.strip()
+        ]
+        if not language_inputs or not workflow_inputs:
+            _opt39_unsized(
+                finding, "the job's complete language input map is not declared",
+                sampled_prs=0, unknown_prs=0, missing_job_rows=0)
+            continue
+        workflow_runs = list(sampled_runs_by_wf.get(workflow, []))
+        sampled_runs = [
+            run for run in workflow_runs
+            if str(run.get("event") or "") in {"pull_request", "pull_request_target"}
+        ]
+        if not workflow_runs or not sampled_runs:
+            withhold(finding)
+            continue
+        if any(not isinstance(_run_pr_number(run), int) for run in sampled_runs):
+            withhold(finding)
+            continue
+        exact_paths: dict[str, list[str] | None] = {}
+        for run in sampled_runs:
+            run_id = _run_id(run)
+            if not run_id:
+                withhold(finding)
+                break
+            exact_paths[run_id] = _opt39_exact_changed_files(client, repo, run)
+        if finding not in findings:
+            continue
+        if any(paths is None for paths in exact_paths.values()):
+            withhold(finding)
+            continue
+        classifications = {
+            run_id: _opt39_paths_classification(
+                paths or [], language_inputs, workflow_inputs)
+            for run_id, paths in exact_paths.items()
+        }
+        if any(value == "unknown" for value in classifications.values()):
+            withhold(finding)
+            continue
+        aliases: set[str] = set()
+        for job_name in finding.get("affected_jobs") or []:
+            aliases.update(_own_workflow_job_identities(
+                job_graph, workflow, str(job_name)))
+        rows: list[tuple[int, str, float]] = []
+        missing_job_rows = 0
+        for run_jobs in jobs_per_run_by_wf.get(workflow, []):
+            run_id = next((
+                str(job.get("_run_id")) for job in run_jobs
+                if job.get("_run_id") not in (None, "")
+            ), "")
+            if not run_id or run_id not in classifications:
+                continue
+            matched = [
+                job for job in run_jobs
+                if _whole_run_cancel_base_key(str(job.get("name") or "")) in aliases
+            ]
+            priced = [_billable_equiv_min(job) for job in matched]
+            if not matched or any(value is None for value in priced):
+                missing_job_rows += 1
+                continue
+            classification = classifications.get(run_id, "unknown")
+            rows.append((run_id, classification,
+                         float(sum(value for value in priced if value is not None))))
+        classified = rows
+        if missing_job_rows:
+            _opt39_unsized(
+                finding, "some affected job timings were missing or unreadable",
+                sampled_prs=len(classified), unknown_prs=0,
+                missing_job_rows=missing_job_rows)
+            continue
+        if not classified:
+            withhold(finding)
+            continue
+        monthly_volume = vol_by_wf.get(workflow)
+        if not isinstance(monthly_volume, int) or monthly_volume <= 0:
+            _opt39_unsized(
+                finding, "the workflow's 30-day run volume is unknown or zero",
+                sampled_prs=len(classified), unknown_prs=0,
+                missing_job_rows=missing_job_rows)
+            continue
+        irrelevant = [row for row in classified if row[1] == "irrelevant"]
+        if not irrelevant:
+            withhold(finding)
+            continue
+        sample_saved = sum(row[2] for row in irrelevant)
+        pr_volume = monthly_volume * len(sampled_runs) / len(workflow_runs)
+        saving = round(sample_saved / len(classified) * pr_volume, 1)
+        total_sample_compute = sum(row[2] for row in classified)
+        cap = round(total_sample_compute / len(classified) * pr_volume, 1)
+        saving = min(saving, cap)
+        language_text = "/".join(sorted(languages))
+        population = (
+            f"one {len(workflow_runs)}-run workflow sample "
+            f"({len(sampled_runs)} pull-request runs; {len(classified)} priced)"
+        )
+        measurement = {
+            "status": "measured",
+            "languages": sorted(languages),
+            "sampled_prs": len(classified),
+            "irrelevant_prs": len(irrelevant),
+            "unknown_prs": 0,
+            "missing_job_rows": missing_job_rows,
+            "sample_runner_minutes_saved": round(sample_saved, 1),
+            "sample_runner_minutes_total": round(total_sample_compute, 1),
+            "workflow_runs_30d": monthly_volume,
+            "estimated_pr_runs_30d": round(pr_volume, 1),
+            "workflow_sampled_runs": len(workflow_runs),
+            "pr_sampled_runs": len(sampled_runs),
+            "runner_minutes_per_30d": saving,
+            "affected_compute_cap_min_30d": cap,
+            "sample_population": population,
+        }
+        finding["language_path_measurement"] = measurement
+        finding["wall_clock_p50_s"] = 0.0
+        finding["runner_min_saving"] = saving
+        finding["runner_minute_effect"] = {
+            "direction": "saving", "runner_min_per_month": saving}
+        finding["tier"] = 2
+        finding["realization"] = "none"
+        finding["sizing_basis"] = "measured"
+        finding["size_note"] = (
+            f"runner-minute saving: {saving:.1f} per 30 days from {population}; "
+            "pull-request wall-clock is not credited because an unchanged required "
+            "aggregate may still gate the merge")
+        finding["evidence"] = (
+            str(finding.get("evidence") or "").rstrip()
+            + f" Measured {len(irrelevant)} of {len(classified)} sampled pull-request "
+              f"runs with no "
+              f"{language_text} input; their affected jobs used {sample_saved:.1f} "
+              f"runner-minutes in {population}, projecting a saving of {saving:.1f} "
+              f"runner-minutes per 30 days from {monthly_volume} workflow runs."
+            + f" The 30-day scale applies the sample's {len(sampled_runs)} of "
+              f"{len(workflow_runs)} pull-request event share to the workflow's "
+              f"{monthly_volume} total runs."
+            + " Unknown or failed changed-path lookups must run every language job."
+        )
+
+
 _CACHE_SIZING_PATTERNS = frozenset(
     {"OPT4", "OPT6", "OPT9", "OPT61", "OPT62", "OPT96", "OPT101"})
 _CACHE_DEFAULT_BUDGET_BYTES = 10 * 1024 ** 3
@@ -34370,6 +34616,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         vol_by_wf, job_memo, findings_doc.get("workflow_job_graph"))
 
     _changed_files: dict[int, list[str] | None] = {}
+    _measure_opt39_language_jobs(
+        client, repo, findings, sampled_runs_by_wf, jobs_per_run_by_wf,
+        vol_by_wf, findings_doc.get("workflow_job_graph"))
     _measure_opt32_path_filters(
         client, repo, findings, sampled_runs_by_wf, _wf_docs,
         changed_files=_changed_files)

@@ -2310,6 +2310,610 @@ jobs:
     assert "OPT39" not in _scan_one(tmp_path, neg, name="codeql.yml")
 
 
+_OPT39_SINGLE_LANGUAGE_GO = """
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+"""
+
+_OPT39_NODE_LANE = """
+  web-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm test
+"""
+
+
+def test_opt39_per_language_job_without_change_gate(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  go-contract:
+    name: Go contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+
+    assert finding is not None, (
+        "OPT39 should flag a pull-request Go job with no language-path gate")
+    assert finding["affected_jobs"] == ["go-contract"]
+    assert finding["opt39_languages"] == ["go"]
+    assert "go toolchain" in finding["evidence"]
+
+
+def _opt39_recipe_jobs_yaml() -> str:
+    text = (_SKILL_DIR / "references" / "patterns"
+            / "opt39-multi-language-matrix-without-path-filter.md").read_text(
+                encoding="utf-8")
+    fix = text[text.index("**Fix**:"):]
+    start = fix.index("```yaml\n") + len("```yaml\n")
+    return fix[start:fix.index("\n```", start)]
+
+
+def test_opt39_recipe_example_fails_open_and_counts_as_a_path_gate(tmp_path: Path):
+    """The catalog's own fix must be safe and must silence the finding.
+
+    Each lane runs unless the selector succeeded and proved it untouched, and a
+    repository that adopts the example verbatim is recognized as gated.
+    """
+    jobs = _opt39_recipe_jobs_yaml()
+    lane_conditions = re.findall(r"^    if: (.+)$", jobs, re.M)
+    lane_conditions = [c for c in lane_conditions if "needs.changes" in c]
+    assert len(lane_conditions) == 2
+    for condition in lane_conditions:
+        assert "!cancelled()" in condition
+        assert "needs.changes.result != 'success'" in condition
+        assert "!= 'false'" in condition
+    assert "|| 'true'" in jobs
+    assert "continue-on-error: true" in jobs
+
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    workflow = "name: CI\non:\n  pull_request:\n" + jobs + "\n"
+    (path / "ci.yml").write_text(workflow, encoding="utf-8")
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+    # Control: the same lanes without their gates are the waste OPT39 reports.
+    ungated = re.sub(r"^    if: \$\{\{ !cancelled\(\).*\n", "", workflow, flags=re.M)
+    assert ungated != workflow
+    (path / "ci.yml").write_text(ungated, encoding="utf-8")
+    flagged = [f for f in _scan(tmp_path)["findings"] if f.get("pattern") == "OPT39"]
+    assert sorted(j for f in flagged for j in f["affected_jobs"]) == [
+        "go-contract", "rust-contract"]
+
+
+def _opt39_run_recipe_aggregate(results: dict[str, str],
+                                outputs: dict[str, str]) -> int:
+    """Run the recipe's `ci-ok` script as GitHub would for one set of outcomes."""
+    import yaml
+
+    jobs = yaml.safe_load(_opt39_recipe_jobs_yaml())["jobs"]
+    aggregate = jobs["ci-ok"]
+    needs = aggregate["needs"]
+    needs = [needs] if isinstance(needs, str) else list(needs)
+
+    def value(expression: str) -> str:
+        expression = expression.strip()
+        if expression == "join(needs.*.result, ' ')":
+            return " ".join(results[name] for name in needs)
+        match = re.fullmatch(r"needs\.([\w-]+)\.result", expression)
+        if match and match.group(1) in needs:
+            return results[match.group(1)]
+        match = re.fullmatch(r"needs\.changes\.outputs\.(\w+)", expression)
+        if match and "changes" in needs:
+            return outputs.get(match.group(1), "")
+        if match:  # `changes` is not a need: GitHub leaves the context empty
+            return ""
+        raise AssertionError(f"unsupported expression in ci-ok: {expression}")
+
+    (step,) = aggregate["steps"]
+    env = {"PATH": "/usr/bin:/bin"}
+    for name, template in (step.get("env") or {}).items():
+        env[name] = re.sub(r"\$\{\{(.*?)\}\}", lambda m: value(m.group(1)),
+                           str(template))
+    return subprocess.run(["bash", "-e", "-c", step["run"]], env=env,
+                          capture_output=True, text=True).returncode
+
+
+@pytest.mark.parametrize(("label", "results", "outputs", "passes"), [
+    ("go untouched, rust ran", {"changes": "success", "go-contract": "skipped",
+                                "rust-contract": "success"},
+     {"go": "false", "rust": "true"}, True),
+    ("selector failed, every lane ran", {"changes": "failure",
+                                         "go-contract": "success",
+                                         "rust-contract": "success"},
+     {"go": "true", "rust": "true"}, True),
+    ("run cancelled before the lanes started", {"changes": "success",
+                                                "go-contract": "skipped",
+                                                "rust-contract": "skipped"},
+     {"go": "true", "rust": "true"}, False),
+    ("selector cancelled", {"changes": "cancelled", "go-contract": "skipped",
+                            "rust-contract": "skipped"}, {}, False),
+    ("a lane failed", {"changes": "success", "go-contract": "failure",
+                       "rust-contract": "success"},
+     {"go": "true", "rust": "true"}, False),
+])
+def test_opt39_recipe_aggregate_never_passes_an_unproven_skip(
+        label, results, outputs, passes):
+    """The required `ci-ok` check accepts a skipped lane only when the selector
+    succeeded and proved that lane untouched. A run cancelled before its lanes
+    start skips them all, and must not report Success on the head commit."""
+    assert (_opt39_run_recipe_aggregate(results, outputs) == 0) is passes, label
+
+
+def test_opt39_per_language_job_with_change_gate_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+  go-contract:
+    name: Go contracts
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+@pytest.mark.parametrize("selector_step", [
+    """      - id: files
+        uses: tj-actions/changed-files@v46
+        with:
+          files_yaml: |
+            go:
+              - '**/*.go'
+              - go.mod
+      - id: select
+        run: echo "go=${{ steps.files.outputs.go_any_changed }}" >> "$GITHUB_OUTPUT"
+""",
+    """      - id: select
+        run: |
+          changed="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          if grep -qE '\\.go$|^go\\.mod$' <<<"$changed"; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+""",
+])
+def test_opt39_common_changed_file_selectors_count_as_path_gates(
+        tmp_path: Path, selector_step: str):
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.select.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+""" + selector_step + """  go-test:
+    needs: changes
+    if: needs.changes.outputs.go != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+      - run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_unrelated_needs_condition_is_not_a_path_gate(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make generate
+  go-contract:
+    name: Go contracts
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is not None
+
+
+def test_opt39_unrelated_needs_output_is_not_a_path_gate(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - id: version
+        run: echo value=1 >> "$GITHUB_OUTPUT"
+  proof:
+    needs: meta
+    if: needs.meta.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is not None
+
+
+@pytest.mark.parametrize("selector", [
+    # A repository's own composite action decides the output: unreadable here.
+    """      - id: detect
+        uses: ./.github/actions/detect-changes
+""",
+    # A repository script writes the output: its keys are not in the workflow.
+    """      - id: detect
+        run: ./scripts/ci/changed-languages.sh >> "$GITHUB_OUTPUT"
+""",
+])
+def test_opt39_unreadable_selector_withholds_the_finding(tmp_path: Path, selector: str):
+    """A lane gated on an output the scanner cannot classify may well be gated
+    by changed paths. Withhold the finding rather than call the lane ungated."""
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.detect.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+""" + selector + """  go-test:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+      - run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_reusable_workflow_selector_withholds_the_finding(tmp_path: Path):
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  changes:
+    uses: ./.github/workflows/changes.yml
+  go-test:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+      - run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_step_level_changed_path_gate_stays_quiet(tmp_path: Path):
+    """The toolchain is installed only when a same-job selector saw Go change."""
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go: ['**/*.go', 'go.mod']
+      - if: steps.filter.outputs.go == 'true'
+        uses: actions/setup-go@v5
+      - if: steps.filter.outputs.go == 'true'
+        run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+    # Control: a cache-hit condition on the same step is not a path gate.
+    cache_gated = workflow.replace(
+        "      - if: steps.filter.outputs.go == 'true'\n        uses: actions/setup-go@v5",
+        "      - id: cache\n        uses: actions/cache@v4\n        with:\n"
+        "          path: ~/go\n          key: go\n"
+        "      - if: steps.cache.outputs.cache-hit != 'true'\n"
+        "        uses: actions/setup-go@v5")
+    assert cache_gated != workflow
+    (path / "ci.yml").write_text(cache_gated + _OPT39_NODE_LANE, encoding="utf-8")
+    assert _finding(_scan(tmp_path), "OPT39") is not None
+
+
+def test_opt39_fail_open_github_script_path_gate_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Rust proof
+on:
+  pull_request:
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      rust_changed: ${{ steps.select.outputs.rust_changed }}
+    steps:
+      - uses: actions/github-script@v9
+        id: select
+        with:
+          script: |
+            const { data } = await github.rest.repos.compareCommitsWithBasehead({
+              ...context.repo, basehead: 'base...head'
+            });
+            const files = data.files;
+            core.setOutput('rust_changed', files.some(file => file.filename.endsWith('.rs')));
+  proof:
+    needs: scope
+    if: needs.scope.outputs.rust_changed != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "proof.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_declared_language_inputs_are_stamped_for_exact_sizing(tmp_path: Path):
+    workflow = """
+name: Runtime conformance
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/runtime.yml'
+      - 'crates/**'
+      - 'packages/**'
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      rust_changed: ${{ steps.rust.outputs.changed }}
+    steps:
+      - name: Detect scheduled Rust input changes
+        id: rust
+        uses: ./.github/actions/detect-scheduled-changes
+        with:
+          proof-jobs: Rust workspace
+          paths: |
+            .github/workflows/runtime.yml
+            crates/**
+  proof:
+    needs: scope
+    if: github.event_name != 'schedule' || needs.scope.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "runtime.yml").write_text(workflow, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["opt39_language_inputs"] == [
+        ".github/workflows/runtime.yml", "crates/**"]
+    assert finding["opt39_workflow_inputs"] == [
+        ".github/workflows/runtime.yml", "crates/**", "packages/**"]
+
+
+def test_opt39_push_only_job_in_mixed_workflow_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Mixed CI
+on:
+  push:
+  pull_request:
+jobs:
+  go-proof:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "mixed.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_language_scoped_pull_request_trigger_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Rust proof
+on:
+  pull_request:
+    paths:
+      - '**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+jobs:
+  rust-proof:
+    name: Rust proof
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "proof.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_rust_workspace_with_rustup_install_is_detected(tmp_path: Path):
+    workflow = """
+name: Runtime conformance
+on:
+  pull_request:
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "runtime.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["opt39_languages"] == ["rust"]
+
+
+def test_opt39_neutral_contract_job_still_detects_its_language_setup(tmp_path: Path):
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  contract-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v6
+      - run: pytest
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["opt39_languages"] == ["python"]
+
+
+def test_opt39_single_language_workflow_stays_quiet(tmp_path: Path):
+    """A Go project's only test job is not a per-language lane.
+
+    Every pull request there changes Go or non-code files; the latter is the
+    missing trigger path filter (OPT32), not an unneeded language lane.
+    """
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(_OPT39_SINGLE_LANGUAGE_GO, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_language_lane_beside_another_language_lane_is_detected(tmp_path: Path):
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(
+        _OPT39_SINGLE_LANGUAGE_GO + _OPT39_NODE_LANE, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["affected_jobs"] == ["go-test"]
+
+
+def test_opt39_generic_primary_tooling_job_stays_quiet(tmp_path: Path):
+    workflow = """
+name: CI guard
+on:
+  pull_request:
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v6
+      - run: python maintainers/scan.py
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
 def test_opt62_clean_on_self_hosted(tmp_path: Path):
     pos = """name: CI
 on: push
