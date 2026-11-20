@@ -31,8 +31,8 @@ The fixtures stay cloaked because a registry scanner reads a tracked
 Needs `claude` on `PATH` and PyYAML importable by `python3` (the scanner's one
 dependency). The runner does not check for PyYAML: without it the scanner fails
 inside the session and the run exits 1, which reads as a behaviour change, so
-confirm `python3 -c "import yaml"` first. The skill is mounted as a copy without `evals/`, `CHANGELOG.md`
-and its oracle tests, so no answer key is on disk for the session. CI runs the
+confirm `python3 -c "import yaml"` first. The skill is mounted as a copy without `evals/`, `CHANGELOG.md`,
+`changelog.d/` and its oracle tests, so no answer key is on disk for the session. CI runs the
 same command in `.github/workflows/skill-evals.yml`.
 
 The five sessions run at once (`--jobs N` or env `SKILL_EVALS_JOBS` to change

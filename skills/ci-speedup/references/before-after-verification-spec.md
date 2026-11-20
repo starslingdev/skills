@@ -566,4 +566,4 @@ Decision 6.
   workflow cannot be reported as the old check's merge-wait delta), and the
   "CI failed / 1 run / high variance" degradations — all offline with
   synthesized run timings.
-- CHANGELOG entry.
+- Changelog entry (a fragment under `changelog.d/`).
