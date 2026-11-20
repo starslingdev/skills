@@ -1584,6 +1584,275 @@ jobs:
     assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+_OPT114_LOCK = '{"lockfileVersion": 3, "packages": {}}\n'
+
+
+def _write_opt114_repo(tmp_path: Path, workflow_steps: str, files: dict[str, str], *,
+                       on: str = "pull_request", job_extra: str = "",
+                       workflow_extra: str = "") -> None:
+    """A repository with one CI job whose steps are ``workflow_steps``."""
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
+    _write_workflow(tmp_path, "image.yml", f"""name: Image CI
+on: {on}
+{workflow_extra}jobs:
+  image:
+    runs-on: ubuntu-latest
+{job_extra}    steps:
+      - uses: actions/checkout@v4
+{workflow_steps}""")
+
+
+def _write_opt114_fixture(tmp_path: Path, docker_commands: str, *, host: str = "npm ci") -> None:
+    """Host ``npm ci`` and the image install read the same root lockfile."""
+    _write_opt114_repo(tmp_path, f"""      - run: {host}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": ("FROM node:22\nWORKDIR /app\n"
+                       "COPY package.json package-lock.json ./\n" + docker_commands),
+    })
+
+
+def _opt114_findings(tmp_path: Path) -> list[dict]:
+    return [row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT114"]
+
+
+def test_opt114_docker_npm_audit_repeats_host_advisory_lookup(tmp_path: Path):
+    _write_opt114_fixture(
+        tmp_path,
+        "RUN npm ci\nRUN npm run build && npm prune --omit=dev\n",
+    )
+
+    findings = _opt114_findings(tmp_path)
+    assert len(findings) == 1, findings
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["image"]
+    assert "npm ci" in finding["evidence"]
+    assert "npm prune" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+    assert "unsized" in finding["evidence"]
+
+
+@pytest.mark.parametrize(
+    ("docker_commands", "host"),
+    [
+        ("RUN npm ci --no-audit\nRUN npm prune --omit=dev --no-audit\n", "npm ci"),
+        ("RUN npm ci\nRUN npm prune --omit=dev\n", "npm ci --no-audit"),
+        ("RUN npm ci\nRUN npm prune --omit=dev\n", "pnpm install"),
+        ("RUN NPM_CONFIG_AUDIT=$AUDIT npm ci\n", "npm ci"),
+        ("RUN npm ci\n", "NPM_CONFIG_AUDIT=$NPM_AUDIT npm ci"),
+    ],
+)
+def test_opt114_stays_silent_without_duplicate_audit_reporting(
+    tmp_path: Path, docker_commands: str, host: str,
+):
+    _write_opt114_fixture(tmp_path, docker_commands, host=host)
+
+    assert "OPT114" not in _patterns(_scan(tmp_path))
+
+
+def test_opt114_host_install_in_image_context_directory_fires(tmp_path: Path):
+    # The host install and the image both read worker/package-lock.json.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+        working-directory: worker
+      - uses: docker/build-push-action@v6
+        with:
+          context: worker
+""", {
+        "worker/package.json": "{}\n",
+        "worker/package-lock.json": _OPT114_LOCK,
+        "worker/Dockerfile": ("FROM node:22\nCOPY package*.json ./\nRUN npm ci\n"),
+    })
+
+    assert [row["affected_jobs"] for row in _opt114_findings(tmp_path)] == [["image"]]
+
+
+def test_opt114_inherited_working_directory_npmrc_disables_host_audit(tmp_path: Path):
+    # `defaults.run.working-directory: app` puts the bare host `npm ci` under
+    # app/.npmrc, which turns audit off: the image lookup is the only report.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+      - run: docker build -f ../Dockerfile ..
+""", {
+        "app/package.json": "{}\n",
+        "app/package-lock.json": _OPT114_LOCK,
+        "app/.npmrc": "audit=false\n",
+        "Dockerfile": ("FROM node:22\nCOPY app/package.json app/package-lock.json ./\n"
+                       "RUN npm ci\n"),
+    }, job_extra="    defaults:\n      run:\n        working-directory: app\n")
+
+    assert _opt114_findings(tmp_path) == []
+
+
+@pytest.mark.parametrize("host_step", [
+    "      - run: cd tools && npm ci\n",
+    "      - run: npm ci --prefix tools\n",
+    "      - run: npm ci\n        working-directory: ${{ matrix.dir }}\n",
+])
+def test_opt114_unresolved_host_install_directory_withholds(tmp_path: Path, host_step: str):
+    _write_opt114_repo(tmp_path, host_step + """      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "tools/package.json": "{}\n",
+        "tools/package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_conditional_host_install_does_not_cover_every_build(tmp_path: Path):
+    # Push builds run the image install but skip the host audit.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+        if: github.event_name == 'pull_request'
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    }, on="[push, pull_request]")
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_host_and_build_under_the_same_condition_fire(tmp_path: Path):
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+        if: github.event_name == 'pull_request'
+      - uses: docker/build-push-action@v6
+        if: github.event_name == 'pull_request'
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    }, on="[push, pull_request]")
+
+    assert len(_opt114_findings(tmp_path)) == 1
+
+
+def test_opt114_image_with_separate_lockfile_is_not_a_duplicate(tmp_path: Path):
+    # Host `npm ci` audits the root tools; the image installs worker's own lockfile.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+      - uses: docker/build-push-action@v6
+        with:
+          context: worker
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "worker/package.json": "{}\n",
+        "worker/package-lock.json": _OPT114_LOCK,
+        "worker/Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_host_heredoc_text_is_not_an_install(tmp_path: Path):
+    _write_opt114_repo(tmp_path, """      - run: |
+          cat <<'EOF'
+          npm ci
+          EOF
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+@pytest.mark.parametrize("docker_run", [
+    "RUN cat > /usr/local/bin/setup.sh <<'EOF'\nnpm ci\nEOF\n",
+    "RUN echo 'npm ci; npm prune' > /notes.txt\n",
+])
+def test_opt114_image_text_that_is_not_run_stays_quiet(tmp_path: Path, docker_run: str):
+    _write_opt114_fixture(tmp_path, docker_run)
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_unselected_stage_install_stays_quiet(tmp_path: Path):
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": ("FROM node:22 AS dev\nCOPY package*.json ./\nRUN npm ci\n"
+                       "FROM node:22-slim AS runtime\nCOPY server.js ./\n"
+                       "FROM dev AS test\nRUN npm test\n"),
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_unrelated_stage_audit_setting_does_not_hide_selected_stage(
+    tmp_path: Path,
+):
+    _write_opt114_fixture(tmp_path, (
+        "RUN npm ci\n"
+        "FROM node:22 AS tools\nENV NPM_CONFIG_AUDIT=false\nRUN npm install -g x\n"
+        "FROM node:22-slim AS runtime\nCOPY --from=0 /app /app\n"
+    ))
+
+    findings = _opt114_findings(tmp_path)
+    assert len(findings) == 1, findings
+    assert "`npm ci`" in findings[0]["evidence"]
+    assert "npm install" not in findings[0]["evidence"]
+
+
+@pytest.mark.parametrize(("docker_commands", "fires"), [
+    # A setting that reaches the image before the install turns its audit off.
+    ("COPY docker.npmrc ./.npmrc\nRUN npm ci\n", False),
+    ("ENV NPM_CONFIG_AUDIT=false\nRUN npm ci\n", False),
+    ("ARG NPM_CONFIG_AUDIT\nRUN npm ci\n", False),
+    ("RUN npm config set audit false && npm ci\n", False),
+    # A setting applied only after the install does not cover it.
+    ("RUN npm ci\nENV NPM_CONFIG_AUDIT=false\n", True),
+])
+def test_opt114_image_audit_settings_follow_docker_order(
+    tmp_path: Path, docker_commands: str, fires: bool,
+):
+    _write_opt114_fixture(tmp_path, docker_commands)
+    (tmp_path / "docker.npmrc").write_text("audit=false\n", encoding="utf-8")
+
+    assert bool(_opt114_findings(tmp_path)) is fires
+
+
+def test_opt114_context_npmrc_not_copied_into_image_does_not_reach_it(tmp_path: Path):
+    # The Dockerfile copies only the manifests, so worker/.npmrc never applies
+    # inside the image: its `npm ci` still audits.
+    (tmp_path / "worker").mkdir()
+    (tmp_path / "worker" / ".npmrc").write_text("audit=false\n", encoding="utf-8")
+    (tmp_path / "worker" / "package-lock.json").write_text(_OPT114_LOCK, encoding="utf-8")
+    dockerfile = "FROM node:22\nCOPY package-lock.json ./\nRUN npm ci\n"
+
+    commands = scan._opt114_image_npm_commands(
+        dockerfile, tmp_path / "worker", tmp_path)
+
+    assert [(verb, copied) for verb, _command, copied in commands] == [
+        ("ci", ["worker/package-lock.json"])]
+    copied_npmrc = scan._opt114_image_npm_commands(
+        "FROM node:22\nCOPY . .\nRUN npm ci\n", tmp_path / "worker", tmp_path)
+    assert copied_npmrc == []
+
+
 def test_opt109_always_failure_reporter_runs_on_healthy_prs(tmp_path: Path):
     workflow = """name: CI
 on: pull_request

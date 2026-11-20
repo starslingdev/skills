@@ -2990,6 +2990,432 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT114 — duplicate npm advisory lookups inside CI image builds ---------
+#
+# Audit state is three-valued: "on", "off", or "unknown". Only "on" on both
+# halves (a host `npm ci` and an image-layer install/prune reading the same
+# lockfile) produces a finding; anything the scan cannot classify withholds it.
+
+_OPT114_TRUE = frozenset({"1", "true", "yes", "on"})
+_OPT114_FALSE = frozenset({"0", "false", "no", "off"})
+_OPT114_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json")
+_OPT114_NPM_COMMAND_RE = re.compile(
+    r"^(?:--mount=\S+\s+)*(?P<prefix>(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)"
+    r"npm\s+(?P<verb>ci|install|i|prune)\b(?P<args>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_OPT114_CONFIG_SET_RE = re.compile(
+    r"^npm\s+(?:config\s+)?set\s+audit(?:\s*=\s*|\s+)(?P<value>\S+)", re.I)
+_OPT114_DIR_CHANGE_RE = re.compile(
+    r"(?:^|[;&|(\n]|\bthen\b|\bdo\b|\belse\b)\s*(?:cd|pushd)\b", re.I)
+
+
+def _opt114_audit_value(value: Any) -> str:
+    text = str(value).strip().strip("'\"").lower()
+    if text in _OPT114_TRUE:
+        return "on"
+    if text in _OPT114_FALSE:
+        return "off"
+    return "unknown"
+
+
+def _opt114_shell_code(text: str) -> str:
+    """Shell text with heredoc bodies dropped and quoted strings blanked.
+
+    Only what the shell would run as a command survives: a heredoc body and a
+    quoted string are data (printed, written to a file, passed as an argument),
+    so an `npm ci` inside one is never read as an install."""
+    text = re.sub(r"\\[ \t]*\n[ \t]*", " ", text)
+    lines = text.split("\n")
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        index += 1
+        for delimiter in re.findall(r"<<-?\s*['\"]?([A-Za-z_][\w.-]*)", line):
+            while index < len(lines) and lines[index].strip() != delimiter:
+                index += 1
+            index += 1
+    code = "\n".join(kept)
+    code = re.sub(r"'[^'\n]*'", "''", code)
+    return re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', code)
+
+
+def _opt114_npm_commands(text: str) -> list[tuple[str, str, str]]:
+    """Direct npm install/prune commands as ``(verb, command, audit)``.
+
+    ``audit`` is the command's own setting ("on" / "off" / "unknown"), or ""
+    when the command leaves the ambient configuration in charge. A global
+    install (`-g`) is skipped: npm does not audit global installs."""
+    commands: list[tuple[str, str, str]] = []
+    for raw_segment in re.split(r"&&|\|\||;|\n|\|", _opt114_shell_code(text)):
+        segment = raw_segment.strip()
+        match = _OPT114_NPM_COMMAND_RE.match(segment)
+        if not match:
+            continue
+        args = match.group("args")
+        if re.search(r"(?:^|\s)(?:-g|--global)(?:\s|=|$)", args):
+            continue
+        verb = match.group("verb").lower()
+        verb = "install" if verb == "i" else verb
+        audit = ""
+        for name, value in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=(\S*)",
+                                      match.group("prefix")):
+            if name.lower() == "npm_config_audit":
+                audit = _opt114_audit_value(value)
+        flag = re.search(r"(?:^|\s)--(no-)?audit(?:=(\S+))?(?=\s|$)", args, re.I)
+        if flag:
+            if flag.group(1):
+                audit = "off"
+            elif flag.group(2) is not None:
+                audit = _opt114_audit_value(flag.group(2))
+            else:
+                audit = "on"
+        commands.append((verb, segment, audit))
+    return commands
+
+
+def _opt114_env_audit(env: Any) -> str:
+    """Audit state an Actions ``env:`` mapping sets ("" when it sets none)."""
+    if not isinstance(env, dict):
+        return "" if env in (None, "") else "unknown"
+    for key, value in env.items():
+        if str(key).lower() == "npm_config_audit":
+            return _opt114_audit_value(value)
+    return ""
+
+
+def _opt114_npmrc_audit(text: str) -> str:
+    """Audit state an npmrc file sets ("" when it sets none)."""
+    state = ""
+    for match in re.finditer(r"(?im)^\s*audit\s*=\s*([^\s#;]*)", text):
+        state = _opt114_audit_value(match.group(1))
+    return state
+
+
+def _opt114_host_npmrc_blocks(root: Path, directory: Path) -> bool:
+    """Whether a repository npmrc at or above ``directory`` may disable audit.
+
+    Conservative: every ancestor up to the checkout root is read, and an
+    unreadable file or a non-"on" setting withholds the finding."""
+    try:
+        relative = directory.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return True
+    for index in range(len(relative.parts) + 1):
+        candidate = root / Path(*relative.parts[:index]) / ".npmrc"
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        if _opt114_npmrc_audit(text) not in ("", "on"):
+            return True
+    return False
+
+
+def _opt114_host_lockfiles(root: Path, directory: Path) -> list[str]:
+    found: list[str] = []
+    for name in _OPT114_LOCKFILES:
+        path = directory / name
+        if path.is_file():
+            try:
+                found.append(path.resolve().relative_to(root.resolve()).as_posix())
+            except (OSError, ValueError):
+                continue
+    return found
+
+
+def _opt114_host_audits(doc: dict, job: dict, root: Path
+                        ) -> list[tuple[str | None, list[str]]]:
+    """Host `npm ci` runs that keep audit on: ``(condition, lockfiles)``.
+
+    A step whose directory cannot be resolved (an expression, a `cd`, a
+    `--prefix`/workspace flag), whose npmrc may disable audit, or that has no
+    lockfile in its directory is not counted."""
+    audits: list[tuple[str | None, list[str]]] = []
+    for step, condition in _steps_with_if(job):
+        if _opt102_step_build_config(step, job, doc) is not None:
+            continue
+        run = _run(step)
+        if not run:
+            continue
+        step_env = _opt114_env_audit(step.get("env"))
+        if step_env not in ("", "on"):
+            continue
+        workdir = _script_working_directory(job, step, doc)
+        if "${{" in workdir or Path(workdir).is_absolute():
+            continue
+        code = _opt114_shell_code(run)
+        if _OPT114_DIR_CHANGE_RE.search(code):
+            continue
+        directory = (root / workdir).resolve()
+        try:
+            directory.relative_to(root)
+        except ValueError:
+            continue
+        if _opt114_host_npmrc_blocks(root, directory):
+            continue
+        lockfiles = _opt114_host_lockfiles(root, directory)
+        if not lockfiles:
+            continue
+        for verb, command, audit in _opt114_npm_commands(run):
+            if verb != "ci" or audit not in ("", "on"):
+                continue
+            if re.search(r"(?:^|\s)(?:--prefix|-C|--workspaces?|-w|--ws)(?:\s|=|$)",
+                         command):
+                continue
+            audits.append((condition, lockfiles))
+            break
+    return audits
+
+
+def _opt114_job_blocks(doc: dict, job: dict) -> bool:
+    """Job-wide settings that may turn the host audit off, or that hide steps."""
+    if job_walk(job).malformed_groups:
+        return True
+    for env in (doc.get("env"), job.get("env")):
+        if _opt114_env_audit(env) not in ("", "on"):
+            return True
+    for step in _steps(job):
+        code = _opt114_shell_code(_run(step))
+        for segment in re.split(r"&&|\|\||;|\n|\|", code):
+            if _OPT114_CONFIG_SET_RE.match(segment.strip()):
+                return True
+        if re.search(r"(?i)npm_config_audit", _run(step)) and "GITHUB_ENV" in _run(step):
+            return True
+    return False
+
+
+def _opt114_copy_sources(body: str, context: Path, root: Path
+                         ) -> tuple[list[str], list[Path]] | None:
+    """Repository-relative sources one COPY/ADD reads, plus its npmrc files.
+
+    Globs expand against the build context. ``None`` when a source cannot be
+    resolved (a variable, a URL, a path outside the checkout)."""
+    joined = re.sub(r"\\\s*\n\s*", " ", body).strip()
+    operands = re.sub(r"^(?:--\S+\s+)+", "", joined)
+    try:
+        if operands.startswith("["):
+            values = json.loads(operands)
+            if not (isinstance(values, list) and len(values) >= 2
+                    and all(isinstance(value, str) for value in values)):
+                return None
+        else:
+            values = [token for token in shlex.split(operands)
+                      if not token.startswith("--")]
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if len(values) < 2:
+        return None
+    destination = values[-1]
+    sources: list[str] = []
+    npmrcs: list[Path] = []
+    for raw_source in values[:-1]:
+        source = str(raw_source).lstrip("/") or "."
+        if "://" in source or "$" in source:
+            return None
+        if any(char in source for char in "*?["):
+            try:
+                matches = sorted(context.glob(source))
+            except (OSError, ValueError, NotImplementedError):
+                return None
+        else:
+            matches = [context / source]
+        for match in matches:
+            resolved = match.resolve()
+            try:
+                relative = resolved.relative_to(root)
+            except ValueError:
+                return None
+            sources.append(relative.as_posix() or ".")
+            if resolved.is_dir():
+                if (resolved / ".npmrc").exists():
+                    npmrcs.append(resolved / ".npmrc")
+            elif resolved.name == ".npmrc" or destination.rstrip("/").endswith(".npmrc"):
+                npmrcs.append(resolved)
+    return sources, npmrcs
+
+
+def _opt114_image_npm_commands(text: str, context: Path, root: Path,
+                               target: str = "") -> list[tuple[str, str, list[str]]] | None:
+    """Image-layer npm install/prune commands that still audit.
+
+    Returns ``(verb, command, copied_sources)`` for the selected stage and the
+    stages it builds from, in order; ``copied_sources`` are the repository
+    paths copied into that stage chain before the command. Audit settings are
+    tracked per stage as Docker applies them: `ENV`/`ARG NPM_CONFIG_AUDIT`, an
+    `npm config set audit`, and an `.npmrc` COPY'd into the image. A build-context
+    `.npmrc` the Dockerfile never copies does not reach the image. ``None`` when
+    the selected stage cannot be identified."""
+    raw_stages = [stage for stage in re.split(r"(?im)(?=^\s*FROM\s+)", text)
+                  if re.match(r"(?i)^\s*FROM\s+", stage)]
+    stages: list[tuple[str, int | None, set[str]]] = []
+    aliases: dict[str, int] = {}
+    for stage in raw_stages:
+        clean = "\n".join(line for line in stage.splitlines()
+                          if not line.lstrip().startswith("#"))
+        header = clean.splitlines()[0].strip()
+        match = re.match(r"(?i)^FROM(?:\s+--\S+)*\s+(\S+)(?:\s+AS\s+(\S+))?", header)
+        if not match:
+            return None
+        base_ref = match.group(1).lower()
+        base = (aliases.get(base_ref) if base_ref in aliases
+                else (int(base_ref) if base_ref.isdigit()
+                      and int(base_ref) < len(stages) else None))
+        refs = set(re.findall(r"(?im)^\s*(?:COPY|RUN)\b[^\n]*?--from=([^\s,]+)", clean))
+        stages.append((clean, base, {ref.lower() for ref in refs}))
+        if match.group(2):
+            aliases[match.group(2).lower()] = len(stages) - 1
+    if not stages:
+        return None
+    if target:
+        if "${{" in target or "$" in target:
+            return None
+        selected = aliases.get(target.lower())
+        if selected is None:
+            return None
+    else:
+        selected = len(stages) - 1
+    reachable: set[int] = set()
+    pending = [selected]
+    while pending:
+        index = pending.pop()
+        if index in reachable:
+            continue
+        reachable.add(index)
+        _clean, base, refs = stages[index]
+        if base is not None:
+            pending.append(base)
+        for ref in refs:
+            ref_index = (int(ref) if ref.isdigit() and int(ref) < len(stages)
+                         else aliases.get(ref))
+            if ref_index is not None:
+                pending.append(ref_index)
+
+    end_state: dict[int, tuple[str, list[str]]] = {}
+    found: list[tuple[str, str, list[str]]] = []
+    for index, (clean, base, _refs) in enumerate(stages):
+        audit, copied = (end_state[base] if base is not None and base in end_state
+                         else ("on", []))
+        copied = list(copied)
+        for keyword, body in _opt102_dockerfile_instructions(clean):
+            if keyword in {"ENV", "ARG"}:
+                for name, value in re.findall(
+                        r"(?i)\b(npm_config_audit)(?:(?:=|\s+)(\S+))?", body):
+                    if keyword == "ARG" and not value:
+                        audit = "unknown"
+                    else:
+                        audit = _opt114_audit_value(value or "")
+            elif keyword in {"COPY", "ADD"}:
+                if re.search(r"(?:^|\s)--from(?:=|\s)", body):
+                    if "npmrc" in body.lower():
+                        audit = "unknown"
+                    continue
+                parsed = _opt114_copy_sources(body, context, root)
+                if parsed is None:
+                    audit = "unknown"
+                    continue
+                sources, npmrcs = parsed
+                copied.extend(sources)
+                for npmrc in npmrcs:
+                    try:
+                        state = _opt114_npmrc_audit(
+                            npmrc.read_text(encoding="utf-8", errors="replace"))
+                    except OSError:
+                        state = "unknown"
+                    if state:
+                        audit = state
+            elif keyword == "RUN":
+                if re.search(r"--mount=[^\s]*type=secret[^\s]*npmrc", body, re.I):
+                    audit = "unknown"
+                code = _opt114_shell_code(body)
+                for segment in re.split(r"&&|\|\||;|\n|\|", code):
+                    setting = _OPT114_CONFIG_SET_RE.match(segment.strip())
+                    if setting:
+                        audit = _opt114_audit_value(setting.group("value"))
+                        continue
+                    for verb, command, own in _opt114_npm_commands(segment):
+                        effective = own or audit
+                        if effective == "on" and index in reachable:
+                            found.append((verb, command, list(copied)))
+        end_state[index] = (audit, copied)
+    return found
+
+
+def _detect_opt114(doc: dict, raw: str) -> list[Hit]:
+    """Docker layers repeat npm's advisory request after an audited host install.
+
+    Both halves must hold in one job: a host `npm ci` that keeps audit on and
+    runs whenever the image build runs, and an image-layer install/prune that
+    still audits and reads that same lockfile (the image copies it in)."""
+    if _OPT102_ROOT is None:
+        return []
+    root = _OPT102_ROOT.resolve()
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict) or _opt114_job_blocks(doc, job):
+            continue
+        host_audits = _opt114_host_audits(doc, job, root)
+        if not host_audits:
+            continue
+        for step, condition in _steps_with_if(job):
+            build = _opt102_step_build_config(step, job, doc)
+            if build is None:
+                continue
+            lockfiles = sorted({lock for host_condition, locks in host_audits
+                                if host_condition is None
+                                or " ".join(str(host_condition).split())
+                                == " ".join(str(condition or "").split())
+                                for lock in locks})
+            if not lockfiles:
+                continue
+            config, marker = build
+            paths = _opt102_resolved_dockerfile(
+                root, config, env={}, matrix={}, inputs={}, outputs={})
+            if paths is None:
+                continue
+            candidate, context = paths
+            try:
+                text = candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            repeated = _opt114_image_npm_commands(
+                text, context, root, str(config.get("target") or ""))
+            if not repeated:
+                continue
+            shared = [lock for lock in lockfiles
+                      if any(any(_opt102_path_covers(source, lock) for source in copied)
+                             for _verb, _command, copied in repeated)]
+            verbs = sorted({verb for verb, _command, copied in repeated
+                            if any(_opt102_path_covers(source, lock)
+                                   for source in copied for lock in shared)})
+            if not shared or not verbs:
+                continue
+            line = _line_of_in_job(raw, str(job_name), marker)
+            rel = candidate.relative_to(root)
+            hits.append(Hit(
+                line=line,
+                affected_jobs=[str(job_name)],
+                evidence=(
+                    f"job `{job_name}` keeps host `npm ci` audit reporting for "
+                    f"`{shared[0]}`, but `{rel}` installs from that same lockfile and "
+                    f"repeats the default advisory lookup in "
+                    f"{', '.join(f'`npm {verb}`' for verb in verbs)}; add "
+                    "`--no-audit` to those image-layer install/prune commands only. "
+                    "Runner-minute effect: saving — removes repeated advisory wait "
+                    "from the same image-build runner; unsized because this static "
+                    "scan has no measured Docker-layer duration or 30-day job count."
+                ),
+                match_text=str(rel),
+                snippet=_raw_line(raw, line),
+            ))
+            break
+    return hits
+
+
 _OPT89_COMPILE_RE = re.compile(
     r"(?:^|&&|\|\||[;|]|\bthen\b|\bdo\b)\s*"
     + SHELL_PREFIX_SRC +  # `KEY=value` / env / sudo / time prefixes, see shell_prefix.py
@@ -7458,6 +7884,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT76": _detect_opt76,
     "OPT29": _detect_opt29,
     "OPT108": _detect_opt108,
+    "OPT114": _detect_opt114,
     "OPT109": _detect_opt109,
     "OPT31": _detect_opt31,
     "OPT32": _detect_opt32,
