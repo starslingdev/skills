@@ -2143,6 +2143,70 @@ jobs:
     assert _finding(_scan(tmp_path), "OPT39") is None
 
 
+def test_opt39_declared_language_inputs_are_stamped_for_exact_sizing(tmp_path: Path):
+    workflow = """
+name: Runtime conformance
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/runtime.yml'
+      - 'crates/**'
+      - 'packages/**'
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      rust_changed: ${{ steps.rust.outputs.changed }}
+    steps:
+      - name: Detect scheduled Rust input changes
+        id: rust
+        uses: ./.github/actions/detect-scheduled-changes
+        with:
+          proof-jobs: Rust workspace
+          paths: |
+            .github/workflows/runtime.yml
+            crates/**
+  proof:
+    needs: scope
+    if: github.event_name != 'schedule' || needs.scope.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "runtime.yml").write_text(workflow, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["opt39_language_inputs"] == [
+        ".github/workflows/runtime.yml", "crates/**"]
+    assert finding["opt39_workflow_inputs"] == [
+        ".github/workflows/runtime.yml", "crates/**", "packages/**"]
+
+
+def test_opt39_push_only_job_in_mixed_workflow_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Mixed CI
+on:
+  push:
+  pull_request:
+jobs:
+  go-proof:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "mixed.yml").write_text(workflow, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
 def test_opt39_language_scoped_pull_request_trigger_stays_quiet(tmp_path: Path):
     workflow = """
 name: Rust proof

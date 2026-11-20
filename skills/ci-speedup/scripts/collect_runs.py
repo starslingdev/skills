@@ -6540,55 +6540,54 @@ _OPT39_LANGUAGE_SUFFIXES: dict[str, tuple[str, ...]] = {
     "python": (".py", ".pyi"),
     "rust": (".rs",),
 }
-_OPT39_OTHER_LANGUAGE_SUFFIXES = (
-    ".c", ".cc", ".cpp", ".cs", ".go", ".java", ".js", ".jsx", ".kt",
-    ".mjs", ".php", ".py", ".pyi", ".rb", ".rs", ".swift", ".ts", ".tsx",
-)
-
-
-def _opt39_path_matches_language(path: str, language: str) -> bool:
-    value = path.lstrip("/").lower()
-    base = value.rsplit("/", 1)[-1]
-    if value.endswith(_OPT39_LANGUAGE_SUFFIXES.get(language, ())):
-        return True
-    if language == "go":
-        return base in {"go.mod", "go.sum", "go.work", "go.work.sum"}
-    if language == "rust":
-        return (base in {"cargo.toml", "cargo.lock", "rustfmt.toml", ".rustfmt.toml",
-                         "clippy.toml", ".clippy.toml", ".gitattributes"}
-                or base.startswith("rust-toolchain") or value.startswith(".cargo/"))
-    if language == "python":
-        return (base in {"pyproject.toml", "poetry.lock", "uv.lock", "setup.py",
-                         "setup.cfg", "tox.ini", ".python-version"}
-                or base.startswith("requirements"))
-    return False
-
-
-def _opt39_paths_classification(paths: list[str], languages: set[str]) -> str:
-    """Classify one PR as relevant, irrelevant or unknown for known toolchains.
-
-    Unknown inputs fail closed: the recipe runs the job and the sizing sample does
-    not count that PR as removable. This matters for shared JSON fixtures or custom
-    generators whose owner cannot be inferred from an extension.
-    """
+def _opt39_paths_classification(
+        paths: list[str], language_inputs: list[str], workflow_inputs: list[str]) -> str:
+    """Classify exact-run paths against an explicit, complete owner map."""
     if not paths:
         return "unknown"
     for path in paths:
-        value = path.lstrip("/").lower()
-        base = value.rsplit("/", 1)[-1]
-        if value.startswith(".github/workflows/"):
+        if any(_opt32_glob_matches(path, pattern) for pattern in language_inputs):
             return "relevant"
-        if any(_opt39_path_matches_language(value, language) for language in languages):
-            return "relevant"
-        known_other = (
-            value.endswith(_OPT39_OTHER_LANGUAGE_SUFFIXES)
-            or value.endswith((".md", ".mdx", ".rst"))
-            or base in {"package.json", "package-lock.json", "pnpm-lock.yaml",
-                        "yarn.lock", "bun.lock", "bun.lockb"}
-        )
-        if not known_other:
+        if not any(_opt32_glob_matches(path, pattern) for pattern in workflow_inputs):
             return "unknown"
     return "irrelevant"
+
+
+def _opt39_exact_changed_files(
+        client: GhClient, repo: str, run: dict[str, Any]) -> list[str] | None:
+    """Read the exact base/head comparison captured on one historical PR run."""
+    pulls = run.get("pull_requests")
+    if not isinstance(pulls, list) or not pulls or not isinstance(pulls[0], dict):
+        return None
+    pull = pulls[0]
+    base = (pull.get("base") or {}).get("sha") if isinstance(pull.get("base"), dict) else None
+    head = (pull.get("head") or {}).get("sha") if isinstance(pull.get("head"), dict) else None
+    if not (isinstance(base, str) and isinstance(head, str)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", base)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", head)):
+        return None
+    doc = client.json(f"repos/{repo}/compare/{base}...{head}")
+    files = doc.get("files") if isinstance(doc, dict) else None
+    if not isinstance(files, list) or not files or len(files) >= 300:
+        return None
+    paths: list[str] = []
+    supported = {"added", "modified", "removed", "renamed", "copied", "changed",
+                 "unchanged"}
+    for row in files:
+        if not isinstance(row, dict) or row.get("status") not in supported:
+            return None
+        filename = row.get("filename")
+        previous = row.get("previous_filename")
+        if not isinstance(filename, str) or not filename:
+            return None
+        if row.get("status") == "renamed" and not isinstance(previous, str):
+            return None
+        if previous is not None and not isinstance(previous, str):
+            return None
+        paths.append(filename)
+        if previous:
+            paths.append(previous)
+    return paths
 
 
 def _opt39_unsized(finding: dict[str, Any], reason: str, **counts: Any) -> None:
@@ -6613,7 +6612,6 @@ def _measure_opt39_language_jobs(
     jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
     vol_by_wf: dict[str, int | None],
     job_graph: Any,
-    changed_files: dict[int, list[str] | None],
 ) -> None:
     """Measure OPT39 per-language jobs from the sampled PRs and their job compute."""
     targets = [
@@ -6635,6 +6633,19 @@ def _measure_opt39_language_jobs(
         if not languages:
             withhold(finding)
             continue
+        language_inputs = [
+            str(pattern) for pattern in finding.get("opt39_language_inputs") or []
+            if isinstance(pattern, str) and pattern.strip()
+        ]
+        workflow_inputs = [
+            str(pattern) for pattern in finding.get("opt39_workflow_inputs") or []
+            if isinstance(pattern, str) and pattern.strip()
+        ]
+        if not language_inputs or not workflow_inputs:
+            _opt39_unsized(
+                finding, "the job's complete language input map is not declared",
+                sampled_prs=0, unknown_prs=0, missing_job_rows=0)
+            continue
         workflow_runs = list(sampled_runs_by_wf.get(workflow, []))
         sampled_runs = [
             run for run in workflow_runs
@@ -6646,18 +6657,22 @@ def _measure_opt39_language_jobs(
         if any(not isinstance(_run_pr_number(run), int) for run in sampled_runs):
             withhold(finding)
             continue
-        sampled_numbers = list(dict.fromkeys(
-            number for run in sampled_runs for number in [_run_pr_number(run)]
-            if isinstance(number, int)))
-        for number in sampled_numbers:
-            if number not in changed_files:
-                changed_files[number] = _opt32_changed_files(client, repo, number)
-        if any(changed_files.get(number) is None for number in sampled_numbers):
+        exact_paths: dict[str, list[str] | None] = {}
+        for run in sampled_runs:
+            run_id = _run_id(run)
+            if not run_id:
+                withhold(finding)
+                break
+            exact_paths[run_id] = _opt39_exact_changed_files(client, repo, run)
+        if finding not in findings:
+            continue
+        if any(paths is None for paths in exact_paths.values()):
             withhold(finding)
             continue
         classifications = {
-            number: _opt39_paths_classification(changed_files.get(number) or [], languages)
-            for number in sampled_numbers
+            run_id: _opt39_paths_classification(
+                paths or [], language_inputs, workflow_inputs)
+            for run_id, paths in exact_paths.items()
         }
         if any(value == "unknown" for value in classifications.values()):
             withhold(finding)
@@ -6669,11 +6684,11 @@ def _measure_opt39_language_jobs(
         rows: list[tuple[int, str, float]] = []
         missing_job_rows = 0
         for run_jobs in jobs_per_run_by_wf.get(workflow, []):
-            pr_number = next((
-                job.get("_run_pr_number") for job in run_jobs
-                if isinstance(job.get("_run_pr_number"), int)
-            ), None)
-            if not isinstance(pr_number, int) or changed_files.get(pr_number) is None:
+            run_id = next((
+                str(job.get("_run_id")) for job in run_jobs
+                if job.get("_run_id") not in (None, "")
+            ), "")
+            if not run_id or run_id not in classifications:
                 continue
             matched = [
                 job for job in run_jobs
@@ -6683,8 +6698,8 @@ def _measure_opt39_language_jobs(
             if not matched or any(value is None for value in priced):
                 missing_job_rows += 1
                 continue
-            classification = classifications.get(pr_number, "unknown")
-            rows.append((pr_number, classification,
+            classification = classifications.get(run_id, "unknown")
+            rows.append((run_id, classification,
                          float(sum(value for value in priced if value is not None))))
         classified = rows
         if missing_job_rows:
@@ -34589,7 +34604,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _changed_files: dict[int, list[str] | None] = {}
     _measure_opt39_language_jobs(
         client, repo, findings, sampled_runs_by_wf, jobs_per_run_by_wf,
-        vol_by_wf, findings_doc.get("workflow_job_graph"), _changed_files)
+        vol_by_wf, findings_doc.get("workflow_job_graph"))
     _measure_opt32_path_filters(
         client, repo, findings, sampled_runs_by_wf, _wf_docs,
         changed_files=_changed_files)

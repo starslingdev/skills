@@ -4924,6 +4924,53 @@ def _opt39_trigger_is_language_scoped(on: object, languages: list[str]) -> bool:
     return all(owner == "shared" or owner in languages for owner in owners)
 
 
+def _opt39_declared_input_map(
+        doc: dict, on: object, languages: list[str]) -> tuple[list[str], list[str]] | None:
+    """Return (language inputs, workflow inputs) only for an explicit owner map.
+
+    The public evidence reuses a scheduled-change action's complete `paths:` list
+    for pull-request ownership. A suffix guess is not a complete input contract.
+    """
+    if not isinstance(on, dict):
+        return None
+    pull_request = on.get("pull_request")
+    workflow_paths = pull_request.get("paths") if isinstance(pull_request, dict) else None
+    if isinstance(workflow_paths, str):
+        workflow_paths = [workflow_paths]
+    if (not isinstance(workflow_paths, list) or not workflow_paths
+            or any(not isinstance(path, str) or path.strip().startswith("!")
+                   for path in workflow_paths)):
+        return None
+    language_patterns: list[str] = []
+    language_names = tuple(language.lower() for language in languages)
+    for upstream_name, upstream in _jobs_from_doc(doc).items():
+        if not isinstance(upstream, dict):
+            continue
+        for step in _steps(upstream):
+            uses = _uses(step).lower()
+            with_doc = step.get("with") if isinstance(step, dict) else None
+            if "detect-scheduled-changes" not in uses or not isinstance(with_doc, dict):
+                continue
+            descriptor = " ".join((
+                upstream_name, str(upstream.get("name") or ""),
+                str(step.get("name") or ""), str(with_doc.get("proof-jobs") or ""),
+            )).lower()
+            if not any(language in descriptor for language in language_names):
+                continue
+            paths = with_doc.get("paths")
+            if not isinstance(paths, str):
+                continue
+            candidates = [line.strip() for line in paths.splitlines() if line.strip()]
+            if (not candidates or any(line.startswith("!") or "${{" in line
+                                      for line in candidates)):
+                continue
+            language_patterns.extend(candidates)
+    if not language_patterns:
+        return None
+    return (list(dict.fromkeys(language_patterns)),
+            list(dict.fromkeys(str(path).strip() for path in workflow_paths)))
+
+
 def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
     """A language-specific PR job with no changed-path gate (OPT39)."""
     # The finding's claim is "every language leg runs on every PR" — only true if the
@@ -4957,6 +5004,9 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
         if job_languages and (language_path_gated or _opt39_trigger_is_language_scoped(
                 on, job_languages)):
             continue
+        if job_languages and not _opt96_condition_allows(
+                job.get("if"), "pull_request", "main"):
+            continue
         if scanner_matrix:
             evidence = (f"job `{job_name}` runs a `language` matrix scanner with no "
                         f"`dorny/paths-filter` gate — every language leg runs on "
@@ -4974,6 +5024,10 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
                 "opt39_job_kind": "per-language-toolchain",
                 "opt39_languages": job_languages,
             }
+            declared_inputs = _opt39_declared_input_map(doc, on, job_languages)
+            if declared_inputs is not None:
+                facts["opt39_language_inputs"] = declared_inputs[0]
+                facts["opt39_workflow_inputs"] = declared_inputs[1]
         hits.append(Hit(
             # Anchor on THIS job's `language` matrix line, not the file-global
             # first `language` substring elsewhere in the file (the OPT33/OPT29
