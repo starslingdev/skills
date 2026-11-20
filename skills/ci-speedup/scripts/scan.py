@@ -50,6 +50,7 @@ SCAN_INCOMPLETE_KINDS = frozenset({
     "workflow-unreadable", "workflow-unparseable", "workflow-not-mapping",
     "parallel-group-unread", "symlink-out-of-tree", "no-workflows-dir",
     "opt19-file-cap", "opt19-source-unreadable", "turbo-unreadable",
+    "opt25-source-unreadable",
 })
 
 # Detectors proven by cardinality tests to emit one finding per physical
@@ -9021,6 +9022,88 @@ _OPT19_PATTERNS: tuple[tuple[str, "re.Pattern[str]", float], ...] = (
 _OPT19_FILE_CAP = 8000
 
 
+_OPT25_SPLITTER_PATH_RE = re.compile(r"(?:shard|split|partition)", re.IGNORECASE)
+_OPT25_SPLITTER_SUFFIXES = (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+_OPT25_SORT_ASSIGN_RE = re.compile(
+    r"(?m)^\s*(?:const\s+|let\s+|var\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"\s*=\s*(?:sorted\s*\(|[^\n;]*\.sort\s*\()")
+_OPT25_SORT_IN_PLACE_RE = re.compile(
+    r"(?m)^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\.sort\s*\(")
+
+
+def _opt25_positional_use(text: str, name: str) -> re.Match[str] | None:
+    escaped = re.escape(name)
+    stride = re.compile(
+        rf"\b{escaped}\s*\[\s*(?:shard|index|i)\w*\s*::\s*"
+        rf"(?:count|shards?|total|n)\w*\s*\]", re.IGNORECASE)
+    modulo = re.compile(
+        rf"\b{escaped}\.filter\s*\([^\n]{{0,240}}\b(?:index|i)\w*\s*%\s*"
+        rf"(?:count|shards?|total|n)\w*", re.IGNORECASE)
+    return stride.search(text) or modulo.search(text)
+
+
+def _detect_opt25_positional_splitters(root: Path):
+    """Sorted test lists assigned by position, so insertions reshuffle shards."""
+    hits: list[tuple[str, str, Hit]] = []
+    incomplete: list[dict[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames
+                       if name not in _OPT19_SKIP_DIRS and not name.startswith(".")]
+        for filename in filenames:
+            if not filename.endswith(_OPT25_SPLITTER_SUFFIXES):
+                continue
+            path = Path(dirpath, filename)
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            try:
+                if not _inside_scan_root(path):
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                incomplete.append({
+                    "path": rel, "kind": "opt25-source-unreadable",
+                    "reason": f"OPT25 splitter source read failed: {exc}",
+                })
+                continue
+            if (not _OPT25_SPLITTER_PATH_RE.search(rel)
+                    and not re.search(r"\b(?:shard|partition)\w*\b", text,
+                                      re.IGNORECASE)):
+                continue
+            assignments = list(_OPT25_SORT_ASSIGN_RE.finditer(text))
+            assignments += list(_OPT25_SORT_IN_PLACE_RE.finditer(text))
+            for assignment in assignments:
+                name = assignment.group("name")
+                positional = _opt25_positional_use(text[assignment.end():], name)
+                if positional is None:
+                    continue
+                line = text.count("\n", 0, assignment.end() + positional.start()) + 1
+                hit = Hit(
+                    line=line, affected_jobs=[], match_text=name,
+                    evidence=(f"planner file `{rel}` sorts `{name}` and assigns it by "
+                              "position, so inserting a test reshuffles existing shards"),
+                    facts={
+                        "positional_splitter_static": True,
+                        "pattern_class": "static",
+                        "wall_clock_p50_s": None,
+                        "runner_min_saving": None,
+                        "tier": 2,
+                        "realization": "none",
+                        "fix_strategy": (
+                            "Place unlisted tests by a stable hash of the test name, "
+                            "then pack a checked-in list of measured slow tests "
+                            "heaviest first onto the lightest shard. Take weights from "
+                            "per-test timings printed by CI shards and exclude per-shard "
+                            "constants from those weights."),
+                        "size_note": (
+                            "runner-minute effect: roughly neutral because the same "
+                            "existing shard jobs run the same tests; wall-clock saving "
+                            "is unsized until CI per-test timings measure the imbalance"),
+                    },
+                )
+                hits.append(("OPT25", rel, hit))
+                break
+    return hits, incomplete
+
+
 def _detect_opt19(root: Path):
     """Return ([(pattern, workflow_file, Hit, total_seconds)], incomplete).
 
@@ -10003,6 +10086,20 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         f["realization"] = "direct"
         f["measured_signal"] = hit.evidence
         f["measured_evidence"] = me
+        findings.append(f)
+
+    # OPT25 source extension: a positional splitter can be structurally
+    # unstable before sampled leg timings have become imbalanced. Keep it
+    # uncredited and hand off the stable-hash + CI-weighted recipe.
+    opt25_source_hits, opt25_source_incomplete = _detect_opt25_positional_splitters(root)
+    scan_incomplete.extend(opt25_source_incomplete)
+    for pat, source_path, hit in opt25_source_hits:
+        entry = catalog_by_id.get(pat)
+        if entry is None:
+            continue
+        finding_idx += 1
+        f = _emit(entry, hit, source_path, finding_idx)
+        f.update(hit.facts)
         findings.append(f)
 
     # Reconcile mutually-exclusive remedies that fired on the SAME physical step

@@ -2251,6 +2251,7 @@ Strip trailing digits and separators from named variants (`slow-0` → `large`),
 
 - Collect per-leg median duration of a matrix base across sampled runs; flag an atomic-unit ratio of at least 1.6×, or a plain imbalance if `max_leg_median / min_leg_median > 3` (**lower to 2x** when the slow leg is the workflow's long pole).
 - **Classify the case**: without a named family, the matrix is *sharded* (case 1) only when the varying axis token is an explicit `shard`/`partition` marker. A prefix-varying / named-package / named-config axis is *heterogeneous* (case 2). Bare-number axes (node versions, etc.) are treated as heterogeneous (they are not interchangeable shards).
+- **Static early warning**: inspect repository sharding scripts for a sorted test list assigned by position (`names[index::count]`, or a sorted JavaScript list filtered by `index % count`). Inserting one test reshuffles most existing assignments even before sampled legs cross the imbalance threshold. A stable name hash stays quiet.
 
 **Fix — case 1 (sharded suite), achievable by redistribution**:
 
@@ -2259,6 +2260,7 @@ Strip trailing digits and separators from named variants (`slow-0` → `large`),
 - Timing-based sharding (pytest-split, nextest timing data): enable it.
 - Runner distributes by whole file (Jest `--shard`, Playwright `--shard` without `fullyParallel: true`, file-granular splitters): the imbalance is one oversized file, so find it from measured per-file runtime and split it before adding shards; more shards cannot spread one file. Playwright with `fullyParallel: true` shards individual tests, so this does not apply there.
 - Sizing: the slow shard can drop toward the mean leg duration → `Δwc ≈ slow − mean(legs)`.
+- For a hand-written positional splitter, place every unlisted test by a stable hash of its test name. Keep a checked-in list of measured slow tests and pack those heaviest first onto the currently lightest shard. Take weights from the per-test timings printed by CI shards, not local runs, and exclude per-shard constants such as a one-time build paid by the first caller. The same existing jobs still execute the same tests, so the runner-minute effect is roughly neutral; wall-clock saving remains unsized until CI timings measure the imbalance. Public examples show that adding two tests moved 1,949 existing assignments under the stride rule and zero under the hash rule in [openclaw/crabbox#2826](https://github.com/openclaw/crabbox/pull/2826), with weights then taken from CI timings in [openclaw/crabbox#2832](https://github.com/openclaw/crabbox/pull/2832).
 
 **Fix — case 2 (heterogeneous legs), NOT rebalanceable**:
 

@@ -518,6 +518,52 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
             if not check.skipped and not check.ok] == []
 
 
+def test_positional_splitter_runs_through_collection_and_full_verifier(
+        monkeypatch, tmp_path):
+    positive = tmp_path / "positional-splitter"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    scripts = positive / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return names[shard::count]
+''', encoding="utf-8")
+    run_root = tmp_path / "run-positional-splitter"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(positive, monkeypatch, run_root, max_runs=20)
+    findings = [row for row in doc["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings, "expected sorted positional splitter guidance"
+    finding = findings[0]
+    assert finding.get("wall_clock_p50_s") is None, finding
+    assert finding.get("runner_min_saving") is None, finding
+    assert "stable hash" in finding.get("fix_strategy", ""), finding
+    assert "runner-minute effect: roughly neutral" in finding.get("size_note", ""), finding
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+    negative = tmp_path / "stable-hash-splitter"
+    shutil.copytree(positive, negative)
+    (negative / "scripts" / "test-shard.py").write_text('''\
+import hashlib
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return [name for name in names
+            if int(hashlib.sha256(name.encode()).hexdigest(), 16) % count == shard]
+''', encoding="utf-8")
+    negative_root = tmp_path / "run-stable-hash-splitter"
+    negative_root.mkdir()
+    negative_doc, _negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
 def test_runtime_typescript_loader_is_sized_from_profiled_long_pole_only(
         monkeypatch, tmp_path):
     """Runtime transpilation needs a measured loader share, not a command guess."""

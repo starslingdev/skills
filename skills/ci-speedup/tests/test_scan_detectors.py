@@ -636,6 +636,41 @@ jobs:
     assert "OPT16" not in _scan_one(tmp_path, neg)
 
 
+def test_opt25_finds_sorted_positional_shard_splitter(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return names[shard::count]
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings, "expected sorted positional splitter guidance"
+    finding = findings[0]
+    assert "stable hash" in finding.get("fix_strategy", ""), finding
+    assert "runner-minute effect: roughly neutral" in finding.get("size_note", ""), finding
+
+
+def test_opt25_positional_splitter_keeps_stable_hash_partition_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+import hashlib
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return [name for name in names
+            if int(hashlib.sha256(name.encode()).hexdigest(), 16) % count == shard]
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings == [], findings
+
+
 def test_opt18_not_auto_emitted(tmp_path: Path):
     """OPT18 is NOT auto-emitted as a finding: which services a job needs can't
     be determined from the workflow YAML (it needs docker-compose.yml + the test

@@ -7038,6 +7038,21 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
+    if f.get("positional_splitter_static"):
+        # Source proves an unstable assignment rule, not a duration or current
+        # imbalance. Preserve its neutral runner-cost disclosure without
+        # inventing the measured OPT25 wall-clock model.
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f.setdefault(
+            "size_note",
+            "runner-minute effect: roughly neutral because the same existing "
+            "shard jobs run the same tests; wall-clock saving is unsized until "
+            "CI per-test timings measure the imbalance",
+        )
+        return
     cache_confirmation = f.get("cache_log_confirmation")
     confirmed_miss_majority = (
         isinstance(cache_confirmation, dict)
