@@ -606,7 +606,9 @@ gap, and at most 4 log probes;
 OPT81: 8 samples per label, a 30-second and 25% gap, 50% covered time, and a
 30-second cache-lever floor; OPT82: 60 seconds; OPT83: 15% and 20 seconds;
 OPT84: 0% minimum share and 20 seconds, and 15% of the pole for its
-install row (npm, pnpm or Yarn install to `bun install`); OPT108: a successful
+install row (npm, pnpm or Yarn install to `bun install`); OPT106: OPT83's
+15% and 20 seconds for a runtime-loader step on the default (unsized) path, and
+30 seconds and 20% of the job wall for a profiled loader; OPT108: a successful
 comment-triggered run under 30 seconds counts as a rejected comment (the drill's
 self-skip floor, `_NOOP_FLOOR_S`), and at least 3 such runs must be priced
 before its runner-minute saving is credited.
@@ -896,7 +898,9 @@ implementation lands.
       "collect_runs.py:_OPT83_MIN_SHARE": 0.15,
       "collect_runs.py:_OPT83_MIN_STEP_S": 20.0,
       "verify_report.py:_VR_OPT83_MIN_SHARE": 0.15,
-      "verify_report.py:_VR_OPT83_MIN_STEP_S": 20.0
+      "verify_report.py:_VR_OPT83_MIN_STEP_S": 20.0,
+      "verify_report.py:_VR_OPT106_MIN_STEP_SHARE": 0.15,
+      "verify_report.py:_VR_OPT106_MIN_STEP_S": 20.0
     }
   },
   "opt84-minimum-seconds": {
