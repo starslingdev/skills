@@ -454,67 +454,127 @@ def test_opt81_a1_gap_below_floor_is_a_verdict_not_a_held_back_candidate():
     assert found == [] and withheld.get("gap_below_floor") == 1
 
 
-def test_opt81_reports_a_smaller_runner_within_five_percent_with_signed_effect():
-    large = [100, 101, 99, 102, 100]
-    small = [103, 104, 102, 105, 103]
-    found, withheld, cands, *_ = _a1(_alt_runs(
-        slow_label="starsling-ubuntu-24.04-4", slow=large,
-        fast_label="starsling-ubuntu-24.04-2", fast=small))
+_LARGE8 = "ubuntu-24.04-8-cores"
+_SMALL4 = "ubuntu-24.04-4-cores"
+
+
+def _downsize(large=(100, 101, 99, 102, 100), small=(103, 104, 102, 105, 103),
+              large_label=_LARGE8, small_label=_SMALL4, job=None):
+    runs = _alt_runs(slow_label=large_label, slow=list(large),
+                     fast_label=small_label, fast=list(small))
+    if job:
+        for run in runs:
+            for j in run:
+                j["name"] = job
+    return _a1(runs)
+
+
+def test_opt81_reports_a_smaller_runner_as_a_signed_runner_cost_saving():
+    """Issue #398: the saving is the price difference between the two sizes, with
+    its basis (paired samples, the price ratio and its source), never wall-clock."""
+    found, withheld, cands, *_ = _downsize()
 
     assert len(found) == 1, (withheld, cands)
     f = found[0]
     fr = f["faster_runner"]
     assert fr["kind"] == "opt81_downsize"
-    assert fr["large"]["size"] == "4" and fr["small"]["size"] == "2"
+    assert fr["large"]["size"] == "8" and fr["small"]["size"] == "4"
     assert fr["slowdown_frac"] == pytest.approx(0.03, abs=0.001)
-    assert f["runner_minute_effect"]["direction"] == "added_cost"
-    assert f["runner_minute_effect"]["runner_min_per_run"] == pytest.approx(0.05)
-    assert f["wall_clock_p50_s"] == 0.0
+    effect = f["runner_cost_effect"]
+    assert effect["direction"] == "saving"
+    # 4-core 0.012 / 8-core 0.022 per minute, GitHub's published Linux x64 rates.
+    assert effect["price_ratio"] == pytest.approx(0.5455)
+    assert effect["runner_cost_frac"] == pytest.approx(1 - 103 * 0.5455 / 100, abs=1e-4)
+    assert effect["price_source"] == cr._OPT81_PRICE_SOURCE_URL
+    assert "runner_minute_effect" not in f and "runner_minute_effect" not in fr
+    assert f["wall_clock_p50_s"] == 0.0 and f.get("runner_min_saving") is None
+    assert "runner-cost saving of 43.8% per job run" in f["evidence"]
+    assert "price ratio 0.5455" in f["evidence"] and "read 2026-11-20" in f["evidence"]
     assert cands == []
 
 
-def test_opt81_smaller_runner_faster_is_a_signed_runner_minute_saving():
-    found, *_ = _a1(_alt_runs(
-        slow_label="starsling-ubuntu-24.04-4", slow=[105] * 5,
-        fast_label="starsling-ubuntu-24.04-2", fast=[101] * 5))
-
-    effect = found[0]["runner_minute_effect"]
-    assert effect["direction"] == "saving"
-    assert effect["runner_min_per_run"] == pytest.approx(0.0667, abs=0.0001)
+def test_opt81_downsize_without_a_published_rate_is_unsized_with_its_reason():
+    found, *_ = _downsize(large_label="starsling-ubuntu-24.04-4",
+                          small_label="starsling-ubuntu-24.04-2")
+    effect = found[0]["runner_cost_effect"]
+    assert effect["direction"] == "unsized"
+    assert "no published per-minute rate" in effect["reason"]
+    assert "price_ratio" not in effect and "runner_cost_frac" not in effect
 
 
 def test_opt81_smaller_runner_more_than_five_percent_slower_stays_quiet():
-    found, withheld, _cands, *_ = _a1(_alt_runs(
-        slow_label="starsling-ubuntu-24.04-4", slow=[100] * 5,
-        fast_label="starsling-ubuntu-24.04-2", fast=[107] * 5))
+    found, withheld, cands, *_ = _downsize(large=[100] * 5, small=[107] * 5)
 
     assert found == []
     assert withheld.get("downsize_slowdown_above_limit") == 1
+    # A measured verdict, never a held-back candidate.
+    assert cands == [] and "fewer_than_min_samples_on_two_labels" not in withheld
 
 
-def test_opt81_downsize_card_carries_signed_effect_and_route_guards():
-    found, *_ = _a1(_alt_runs(
-        slow_label="starsling-ubuntu-24.04-4", slow=[100] * 5,
-        fast_label="starsling-ubuntu-24.04-2", fast=[103] * 5))
+def test_opt81_two_images_are_not_a_downsize():
+    """Near miss: a 16-core 22.04 route and an 8-core 24.04 route differ in image
+    (a compatibility pin), not only in size."""
+    found, withheld, *_ = _downsize(large_label="ubuntu-22.04-16-cores",
+                                    small_label="ubuntu-24.04-8-cores")
+    assert found == [], withheld
+
+
+@pytest.mark.parametrize("job", ["bench (compat)", "release build",
+                                 "test-pinned-runner", "frozen image smoke"])
+def test_opt81_pinned_or_compatibility_routes_are_never_downsized(job):
+    found, withheld, cands, *_ = _downsize(job=job)
+    assert found == []
+    assert withheld.get("downsize_pinned_or_compatibility_route") == 1
+    assert cands == []
+
+
+def test_opt81_ordinary_job_names_with_route_words_inside_still_fire():
+    # Whole words only: "pinpoint" and "compatible-api" are not pinned/release routes.
+    for job in ("pinpoint tests", "compatible-api lint"):
+        found, *_ = _downsize(job=job)
+        assert len(found) == 1, job
+
+
+def test_opt81_downsize_card_states_runner_cost_not_runner_minutes():
+    found, *_ = _downsize(large=[100] * 5, small=[103] * 5)
     card = "\n".join(bp._opt81_card(found[0], "https://example.invalid/catalog"))
 
-    assert "smaller `starsling-ubuntu-24.04-2`" in card
-    assert "added cost 0.05 runner-minutes per job run" in card
+    assert f"smaller `{_SMALL4}`" in card
+    assert "**Runner-cost effect:** runner-cost saving of 43.8% per job run" in card
+    assert "price ratio 0.5455" in card and cr._OPT81_PRICE_SOURCE_URL in card
+    assert "**Runner-minute effect:**" not in card
+    assert "runner-minutes per job run" not in card
     assert all(word in card for word in ("pinned", "frozen", "compatibility"))
-    assert "price" in card and "not sized" in card
 
 
-def test_opt81_verifier_rederives_downsize_shape_and_signed_effect():
+def test_opt81_verifier_rederives_downsize_shape_and_signed_cost_effect():
     vr = _load_verify_report()
-    found, *_ = _a1(_alt_runs(
-        slow_label="starsling-ubuntu-24.04-4", slow=[100] * 5,
-        fast_label="starsling-ubuntu-24.04-2", fast=[103] * 5))
+    found, *_ = _downsize(large=[100] * 5, small=[103] * 5)
     f = copy.deepcopy(found[0])
 
     assert vr._opt81_a1_rederived(f) == []
-    f["runner_minute_effect"]["direction"] = "saving"
-    assert any("runner-minute effect" in problem
+    f["runner_cost_effect"]["direction"] = "added_cost"
+    assert any("runner-cost effect" in problem
                for problem in vr._opt81_a1_rederived(f))
+    g = copy.deepcopy(found[0])
+    g["runner_cost_effect"]["price_ratio"] = 0.5
+    g["faster_runner"]["runner_cost_effect"]["price_ratio"] = 0.5
+    assert any("runner-cost effect" in problem
+               for problem in vr._opt81_a1_rederived(g))
+
+
+def test_opt81_price_table_stays_coupled_to_the_verifier():
+    vr = _load_verify_report()
+    assert vr._VR_OPT81_GITHUB_LARGER_RATE_PER_MIN == cr._OPT81_GITHUB_LARGER_RATE_PER_MIN
+    assert vr._VR_OPT81_PRICE_SOURCE_URL == cr._OPT81_PRICE_SOURCE_URL
+    assert vr._VR_OPT81_PRICE_SOURCE_READ == cr._OPT81_PRICE_SOURCE_READ
+    assert (vr._VR_OPT81_DOWNSIZE_PINNED_ROUTE_RE.pattern
+            == cr._OPT81_DOWNSIZE_PINNED_ROUTE_RE.pattern)
+    effect = {"direction": "saving", "runner_cost_frac": 0.4381, "price_ratio": 0.5455,
+              "price_basis": "b", "price_source": "u", "price_read": "d"}
+    assert (vr._vr_opt81_downsize_effect_text(effect, 5, 5)
+            == bp._opt81_downsize_effect_text(effect, 5, 5)
+            == cr._opt81_downsize_effect_text(effect, 5, 5))
 
 
 def test_opt81_a1_three_qualifying_labels_withhold():
@@ -832,6 +892,8 @@ def _opt81_texts() -> dict[str, str]:
         "a1 finding": json.dumps(a1),
         "a2 finding": json.dumps(a2),
         "a1 card + prompt": "\n".join(bp._opt81_card(a1, url)),
+        "a1 downsize finding": json.dumps(_downsize()[0][0]),
+        "a1 downsize card + prompt": "\n".join(bp._opt81_card(_downsize()[0][0], url)),
         "a2 card + prompt": "\n".join(bp._opt81_card(a2, url)),
         "a2 held back": "\n".join(bp._opt81_card(a2, url, held_back_by="x")),
         "unrouted section": "\n".join(bp._opt81_unrouted_block([a1, a2], url)),
@@ -1512,8 +1574,8 @@ def test_opt81_downsize_runs_through_collect_and_full_report_verifier(
     renderer-only stamp, and the complete report verifier accepts the result."""
     vr = _load_verify_report()
     plan = [leg for pair in zip(
-        [("starsling-ubuntu-24.04-4", 100)] * 5,
-        [("starsling-ubuntu-24.04-2", 103)] * 5,
+        [("ubuntu-24.04-8-cores", 100)] * 5,
+        [("ubuntu-24.04-4-cores", 103)] * 5,
     ) for leg in pair]
     doc = _collect(monkeypatch, plan,
                    seed={"skill_commit_sha": "installed:unversioned"})

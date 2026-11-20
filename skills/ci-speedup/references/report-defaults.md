@@ -605,7 +605,8 @@ runs; OPT79: 3 hits, 3 misses, 5 seconds and 20% waste, a 25% tail share, and
 gap, and at most 4 log probes;
 OPT81: 8 samples per label, a 30-second and 25% gap, 50% covered time, and a
 30-second cache-lever floor; its same-class downsize half needs 5 samples per
-size and allows at most a 5% absolute median-duration difference; OPT82: 60
+size and allows at most a 5% absolute median-duration difference, and is priced
+by the ratio of GitHub's published per-minute rates for the two sizes; OPT82: 60
 seconds; OPT83: 15% and 20 seconds;
 OPT84: 0% minimum share and 20 seconds, and 15% of the pole for its
 install row (npm, pnpm or Yarn install to `bun install`); OPT108: a successful
