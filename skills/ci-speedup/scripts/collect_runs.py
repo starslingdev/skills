@@ -5891,6 +5891,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     # OPT108: measured from the comment workflow's short successful runs
     # (`_size_opt108_comment_runs`); unsized with its reason otherwise.
     "OPT108": {"model": "measured"},
+    "OPT112": {"model": "measured"},
     "OPT29": {"model": "runner-min-only", "hit_rate": 0.1, "cost_basis": "affected_jobs",
               "cost_basis_rate_label": "the merge_group-run share",
               "cost_basis_label": "the merge_group-run share of the job's compute reclaimed by "
@@ -8248,6 +8249,9 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
               "the affected jobs' measured cost-spine billable"),
     "OPT106": (_RM_DOOR_CLAMP,
                "profiled runtime TypeScript loader self time — measured per-run "
+               "credit clamped to the affected job's measured cost-spine billable"),
+    "OPT112": (_RM_DOOR_CLAMP,
+               "measured same-key fresh-versus-old Go build-cache slowdown — "
                "credit clamped to the affected job's measured cost-spine billable"),
     # DERIVE — whole-run cancel re-derives hit_rate x the affected jobs' measured
     # billable (implemented by `_reground_whole_run_cancel_saving`, run first).
@@ -29668,6 +29672,206 @@ def _cache_path_sample(client, repo: str, jobs: list, facts: list,
                          for fact, s in zip(facts, state) if s["valid"] and s["runs"]]}
 
 
+# The key is quoted into the report, so only a cache key's ordinary characters
+# are admitted; a restore line carrying anything else is treated as no restore.
+_GO_CACHE_RESTORE_RE = _re.compile(
+    r"^Cache restored from key:\s*(?P<key>[A-Za-z0-9_.+=/:,@-]{1,512})\s*$",
+    _re.IGNORECASE)
+_GO_STEP_HEADER_RE = _re.compile(r"^##\[group\]Run\s+(?P<head>.+)$")
+# A step that names the Go build cache and touches files is a retention step
+# (the issue's own fix); its presence withholds the finding.
+_GO_BUILD_CACHE_NAME_RE = _re.compile(r"GOCACHE|go-build", _re.IGNORECASE)
+_GO_CACHE_TOUCH_RE = _re.compile(r"(?:^|[\s;&|(])touch\b")
+# cmd/go (src/cmd/go/internal/cache/cache.go) trims entries whose mtime is older
+# than trimLimit (5 days) plus mtimeInterval (1 hour), at most once per
+# trimInterval (24 hours), when a go command closes the cache. An archive older
+# than this at restore time is fully exposed to the first command's trim; one
+# younger than five days loses nothing to it.
+_OPT112_FRESH_ARCHIVE_DAYS = 5.0
+_OPT112_TRIM_CUTOFF_DAYS = 5.0 + 1.0 / 24.0
+_OPT112_MIN_SLOWDOWN_S = 30.0
+_OPT112_MIN_RUNS_PER_WINDOW = 2
+_OPT112_MAX_FRESH_LOGS = 4
+_OPT112_MAX_OLD_LOGS = 4
+
+
+def _step_with_inputs(lines: list[str]) -> list[str]:
+    """The `with:` input lines GitHub echoes in a step's group header.
+
+    The runner also echoes job/step `env:` into every step group; those lines
+    describe the environment, not what this step caches, so they stop the scan.
+    """
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        bare = line.strip()
+        if bare == "with:":
+            inside = True
+            continue
+        if bare == "env:" or bare.startswith("##[endgroup]"):
+            if inside:
+                break
+            continue
+        if inside:
+            out.append(line)
+    return out
+
+
+def _go_cache_restore_fact(log: str) -> dict[str, Any] | None:
+    """The exact Go build-cache key an ordinary job log restored, if any.
+
+    Reads only what `actions/setup-go` and `actions/cache` print by default:
+    setup-go's `Cache restored from key: setup-go-...` line, or an
+    `actions/cache` step whose logged `path:` input names the Go build cache.
+    `retained` is True when a later step touches the Go build cache (the fix
+    is already present). Two different restored Go keys are ambiguous: None.
+    """
+    records, untimestamped, total = _opt80_log_records(log)
+    if not records or (total and untimestamped / total > _OPT80_MAX_UNTIMESTAMPED_FRACTION):
+        return None
+    steps: list[tuple[str, list[str]]] = []
+    keys: list[tuple[int, str]] = []
+    for _stamp, text in records:
+        header = _GO_STEP_HEADER_RE.match(text)
+        if header:
+            steps.append((header.group("head").strip(), [text]))
+            continue
+        if steps:
+            steps[-1][1].append(text)
+        match = _GO_CACHE_RESTORE_RE.match(text)
+        if not match or not steps:
+            continue
+        key = match.group("key")
+        head, lines = steps[-1]
+        go_restore = (key.lower().startswith("setup-go-")
+                      or ("actions/cache" in head.lower()
+                          and any(_GO_BUILD_CACHE_NAME_RE.search(line)
+                                  for line in _step_with_inputs(lines))))
+        if go_restore:
+            keys.append((len(steps) - 1, key))
+    if not keys or len({key for _i, key in keys}) != 1:
+        return None
+    first_step = keys[0][0]
+    retained = any(
+        any(_GO_CACHE_TOUCH_RE.search(line) for line in lines)
+        and any(_GO_BUILD_CACHE_NAME_RE.search(line) for line in lines)
+        for _head, lines in steps[first_step + 1:])
+    return {"cache_key": keys[0][1], "retained": retained}
+
+
+def _go_cache_archive_created(
+    client: "GhClient", repo: str, key: str,
+) -> _dt.datetime | None:
+    """Creation time of the one cache archive stored under exactly ``key``."""
+    if not key:
+        return None
+    payload = client.json(
+        f"repos/{repo}/actions/caches?key={quote(key, safe='')}&per_page=10",
+        allow_missing=True,
+    )
+    rows = payload.get("actions_caches") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    exact = [row for row in rows if isinstance(row, dict)
+             and str(row.get("key") or "") == key]
+    if len(exact) != 1:
+        return None
+    created = _parse_dt(str(exact[0].get("created_at") or ""))
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=_dt.timezone.utc)
+    return created
+
+
+def _go_cache_trim_fact(
+    client: "GhClient", repo: str, log: str, repr_job: dict[str, Any],
+    qual: list[tuple[float, dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Measure trim loss as a same-key natural experiment over sampled runs.
+
+    The representative log names the exact restored Go build-cache archive; its
+    creation time splits the job's sampled successful runs into those that
+    restored it while every entry was younger than cmd/go's trim limit (fresh)
+    and those that restored it past the limit (old). Each compared run's own
+    log must show the same exact key and no retention step. The finding needs
+    no instrumentation: only the restore line setup-go/actions/cache print, the
+    jobs API durations and the cache inventory's ``created_at``.
+    """
+    restore = _go_cache_restore_fact(log)
+    if restore is None or restore["retained"]:
+        return None
+    key = str(restore["cache_key"])
+    created = _go_cache_archive_created(client, repo, key)
+    if created is None:
+        return None
+
+    def _age_days(job: dict[str, Any]) -> float | None:
+        started = _parse_dt(str(job.get("started_at") or ""))
+        if started is None:
+            return None
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=_dt.timezone.utc)
+        return (started - created).total_seconds() / 86400.0
+
+    fresh_pool: list[tuple[float, float, dict[str, Any]]] = []
+    old_pool: list[tuple[float, float, dict[str, Any]]] = []
+    for duration, job in qual:
+        if job.get("conclusion") != "success" or not duration:
+            continue
+        age = _age_days(job)
+        if age is None or age < 0:
+            continue
+        if age < _OPT112_FRESH_ARCHIVE_DAYS:
+            fresh_pool.append((age, float(duration), job))
+        elif age >= _OPT112_TRIM_CUTOFF_DAYS:
+            old_pool.append((age, float(duration), job))
+    if (len(fresh_pool) < _OPT112_MIN_RUNS_PER_WINDOW
+            or len(old_pool) < _OPT112_MIN_RUNS_PER_WINDOW):
+        return None
+    fresh_pool.sort(key=lambda row: row[0])
+    # The representative is already in hand; then the runs nearest the boundary.
+    old_pool.sort(key=lambda row: (row[2].get("id") != repr_job.get("id"), row[0]))
+    known = {repr_job.get("id"): log}
+
+    def _confirmed(pool, limit):
+        out = []
+        for age, duration, job in pool[:limit]:
+            text = known.get(job.get("id"))
+            if text is None:
+                text = _fetch_job_log(client, repo, job)
+            fact = _go_cache_restore_fact(text or "")
+            if (fact is None or fact["retained"]
+                    or fact["cache_key"] != key):
+                continue
+            out.append((age, duration, str(job.get("html_url") or "")))
+        return out
+
+    fresh = _confirmed(fresh_pool, _OPT112_MAX_FRESH_LOGS)
+    if len(fresh) < _OPT112_MIN_RUNS_PER_WINDOW:
+        return None
+    old = _confirmed(old_pool, _OPT112_MAX_OLD_LOGS)
+    if len(old) < _OPT112_MIN_RUNS_PER_WINDOW:
+        return None
+    fresh_median = statistics.median(row[1] for row in fresh)
+    old_median = statistics.median(row[1] for row in old)
+    slowdown = old_median - fresh_median
+    # Every old-archive run must sit above the fresh median: one slow outlier
+    # cannot carry the comparison.
+    if (slowdown < _OPT112_MIN_SLOWDOWN_S
+            or min(row[1] for row in old) <= fresh_median):
+        return None
+    return {
+        "cache_key": key,
+        "archive_created_at": created.isoformat().replace("+00:00", "Z"),
+        "fresh_runs": [{"age_days": round(a, 1), "duration_s": round(d, 1), "url": u}
+                       for a, d, u in fresh],
+        "old_runs": [{"age_days": round(a, 1), "duration_s": round(d, 1), "url": u}
+                     for a, d, u in old],
+        "fresh_median_s": round(fresh_median, 1),
+        "old_median_s": round(old_median, 1),
+        "slowdown_s": round(slowdown, 1),
+    }
+
+
 def _persist_pole_logs(
     client: "GhClient", repo: str, poles: list[dict[str, Any]],
     jobs_per_run_by_wf: dict[str, list], data_dir: "Path", mag_runs: int = 3,
@@ -29919,6 +30123,7 @@ def _persist_pole_logs(
         opt13_fact = _opt13_build_in_quality_log(log)
         runtime_ts_loader = (leaf0 if leaf0.get("fix_key") == "runtime-ts-transpilation"
                              else None)
+        go_cache_trim = _go_cache_trim_fact(client, repo, log, repr_job, qual)
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
             "leaf_fix_key": leaf0.get("fix_key"),
@@ -29930,6 +30135,7 @@ def _persist_pole_logs(
             **({"opt13_build_in_script": opt13_fact} if opt13_fact else {}),
             **({"runtime_ts_loader": runtime_ts_loader}
                if runtime_ts_loader else {}),
+            **({"go_cache_trim": go_cache_trim} if go_cache_trim else {}),
         })
         logger.debug("saved pole log for %s -> %s (closest to P50 of %d qualifying "
                      "runs)", job, fn, len(qual))
@@ -30459,6 +30665,97 @@ def _detect_runtime_ts_loader_steps(
             finding["runtime_loader_job_p50_s"] = round(job_p50, 1)
             out.append(finding)
             break
+    return out
+
+
+def _detect_go_cache_trim(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Turn a same-key fresh-versus-old Go cache slowdown into OPT112."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    for entry in pole_logs:
+        fact = entry.get("go_cache_trim")
+        if not isinstance(fact, dict):
+            continue
+        seconds = fact.get("slowdown_s")
+        fresh = fact.get("fresh_runs")
+        old = fact.get("old_runs")
+        job_seconds = entry.get("duration_s")
+        if (not isinstance(seconds, (int, float)) or isinstance(seconds, bool)
+                or seconds < _OPT112_MIN_SLOWDOWN_S
+                or not isinstance(job_seconds, (int, float))
+                or job_seconds <= 0 or seconds > job_seconds
+                or not isinstance(fresh, list) or not isinstance(old, list)
+                or len(fresh) < _OPT112_MIN_RUNS_PER_WINDOW
+                or len(old) < _OPT112_MIN_RUNS_PER_WINDOW):
+            continue
+        workflow = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        runs = volume_by_workflow.get(workflow)
+        sample = (f"{len(old)} old-archive vs {len(fresh)} fresh-archive sampled "
+                  "runs of the same cache key")
+        runner_min = (round(float(seconds) * runs / 60.0, 1)
+                      if isinstance(runs, int) and not isinstance(runs, bool)
+                      and runs > 0 else None)
+        if runner_min is not None:
+            runner_effect = (
+                f"runner-minute saving: at most {runner_min:.1f}/month (median "
+                f"slowdown from {sample} x {runs} workflow runs in 30 days; runs "
+                "that restore an archive younger than five days save nothing)")
+        elif isinstance(runs, int) and not isinstance(runs, bool) and runs <= 0:
+            runner_effect = ("runner-minute saving: unsized (the 30-day volume "
+                             "window holds no runs of this workflow)")
+        else:
+            runner_effect = ("runner-minute saving: unsized (30-day run volume for "
+                             "this workflow is unavailable)")
+        key = str(fact.get("cache_key") or "")
+        fresh_median = float(fact.get("fresh_median_s") or 0.0)
+        old_median = float(fact.get("old_median_s") or 0.0)
+        evidence = (
+            f"`{job}` restores the same exact Go build-cache archive (`{key}`) in "
+            f"every compared run. Runs that restored it within five days of its "
+            f"creation took a median {fresh_median:.0f}s; runs that restored it "
+            f"after Go's five-day trim limit took a median {old_median:.0f}s, "
+            f"{float(seconds):.0f}s slower ({sample})."
+        )
+        rows = [[f"`{job}`", label, f"{float(run.get('age_days') or 0.0):.1f} days",
+                 f"{float(run.get('duration_s') or 0.0):.1f}s",
+                 f"[job log]({run['url']})" if run.get("url") else "sampled job"]
+                for label, group in (("fresh", fresh), ("old", old))
+                for run in group if isinstance(run, dict)]
+        measured = _measured_evidence(
+            ["Job", "Archive", "Archive age at start", "Job wall", "Run"], rows,
+            (f"Same cache key, median job wall {fresh_median:.1f}s while the archive "
+             f"was younger than five days and {old_median:.1f}s after; the "
+             f"{float(seconds):.1f}s difference is the measured trim loss."),
+            "The difference compares sampled runs, not a before/after of the fix; "
+            "confirm with the same job after adding the retention step.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT112", "HIGH", "Restored Go Build Cache Trimmed Before Reuse",
+            workflow, job, evidence,
+            "Touch every restored `GOCACHE` file immediately after setup and before "
+            "the first Go command. Do not add a warm-up build: it can trim the other "
+            "flag population instead. Preserve the cache key and test flags, then "
+            "compare the same job before and after.",
+            "opt112--restored-go-build-cache-trimmed-before-reuse", idx,
+            wc_p50=float(seconds), rm=runner_min,
+            size_note=(f"measured median slowdown {float(seconds):.1f}s per old-archive "
+                       f"run; {runner_effect}"),
+            realization="tail", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        finding["go_cache_key"] = key
+        finding["go_cache_archive_created_at"] = str(fact.get("archive_created_at") or "")
+        finding["go_cache_slowdown_s"] = float(seconds)
+        finding["go_cache_fresh_runs"] = len(fresh)
+        finding["go_cache_old_runs"] = len(old)
+        if isinstance(runs, int) and not isinstance(runs, bool):
+            finding["workflow_runs_30d"] = runs
+        out.append(finding)
     return out
 
 
@@ -34978,6 +35275,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         new = _detect_runtime_ts_transpilation(pole_logs, vol_by_wf, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        new = _detect_go_cache_trim(pole_logs, vol_by_wf, next_id)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         findings_doc["findings"] = findings
