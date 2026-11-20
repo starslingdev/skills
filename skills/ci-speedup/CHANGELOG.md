@@ -1,9 +1,14 @@
 # Changelog
 
 - **2026-11-20** — Extend OPT16 to find repeated Knip analysis over one project
-  scope when only report or issue-selection flags change. Distinct configs,
-  production modes and working directories remain separate, and the recipe runs
-  one combined analysis before splitting its output.
+  scope when only report or issue-selection flags change (Knip only; other
+  analysis tools are not recognized by this form). Distinct configs,
+  production modes, working directories, step `if:` conditions, `--fix` runs,
+  arguments of other commands chained after Knip, and Knip lines after an
+  in-step `cd` remain separate; a `>` report redirect counts as output. The finding is reported as
+  `runner-minute saving: unsized` instead of the flat OPT16 default, because the
+  combined run still performs the analysis once, and the recipe runs one
+  combined analysis before splitting its output. (#430)
 - **2026-11-18** — Keep real-repository golden gate comparisons independent of engine findings: recorded default-branch and all-branch protection select the representative PR shape, while expanded matrix requirements, recorded workflow dependencies, jobs and durations define the eligible oracle gate. Preserve runs with missing job lists as explicit partial reads, keep the Home Assistant pylint omissions separate from its hassfest share mismatch, and record that go-ethereum requires Lint while 32bit tests runs downstream. (#358)
 - **2026-11-18** — Let every ci-speedup entry script resolve its shipped sibling modules under Python isolated mode (`python3 -I`), with subprocess coverage across all seven command-line entry points. (#382)
 - **2026-11-15** — Preserve full commit identities in public golden recordings, mark comparisons that share normalized replay data, compare low-share gate counts within their uncertainty, pin rendered pole order and completed-sample spread to run creation dates, and keep incomplete recordings useful by replaying only run/job pairs whose evidence was captured, including copied runs whose jobs come from the normalized recording. (#352)

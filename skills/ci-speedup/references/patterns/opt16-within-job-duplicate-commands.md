@@ -15,22 +15,28 @@ category: 2
 
 **Detection heuristic**:
 
-The static scanner also recognizes repeated Knip analysis in separate steps of
-one job when the project scope is unchanged and only issue-selection or report
-flags differ. Scope-defining arguments such as `--config`, `--production` and
-the working directory must match. A different config, production mode or
-working directory stays quiet. This covers the public
-[OpenClaw #185851](https://github.com/openclaw/openclaw/pull/185851) shape,
-where several report commands rebuilt the same analysis graph.
+The static scanner also recognizes one form of repeated analysis in which
+the runs differ only in report or issue-selection flags. It covers Knip only:
+Knip's `--include`, `--reporter` and issue-type flags (`--files`, `--exports`,
+`--dependencies` and the like) select or render issues from one project
+analysis, so the scanner can tell them apart from scope-defining arguments.
+Other analysis tools run several times over one scope are not flagged by this
+static form. Separate steps of one job match when the step's working
+directory, its `if:` condition and every other argument (`--config`,
+`--production`, `--workspace` and so on) are identical; a `>` redirect of the
+report counts as output. A different config, production mode, workspace,
+working directory or step condition stays quiet, and so do a run with `--fix`
+and a Knip line that follows a `cd` in its step. Evidence: the public
+[OpenClaw #185851](https://github.com/openclaw/openclaw/pull/185851) change
+took 91.3 s to 65.9 s.
 
-For this variant, run Knip once with the combined issue selection, then split or
-filter its output while preserving every existing severity policy. Measure the
-old commands and the combined command on the same commit and dependency state.
-The runner-minute effect is a saving only when the combined command uses less
-total runner time; the static finding does not size that saving by itself. The
-public change measured one warm-cache screening pair at 91.28 s before and
-65.91 s after: a 25.37 s (0.423 runner-minute) saving for that sample, not a
-transferable clean-CI median or whole-pipeline estimate.
+For this form, run Knip once with the combined issue selection, then split or
+filter its output, keeping each selection's pass/fail policy. The
+runner-minute effect is a saving (25.4 s, about 0.42 runner-minutes per run,
+in the cited change), but the finding reports `runner-minute saving: unsized`
+because the combined run still performs the analysis once and its cost is
+specific to each repository. Time the separate runs and the combined run on
+the same commit before crediting minutes.
 
 Job logs can prove the Cargo variant even when the workflow commands differ:
 if two distinct step groups print the same in-repository
