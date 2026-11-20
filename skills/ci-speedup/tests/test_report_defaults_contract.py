@@ -28,6 +28,7 @@ REQUIRED_DECISIONS = {
     "merge-queue-proof-thresholds", "timeout-recommendation-thresholds",
     "dependency-cache-floor", "cold-cache-miss-threshold",
     "cache-partial-miss-floor",
+    "default-branch-batching-window",
     "ceiling-minimum-gates", "partial-majority-rule",
 }
 
@@ -117,6 +118,9 @@ REQUIRED_CURRENT_SOURCES = {
     "collect_runs.py:_COST_RUNLIST_MAX": 100,
     "collect_runs.py:_DEEPEN_TOP_CHECKS": 12,
     "collect_runs.py:_DEFAULT_BRANCH_PUSH_SAMPLE_MAX": 10,
+    "collect_runs.py:_OPT107_BATCH_WINDOW_S": 3600,
+    "collect_runs.py:_OPT107_MIN_BATCHABLE_RUNS": 2,
+    "collect_runs.py:_OPT107_MIN_BATCHABLE_SHARE": 0.25,
     "collect_runs.py:_DEPENDENCY_CACHE_FLOOR_PCT": 50.0,
     "collect_runs.py:_GHA_DEFAULT_JOB_TIMEOUT_S": 21600.0,
     "collect_runs.py:_MAG_WIDE_REL": 0.25,
