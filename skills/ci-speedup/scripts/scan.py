@@ -49,7 +49,8 @@ logger = logging.getLogger("scan")
 SCAN_INCOMPLETE_KINDS = frozenset({
     "workflow-unreadable", "workflow-unparseable", "workflow-not-mapping",
     "parallel-group-unread", "symlink-out-of-tree", "no-workflows-dir",
-    "opt19-file-cap", "opt19-source-unreadable", "turbo-unreadable",
+    "opt19-file-cap", "opt19-source-unreadable", "opt113-file-cap",
+    "opt113-source-unreadable", "turbo-unreadable",
 })
 
 # Detectors proven by cardinality tests to emit one finding per physical
@@ -1680,6 +1681,133 @@ def _detect_opt45(doc: dict, raw: str) -> list[Hit]:
     )]
 
 
+# ---- OPT46 extension — always() aggregate after cancellation ----------------
+
+_OPT46_ALWAYS_RE = re.compile(r"\balways\s*\(\s*\)", re.I)
+_OPT46_CANCELLED_RE = re.compile(r"\bcancelled\s*\(\s*\)", re.I)
+_OPT46_NEEDS_RESULT_RE = re.compile(
+    r"needs(?:\.\*|\.[A-Za-z_][\w-]*|\[['\"][^'\"]+['\"]\])?\.result|"
+    r"(?:to|from)JSON\s*\(\s*needs\s*\)",
+    re.I,
+)
+# Every simple command in a verdict script must start with one of these words
+# (after shell keywords and `VAR=value` assignments are stripped). Anything
+# else, including a command chained after a result check, is possible real work.
+_OPT46_RESULT_COMMANDS = frozenset({
+    "echo", "printf", "test", "[", "[[", "exit", "set", "true", "false", ":",
+    "jq", "case", "esac", "for", "done", "fi"})
+_OPT46_SHELL_KEYWORDS = frozenset({"if", "elif", "then", "else", "do", "!"})
+_OPT46_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*")
+
+
+def _opt46_result_only_script(run: str) -> bool:
+    """True when every simple command in ``run`` only inspects or reports."""
+    script = run.replace("\\\n", " ")
+    if "$(" in script or "`" in script:
+        return False
+    for raw_line in script.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Neutralise quoted text and test brackets so their `&&`, `|` or `;`
+        # are not read as command separators.
+        line = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "''", line)
+        line = re.sub(r"\[\[.*?\]\]", "[[ ]]", line)
+        for command in re.split(r"&&|\|\||;;|[;|]", line):
+            words = command.split()
+            while words and (words[0] in _OPT46_SHELL_KEYWORDS
+                             or _OPT46_ASSIGNMENT_RE.fullmatch(words[0])):
+                words.pop(0)
+            if words and words[0] not in _OPT46_RESULT_COMMANDS:
+                return False
+    return True
+
+
+def _opt46_cancellation_enabled(doc: dict) -> bool:
+    concurrency = doc.get("concurrency")
+    if not isinstance(concurrency, dict):
+        return False
+    value = concurrency.get("cancel-in-progress")
+    if value is True:
+        return True
+    if not isinstance(value, str):
+        return False
+    compact = re.sub(r"\s+", "", value).lower()
+    return compact not in {"", "false", "${{false}}"}
+
+
+def _opt46_result_only_step(step: dict) -> bool:
+    """A step whose only executable work evaluates dependency results.
+
+    Fail closed on arbitrary commands and actions.  The explicit shell
+    allow-list covers the small verdict scripts GitHub workflows conventionally
+    use; an opaque helper may do real work and therefore is not an aggregate.
+    """
+    uses, run = _uses(step), _run(step)
+    try:
+        step_text = yaml.safe_dump(step)
+    except yaml.YAMLError:
+        return False
+    if uses:
+        return "alls-green" in uses and bool(_OPT46_NEEDS_RESULT_RE.search(step_text))
+    if not run or not _OPT46_NEEDS_RESULT_RE.search(step_text):
+        return False
+    return _opt46_result_only_script(run)
+
+
+def _opt46_check_context(job_name: str, job: dict) -> str | None:
+    """The status-check name this job publishes, or None when it cannot be
+    read from YAML (a templated name or a matrix suffix)."""
+    if isinstance(job.get("strategy"), dict) and job["strategy"].get("matrix"):
+        return None
+    name = job.get("name", job_name)
+    if not isinstance(name, str) or not name.strip() or "${{" in name:
+        return None
+    return name.strip()
+
+
+def _detect_opt46_cancelled_aggregate(doc: dict, raw: str) -> list[Hit]:
+    """An ``always()`` result-only aggregate still acquires a runner after a
+    top-level concurrency group cancels the superseded run.
+
+    These hits are CANDIDATES, not findings: ``!cancelled()`` is safe advice
+    only for an aggregate that is not a required status check, which the YAML
+    cannot show. ``collect_runs`` promotes a candidate only after a complete
+    required-check read proves its check is not required."""
+    if not _opt46_cancellation_enabled(doc):
+        return []
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict) or not job.get("needs"):
+            continue
+        condition = str(job.get("if") or "")
+        if (not _OPT46_ALWAYS_RE.search(condition)
+                or _OPT46_CANCELLED_RE.search(condition)):
+            continue
+        executable = [step for step in _steps(job) if _run(step) or _uses(step)]
+        if not executable or not all(_opt46_result_only_step(step) for step in executable):
+            continue
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"aggregate job `{job_name}` uses `if: always()` only to evaluate "
+                "dependency results while the workflow cancels superseded runs, so it "
+                "can still acquire a runner after cancellation."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+            facts={
+                "opt46_check_context": _opt46_check_context(job_name, job),
+                "runner_min_unsized_reason": (
+                    "the aggregate's compute on cancelled runs is not measured from "
+                    "the workflow file"),
+            },
+        ))
+    return hits
+
+
 # ---- OPT32 — Missing paths/paths-ignore on Expensive Workflows (P7.1) --------
 
 _ON_LINE_RE = re.compile(r"^(['\"]?on['\"]?\s*:.*)$", re.M)
@@ -1696,7 +1824,221 @@ def _on_block(raw: str) -> tuple[int, str]:
     return line, _block_lines(raw, line)
 
 
-def _detect_opt32(doc: dict, raw: str) -> list[Hit]:
+_OPT32_TEST_DIR_NAMES = frozenset({"test", "tests", "__tests__", "spec", "specs"})
+_OPT32_PATH_SCAN_DIR_CAP = 10_000
+_OPT32_SOURCE_READ_CAP = 5_000
+_OPT32_SOURCE_BYTES = 512 * 1024
+# A file whose own name says it is a test. A test-named directory holding none
+# of these (an OpenAPI `spec/`, a `test` utility package) is not test-only.
+_OPT32_TEST_FILE_RE = re.compile(
+    r"(?:^test_.+\.py$|_test\.[A-Za-z0-9]+$|\.(?:test|spec)\.[A-Za-z0-9]+$"
+    r"|_spec\.rb$|^conftest\.py$|Tests?\.(?:java|kt|cs|swift)$)")
+# A manifest directly in the test-named directory makes it a package that can
+# be built or published on its own, so excluding it could drop a deploy input.
+_OPT32_PACKAGE_MANIFESTS = frozenset({
+    "package.json", "pyproject.toml", "setup.py", "setup.cfg", "go.mod",
+    "Cargo.toml", "pom.xml", "build.gradle", "build.gradle.kts", "Gemfile",
+    "deno.json", "jsr.json"})
+_OPT32_JS_SPEC_RE = re.compile(
+    r"""(?:\bfrom\s*|\bimport\s*\(?\s*|\brequire\s*\(\s*|\bexport\s[^'"\n]*?from\s*)"""
+    r"""['"](\.{1,2}/[^'"\n]*)['"]""")
+_OPT32_PY_IMPORT_RE = re.compile(r"^\s*(?:from\s+([\w.]+)\s+import|import\s+([\w., ]+))", re.M)
+_OPT32_QUOTED_RE = re.compile(r"""['"`]([^'"`\n]+)['"`]""")
+
+
+def _opt32_gh_glob_regex(pattern: str) -> re.Pattern[str] | None:
+    """GitHub filter-pattern subset: `*` stays inside one segment, `**` spans
+    segments, `?` is one character. Anything else is unsupported (None), so the
+    caller withholds instead of guessing what the filter selects."""
+    pattern = pattern.strip().lstrip("/")
+    if not pattern or any(c in pattern for c in "[]{}+\\"):
+        return None
+    out: list[str] = []
+    i = 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "*":
+            if pattern.startswith("**", i):
+                i += 2
+                if i < len(pattern) and pattern[i] == "/":
+                    out.append("(?:.*/)?")
+                    i += 1
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif c == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(c))
+        i += 1
+    return re.compile("".join(out))
+
+
+def _opt32_repo_shape(root: Path) -> tuple[dict[str, list[str]], list[str]] | None:
+    """``({test_dir: [test-named files]}, [non-test files])`` from a bounded walk.
+
+    Dependency/build trees are skipped. A test-named directory with a package
+    manifest directly inside is left out (it may ship on its own). When the walk
+    bound is hit, return None: an unread repository shape is never a clean
+    verdict.
+    """
+    ignored = {".git", ".hg", ".svn", "node_modules", "vendor", ".venv",
+               "venv", "dist", "build", ".cache"}
+    tests: dict[str, list[str]] = {}
+    packaged: set[str] = set()
+    sources: list[str] = []
+    visited = 0
+    for base, dirs, files in os.walk(root, followlinks=False):
+        visited += 1
+        if visited > _OPT32_PATH_SCAN_DIR_CAP:
+            return None
+        dirs[:] = [name for name in dirs if name not in ignored and not name.startswith(".")]
+        try:
+            rel_dir = Path(base).relative_to(root)
+        except ValueError:
+            return None
+        parts = rel_dir.parts
+        test_at = next((i for i, part in enumerate(parts)
+                        if part.lower() in _OPT32_TEST_DIR_NAMES), None)
+        if test_at is None:
+            sources.extend((rel_dir / name).as_posix() for name in files)
+            continue
+        test_dir = Path(*parts[:test_at + 1]).as_posix()
+        if test_at == len(parts) - 1 and _OPT32_PACKAGE_MANIFESTS & set(files):
+            packaged.add(test_dir)
+        named = [(rel_dir / name).as_posix() for name in files
+                 if _OPT32_TEST_FILE_RE.search(name)]
+        if named:
+            tests.setdefault(test_dir, []).extend(named)
+    for test_dir in packaged:
+        tests.pop(test_dir, None)
+    return tests, sources
+
+
+def _opt32_references_test_dir(text: str, source: str, test_dir: str) -> bool | None:
+    """Whether production file ``source`` imports from ``test_dir``.
+
+    Relative JS/TS specifiers are resolved against the importing file; Python
+    imports and other quoted module paths match when they name the directory.
+    None when the file cannot be classified."""
+    name = test_dir.rsplit("/", 1)[-1]
+    src_dir = Path(source).parent
+    for spec in _OPT32_JS_SPEC_RE.findall(text):
+        resolved = os.path.normpath((src_dir / spec).as_posix()).replace(os.sep, "/")
+        if resolved == test_dir or resolved.startswith(test_dir + "/"):
+            return True
+    if source.endswith(".py"):
+        for frm, imp in _OPT32_PY_IMPORT_RE.findall(text):
+            mods = [frm] if frm else [m.strip().split(" ")[0] for m in imp.split(",")]
+            if any(name in mod.split(".") for mod in mods if mod):
+                return True
+        return False
+    for quoted in _OPT32_QUOTED_RE.findall(text):
+        # Go import paths, Ruby require_relative, Rust/C include strings.
+        if quoted.startswith(("http://", "https://")):
+            continue
+        segs = quoted.split("/")
+        if len(segs) > 1 and name in segs and "*" not in quoted:
+            return True
+    return False
+
+
+def _detect_opt32_deploy_test_paths(
+    doc: dict, raw: str, root: Path, default_branch: str | None,
+) -> list[Hit]:
+    """A default-branch deploy/release positive path that also selects tests."""
+    if not default_branch or not _is_release_like(doc):
+        return []
+    on = doc.get("on") or doc.get(True)
+    if not isinstance(on, dict) or "push" not in on:
+        return []
+    push = on.get("push")
+    if not isinstance(push, dict) or not _opt96_push_runs_on(push, default_branch):
+        return []
+    raw_paths = push.get("paths")
+    if not isinstance(raw_paths, list) or "paths-ignore" in push:
+        return []
+    paths = [str(pattern) for pattern in raw_paths if isinstance(pattern, str)]
+    if len(paths) != len(raw_paths) or not paths or any("${{" in p for p in paths):
+        return []
+    compiled: list[tuple[bool, str, re.Pattern[str]]] = []
+    for pattern in paths:
+        rx = _opt32_gh_glob_regex(pattern[1:] if pattern.startswith("!") else pattern)
+        if rx is None:
+            return []  # unsupported glob: what the filter selects is unknown
+        compiled.append((pattern.startswith("!"), pattern, rx))
+
+    def final_positive(file_path: str) -> str:
+        """The last positive pattern when the ordered list selects the file."""
+        selected, positive = False, ""
+        for negative, pattern, rx in compiled:
+            if rx.fullmatch(file_path):
+                selected = not negative
+                if not negative:
+                    positive = pattern
+        return positive if selected else ""
+
+    shape = _opt32_repo_shape(root)
+    if shape is None:
+        return []
+    tests, sources = shape
+    offenders: dict[str, tuple[str, str]] = {}
+    for test_dir, files in tests.items():
+        for file_path in files:
+            positive = final_positive(file_path)
+            if positive:
+                offenders.setdefault(test_dir, (file_path, positive))
+                break
+    if not offenders:
+        return []
+
+    # A deploy that builds from a test-named directory (a helper imported by
+    # production code) still needs that directory: withhold, never call it safe.
+    selected_sources = [s for s in sources if final_positive(s)]
+    if len(selected_sources) > _OPT32_SOURCE_READ_CAP:
+        return []
+    for source in selected_sources:
+        try:
+            with open(root / source, "rb") as fh:
+                text = fh.read(_OPT32_SOURCE_BYTES).decode("utf-8", "replace")
+        except OSError:
+            return []
+        for test_dir in list(offenders):
+            if _opt32_references_test_dir(text, source, test_dir) is not False:
+                offenders.pop(test_dir)
+        if not offenders:
+            return []
+
+    test_dir, (example, positive) = sorted(offenders.items())[0]
+    exclusions = ", ".join(f"`'!{d}/**'`" for d in sorted(offenders))
+    line = _line_of(raw, positive)  # anchor:workflow-level (push paths gate every deploy job)
+    return [Hit(
+        line=line,
+        affected_jobs=list(_jobs_from_doc(doc).keys()),
+        evidence=(
+            f"default-branch deploy/release path `{positive}` also selects test file "
+            f"`{example}`. Add the negated pattern {exclusions} after the last "
+            "positive glob that selects it, in the same `paths:` list (`paths` and "
+            "`paths-ignore` cannot both be set for one event). No non-test file "
+            "the filter selects imports from that directory. Runner-minute effect: "
+            "saving the deploy jobs' compute on test-only default-branch merges; "
+            "not sized until those merges' frequency and the affected jobs' "
+            "measured compute are available."
+        ),
+        match_text="(workflow)",
+        snippet=_on_block(raw)[1],
+        facts={
+            "opt32_deploy_test_paths": True,
+            "non_pr_lane": True,
+            "fix_strategy": "deploy-path-test-exclusion",
+            "title": "Deploy path filter includes test-only changes",
+        },
+    )]
+
+
+def _detect_opt32(doc: dict, raw: str, root: Path | None = None,
+                  default_branch: str | None = None) -> list[Hit]:
     """A PR/push workflow with no `paths:` / `paths-ignore:` filter.
 
     Expensive workflows (long test jobs, build matrices) waste cycles on PRs
@@ -1717,6 +2059,8 @@ def _detect_opt32(doc: dict, raw: str) -> list[Hit]:
     class (the activation-fidelity bug) for this rare unflagged case; revisit if a
     label-triggered heavy workflow is observed in the wild.
     """
+    deploy_path_hits = (_detect_opt32_deploy_test_paths(
+        doc, raw, root, default_branch) if root is not None else [])
     on = doc.get("on") or doc.get(True)
     triggers = []
     for t in ("pull_request", "push"):
@@ -1732,17 +2076,17 @@ def _detect_opt32(doc: dict, raw: str) -> list[Hit]:
             continue
         triggers.append(t)
     if not triggers:
-        return []
+        return deploy_path_hits
     if _on_has_paths_filter(on):
-        return []
+        return deploy_path_hits
     # Already path/change-aware internally → not unfiltered in practice.
     if "dorny/paths-filter" in raw or "tj-actions/changed-files" in raw:
-        return []
+        return deploy_path_hits
     if re.search(r"\bhas_code\b|\bchanges\b\s*:|outputs:\s*\n.*\b(changed|affected)\b",
                  raw):
         # an internal change-detection job already gates the heavy work
         if re.search(r"if:\s*.*needs\.[\w-]*(changes|detect)[\w-]*\.outputs", raw):
-            return []
+            return deploy_path_hits
     on_line, block = _on_block(raw)
     trig = "/".join(triggers)
     # The REQUIRED-status-check caveat only applies to PR-triggered workflows
@@ -1752,7 +2096,7 @@ def _detect_opt32(doc: dict, raw: str) -> list[Hit]:
             "`dorny/paths-filter` gate that returns a neutral pass — a "
             "workflow-level `paths:` filter would strand the required check on "
             "excluded PRs." if "pull_request" in triggers else "")
-    return [Hit(
+    return deploy_path_hits + [Hit(
         line=on_line or 1,
         affected_jobs=list(_jobs_from_doc(doc).keys()),
         evidence=(f"workflow triggers on {trig} but declares no "
@@ -2643,6 +2987,432 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                             inputs=caller_inputs, outputs=outputs)
                         if resolved_value is not None:
                             outputs[f"steps.{step_id}.outputs.{key}"] = resolved_value
+    return hits
+
+
+# ---- OPT114 — duplicate npm advisory lookups inside CI image builds ---------
+#
+# Audit state is three-valued: "on", "off", or "unknown". Only "on" on both
+# halves (a host `npm ci` and an image-layer install/prune reading the same
+# lockfile) produces a finding; anything the scan cannot classify withholds it.
+
+_OPT114_TRUE = frozenset({"1", "true", "yes", "on"})
+_OPT114_FALSE = frozenset({"0", "false", "no", "off"})
+_OPT114_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json")
+_OPT114_NPM_COMMAND_RE = re.compile(
+    r"^(?:--mount=\S+\s+)*(?P<prefix>(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*)"
+    r"npm\s+(?P<verb>ci|install|i|prune)\b(?P<args>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+_OPT114_CONFIG_SET_RE = re.compile(
+    r"^npm\s+(?:config\s+)?set\s+audit(?:\s*=\s*|\s+)(?P<value>\S+)", re.I)
+_OPT114_DIR_CHANGE_RE = re.compile(
+    r"(?:^|[;&|(\n]|\bthen\b|\bdo\b|\belse\b)\s*(?:cd|pushd)\b", re.I)
+
+
+def _opt114_audit_value(value: Any) -> str:
+    text = str(value).strip().strip("'\"").lower()
+    if text in _OPT114_TRUE:
+        return "on"
+    if text in _OPT114_FALSE:
+        return "off"
+    return "unknown"
+
+
+def _opt114_shell_code(text: str) -> str:
+    """Shell text with heredoc bodies dropped and quoted strings blanked.
+
+    Only what the shell would run as a command survives: a heredoc body and a
+    quoted string are data (printed, written to a file, passed as an argument),
+    so an `npm ci` inside one is never read as an install."""
+    text = re.sub(r"\\[ \t]*\n[ \t]*", " ", text)
+    lines = text.split("\n")
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        kept.append(line)
+        index += 1
+        for delimiter in re.findall(r"<<-?\s*['\"]?([A-Za-z_][\w.-]*)", line):
+            while index < len(lines) and lines[index].strip() != delimiter:
+                index += 1
+            index += 1
+    code = "\n".join(kept)
+    code = re.sub(r"'[^'\n]*'", "''", code)
+    return re.sub(r'"(?:[^"\\\n]|\\.)*"', '""', code)
+
+
+def _opt114_npm_commands(text: str) -> list[tuple[str, str, str]]:
+    """Direct npm install/prune commands as ``(verb, command, audit)``.
+
+    ``audit`` is the command's own setting ("on" / "off" / "unknown"), or ""
+    when the command leaves the ambient configuration in charge. A global
+    install (`-g`) is skipped: npm does not audit global installs."""
+    commands: list[tuple[str, str, str]] = []
+    for raw_segment in re.split(r"&&|\|\||;|\n|\|", _opt114_shell_code(text)):
+        segment = raw_segment.strip()
+        match = _OPT114_NPM_COMMAND_RE.match(segment)
+        if not match:
+            continue
+        args = match.group("args")
+        if re.search(r"(?:^|\s)(?:-g|--global)(?:\s|=|$)", args):
+            continue
+        verb = match.group("verb").lower()
+        verb = "install" if verb == "i" else verb
+        audit = ""
+        for name, value in re.findall(r"([A-Za-z_][A-Za-z0-9_]*)=(\S*)",
+                                      match.group("prefix")):
+            if name.lower() == "npm_config_audit":
+                audit = _opt114_audit_value(value)
+        flag = re.search(r"(?:^|\s)--(no-)?audit(?:=(\S+))?(?=\s|$)", args, re.I)
+        if flag:
+            if flag.group(1):
+                audit = "off"
+            elif flag.group(2) is not None:
+                audit = _opt114_audit_value(flag.group(2))
+            else:
+                audit = "on"
+        commands.append((verb, segment, audit))
+    return commands
+
+
+def _opt114_env_audit(env: Any) -> str:
+    """Audit state an Actions ``env:`` mapping sets ("" when it sets none)."""
+    if not isinstance(env, dict):
+        return "" if env in (None, "") else "unknown"
+    for key, value in env.items():
+        if str(key).lower() == "npm_config_audit":
+            return _opt114_audit_value(value)
+    return ""
+
+
+def _opt114_npmrc_audit(text: str) -> str:
+    """Audit state an npmrc file sets ("" when it sets none)."""
+    state = ""
+    for match in re.finditer(r"(?im)^\s*audit\s*=\s*([^\s#;]*)", text):
+        state = _opt114_audit_value(match.group(1))
+    return state
+
+
+def _opt114_host_npmrc_blocks(root: Path, directory: Path) -> bool:
+    """Whether a repository npmrc at or above ``directory`` may disable audit.
+
+    Conservative: every ancestor up to the checkout root is read, and an
+    unreadable file or a non-"on" setting withholds the finding."""
+    try:
+        relative = directory.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return True
+    for index in range(len(relative.parts) + 1):
+        candidate = root / Path(*relative.parts[:index]) / ".npmrc"
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        if _opt114_npmrc_audit(text) not in ("", "on"):
+            return True
+    return False
+
+
+def _opt114_host_lockfiles(root: Path, directory: Path) -> list[str]:
+    found: list[str] = []
+    for name in _OPT114_LOCKFILES:
+        path = directory / name
+        if path.is_file():
+            try:
+                found.append(path.resolve().relative_to(root.resolve()).as_posix())
+            except (OSError, ValueError):
+                continue
+    return found
+
+
+def _opt114_host_audits(doc: dict, job: dict, root: Path
+                        ) -> list[tuple[str | None, list[str]]]:
+    """Host `npm ci` runs that keep audit on: ``(condition, lockfiles)``.
+
+    A step whose directory cannot be resolved (an expression, a `cd`, a
+    `--prefix`/workspace flag), whose npmrc may disable audit, or that has no
+    lockfile in its directory is not counted."""
+    audits: list[tuple[str | None, list[str]]] = []
+    for step, condition in _steps_with_if(job):
+        if _opt102_step_build_config(step, job, doc) is not None:
+            continue
+        run = _run(step)
+        if not run:
+            continue
+        step_env = _opt114_env_audit(step.get("env"))
+        if step_env not in ("", "on"):
+            continue
+        workdir = _script_working_directory(job, step, doc)
+        if "${{" in workdir or Path(workdir).is_absolute():
+            continue
+        code = _opt114_shell_code(run)
+        if _OPT114_DIR_CHANGE_RE.search(code):
+            continue
+        directory = (root / workdir).resolve()
+        try:
+            directory.relative_to(root)
+        except ValueError:
+            continue
+        if _opt114_host_npmrc_blocks(root, directory):
+            continue
+        lockfiles = _opt114_host_lockfiles(root, directory)
+        if not lockfiles:
+            continue
+        for verb, command, audit in _opt114_npm_commands(run):
+            if verb != "ci" or audit not in ("", "on"):
+                continue
+            if re.search(r"(?:^|\s)(?:--prefix|-C|--workspaces?|-w|--ws)(?:\s|=|$)",
+                         command):
+                continue
+            audits.append((condition, lockfiles))
+            break
+    return audits
+
+
+def _opt114_job_blocks(doc: dict, job: dict) -> bool:
+    """Job-wide settings that may turn the host audit off, or that hide steps."""
+    if job_walk(job).malformed_groups:
+        return True
+    for env in (doc.get("env"), job.get("env")):
+        if _opt114_env_audit(env) not in ("", "on"):
+            return True
+    for step in _steps(job):
+        code = _opt114_shell_code(_run(step))
+        for segment in re.split(r"&&|\|\||;|\n|\|", code):
+            if _OPT114_CONFIG_SET_RE.match(segment.strip()):
+                return True
+        if re.search(r"(?i)npm_config_audit", _run(step)) and "GITHUB_ENV" in _run(step):
+            return True
+    return False
+
+
+def _opt114_copy_sources(body: str, context: Path, root: Path
+                         ) -> tuple[list[str], list[Path]] | None:
+    """Repository-relative sources one COPY/ADD reads, plus its npmrc files.
+
+    Globs expand against the build context. ``None`` when a source cannot be
+    resolved (a variable, a URL, a path outside the checkout)."""
+    joined = re.sub(r"\\\s*\n\s*", " ", body).strip()
+    operands = re.sub(r"^(?:--\S+\s+)+", "", joined)
+    try:
+        if operands.startswith("["):
+            values = json.loads(operands)
+            if not (isinstance(values, list) and len(values) >= 2
+                    and all(isinstance(value, str) for value in values)):
+                return None
+        else:
+            values = [token for token in shlex.split(operands)
+                      if not token.startswith("--")]
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if len(values) < 2:
+        return None
+    destination = values[-1]
+    sources: list[str] = []
+    npmrcs: list[Path] = []
+    for raw_source in values[:-1]:
+        source = str(raw_source).lstrip("/") or "."
+        if "://" in source or "$" in source:
+            return None
+        if any(char in source for char in "*?["):
+            try:
+                matches = sorted(context.glob(source))
+            except (OSError, ValueError, NotImplementedError):
+                return None
+        else:
+            matches = [context / source]
+        for match in matches:
+            resolved = match.resolve()
+            try:
+                relative = resolved.relative_to(root)
+            except ValueError:
+                return None
+            sources.append(relative.as_posix() or ".")
+            if resolved.is_dir():
+                if (resolved / ".npmrc").exists():
+                    npmrcs.append(resolved / ".npmrc")
+            elif resolved.name == ".npmrc" or destination.rstrip("/").endswith(".npmrc"):
+                npmrcs.append(resolved)
+    return sources, npmrcs
+
+
+def _opt114_image_npm_commands(text: str, context: Path, root: Path,
+                               target: str = "") -> list[tuple[str, str, list[str]]] | None:
+    """Image-layer npm install/prune commands that still audit.
+
+    Returns ``(verb, command, copied_sources)`` for the selected stage and the
+    stages it builds from, in order; ``copied_sources`` are the repository
+    paths copied into that stage chain before the command. Audit settings are
+    tracked per stage as Docker applies them: `ENV`/`ARG NPM_CONFIG_AUDIT`, an
+    `npm config set audit`, and an `.npmrc` COPY'd into the image. A build-context
+    `.npmrc` the Dockerfile never copies does not reach the image. ``None`` when
+    the selected stage cannot be identified."""
+    raw_stages = [stage for stage in re.split(r"(?im)(?=^\s*FROM\s+)", text)
+                  if re.match(r"(?i)^\s*FROM\s+", stage)]
+    stages: list[tuple[str, int | None, set[str]]] = []
+    aliases: dict[str, int] = {}
+    for stage in raw_stages:
+        clean = "\n".join(line for line in stage.splitlines()
+                          if not line.lstrip().startswith("#"))
+        header = clean.splitlines()[0].strip()
+        match = re.match(r"(?i)^FROM(?:\s+--\S+)*\s+(\S+)(?:\s+AS\s+(\S+))?", header)
+        if not match:
+            return None
+        base_ref = match.group(1).lower()
+        base = (aliases.get(base_ref) if base_ref in aliases
+                else (int(base_ref) if base_ref.isdigit()
+                      and int(base_ref) < len(stages) else None))
+        refs = set(re.findall(r"(?im)^\s*(?:COPY|RUN)\b[^\n]*?--from=([^\s,]+)", clean))
+        stages.append((clean, base, {ref.lower() for ref in refs}))
+        if match.group(2):
+            aliases[match.group(2).lower()] = len(stages) - 1
+    if not stages:
+        return None
+    if target:
+        if "${{" in target or "$" in target:
+            return None
+        selected = aliases.get(target.lower())
+        if selected is None:
+            return None
+    else:
+        selected = len(stages) - 1
+    reachable: set[int] = set()
+    pending = [selected]
+    while pending:
+        index = pending.pop()
+        if index in reachable:
+            continue
+        reachable.add(index)
+        _clean, base, refs = stages[index]
+        if base is not None:
+            pending.append(base)
+        for ref in refs:
+            ref_index = (int(ref) if ref.isdigit() and int(ref) < len(stages)
+                         else aliases.get(ref))
+            if ref_index is not None:
+                pending.append(ref_index)
+
+    end_state: dict[int, tuple[str, list[str]]] = {}
+    found: list[tuple[str, str, list[str]]] = []
+    for index, (clean, base, _refs) in enumerate(stages):
+        audit, copied = (end_state[base] if base is not None and base in end_state
+                         else ("on", []))
+        copied = list(copied)
+        for keyword, body in _opt102_dockerfile_instructions(clean):
+            if keyword in {"ENV", "ARG"}:
+                for name, value in re.findall(
+                        r"(?i)\b(npm_config_audit)(?:(?:=|\s+)(\S+))?", body):
+                    if keyword == "ARG" and not value:
+                        audit = "unknown"
+                    else:
+                        audit = _opt114_audit_value(value or "")
+            elif keyword in {"COPY", "ADD"}:
+                if re.search(r"(?:^|\s)--from(?:=|\s)", body):
+                    if "npmrc" in body.lower():
+                        audit = "unknown"
+                    continue
+                parsed = _opt114_copy_sources(body, context, root)
+                if parsed is None:
+                    audit = "unknown"
+                    continue
+                sources, npmrcs = parsed
+                copied.extend(sources)
+                for npmrc in npmrcs:
+                    try:
+                        state = _opt114_npmrc_audit(
+                            npmrc.read_text(encoding="utf-8", errors="replace"))
+                    except OSError:
+                        state = "unknown"
+                    if state:
+                        audit = state
+            elif keyword == "RUN":
+                if re.search(r"--mount=[^\s]*type=secret[^\s]*npmrc", body, re.I):
+                    audit = "unknown"
+                code = _opt114_shell_code(body)
+                for segment in re.split(r"&&|\|\||;|\n|\|", code):
+                    setting = _OPT114_CONFIG_SET_RE.match(segment.strip())
+                    if setting:
+                        audit = _opt114_audit_value(setting.group("value"))
+                        continue
+                    for verb, command, own in _opt114_npm_commands(segment):
+                        effective = own or audit
+                        if effective == "on" and index in reachable:
+                            found.append((verb, command, list(copied)))
+        end_state[index] = (audit, copied)
+    return found
+
+
+def _detect_opt114(doc: dict, raw: str) -> list[Hit]:
+    """Docker layers repeat npm's advisory request after an audited host install.
+
+    Both halves must hold in one job: a host `npm ci` that keeps audit on and
+    runs whenever the image build runs, and an image-layer install/prune that
+    still audits and reads that same lockfile (the image copies it in)."""
+    if _OPT102_ROOT is None:
+        return []
+    root = _OPT102_ROOT.resolve()
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict) or _opt114_job_blocks(doc, job):
+            continue
+        host_audits = _opt114_host_audits(doc, job, root)
+        if not host_audits:
+            continue
+        for step, condition in _steps_with_if(job):
+            build = _opt102_step_build_config(step, job, doc)
+            if build is None:
+                continue
+            lockfiles = sorted({lock for host_condition, locks in host_audits
+                                if host_condition is None
+                                or " ".join(str(host_condition).split())
+                                == " ".join(str(condition or "").split())
+                                for lock in locks})
+            if not lockfiles:
+                continue
+            config, marker = build
+            paths = _opt102_resolved_dockerfile(
+                root, config, env={}, matrix={}, inputs={}, outputs={})
+            if paths is None:
+                continue
+            candidate, context = paths
+            try:
+                text = candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            repeated = _opt114_image_npm_commands(
+                text, context, root, str(config.get("target") or ""))
+            if not repeated:
+                continue
+            shared = [lock for lock in lockfiles
+                      if any(any(_opt102_path_covers(source, lock) for source in copied)
+                             for _verb, _command, copied in repeated)]
+            verbs = sorted({verb for verb, _command, copied in repeated
+                            if any(_opt102_path_covers(source, lock)
+                                   for source in copied for lock in shared)})
+            if not shared or not verbs:
+                continue
+            line = _line_of_in_job(raw, str(job_name), marker)
+            rel = candidate.relative_to(root)
+            hits.append(Hit(
+                line=line,
+                affected_jobs=[str(job_name)],
+                evidence=(
+                    f"job `{job_name}` keeps host `npm ci` audit reporting for "
+                    f"`{shared[0]}`, but `{rel}` installs from that same lockfile and "
+                    f"repeats the default advisory lookup in "
+                    f"{', '.join(f'`npm {verb}`' for verb in verbs)}; add "
+                    "`--no-audit` to those image-layer install/prune commands only. "
+                    "Runner-minute effect: saving — removes repeated advisory wait "
+                    "from the same image-build runner; unsized because this static "
+                    "scan has no measured Docker-layer duration or 30-day job count."
+                ),
+                match_text=str(rel),
+                snippet=_raw_line(raw, line),
+            ))
+            break
     return hits
 
 
@@ -4154,7 +4924,190 @@ _MANIFEST_MUTATION_RE = re.compile(
     r"apply.*patch", re.I)
 
 
-def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
+# Knip computes one project graph, then filters that graph into issue groups or
+# renderings. Re-running the command only to change these selectors repeats the
+# expensive analysis. Keep scope-defining flags such as ``--config`` and
+# ``--production`` in the signature so distinct project scans stay separate.
+_OPT16_KNIP_VALUE_SELECTORS = {"--include", "--reporter", "--format", "--output"}
+_OPT16_KNIP_BOOLEAN_SELECTORS = {
+    "--binaries", "--class-members", "--dependencies", "--dev-dependencies",
+    "--duplicates", "--enum-members", "--exports", "--files",
+    "--include-entry-exports", "--namespace-members", "--ns-exports",
+    "--ns-types", "--optional-peer-dependencies", "--types", "--unlisted",
+    "--unresolved",
+}
+
+
+_OPT16_SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
+
+
+def _opt16_analysis_signature(command: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Return (scope, selectors) for a supported analysis invocation."""
+    try:
+        tokens = shlex.split(command, comments=True)
+    except ValueError:
+        return None
+    tool_index = next((index for index, token in enumerate(tokens)
+                       if re.fullmatch(r"knip(?:@[^\s]+)?", token)), None)
+    if tool_index is None:
+        return None
+
+    scope: list[str] = []
+    selectors: list[str] = []
+    index = 0
+    in_knip = False
+    while index < len(tokens):
+        token = tokens[index]
+        name, equals, value = token.partition("=")
+        if index == tool_index:
+            in_knip = True
+        elif token in _OPT16_SHELL_OPERATORS:
+            # Arguments after `&&`, `|` and so on belong to another command.
+            in_knip = False
+        if not in_knip or index == tool_index:
+            scope.append(token)
+            index += 1
+            continue
+        if name in {"--fix", "--fix-type", "--allow-remove-files"}:
+            return None  # Knip rewrites the tree; later runs see other files.
+        if token in {">", ">>"} and index + 1 < len(tokens):
+            selectors.append(f"{token}{tokens[index + 1]}")  # report destination
+            index += 2
+            continue
+        if name in _OPT16_KNIP_VALUE_SELECTORS:
+            if equals:
+                selectors.append(f"{name}={value}")
+                index += 1
+                continue
+            if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+                return None
+            selectors.append(f"{name}={tokens[index + 1]}")
+            index += 2
+            continue
+        if token in _OPT16_KNIP_BOOLEAN_SELECTORS:
+            selectors.append(token)
+            index += 1
+            continue
+        scope.append(token)
+        index += 1
+    if not selectors:
+        return None
+    return tuple(scope), tuple(selectors)
+
+
+_OPT16_CONDITIONAL_RE = re.compile(r"\|\||(?:^|[\s;(])(?:if|elif|else|case|until|while)\b")
+
+
+def _opt16_norm_dir(value: Any) -> str | None:
+    """A working directory as a repo-relative posix path ("" = root); None when
+    it is an expression or leaves the checkout."""
+    import posixpath
+    text = str(value or "").strip().replace("\\", "/")
+    if "${{" in text or text.startswith(("/", "~")):
+        return None
+    text = posixpath.normpath(text) if text else ""
+    if text == ".." or text.startswith("../"):
+        return None
+    return "" if text == "." else text
+
+
+def _opt16_analysis_repeat_hit(job_name: str, job: dict, doc: dict, raw: str,
+                               steps: list, mutation_idxs: set[int],
+                               package_scripts: dict[str, Any] | None) -> Hit | None:
+    """OPT16's repeated-analysis form: the same Knip analysis run more than once
+    in one job, over one scope, differing only in report or issue-selection
+    flags. Each step's command is read through the shared run-leaf resolver
+    (`collect_runs._resolve_run_leaves`), so package scripts (`pnpm knip:json`)
+    and `\\`-continued lines are followed. Anything the read cannot pin down (a
+    directory change, an expression working directory, a conditional chain
+    holding several runs) withholds that step's runs."""
+    import collect_runs as _cr  # lazy: the resolver lives with OPT82/OPT84
+
+    tal = package_scripts if isinstance(package_scripts, dict) else {}
+    scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
+                      if isinstance(v, dict)}
+    scripts_unreadable = frozenset(str(d) for d in
+                                   (tal.get("package_scripts_unreadable") or []))
+    walk_complete = tal.get("truncated") is False
+
+    def _defaults_wd(owner: Any) -> Any:
+        d = owner.get("defaults") if isinstance(owner, dict) else None
+        r = d.get("run") if isinstance(d, dict) else None
+        return r.get("working-directory") if isinstance(r, dict) else None
+
+    default_wd = _defaults_wd(job)
+    if default_wd is None:
+        default_wd = _defaults_wd(doc)
+    knip_in_scripts = any("knip" in str(body) for scripts in scripts_by_dir.values()
+                          for body in scripts.values())
+    groups: dict[tuple, list[tuple[int, str, tuple[str, ...]]]] = {}
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict) or not isinstance(step.get("run"), str):
+            continue
+        run = re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", step["run"])
+        if "knip" not in run and not knip_in_scripts:
+            continue
+        wd = _opt16_norm_dir(step.get("working-directory", default_wd))
+        if wd is None:
+            continue
+        res = _cr._resolve_run_leaves(run, wd, scripts_by_dir, scripts_unreadable,
+                                      walk_complete=walk_complete)
+        if any(u.get("kind") == "cd" for u in res.unresolved):
+            continue  # the project scope after a directory change is unknown
+        runs = []
+        for leaf in res.leaves:
+            if leaf.get("wd") is None:
+                continue
+            sig = _opt16_analysis_signature(shlex.join(leaf.get("tokens") or []))
+            if sig is not None:
+                runs.append((leaf, sig))
+        if not runs:
+            continue
+        if len(runs) > 1:
+            # Several runs in one step are proven to repeat only when nothing in
+            # the command or the scripts it follows chooses between them.
+            bodies = [run]
+            for leaf, _sig in runs:
+                eff = _cr._rl_effective_scripts(str(leaf.get("wd") or ""), scripts_by_dir,
+                                                scripts_unreadable, walk_complete) or {}
+                for link in leaf.get("chain") or []:
+                    bodies.append(str(eff.get(str(link).split()[-1], "")))
+            if any(_OPT16_CONDITIONAL_RE.search(b) for b in bodies):
+                runs = runs[:1]
+        # A step `if:` is part of the key: runs under different conditions may
+        # never execute together (one per event).
+        step_if = str(step.get("if") or "")
+        first_line = next((ln.strip() for ln in step["run"].splitlines() if ln.strip()), "")
+        for leaf, (scope, selectors) in runs:
+            groups.setdefault((scope, str(leaf.get("wd") or ""), step_if), []).append(
+                (i, first_line, selectors))
+    for (_scope, wd, _if), invocations in groups.items():
+        selector_sets = {selectors for _i, _line, selectors in invocations}
+        if len(invocations) < 2 or len(selector_sets) < 2:
+            continue
+        idxs = sorted({i for i, _line, _sel in invocations})
+        if any(idxs[0] <= mi <= idxs[-1] for mi in mutation_idxs):
+            continue
+        where = (f"{len(idxs)} separate steps" if len(idxs) > 1
+                 else "one step")
+        wd_note = f" (working-directory `{wd}`)" if wd else ""
+        return Hit(
+            line=_line_of_in_job(raw, job_name, invocations[0][1]),
+            affected_jobs=[job_name],
+            evidence=(f"job `{job_name}` runs the same Knip analysis "
+                      f"{len(invocations)} times in {where} with only report/include "
+                      f"selectors changed{wd_note}; run it once and split or "
+                      "filter the combined report, keeping each selection's "
+                      "pass/fail policy"),
+            match_text=job_name,
+            facts={"opt16_analysis_repeat": {"tool": "knip", "runs": len(invocations),
+                                             "steps": len(idxs)}},
+        )
+    return None
+
+
+def _detect_opt16(doc: dict, raw: str,
+                  package_scripts: dict[str, Any] | None = None) -> list[Hit]:
     """The same EXPENSIVE `run:` command (build/install/test) appears in ≥2
     separate steps of one job — wasteful rebuild (catalog OPT16). Two
     suppressions avoid false positives: the dedup key includes the step's
@@ -4182,6 +5135,7 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
                     continue
                 seen_in_step.add(c)
                 key_to_steps.setdefault((c, wd), []).append(i)
+        found = False
         for (cmd, wd), idxs in key_to_steps.items():
             if len(idxs) < 2:
                 continue
@@ -4201,7 +5155,15 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
                           f"{len(idxs)} separate steps{wd_note}: `{cmd[:80]}`"),
                 match_text=job_name,
             ))
+            found = True
             break  # one finding per job is enough
+        if found:
+            continue
+
+        hit = _opt16_analysis_repeat_hit(
+            job_name, job, doc, raw, steps, mutation_idxs, package_scripts)
+        if hit is not None:
+            hits.append(hit)
     return hits
 
 
@@ -5164,6 +6126,88 @@ _OPT31_INSTALL_RE = re.compile(
     r"playwright\s+install|apt-get\s+install|pip\s+install|npm\s+install\s+-g|"
     r"bunx\s+playwright\s+install", re.I)
 _OPT31_GATE_RE = re.compile(r"secrets\.|env\.", re.I)
+_OPT31_NEEDS_RESULT_RE = re.compile(
+    r"needs(?:\.\*|\.[A-Za-z0-9_-]+|\[\s*['\"][^'\"]+['\"]\s*\])\.result",
+    re.I,
+)
+_OPT31_EXPRESSION_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
+_OPT31_NEEDS_EXPRESSION_RE = re.compile(
+    r"^\$\{\{\s*needs(?:\.\*|\.[A-Za-z0-9_-]+|"
+    r"\[\s*['\"][^'\"]+['\"]\s*\])\.result\s*\}\}$",
+    re.I | re.S,
+)
+_OPT31_EARLY_SETUP_RE = re.compile(
+    r"^(?:actions/checkout|[^/@]+/setup-[^/@]+)@", re.I)
+# First word of each simple command a movable gate may run: shell control,
+# output and test builtins only, so nothing depends on checkout or setup.
+_OPT31_GATE_COMMANDS = frozenset({
+    "printf", "echo", "test", "[", "[[", "exit", "false", "true", "set", ":",
+    "case", "esac", "fi", "}",
+})
+_OPT31_GATE_KEYWORDS = frozenset({"if", "elif", "then", "else", "!", "{"})
+_OPT31_DOUBLE_BRACKET_RE = re.compile(r"\[\[(.*?)\]\]")
+# Unary test operators that read the filesystem the moved gate would lose.
+_OPT31_FILE_TEST_RE = re.compile(r"(?:^|\s)!?\s*-[bcdefghkpLrsSuwxOGN](?=\s)")
+_OPT31_COMMAND_SPLIT_RE = re.compile(r"\|\||&&|;;|;|\|")
+_OPT31_SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+_OPT31_RUNNER_VARS = frozenset({"CI", "HOME"})
+_OPT31_NEEDS_CHECK_FAIL_RE = re.compile(
+    r"(?:^|\n)\s*(?:test\b|\[\[?|false\b)|\bexit\s+[1-9]\d*\b|"
+    r"(?:\|\||&&)\s*(?:exit\s+[1-9]|false\b)",
+    re.I,
+)
+
+
+def _opt31_env_keys(node: Any) -> set[str]:
+    env = node.get("env") if isinstance(node, dict) else None
+    return {str(k) for k in env} if isinstance(env, dict) else set()
+
+
+def _opt31_run_defaults_movable(*nodes: Any) -> bool:
+    """No working directory and a POSIX shell at every defaults level."""
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        defaults = node.get("defaults")
+        run = defaults.get("run") if isinstance(defaults, dict) else None
+        if run is None:
+            continue
+        if not isinstance(run, dict):
+            return False
+        if run.get("working-directory") not in (None, ""):
+            return False
+        if run.get("shell") not in (None, "bash", "sh"):
+            return False
+    return True
+
+
+def _opt31_builtin_only(run: str) -> bool:
+    """Every simple command is a builtin that reads no file or tool."""
+    if any(token in run for token in ("$(", "`", "<", "\\\n")):
+        return False
+    for raw_line in run.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        spans = _OPT31_DOUBLE_BRACKET_RE.findall(line)
+        if any(_OPT31_FILE_TEST_RE.search(" " + span + " ") for span in spans):
+            return False
+        line = _OPT31_DOUBLE_BRACKET_RE.sub("[[ ]]", line)
+        for segment in _OPT31_COMMAND_SPLIT_RE.split(line):
+            # `>&2` / `2>&1` are redirects; any other lone `&` backgrounds.
+            if "&" in re.sub(r"\d*>&\d", "", segment):
+                return False
+            words = segment.split()
+            while words and words[0] in _OPT31_GATE_KEYWORDS:
+                words = words[1:]
+            if not words:
+                continue
+            if words[0] not in _OPT31_GATE_COMMANDS:
+                return False
+            if (words[0] in ("test", "[")
+                    and _OPT31_FILE_TEST_RE.search(" ".join(words) + " ")):
+                return False
+    return True
 
 
 def _opt31_tokens(install_line: str) -> set[str]:
@@ -5181,14 +6225,100 @@ def _opt31_tokens(install_line: str) -> set[str]:
     return toks
 
 
+def _opt31_needs_result_check(step: dict, step_if: str | None,
+                               job: dict, doc: dict) -> bool:
+    """A shell-only result gate that can fail without repository files/tools.
+
+    Every GitHub expression available to the step must be exactly one
+    ``needs.<job>.result`` value, and every command a shell builtin that reads
+    no file, tool, working directory or variable an earlier step could export,
+    so moving the step before checkout/toolchain setup cannot change its
+    verdict. Anything this cannot classify withholds the finding.
+    """
+    run = _run(step)
+    if not run or _uses(step) or step_if:
+        return False
+    continue_on_error = step.get("continue-on-error")
+    if continue_on_error not in (None, False):
+        return False
+    if step.get("working-directory") not in (None, ""):
+        return False
+    if step.get("shell") not in (None, "bash", "sh"):
+        return False
+    if not _opt31_run_defaults_movable(doc, job):
+        return False
+    env = step.get("env") if isinstance(step.get("env"), dict) else {}
+    dynamic_text = "\n".join((run, *(str(value) for value in env.values())))
+    expressions = _OPT31_EXPRESSION_RE.findall(dynamic_text)
+    if (not expressions
+            or not all(_OPT31_NEEDS_EXPRESSION_RE.fullmatch(expr.strip())
+                       for expr in expressions)):
+        return False
+    if not any(_OPT31_NEEDS_RESULT_RE.search(expr) for expr in expressions):
+        return False
+    script = _OPT31_EXPRESSION_RE.sub("needs_result", run)
+    known_vars = (_opt31_env_keys(step) | _opt31_env_keys(job)
+                  | _opt31_env_keys(doc) | _OPT31_RUNNER_VARS)
+    for name in _OPT31_SHELL_VAR_RE.findall(script):
+        if name not in known_vars and not name.startswith(("GITHUB_", "RUNNER_")):
+            return False  # may come from an earlier step's $GITHUB_ENV
+    if (not _opt31_builtin_only(script)
+            or not _OPT31_NEEDS_CHECK_FAIL_RE.search(script)):
+        return False
+    return True
+
+
+def _opt31_early_setup(step: dict, step_if: str | None) -> bool:
+    uses = _uses(step)
+    if not _OPT31_EARLY_SETUP_RE.search(uses):
+        return False
+    # A setup already conditional on producer results does not run on the
+    # unsuccessful path this extension prices. Complex result conditions fail
+    # closed rather than being called unconditional.
+    return not (step_if and _OPT31_NEEDS_RESULT_RE.search(step_if))
+
+
 def _detect_opt31(doc: dict, raw: str) -> list[Hit]:
-    """An unconditional install/setup step whose tool is only consumed by a
-    LATER step gated on a `secrets.`/`env.` condition (catalog OPT31)."""
+    """Setup paid before a conditional consumer or a needs-result failure gate."""
     hits: list[Hit] = []
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
         steps = _steps_with_if(job)
+        result_checks = [
+            i for i, (step, step_if) in enumerate(steps)
+            if _opt31_needs_result_check(step, step_if, job, doc)
+        ]
+        if result_checks:
+            first_check = min(result_checks)
+            setup_names = [
+                _uses(step).split("@", 1)[0]
+                for step, step_if in steps[:first_check]
+                if _opt31_early_setup(step, step_if)
+            ]
+            if setup_names:
+                check = steps[first_check][0]
+                label = str(check.get("name") or "needs-result check")
+                line = (_line_of_in_job(raw, job_name, label)
+                        or _line_of_in_job(raw, job_name,
+                                           (_run(check).splitlines() or [""])[0].strip())
+                        or 1)
+                hits.append(Hit(
+                    line=line,
+                    affected_jobs=[job_name],
+                    evidence=(
+                        f"job `{job_name}` runs {', '.join(f'`{name}`' for name in setup_names)} "
+                        f"before needs-result check `{label}`, so an unsuccessful dependency "
+                        "pays checkout or toolchain setup before the check fails. Move the "
+                        "needs-only result check before checkout and toolchain setup while "
+                        "preserving its exact success predicate. Runner-minute effect: saving "
+                        "the affected setup compute on unsuccessful dependency runs; not sized "
+                        "until that run share and those setup steps are measured."
+                    ),
+                    match_text=job_name,
+                    snippet=_block_lines(raw, line),
+                ))
+                continue
         for i, (s, s_if) in enumerate(steps):
             if "if" in s or s_if is not None:
                 continue  # gated, on the step or on its enclosing group
@@ -6943,7 +8073,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT76", "OPT108", "OPT109", "OPT111"})
+    "OPT39", "OPT46", "OPT76", "OPT108", "OPT109", "OPT111"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -6993,6 +8123,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT76": _detect_opt76,
     "OPT29": _detect_opt29,
     "OPT108": _detect_opt108,
+    "OPT114": _detect_opt114,
     "OPT109": _detect_opt109,
     "OPT111": _detect_opt111,
     "OPT31": _detect_opt31,
@@ -9936,6 +11067,204 @@ def _detect_opt19(root: Path):
     return [("OPT19", top[0][0], hit, total_s, me)], incomplete
 
 
+# OPT113 — a linked Go test executable (or an output explicitly built by the
+# test) is used as byte payload for an archive, compressor or hash. Source alone
+# cannot price the repeated bytes, so this detector reports the shape but never
+# invents a duration or run frequency.
+_OPT113_FILE_CAP = 8000
+_OPT113_MAX_BYTES = 1_000_000
+_OPT113_TRANSFORM_RE = re.compile(
+    r"\b(?:zip|tar|gzip|zlib|flate|bzip2|lz4|zstd)\."
+    r"(?:NewWriter(?:Level|Size)?|New)\s*\("
+    r"|\b(?:sha1|sha256|sha512|md5|crc32|crc64|fnv)\."
+    r"(?:New|Sum(?:224|256|384|512)?)\s*\(")
+_OPT113_GO_BUILD_RE = re.compile(
+    r"exec\.Command(?:Context)?\([^\n)]{0,500}?['\"]go['\"]\s*,"
+    r"[^\n)]{0,500}?['\"]build['\"][^\n)]{0,500}?['\"]-o['\"]\s*,\s*"
+    r"(?P<output>[A-Za-z_]\w*)(?=\s*[,)])")
+_OPT113_EXECUTABLE_ASSIGN_RE = re.compile(
+    r"(?P<input>[A-Za-z_]\w*)\s*,\s*[A-Za-z_]\w*\s*:?=\s*"
+    r"os\.Executable\s*\(\s*\)")
+_OPT113_FUNC_RE = re.compile(
+    r"(?m)^func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(")
+_OPT113_ASSIGN_RE = re.compile(
+    r"(?m)^[ \t]*(?P<names>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:?=\s*"
+    r"(?P<rhs>[^\n]*)")
+# The real binary is itself the contract: its format headers, a signature over
+# it, or running it. A byte fixture cannot stand in, so such a file withholds.
+_OPT113_METADATA_RE = re.compile(
+    r"['\"]debug/(?:elf|macho|pe|buildinfo|plan9obj)['\"]"
+    r"|\b(?:elf|macho|pe|buildinfo)\.(?:Open|NewFile|Read\w*)\s*\("
+    r"|\bVerify\w*\s*\(|\b(?:codesign|signtool|notarytool|cosign|sigstore)\b"
+    r"|\bexec\.Command\s*\(\s*(?![\"`])"
+    r"|\bexec\.CommandContext\s*\([^,\n]*,\s*(?![\"`])"
+    r"|\b(?:os\.StartProcess|syscall\.Exec)\s*\(")
+_OPT113_MODE_ASSERT_RE = re.compile(
+    r"\b(?:Mode|Perm)\s*\(\s*\)[^\n]*(?:&|==|!=)")
+_OPT113_DIRECT_SUM_RE = (
+    r"\b(?:sha1|sha256|sha512|md5|crc32|crc64|fnv)\."
+    r"(?:Sum(?:224|256|384|512)?|Checksum\w*)\s*\(\s*{src}\b")
+
+
+def _opt113_without_comments(text: str) -> str:
+    # Preserve newlines and offsets so the finding's line/snippet still points
+    # at the real source after comments are ignored.
+    def blank(match: re.Match[str]) -> str:
+        return re.sub(r"[^\n]", " ", match.group(0))
+
+    text = re.sub(r"/\*.*?\*/", blank, text, flags=re.S)
+    return re.sub(r"(?m)//.*$", blank, text)
+
+
+def _opt113_functions(text: str) -> list[tuple[str, int, str]]:
+    starts = list(_OPT113_FUNC_RE.finditer(text))
+    return [(m.group("name"), m.start(),
+             text[m.start():starts[i + 1].start() if i + 1 < len(starts) else len(text)])
+            for i, m in enumerate(starts)]
+
+
+def _opt113_flow(text: str) -> tuple[str, int] | None:
+    """Trace the oversized bytes into an archive, compressor or hash.
+
+    A finding needs one function that (1) opens or reads the linked test
+    executable — directly, via a helper that returns it, or a `go build -o`
+    output built in that function — and (2) passes those exact bytes into a
+    writer created by an archive/compression/hash constructor (or a direct
+    digest call). Anything the read cannot tie together withholds. A file that
+    inspects format headers, verifies a signature, executes a binary, or
+    asserts a file mode withholds too: there the real binary is the contract.
+    """
+    if _OPT113_METADATA_RE.search(text):
+        return None
+    functions = _opt113_functions(text)
+    helpers: set[str] = set()
+    for name, _start, body in functions:
+        for exe in _OPT113_EXECUTABLE_ASSIGN_RE.finditer(body):
+            if re.search(rf"\breturn\s+{re.escape(exe.group('input'))}\s*(?:,|$)",
+                         body, re.M):
+                helpers.add(name)
+    for _name, start, body in functions:
+        origins: list[tuple[str, str]] = []
+        # The whole argument must be the origin: `exe + ".sha256"` or
+        # `filepath.Join(filepath.Dir(exe), ...)` names a different file.
+        origins += [(re.escape(m.group("input")) + r"\s*\)", "the linked Go test executable")
+                    for m in _OPT113_EXECUTABLE_ASSIGN_RE.finditer(body)]
+        origins += [(re.escape(h) + r"\s*\([^()\n]*\)\s*\)", "the linked Go test executable")
+                    for h in sorted(helpers)]
+        origins += [(re.escape(m.group("output")) + r"\s*\)", "a binary built by the test")
+                    for m in _OPT113_GO_BUILD_RE.finditer(body)]
+        if not origins:
+            continue
+        sources: list[tuple[str, int, str]] = []
+        sinks: set[str] = set()
+        for assign in _OPT113_ASSIGN_RE.finditer(body):
+            first = assign.group("names").split(",")[0].strip()
+            rhs = assign.group("rhs")
+            for expr, label in origins:
+                if re.match(rf"os\.(?:Open|ReadFile)\s*\(\s*{expr}", rhs):
+                    sources.append((first, assign.start("names"), label))
+                    break
+            if (_OPT113_TRANSFORM_RE.match(rhs)
+                    or any(re.match(rf"{re.escape(k)}\.(?:Create\w*|NewWriter\w*)\s*\(", rhs)
+                           for k in sinks)
+                    or (_OPT113_TRANSFORM_RE.search(rhs)
+                        and any(re.search(rf"\b{re.escape(k)}\b", rhs) for k in sinks))):
+                sinks.add(first)
+        if not sources or _OPT113_MODE_ASSERT_RE.search(body):
+            continue
+        for src, offset, label in sources:
+            s = re.escape(src)
+            sink_alt = "|".join(re.escape(k) for k in sorted(sinks)) or r"(?!x)x"
+            flows = (
+                rf"\bio\.Copy(?:N|Buffer)?\s*\([^,\n]*\b(?:{sink_alt})\b[^,\n]*,[^\n]*\b{s}\b",
+                rf"\b(?:{sink_alt})\.Write\w*\s*\([^\n]*\b{s}\b",
+                _OPT113_DIRECT_SUM_RE.format(src=s),
+            )
+            if any(re.search(f, body) for f in flows):
+                return label, start + offset
+    return None
+
+
+def _detect_opt113(root: Path) -> tuple[list[tuple[str, str, Hit]], list[dict]]:
+    hits: list[tuple[str, str, Hit]] = []
+    incomplete: list[dict] = []
+    scanned = 0
+    capped = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in _OPT19_SKIP_DIRS and not d.startswith(".")]
+        for filename in filenames:
+            if not filename.endswith("_test.go"):
+                continue
+            if scanned >= _OPT113_FILE_CAP:
+                capped = True
+                break
+            scanned += 1
+            path = Path(dirpath, filename)
+            rel = path.relative_to(root).as_posix()
+            try:
+                if not _inside_scan_root(path):
+                    continue
+                if path.stat().st_size > _OPT113_MAX_BYTES:
+                    incomplete.append({
+                        "path": rel,
+                        "kind": "opt113-source-unreadable",
+                        "reason": (f"OPT113 source exceeds the {_OPT113_MAX_BYTES}-byte "
+                                   "read bound; fixture input was not classified"),
+                    })
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                incomplete.append({"path": rel, "kind": "opt113-source-unreadable",
+                                   "reason": f"OPT113 source read failed: {exc}"})
+                continue
+            code = _opt113_without_comments(text)
+            origin = _opt113_flow(code)
+            if origin is None:
+                continue
+            origin_label, origin_at = origin
+            line = code.count("\n", 0, origin_at) + 1
+            hit = Hit(
+                line=line,
+                affected_jobs=[],
+                evidence=(f"{rel}: {origin_label} is read and its bytes are passed "
+                          "into an archive, compressor or hash; runner-minute saving: "
+                          "unsized because source does not reveal the affected test's "
+                          "measured duration or monthly run count"),
+                match_text=origin_label,
+                snippet=text.splitlines()[line - 1].rstrip(),
+                facts={
+                    "fix_strategy": (
+                        "Use a small shared byte fixture for byte/archive/hash contract "
+                        "tests; retain a real executable only where executable metadata "
+                        "is the behavior under test."),
+                    "wall_clock_p50_s": None,
+                    "runner_min_saving": None,
+                    "tier": 2,
+                    "realization": "none",
+                    "size_note": (
+                        "runner-minute saving: unsized (source identifies oversized "
+                        "fixture work but not its measured duration or monthly run count)"),
+                    "runner_min_unsized_reason": (
+                        "source identifies oversized fixture work but not its measured "
+                        "duration or monthly run count"),
+                    "oversized_fixture_static": True,
+                },
+            )
+            hits.append(("OPT113", rel, hit))
+        if capped:
+            break
+    if capped:
+        incomplete.append({
+            "path": "<source tree>",
+            "kind": "opt113-file-cap",
+            "reason": (f"OPT113 source scan hit the {_OPT113_FILE_CAP}-file cap after "
+                       f"scanning {scanned} Go test files; remaining fixture inputs "
+                       "were not classified"),
+        })
+    return hits, incomplete
+
+
 # =============================================================================
 # Workflow walk + emit
 # =============================================================================
@@ -10691,6 +12020,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         unreadable_jobs[(mj["path"], mj["job"])] = rec
 
     findings: list[dict[str, Any]] = []
+    opt46_aggregate_candidates: list[dict[str, Any]] = []
     finding_idx = 0
 
     # Index local composite actions that run git-history ops, so OPT28 can see a
@@ -10723,6 +12053,10 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # A restore prefix can be seeded by a cache step in any workflow in the
     # repository, so OPT61 needs one repository-wide saved-key index.
     repo_cache_saved_keys = _cache_saved_keys(doc for _rel, doc, _raw in parsed)
+    # The package scripts a workflow command resolves through (OPT16's
+    # repeated-analysis form follows `pnpm knip:json` into them), read once and
+    # reused for the `type_aware_lint` block below.
+    type_aware_lint = _read_type_aware_lint(root)
 
     # --- Per-file pass ---
     for rel, doc, raw in parsed:
@@ -10736,6 +12070,11 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             fn = _DETECTORS.get(entry.pattern)
             if entry.pattern == "OPT61":
                 hits = list(_detect_opt61(doc, raw, saved_keys=repo_cache_saved_keys))
+            elif entry.pattern == "OPT32":
+                hits = list(_detect_opt32(
+                    doc, raw, root=root, default_branch=default_branch))
+            elif entry.pattern == "OPT16":
+                hits = list(_detect_opt16(doc, raw, package_scripts=type_aware_lint))
             elif fn is not None:
                 hits = list(fn(doc, raw))
             elif entry.match or entry.yaml_path:
@@ -10770,6 +12109,34 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
                 if snippet:
                     f["evidence_snippet"] = snippet
                 findings.append(f)
+
+        # OPT46's primary detector remains run-history based. Its
+        # cancellation-enabled aggregate flavor is provable from YAML, but its
+        # advice is safe only for a check that is not required, so the hits are
+        # recorded as candidates for collect_runs to promote after the
+        # required-check read. A static-only run never reports them.
+        opt46_entry = catalog_by_id.get("OPT46")
+        if opt46_entry is not None:
+            opt46_hits = _detect_opt46_cancelled_aggregate(doc, raw)
+            if unreadable_jobs:
+                opt46_hits = _hold_back_unreadable(
+                    "OPT46", opt46_hits, rel, unreadable_jobs)
+            for hit in opt46_hits:
+                finding_idx += 1
+                f = _emit(opt46_entry, hit, rel, finding_idx)
+                # OPT46's catalog class remains data-driven for its primary
+                # superseded-run overlap detector. This narrow YAML flavor is
+                # static and deliberately uncredited until run evidence sizes
+                # it, so do not mislabel it as a measured finding.
+                f["pattern_class"] = "static"
+                f.update(hit.facts)
+                f["workflow_lanes"] = workflow_lanes.get(rel, [])
+                if workflow_push_scopes.get(rel):
+                    f["workflow_push_scopes"] = workflow_push_scopes[rel]
+                snippet = hit.snippet or _raw_line(raw, hit.line)
+                if snippet:
+                    f["evidence_snippet"] = snippet
+                opt46_aggregate_candidates.append(f)
 
     # --- Cross-workflow / repo-context pass ---
     opt96_held: list[dict] = []
@@ -10818,6 +12185,21 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         f["realization"] = "direct"
         f["measured_signal"] = hit.evidence
         f["measured_evidence"] = me
+        findings.append(f)
+
+    # --- Go test source pass (OPT113) — categorical until run timings reveal
+    # how much of the affected test is spent moving the oversized bytes. ---
+    opt113_hits, opt113_incomplete = _detect_opt113(root)
+    scan_incomplete.extend(opt113_incomplete)
+    for pat, source_file, hit in opt113_hits:
+        entry = catalog_by_id.get(pat)
+        if entry is None:
+            continue
+        finding_idx += 1
+        f = _emit(entry, hit, source_file, finding_idx)
+        f.update(hit.facts)
+        if hit.snippet:
+            f["evidence_snippet"] = hit.snippet
         findings.append(f)
 
     # Reconcile mutually-exclusive remedies that fired on the SAME physical step
@@ -10904,7 +12286,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # which type-aware rules are on, plus the package scripts a workflow's
         # `npm run lint` resolves through. NOT a finding — the config fact the
         # data-pass OPT82 detector joins to a slow lint job.
-        "type_aware_lint": _read_type_aware_lint(root),
+        "type_aware_lint": type_aware_lint,
         "catalog_patterns_total": len(catalog),
         "catalog_patterns_with_detector": len(static_entries) - len(unmatched_patterns),
         "catalog_patterns_without_detector": sorted(unmatched_patterns),
@@ -10914,6 +12296,10 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # catalogued-but-undetected structural pattern is
         # honest about its coverage instead of silently never appearing.
         "catalog_structural_patterns_without_detector": structural_without_detector,
+        # OPT46 cancelled-run aggregate candidates. NOT findings: collect_runs
+        # promotes one only when a complete required-check read shows its check
+        # is not required (a skipped required check counts as passing).
+        "opt46_aggregate_candidates": opt46_aggregate_candidates,
     }
 # =============================================================================
 # CLI

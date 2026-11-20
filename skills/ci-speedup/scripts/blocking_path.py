@@ -4747,6 +4747,20 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request"],
         "deliver": "Review once when a pull request opens or becomes ready, debounce later head updates before runner allocation, or require an authorized explicit re-review command. Exercise open, ready, synchronize and explicit re-review paths, then measure the avoided review-job compute before claiming a numeric saving.",
     },
+    "deploy-path-test-exclusion": {
+        "cause": "A default-branch deploy or release workflow's positive path glob also selects files under a test directory, so a test-only merge can trigger production work.",
+        "look": "Inspect the push trigger's ordered paths list, the matched test directory, and every runtime, configuration, workflow and deployment-helper path the deploy must retain.",
+        "constraints": "Keep the deploy/release trigger on the default branch and retain every production input. GitHub evaluates paths patterns in order; the test exclusion must follow the broader positive glob. Do not add paths-ignore beside paths because one event cannot use both.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#example-including-and-excluding-paths"],
+        "deliver": "Add the narrow negated test-directory pattern immediately after the broader positive glob, preserve the other deploy inputs, and test test-only, runtime-only and mixed changes. Measure skipped deploy frequency and compute before stating a numeric saving.",
+    },
+    "conditional-step-with-unconditional-setup": {
+        "cause": "Setup runs on a path where its only consumer is skipped, or checkout/toolchain setup runs before a needs-result check can reject an unsuccessful dependency.",
+        "look": "Inspect the setup and its consumer or result gate together. Confirm which inputs the gate reads, whether it can fail the job, and whether any repository file or toolchain command makes its current position load-bearing.",
+        "constraints": "Preserve the exact condition and failure predicate. Move a needs-result gate first only when it reads result values alone and uses shell builtins; otherwise keep checkout/toolchain setup available. Keep setup and a conditional consumer under the same condition.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#needs-context"],
+        "deliver": "Either copy the consumer condition to its setup, or move the needs-only failing result check ahead of checkout and toolchain setup. Exercise successful, failed, cancelled, skipped and missing dependency results, and measure the avoided setup work before claiming a numeric saving.",
+    },
     "failure-reporter-on-failure": {
         "cause": "A failure-only report job uses `if: always()`, so healthy runs allocate a runner even though there is no failure to report.",
         "look": "Inspect the reporter's `needs`, job condition and reporting steps (including any script it runs, for a healthy-run path such as clearing a stale failure comment), then trace how its result feeds every final required aggregate gate.",
@@ -8885,6 +8899,18 @@ _OPT83_WITHHOLD_PHRASES: dict[str, str] = {
     "job_starts_a_container_or_background_server":
         "the job starts a container or a background server that the steps "
         "would all use at once",
+    "separate_job_matrix_job":
+        "the steps cannot share one runner, and the job is a matrix, so a sibling "
+        "job would repeat its setup in every cell and its added cost per run could "
+        "not be stated",
+    "separate_job_later_step_may_read_moved_output":
+        "the steps cannot share one runner, and a later step or a job output may "
+        "read what a moved step writes, so moving it to its own job could drop "
+        "that check",
+    "separate_job_prerequisite_unclassified":
+        "the steps cannot share one runner, and a step before them is not setup, "
+        "checkout or install, so what a sibling job would have to repeat is "
+        "unmeasured",
 }
 # OPT84: a slow step on a long pole whose command could not be followed to the
 # tool it runs, or whose fit could not be decided. Every gate in
@@ -12402,6 +12428,30 @@ def _opt83_prompt(f: dict[str, Any], url: str) -> list[str]:
     steps = [s for s in st.get("steps") or [] if isinstance(s, dict)]
     names = ", ".join(f"`{s.get('step')}`" for s in steps)
     ceiling = _num(st.get("ceiling_s")) or 0.0
+    if st.get("kind") == "opt83_separate_jobs":
+        effect = f.get("runner_minute_effect") or {}
+        added = _num(effect.get("runner_min_per_run")) or 0.0
+        moved = _flatten_cell(str(st.get("moved_step") or ""))
+        body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
+                "investigate it in the repo and apply a safe change.", "",
+                f"Where: {wf} (job `{job}`, YAML job `{st.get('yaml_job')}`).",
+                f"What ci-speedup saw: {_flatten_cell(str(f.get('evidence') or ''))}", "",
+                f"Move `{moved}` unchanged into its own sibling job so it runs beside "
+                "the remaining work. Keep every setup and verification command.",
+                "Add one final aggregator job with `if: always()` and `needs:` on every "
+                "sibling. It must fail unless every upstream `result` is `success`, and "
+                "it must keep the required check name that branch protection expects.",
+                f"Merge-wait reduction (re-derived from measured p50s): up to "
+                f"{ceiling:.0f}s; the aggregator job's own pickup comes off it. "
+                f"Runner-minute effect: added cost, at least +{added:.2f} runner-min "
+                "per run (duplicated-setup floor; the aggregator job and per-job "
+                "minute rounding add more), with one additional concurrent runner.",
+                "Roll out on the same commits and keep the split only if the measured "
+                "wall-clock gain holds and the added runner cost is accepted.", "",
+                "Read the catalog entry (background, fix recipe, and guardrail):",
+                f"  {url}", "", *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES]
+        return ["#### 🤖 Prompt for your coding agent (OPT83)", "", "```text",
+                *[_fence_safe(line) for line in body], "```"]
     body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
             "investigate it in the repo and apply a safe change.", "",
             f"Pattern: OPT83 - {_flatten_cell(str(f.get('title') or 'OPT83'))} "
@@ -12455,6 +12505,32 @@ def _opt83_card(f: dict[str, Any], catalog_url: str) -> list[str]:
     listing = " · ".join(f"`{_flatten_cell(str(s.get('step')))}` "
                          f"{_num(s.get('p50_s')) or 0:.0f}s" for s in steps)
     ceiling = _num(st.get("ceiling_s")) or 0.0
+    if st.get("kind") == "opt83_separate_jobs":
+        setup = _num(st.get("setup_s")) or 0.0
+        moved = _flatten_cell(str(st.get("moved_step") or ""))
+        effect = f.get("runner_minute_effect") or {}
+        added = _num(effect.get("runner_min_per_run")) or 0.0
+        out = [f'<a id="opt83-{fid}"></a>', "",
+               f"**🔀 OPT83 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**",
+               "", f"- **Where:** `{wf}` ▸ `{job}`",
+               f"- **Steps that run one after another** (workflow order, p50): {listing}",
+               f"- **Change:** move `{moved}` unchanged to one sibling job and run it "
+               "beside the remaining work; add an `always()` aggregator that requires "
+               "every upstream result to be `success` and keeps the required check name.",
+               f"- **Merge-wait reduction (re-derived from measured p50s):** up to "
+               f"{ceiling:.0f}s (serial candidate sum minus the slower of the remaining "
+               f"job and the moved step plus {setup:.0f}s measured setup; the "
+               "aggregator job's own pickup comes off it).",
+               f"- **Runner-minute effect:** added cost, at least +{added:.2f} "
+               "runner-min per run (duplicated-setup floor; the aggregator job and "
+               "per-job minute rounding add more); one additional concurrent runner."]
+        if f.get("guardrail"):
+            out.append(f"- **Guardrail:** {_flatten_cell(str(f['guardrail']))}")
+        if f.get("rollout"):
+            out.append(f"- **Rollout:** {_flatten_cell(str(f['rollout']))}")
+        out += [f"- **Catalog (background + fix recipe):** {url}", "",
+                *_opt83_prompt(f, url), ""]
+        return out
     out = [f'<a id="opt83-{fid}"></a>', "",
            f"**🔀 OPT83 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**"
            f" · {_OPT83_SUMMARY}", "",
@@ -14590,12 +14666,69 @@ def _unresolved_gate_lines(cp: dict[str, Any]) -> list[str]:
     return ["> **Merge gate unresolved:** " + _clean_label(str(cp["unresolved_reason"])), ""]
 
 
+def _account_weekly_block(value: Any) -> list[str]:
+    """Render caller-supplied account observations without inventing coverage."""
+    if not isinstance(value, dict):
+        return []
+    weeks = [row for row in _as_list(value.get("weeks"))
+             if isinstance(row, dict)]
+    if not weeks:
+        return []
+    lines = [
+        "## Account-level weekly CI",
+        "",
+        "> Optional account export. These totals are descriptive context, not "
+        "repository-sample extrapolations.",
+        "",
+        "| Week starting | Runner-hours | Jobs | Merged PRs | Runner-hours / merged PR | Workload change |",
+        "| :--- | ---: | ---: | ---: | ---: | :--- |",
+    ]
+    for row in weeks:
+        per_pr = _num(row.get("runner_hours_per_merged_pr"))
+        lines.append(
+            f"| {_flatten_cell(str(row.get('week_start') or 'unknown'))} "
+            f"| {float(_num(row.get('runner_hours')) or 0):.1f} "
+            f"| {int(_num(row.get('jobs')) or 0)} "
+            f"| {int(_num(row.get('merged_pull_requests')) or 0)} "
+            f"| {f'{per_pr:.2f}' if per_pr is not None else 'unavailable'} "
+            f"| {_flatten_cell(str(row.get('workload_change') or 'unavailable'))} |")
+    lines.append("")
+    paired = _as_dict(value.get("paired_comparison"))
+    if paired.get("available") is True:
+        effect = str(paired.get("runner_minute_effect") or "unsized")
+        delta = float(_num(paired.get("runner_minute_delta")) or 0)
+        before_n = int(_num(paired.get("before_n")) or 0)
+        after_n = int(_num(paired.get("after_n")) or 0)
+        workload = _flatten_cell(str(paired.get("workload_change") or "unstated"))
+        lines += [
+            "**Supplied paired-run comparison (from your export, not a "
+            "ci-speedup finding, and not counted in this report's savings):** "
+            f"runner-minute {effect}: {delta:.1f} per paired run, comparing "
+            f"the median of {before_n} before and {after_n} after runs. "
+            f"Workload change: {workload}.",
+            "",
+        ]
+    else:
+        reason = _flatten_cell(str(paired.get("reason") or "paired observations unavailable"))
+        lines += [f"**Supplied paired-run comparison withheld:** {reason}.", ""]
+    return lines
+
+
 def render(doc: dict[str, Any], *args, **kwargs) -> str:
     """Include lifecycle context on every report path, including static-only."""
     report = _render_core(doc, *args, **kwargs)
     block = pr_lifecycle.render(doc.get("pr_lifecycle"))
     first, separator, rest = report.partition("\n\n")
-    return first + "\n\n" + block + "\n" + rest if separator else report + "\n\n" + block
+    report = (first + "\n\n" + block + "\n" + rest
+              if separator else report + "\n\n" + block)
+    weekly = _account_weekly_block(doc.get("account_weekly"))
+    if weekly:
+        footer = "\n\n---\n\nGenerated by"
+        head, marker, tail = report.rpartition(footer)
+        addition = "\n\n---\n\n" + "\n".join(weekly).rstrip()
+        report = (head + addition + marker + tail
+                  if marker else report + addition)
+    return report
 
 
 def _minority_gate_tail_block(cp: dict[str, Any]) -> list[str]:

@@ -390,6 +390,25 @@ variation.
 
 **Proposed decision:** **Keep 3.** The value remains awaiting owner approval.
 
+### `account-weekly-paired-minimum`
+
+**Current value:** at least 2 explicit paired run observations per side
+(`before_after.py::_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS`), with equal before and
+after counts, before an account weekly export states a runner-minute effect.
+
+**Report statements:** the paired before/after median runner-minute effect in
+the optional account-level weekly section, or the reason that comparison is
+withheld.
+
+**Reason:** One run per side cannot expose ordinary run-to-run variation. Two is
+the smallest population that can disagree and matches phase 7's locked minimum
+without treating the account export as a repository rerun.
+
+**Proposed decision:** **Keep 2 paired observations per side.** The value
+remains awaiting owner approval.
+
+**Approval status:** awaiting owner approval.
+
 ### `rare-push-lane`
 
 **Current value:** fewer than 8 default-branch push runs in 30 days is treated
@@ -624,6 +643,28 @@ pattern must add its own named minimum and contract entry rather than borrowing
 an unrelated global threshold.
 
 **Approval status:** awaiting owner approval.
+
+### `go-fixed-wait-thresholds`
+
+**Current value:** the measured OPT19 Go poll route needs at least two
+consistent wait intervals; the poll total, or the constant test-body sleep
+total, must account for at least 50% of the measured test (or package) time
+and 20% of the drilled long-pole job. The race-helper route needs at least
+three synchronous call sites that re-exec the test binary (`_OPT19_GO_MIN_INTERVALS`,
+`_OPT19_GO_MIN_TEST_SHARE`, `_OPT19_GO_MIN_JOB_SHARE`, and
+`_OPT19_GO_RACE_HELPER_MIN_SPAWNS`).
+
+**Report statements:** that a Go test is dominated by a fixed production wait,
+or that a race job repeatedly pays the race runtime's default helper-exit sleep.
+
+**Reason:** Repeated equal gaps plus both dominance tests distinguish a fixed
+wait from ordinary slow work. Three helper call sites avoid recommending a race
+option change for a one-off subprocess.
+
+**Proposed decision:** **Keep two intervals, 50%, 20%, and three helpers.**
+
+**Approval status:** awaiting owner approval.
+
 ### `saving-caps`
 
 **Current value:** modeled cache savings use at most 90% of the available cache
@@ -667,6 +708,12 @@ implementation lands.
 
 ```json report-defaults-contract
 {
+  "account-weekly-paired-minimum": {
+    "decision": "account-weekly-paired-minimum",
+    "sources": {
+      "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 2
+    }
+  },
   "bimodal-noise-band": {
     "decision": "bimodal-noise-band",
     "symbols": [
@@ -745,6 +792,15 @@ implementation lands.
     "decision": "gate-frequency-interval",
     "planned_sources": {
       "gate_frequency_contract.py:GATE_INTERVAL_Z": 1.96
+    }
+  },
+  "go-fixed-wait-thresholds": {
+    "decision": "go-fixed-wait-thresholds",
+    "sources": {
+      "collect_runs.py:_OPT19_GO_MIN_INTERVALS": 2,
+      "collect_runs.py:_OPT19_GO_MIN_JOB_SHARE": 0.2,
+      "collect_runs.py:_OPT19_GO_MIN_TEST_SHARE": 0.5,
+      "collect_runs.py:_OPT19_GO_RACE_HELPER_MIN_SPAWNS": 3
     }
   },
   "holds-up-threshold": {
