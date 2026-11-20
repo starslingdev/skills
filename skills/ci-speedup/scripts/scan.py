@@ -4902,11 +4902,19 @@ def _opt39_other_language_lane(doc: dict, job_name: str, languages: list[str]) -
     return False
 
 
+# A shell step that lists the pull request's changed files.
+_OPT39_CHANGED_FILE_LIST_RE = re.compile(
+    r"(?:\bgit\s+diff\b[^\n]*--name-(?:only|status)"
+    r"|\bgh\s+pr\s+diff\b[^\n]*--name-only"
+    r"|\bpulls/[^\s/]+/files\b)")
+
+
 def _opt39_has_path_output_gate(doc: dict, job: dict) -> bool:
     """Whether `job` consumes output from an upstream changed-path selector.
 
     A generic `needs.meta.outputs.version` is not a path gate. Recognize the
-    established paths-filter action and the fail-open GitHub-script form used by
+    established paths-filter and changed-files actions, a shell step that lists
+    changed files into that output, and the fail-open GitHub-script form used by
     repositories that need exact, repository-specific ownership.
     """
     condition = str(job.get("if") or "")
@@ -4919,7 +4927,13 @@ def _opt39_has_path_output_gate(doc: dict, job: dict) -> bool:
             continue
         for step in _steps(upstream):
             uses = _uses(step)
-            if re.search(r"(?:^|/)dorny/paths-filter@", uses, re.I):
+            if re.search(r"(?:^|/)(?:dorny/paths-filter|(?:tj-actions|step-security)/"
+                         r"changed-files)@", uses, re.I):
+                return True
+            command = str(step.get("run") or "") if isinstance(step, dict) else ""
+            if (_OPT39_CHANGED_FILE_LIST_RE.search(command)
+                    and "GITHUB_OUTPUT" in command
+                    and re.search(rf"\b{re.escape(output_name)}=", command)):
                 return True
             if re.search(r"(?:^|/)actions/github-script@", uses, re.I):
                 with_doc = step.get("with")

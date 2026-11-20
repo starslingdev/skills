@@ -2122,6 +2122,55 @@ jobs:
     assert _finding(_scan(tmp_path), "OPT39") is None
 
 
+@pytest.mark.parametrize("selector_step", [
+    """      - id: files
+        uses: tj-actions/changed-files@v46
+        with:
+          files_yaml: |
+            go:
+              - '**/*.go'
+              - go.mod
+      - id: select
+        run: echo "go=${{ steps.files.outputs.go_any_changed }}" >> "$GITHUB_OUTPUT"
+""",
+    """      - id: select
+        run: |
+          changed="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          if grep -qE '\\.go$|^go\\.mod$' <<<"$changed"; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+""",
+])
+def test_opt39_common_changed_file_selectors_count_as_path_gates(
+        tmp_path: Path, selector_step: str):
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.select.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+""" + selector_step + """  go-test:
+    needs: changes
+    if: needs.changes.outputs.go != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+      - run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
 def test_opt39_unrelated_needs_condition_is_not_a_path_gate(tmp_path: Path):
     workflow = """
 name: Go contract
