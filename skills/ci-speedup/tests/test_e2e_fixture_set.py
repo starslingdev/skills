@@ -799,6 +799,32 @@ def test_go_cache_restore_fact_reads_only_go_build_cache_restores():
     assert cr._go_cache_restore_fact(two_keys) is None
 
 
+def test_go_cache_restore_fact_ignores_job_env_naming_gocache():
+    """GitHub echoes job-level `env:` into every step group, so a node cache in a
+    job that sets GOCACHE must not count as a Go build-cache restore."""
+    stamp = "2026-01-28T00:00:00Z"
+    node_cache = (
+        f"{stamp} ##[group]Run actions/cache@v4\n"
+        f"{stamp} with:\n"
+        f"{stamp}   path: node_modules\n"
+        f"{stamp}   key: Linux-node-abc\n"
+        f"{stamp} env:\n"
+        f"{stamp}   GOCACHE: /tmp/go-build\n"
+        f"{stamp} ##[endgroup]\n"
+        f"{stamp} Cache restored from key: Linux-node-abc\n")
+    assert cr._go_cache_restore_fact(node_cache) is None
+    # A multi-line `path:` input still counts when a later line names the cache.
+    multi_path = (
+        f"{stamp} ##[group]Run actions/cache@v4\n"
+        f"{stamp} with:\n"
+        f"{stamp}   path: ~/go/pkg/mod\n"
+        f"{stamp} ~/.cache/go-build\n"
+        f"{stamp}   key: Linux-go-abc\n"
+        f"{stamp} ##[endgroup]\n"
+        f"{stamp} Cache restored from key: Linux-go-abc\n")
+    assert cr._go_cache_restore_fact(multi_path)["cache_key"] == "Linux-go-abc"
+
+
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
     prose = """\
 2026-01-28T00:00:00Z ##[group]Run pnpm test

@@ -29440,6 +29440,28 @@ _OPT112_MAX_FRESH_LOGS = 4
 _OPT112_MAX_OLD_LOGS = 4
 
 
+def _step_with_inputs(lines: list[str]) -> list[str]:
+    """The `with:` input lines GitHub echoes in a step's group header.
+
+    The runner also echoes job/step `env:` into every step group; those lines
+    describe the environment, not what this step caches, so they stop the scan.
+    """
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        bare = line.strip()
+        if bare == "with:":
+            inside = True
+            continue
+        if bare == "env:" or bare.startswith("##[endgroup]"):
+            if inside:
+                break
+            continue
+        if inside:
+            out.append(line)
+    return out
+
+
 def _go_cache_restore_fact(log: str) -> dict[str, Any] | None:
     """The exact Go build-cache key an ordinary job log restored, if any.
 
@@ -29469,7 +29491,7 @@ def _go_cache_restore_fact(log: str) -> dict[str, Any] | None:
         go_restore = (key.lower().startswith("setup-go-")
                       or ("actions/cache" in head.lower()
                           and any(_GO_BUILD_CACHE_NAME_RE.search(line)
-                                  for line in lines)))
+                                  for line in _step_with_inputs(lines))))
         if go_restore:
             keys.append((len(steps) - 1, key))
     if not keys or len({key for _i, key in keys}) != 1:
