@@ -26,8 +26,8 @@ developer's wait. It gets its own prominent section below.
 
 ## 1. Purpose & scope
 
-ci-speedup audits a repository's GitHub Actions workflows against a 101-pattern
-catalog — 89 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98, OPT100–OPT103, OPT107 and OPT108) plus 12 **structural /
+ci-speedup audits a repository's GitHub Actions workflows against a 102-pattern
+catalog — 90 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98, OPT100–OPT103, OPT106, OPT107 and OPT108) plus 12 **structural /
 critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85, OPT87 and OPT104, routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
@@ -3854,6 +3854,7 @@ agent prompt in `_PROMPTS`; it is **not** a prescribed fix):
 | `within-job-duplicate-test` | two invocations print the same completed test signature under the same readable active runtime and package scope (OPT16) | later completion duration (**seconds**, upper bound) |
 | `within-job-duplicate-build` | two invocations print the same package/output build signature under the same readable active runtime (OPT16) | later completion duration (**seconds**, upper bound) |
 | `lighthouse-serial-audits` | Lighthouse CI audits every URL `numberOfRuns` times per collect pass, one after another (OPT103). Counts completed passes only, and fires at 20 or more audits with at least two per distinct URL | audits beyond the first per URL, as a share of all audits (%) |
+| `runtime-ts-transpilation` | a long-pole command directly invokes a runtime TypeScript loader and its profiler summary assigns at least 30s and 20% of the job to loader self time (OPT106) | profiled loader self time (**seconds**, ceiling) |
 
 A detector with `magnitude: None` is **categorical only**: the cause is structural
 (visible in the timeline / config), so there's no scalar to validate and no
@@ -4165,7 +4166,7 @@ order of preference:
 - [`SKILL.md`](SKILL.md) - the canonical contract (phases, admission gate,
   quality review).
 - [`references/patterns/INDEX.md`](references/patterns/INDEX.md) -
-  the 101-pattern catalog, one file per pattern (frontmatter + body); the source
+  the 102-pattern catalog, one file per pattern (frontmatter + body); the source
   of truth for detection and the report's TL;DR / pattern background. The
   single-file [`references/optimization-patterns.md`](references/optimization-patterns.md)
   is compiled from `references/patterns/` by

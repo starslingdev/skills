@@ -447,6 +447,10 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
 """, encoding="utf-8")
     responses_path = positive / "responses.json"
     recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    for page in recorded["jobs"].values():
+        for row in page:
+            if str(row.get("name")) == "t32":
+                row["steps"][0]["name"] = "test runtime TypeScript snapshots"
     recorded["logs"]["1103"] = """\
 2026-01-28T00:00:00.0000000Z ##[group]Run pnpm test
 2026-01-28T00:00:00.0000000Z ##[endgroup]
@@ -512,6 +516,133 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
                 if row.get("pattern") == "OPT13"]
     assert [check for check in negative_checks
             if not check.skipped and not check.ok] == []
+
+
+def test_runtime_typescript_loader_is_sized_from_profiled_long_pole_only(
+        monkeypatch, tmp_path):
+    """Runtime transpilation needs a measured loader share, not a command guess."""
+    positive = tmp_path / "runtime-ts-loader"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    responses_path = positive / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["logs"]["1103"] = """\
+2026-01-28T00:00:00.0000000Z ##[group]Run node --import tsx scripts/generate.ts --cpu-prof
+2026-01-28T00:02:17.6000000Z CI_SPEEDUP_RUNTIME_TS_PROFILE_V1 loader=jiti self_ms=136600 profile=CPU.20260128.cpuprofile sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+2026-01-28T00:02:18.0000000Z Prompt snapshots are current (7 files)
+"""
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+
+    positive_root = tmp_path / "run-runtime-ts-loader"
+    positive_root.mkdir()
+    doc, report, checks = run_fixture(
+        positive, monkeypatch, positive_root, max_runs=20)
+
+    findings = [row for row in doc["findings"] if row.get("pattern") == "OPT106"]
+    assert findings, "expected measured runtime TypeScript loader finding"
+    finding = findings[0]
+    assert finding["runtime_loader_profile_s"] == 136.6
+    assert 0 < finding["wall_clock_p50_s"] <= 136.6
+    assert finding["runner_min_saving"] > 0
+    assert "Precompile" in finding["fix_strategy"]
+    assert "fallback" in finding["fix_strategy"]
+    assert "runner-minute saving" in finding["size_note"]
+    assert "runtime TypeScript loader" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    findings_path = positive_root / positive.name / "findings.json"
+    tampered = json.loads(findings_path.read_text(encoding="utf-8"))
+    next(entry for entry in tampered["data_bundle"]["logs"]
+         if entry.get("runtime_ts_loader"))["runtime_ts_loader"]["profile_s"] = 1.0
+    tampered_path = positive_root / "tampered-runtime-loader.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    assert not vr.check_opt106_runtime_loader_provenance(tampered_path).ok
+
+    negative = tmp_path / "fast-runtime-typescript-tool"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", negative)
+    negative_responses = negative / "responses.json"
+    recorded = json.loads(negative_responses.read_text(encoding="utf-8"))
+    for page in recorded["jobs"].values():
+        for row in page:
+            if str(row.get("name")) == "t32":
+                row["steps"][0]["name"] = "test runtime TypeScript snapshots"
+    recorded["logs"]["1103"] = """\
+2026-01-28T00:00:00.0000000Z ##[group]Run pnpm prompt:snapshots:check
+2026-01-28T00:00:01.0000000Z > node --import tsx scripts/generate.ts --cpu-prof
+2026-01-28T00:00:03.0000000Z jiti self time: 2.0s
+2026-01-28T00:00:04.0000000Z Prompt snapshots are current (7 files)
+"""
+    negative_responses.write_text(json.dumps(recorded), encoding="utf-8")
+
+    negative_root = tmp_path / "run-fast-runtime-typescript-tool"
+    negative_root.mkdir()
+    negative_doc, negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT106"]
+    assert "runtime TypeScript loader" not in negative_report
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
+def test_runtime_typescript_loader_rejects_unscoped_or_impossible_profile_text():
+    """Only a same-step structured profile below job wall is evidence."""
+    forged = """\
+##[group]Run node --import tsx scripts/generate.ts --cpu-prof
+jiti self time: 136.6s
+"""
+    assert bp._parse_log(forged, job_duration_s=300.0) is None
+
+    cross_step = """\
+##[group]Run node --import tsx scripts/generate.ts --cpu-prof
+##[group]Run echo profile summary
+CI_SPEEDUP_RUNTIME_TS_PROFILE_V1 loader=jiti self_ms=136600 profile=CPU.20260128.cpuprofile sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"""
+    assert bp._parse_log(cross_step, job_duration_s=300.0) is None
+
+    impossible = """\
+##[group]Run node --import tsx scripts/generate.ts --cpu-prof
+CI_SPEEDUP_RUNTIME_TS_PROFILE_V1 loader=jiti self_ms=400000 profile=CPU.20260128.cpuprofile sha256=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+"""
+    assert bp._parse_log(impossible, job_duration_s=200.0) is None
+
+    # A package script whose NAME starts with a loader name is not a direct
+    # loader invocation; the loader binary itself (and ts-node-esm) still is.
+    profile = ("CI_SPEEDUP_RUNTIME_TS_PROFILE_V1 loader=tsx self_ms=90000 "
+               "profile=CPU.cpuprofile sha256=" + "a" * 64)
+    for script in ("yarn tsx-lint", "pnpm ts-node-report", "npx tsx:check"):
+        log = f"##[group]Run {script}\n{profile}\n"
+        assert bp._parse_log(log, job_duration_s=300.0) is None, script
+    for direct in ("npx tsx scripts/a.ts", "ts-node-esm scripts/a.ts", "tsx"):
+        log = f"##[group]Run {direct}\n{profile}\n"
+        leaf = bp._parse_log(log, job_duration_s=300.0)
+        assert leaf and leaf["fix_key"] == "runtime-ts-transpilation", direct
+
+
+def test_runtime_typescript_loader_states_signed_or_unsized_runner_minute_effect():
+    """The card words a saving as a saving, or says why it is unsized."""
+    fact = {"fix_key": "runtime-ts-transpilation", "loader": "jiti",
+            "profile_s": 120.0, "profile_artifact": "CPU.cpuprofile",
+            "profile_sha256": "a" * 64}
+    entry = {"workflow_file": ".github/workflows/ci.yml", "job": "snapshots",
+             "duration_s": 300.0, "runtime_ts_loader": fact,
+             "html_url": "https://example.invalid/job/1"}
+    sized = cr._detect_runtime_ts_transpilation(
+        [entry], {".github/workflows/ci.yml": 40}, 0)[0]
+    assert sized["runner_min_saving"] == 80.0
+    assert ("runner-minute saving: at most 80.0/month (profiled loader ceiling "
+            "from 1 representative run x 40 workflow runs in 30 days)"
+            in sized["size_note"])
+    unknown = cr._detect_runtime_ts_transpilation([entry], {}, 0)[0]
+    assert unknown["runner_min_saving"] is None
+    assert ("runner-minute saving: unsized (30-day run volume for this workflow "
+            "is unavailable)" in unknown["size_note"])
+    empty = cr._detect_runtime_ts_transpilation(
+        [entry], {".github/workflows/ci.yml": 0}, 0)[0]
+    assert ("runner-minute saving: unsized (the 30-day volume window holds no "
+            "runs of this workflow)" in empty["size_note"])
+    for finding in (sized, unknown, empty):
+        assert "+" not in finding["size_note"]
+        assert "not sized because" not in finding["size_note"]
 
 
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
