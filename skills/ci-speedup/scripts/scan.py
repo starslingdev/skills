@@ -4571,6 +4571,19 @@ def _comment_guard_dimensions(text: str) -> set[str]:
     return dimensions
 
 
+def _opt108_setup_only(step: dict) -> bool:
+    """Checkout, `setup-*`, cache or a dependency-install step: it only serves
+    the handler that follows, so it does not make the job required work for
+    every comment. Anything else counts as independent work (fail closed)."""
+    uses, run = _uses(step), _run(step)
+    if uses and not run:
+        return bool(_OPT21_SETUP_USES_RE.match(uses))
+    if run and not uses:
+        lines = [ln.strip() for ln in run.splitlines() if ln.strip()]
+        return bool(lines) and all(_OPT21_SETUP_LINE_RE.match(ln) for ln in lines)
+    return False
+
+
 def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
     """A comment-triggered job filters body/author input only after GitHub has
     allocated its runner. Require a readable step-level condition or explicit
@@ -4593,7 +4606,8 @@ def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
             script = "\n".join((_run(step), str(with_values.get("script") or "")))
             if _COMMENT_EARLY_RETURN_RE.search(script):
                 dimensions.update(_comment_guard_dimensions(script))
-            if _run(step) or _uses(step):
+            if (_run(step) or _uses(step)) and (
+                    dimensions or not _opt108_setup_only(step)):
                 step_dimensions.append(dimensions)
         # Moving a step condition to the job boundary is safe only when the
         # same input governs every executable step.  An optional reaction does

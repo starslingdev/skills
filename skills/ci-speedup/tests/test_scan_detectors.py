@@ -1429,6 +1429,41 @@ jobs:
     assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+def test_opt108_setup_before_filtered_handler_still_fires(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  react:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm ci
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_setup_alone_with_unfiltered_work_stays_quiet(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
 def test_opt108_optional_reaction_does_not_make_required_job_skippable(tmp_path: Path):
     workflow = """name: Comment recorder
 on: issue_comment
