@@ -25075,17 +25075,30 @@ def _detect_opt24_long_test_no_sharding(
             continue
         compile_note = ""
         measure_first = compiled_kind is not None and pre_test_floor is None
+        go_extra_unsized = ""
         if go_package is not None:
             shardable = min(float(go_package["seconds"]), p50)
-            pre_test_floor = max(0.0, p50 - float(go_package["total_s"]))
+            outside = p50 - float(go_package["total_s"])
             wc = round(min(shardable / 2.0, p50 / 2.0), 1)
             measure_first = False
+            if outside > 0:
+                pre_test_floor = outside
+                cost = (f"With two shards, the measured repeated floor adds about "
+                        f"{_opt24_floor_label(pre_test_floor)} of runner time per run.")
+            else:
+                # Packages ran concurrently: summed package time is not the
+                # job's test time, so job time minus it measures no floor. The
+                # second leg still repeats checkout, setup and compile.
+                pre_test_floor = None
+                go_extra_unsized = (
+                    "package times overlap, so the floor the second leg repeats "
+                    "is not measurable")
+                cost = ("With two shards, the second leg adds runner time per run "
+                        f"that is unsized ({go_extra_unsized}).")
             compile_note = (
                 f"Go package `{go_package['package']}` accounts for "
                 f"{float(go_package['share']) * 100:.0f}% of the package time "
-                f"({shardable:.0f}s). With two shards, the measured repeated "
-                f"floor adds about {_opt24_floor_label(pre_test_floor)} of runner "
-                "time per run."
+                f"({shardable:.0f}s). {cost}"
             )
         elif pre_test_floor is not None:
             pre_test_floor = min(pre_test_floor, shardable)
@@ -25272,7 +25285,10 @@ def _detect_opt24_long_test_no_sharding(
         if go_package is not None:
             finding["go_dominant_package"] = go_package["package"]
             finding["go_package_share"] = go_package["share"]
-            finding["go_shard_extra_runner_s"] = round(pre_test_floor or 0.0, 1)
+            if go_extra_unsized:
+                finding["go_shard_extra_runner_unsized_reason"] = go_extra_unsized
+            else:
+                finding["go_shard_extra_runner_s"] = round(pre_test_floor or 0.0, 1)
         out.append(finding)
     return out
 

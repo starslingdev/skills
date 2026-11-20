@@ -357,6 +357,63 @@ def test_long_go_step_without_one_dominant_package_stays_quiet(
     ]
 
 
+class _OverlappingGoPackagesClient(_Client):
+    """Parallel packages: summed package time exceeds the job's wall time."""
+
+    def text(self, endpoint: str, allow_missing: bool = False):
+        job_id = int(endpoint.split("/")[-2])
+        if job_id % 10 != 2:
+            return super().text(endpoint, allow_missing)
+        self.queries += 1
+        return "\n".join([
+            "$ go test ./...",
+            "ok example/project/api 500.0s",
+            "ok example/project/store 500.0s",
+            "ok example/project/cli 2000.0s",
+        ])
+
+
+def test_overlapping_go_package_times_leave_the_added_cost_unsized(
+        monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cr, "GhClient", _OverlappingGoPackagesClient)
+    doc = cr.collect({
+        "repo": "o/r",
+        "skill_commit_sha": "installed:unversioned",
+        "workflow_job_graph": {
+            _WORKFLOW: {
+                "cargo-tests": {"name": "cargo tests", "needs": []},
+                "go-tests": {"name": "go tests", "needs": ["cargo-tests"]},
+                "jest-tests": {"name": "jest tests", "needs": ["go-tests"]},
+            },
+        },
+        "findings": [],
+    }, "o/r", max_runs=2, shallow_runs=2)
+    go = _finding(doc, "go tests")
+    assert go["go_dominant_package"] == "example/project/cli"
+    assert go["wall_clock_p50_s"] == 1000.0
+    # 3000s of package time inside a 2900s job: the packages overlapped, so
+    # job time minus package time is not the floor the second leg repeats.
+    assert "go_shard_extra_runner_s" not in go
+    assert "overlap" in go["go_shard_extra_runner_unsized_reason"]
+    assert "adds about 0s" not in go["evidence"]
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    assert "List the tests in `example/project/cli` with `go test -list`" in report
+    assert ("Runner-minute effect: added cost per run for the assumed two-shard "
+            "split, unsized (") in report
+    assert "added cost of ~0s" not in report
+
+
 _PRESHARDED_GO_WORKFLOWS = {
     "matrix-index": """\
 on: pull_request

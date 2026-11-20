@@ -11538,14 +11538,12 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
     if pat in {"OPT24", "OPT25"}:
         body.append(_CONCURRENCY_ORDER_LINE)
         go_member = next(
-            (member for member in members
-             if member.get("go_dominant_package")
-             and _num(member.get("go_shard_extra_runner_s")) is not None),
+            (member for member in members if member.get("go_dominant_package")),
             None,
         )
         if pat == "OPT24" and go_member is not None:
             package = str(go_member["go_dominant_package"])
-            extra = _num(go_member.get("go_shard_extra_runner_s")) or 0.0
+            extra = _num(go_member.get("go_shard_extra_runner_s"))
             body.append(
                 f"Go list-then-run recipe: List the tests in `{package}` with "
                 "`go test -list` using the same build tags and flags (`-race`, "
@@ -11557,12 +11555,22 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                 "coverage, write and upload one atomic profile per shard, merge only "
                 "after every shard succeeds, and apply the unchanged threshold."
             )
-            body.append(
-                f"Runner-minute effect: added cost of ~{_clock(extra)} per run for "
-                "the assumed two-shard split. Extra shard jobs repeat checkout and "
-                "setup and bill each job; here the second runner repeats the measured "
-                "pre-test floor."
-            )
+            if extra is not None:
+                body.append(
+                    f"Runner-minute effect: added cost of ~{_clock(extra)} per run for "
+                    "the assumed two-shard split. Extra shard jobs repeat checkout and "
+                    "setup and bill each job; here the second runner repeats the "
+                    "measured pre-test floor."
+                )
+            else:
+                reason = str(go_member.get("go_shard_extra_runner_unsized_reason")
+                             or "the repeated floor is not measured")
+                body.append(
+                    "Runner-minute effect: added cost per run for the assumed "
+                    f"two-shard split, unsized ({reason}). Extra shard jobs repeat "
+                    "checkout and setup and bill each job; the second runner also "
+                    "repeats compilation."
+                )
         else:
             body.append(_SHARD_RUNNER_MINUTE_LINE)
     if pat == "OPT25":
