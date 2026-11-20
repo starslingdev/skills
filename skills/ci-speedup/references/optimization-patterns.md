@@ -3039,11 +3039,15 @@ for setup before the result gate ends the job.
 5. The savings = `setup_step_p50_seconds × P(consumer skips)`.
 
 For the aggregate-job form, require a result step that reads only literal
-`needs.*.result` values, uses shell control/output/test builtins, can exit
-non-zero, and has no `continue-on-error`. Flag only checkout or `setup-*`
-actions before the first such result gate. Withhold the finding when the gate
-uses a repository script, another GitHub context, an unreadable expression, or
-when setup already has a needs-result condition.
+`needs.*.result` values, can exit non-zero, and has no `continue-on-error`.
+Every simple command in it (split on `;`, `&&`, `||` and `|`) must be a shell
+control, output or test builtin, and it must use bash or sh with no
+`working-directory` at step, job or workflow level. Flag only checkout or
+`setup-*` actions before the first such result gate. Withhold the finding when
+the gate runs a repository script or tool, uses command substitution or an
+input redirect, tests a file, reads a variable that is not in step, job or
+workflow `env` (an earlier step may export it), reads another GitHub context or
+an unreadable expression, or when setup already has a needs-result condition.
 
 **Fix**: Copy the `if:` condition from the consumer step onto the setup step (or wrap both in a guard step that exits early). Example:
 
@@ -3078,9 +3082,9 @@ earlier normally does not reduce successful pull-request merge wait.
 
 **Real-world example (blen-starter-kit)**: `ci.yml` `web-quality` job has `Install Playwright Chromium` (line 92, ~16s) followed by `Web smoke e2e` (line 95) gated on `if: env.CLERK_SECRET_KEY != '' && env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY != ''`. PRs from forks (no Clerk secrets) pay 16s for setup that's never consumed.
 
-**Public evidence**: [OpenClaw pull request #2868](https://github.com/openclaw/crabbox/pull/2868)
-moved a coverage producer-result gate ahead of checkout and Go setup so an
-unsuccessful producer is reported before the aggregate job pays setup cost.
+**Public evidence**: [openclaw/crabbox pull request #2868](https://github.com/openclaw/crabbox/pull/2868):
+the coverage gate fails at its first step and skips checkout and Go setup when
+a producer fails.
 
 **Risk**: LOW. The conditional-consumer fix is defensive when both steps keep
 the same condition. Moving a needs-result gate is safe only under the narrower

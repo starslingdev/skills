@@ -4691,16 +4691,76 @@ _OPT31_NEEDS_EXPRESSION_RE = re.compile(
 )
 _OPT31_EARLY_SETUP_RE = re.compile(
     r"^(?:actions/checkout|[^/@]+/setup-[^/@]+)@", re.I)
-_OPT31_NEEDS_CHECK_LINE_RE = re.compile(
-    r"^(?:printf\b|echo\b|test\b|\[\[?|if\s+\[\[?|elif\s+\[\[?|"
-    r"then\b|else\b|fi\b|case\b|esac\b|exit\s+[1-9]\d*\b|false\b|"
-    r"set\s+-[a-zA-Z]+\b|:)",
-    re.I,
-)
+# First word of each simple command a movable gate may run: shell control,
+# output and test builtins only, so nothing depends on checkout or setup.
+_OPT31_GATE_COMMANDS = frozenset({
+    "printf", "echo", "test", "[", "[[", "exit", "false", "true", "set", ":",
+    "case", "esac", "fi", "}",
+})
+_OPT31_GATE_KEYWORDS = frozenset({"if", "elif", "then", "else", "!", "{"})
+_OPT31_DOUBLE_BRACKET_RE = re.compile(r"\[\[(.*?)\]\]")
+# Unary test operators that read the filesystem the moved gate would lose.
+_OPT31_FILE_TEST_RE = re.compile(r"(?:^|\s)!?\s*-[bcdefghkpLrsSuwxOGN](?=\s)")
+_OPT31_COMMAND_SPLIT_RE = re.compile(r"\|\||&&|;;|;|\|")
+_OPT31_SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+_OPT31_RUNNER_VARS = frozenset({"CI", "HOME"})
 _OPT31_NEEDS_CHECK_FAIL_RE = re.compile(
-    r"(?:^|\n)\s*(?:test\b|\[\[?|false\b)|\bexit\s+[1-9]\d*\b",
+    r"(?:^|\n)\s*(?:test\b|\[\[?|false\b)|\bexit\s+[1-9]\d*\b|"
+    r"(?:\|\||&&)\s*(?:exit\s+[1-9]|false\b)",
     re.I,
 )
+
+
+def _opt31_env_keys(node: Any) -> set[str]:
+    env = node.get("env") if isinstance(node, dict) else None
+    return {str(k) for k in env} if isinstance(env, dict) else set()
+
+
+def _opt31_run_defaults_movable(*nodes: Any) -> bool:
+    """No working directory and a POSIX shell at every defaults level."""
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        defaults = node.get("defaults")
+        run = defaults.get("run") if isinstance(defaults, dict) else None
+        if run is None:
+            continue
+        if not isinstance(run, dict):
+            return False
+        if run.get("working-directory") not in (None, ""):
+            return False
+        if run.get("shell") not in (None, "bash", "sh"):
+            return False
+    return True
+
+
+def _opt31_builtin_only(run: str) -> bool:
+    """Every simple command is a builtin that reads no file or tool."""
+    if any(token in run for token in ("$(", "`", "<", "\\\n")):
+        return False
+    for raw_line in run.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        spans = _OPT31_DOUBLE_BRACKET_RE.findall(line)
+        if any(_OPT31_FILE_TEST_RE.search(" " + span + " ") for span in spans):
+            return False
+        line = _OPT31_DOUBLE_BRACKET_RE.sub("[[ ]]", line)
+        for segment in _OPT31_COMMAND_SPLIT_RE.split(line):
+            # `>&2` / `2>&1` are redirects; any other lone `&` backgrounds.
+            if "&" in re.sub(r"\d*>&\d", "", segment):
+                return False
+            words = segment.split()
+            while words and words[0] in _OPT31_GATE_KEYWORDS:
+                words = words[1:]
+            if not words:
+                continue
+            if words[0] not in _OPT31_GATE_COMMANDS:
+                return False
+            if (words[0] in ("test", "[")
+                    and _OPT31_FILE_TEST_RE.search(" ".join(words) + " ")):
+                return False
+    return True
 
 
 def _opt31_tokens(install_line: str) -> set[str]:
@@ -4718,18 +4778,27 @@ def _opt31_tokens(install_line: str) -> set[str]:
     return toks
 
 
-def _opt31_needs_result_check(step: dict, step_if: str | None) -> bool:
+def _opt31_needs_result_check(step: dict, step_if: str | None,
+                               job: dict, doc: dict) -> bool:
     """A shell-only result gate that can fail without repository files/tools.
 
     Every GitHub expression available to the step must be exactly one
-    ``needs.<job>.result`` value. Restrict commands to shell control, output and
-    test builtins so moving the step before checkout/toolchain setup is safe.
+    ``needs.<job>.result`` value, and every command a shell builtin that reads
+    no file, tool, working directory or variable an earlier step could export,
+    so moving the step before checkout/toolchain setup cannot change its
+    verdict. Anything this cannot classify withholds the finding.
     """
     run = _run(step)
     if not run or _uses(step) or step_if:
         return False
     continue_on_error = step.get("continue-on-error")
     if continue_on_error not in (None, False):
+        return False
+    if step.get("working-directory") not in (None, ""):
+        return False
+    if step.get("shell") not in (None, "bash", "sh"):
+        return False
+    if not _opt31_run_defaults_movable(doc, job):
         return False
     env = step.get("env") if isinstance(step.get("env"), dict) else {}
     dynamic_text = "\n".join((run, *(str(value) for value in env.values())))
@@ -4740,13 +4809,14 @@ def _opt31_needs_result_check(step: dict, step_if: str | None) -> bool:
         return False
     if not any(_OPT31_NEEDS_RESULT_RE.search(expr) for expr in expressions):
         return False
-    lines = [
-        line.strip() for line in run.splitlines()
-        if line.strip() and not line.lstrip().startswith("#")
-    ]
-    if (not lines
-            or not all(_OPT31_NEEDS_CHECK_LINE_RE.match(line) for line in lines)
-            or not _OPT31_NEEDS_CHECK_FAIL_RE.search(run)):
+    script = _OPT31_EXPRESSION_RE.sub("needs_result", run)
+    known_vars = (_opt31_env_keys(step) | _opt31_env_keys(job)
+                  | _opt31_env_keys(doc) | _OPT31_RUNNER_VARS)
+    for name in _OPT31_SHELL_VAR_RE.findall(script):
+        if name not in known_vars and not name.startswith(("GITHUB_", "RUNNER_")):
+            return False  # may come from an earlier step's $GITHUB_ENV
+    if (not _opt31_builtin_only(script)
+            or not _OPT31_NEEDS_CHECK_FAIL_RE.search(script)):
         return False
     return True
 
@@ -4770,7 +4840,7 @@ def _detect_opt31(doc: dict, raw: str) -> list[Hit]:
         steps = _steps_with_if(job)
         result_checks = [
             i for i, (step, step_if) in enumerate(steps)
-            if _opt31_needs_result_check(step, step_if)
+            if _opt31_needs_result_check(step, step_if, job, doc)
         ]
         if result_checks:
             first_check = min(result_checks)

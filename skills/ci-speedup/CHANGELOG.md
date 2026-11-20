@@ -1026,7 +1026,9 @@ unversioned and updates by reinstall from `main`.
 
 ### Changed
 
-- **2026-11-20** — Extend OPT31 to catch a shell-only `needs.*.result` failure gate placed after checkout or `setup-*` actions. Move the unchanged needs-only gate first, fail closed on repository scripts or other contexts, and keep the signed runner-minute saving unsized until unsuccessful dependency share and affected setup compute are measured.
+- **2026-11-20** — Extend OPT31 to catch a shell-only `needs.*.result` failure gate placed after checkout or `setup-*` actions. Move the unchanged needs-only gate first, fail closed on repository scripts or other contexts, and keep the signed runner-minute saving unsized until unsuccessful dependency share and affected setup compute are measured. (#444)
+
+- **2026-11-20** — OPT31's needs-result form fires only when moving the gate first cannot change its verdict: every command must be a shell builtin, and the gate must run under bash or sh with no `working-directory`, test no file, use no command substitution or input redirect, and read only variables from step, job or workflow `env`. (#444)
 
 - **2026-11-06** — Require every agent hand-off to treat scoped local runs as pre-flight evidence and call a change verified only after the repository's own CI gate or its exact gating commands pass. Wall-clock hand-offs also withhold pull requests whose predicted saving is smaller than the pole's observed range; bill-only, Tier-2 and queue-wait prompts do not compare runner-minute savings with that range.
 

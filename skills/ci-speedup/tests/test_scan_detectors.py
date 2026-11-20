@@ -1737,6 +1737,76 @@ jobs:
     assert "OPT31" not in _scan_one(tmp_path, workflow)
 
 
+_OPT31_MOVE_UNSAFE_GATE = """name: CI
+on: pull_request
+%(wfextra)sjobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+%(jobextra)s    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+%(between)s      - name: Gate
+%(stepextra)s        env:
+          R: ${{ needs.test.result }}
+        run: |
+%(run)s
+"""
+
+_OPT31_MOVE_UNSAFE_CASES = {
+    # Each gate reads something checkout, setup or an earlier step provides,
+    # so moving it first could change the job's verdict.
+    "file-test": dict(run='          [[ "$R" == success && -f go.mod ]]'),
+    "then-runs-script": dict(run=(
+        '          if [ "$R" = success ]; then ./scripts/report.sh; fi\n'
+        '          test "$R" = success')),
+    "and-runs-tool": dict(
+        run='          test "$R" = success && go tool cover -func=c.out'),
+    "pipe-to-script": dict(run='          echo "$R" | ./check'),
+    "command-substitution": dict(
+        run='          [[ "$(cat VERSION)" == 1 && "$R" == success ]]'),
+    "input-redirect": dict(run='          test "$R" = success < input.txt'),
+    "step-working-directory": dict(
+        stepextra="        working-directory: app\n",
+        run='          test "$R" = success'),
+    "job-default-working-directory": dict(
+        jobextra="    defaults:\n      run:\n        working-directory: app\n",
+        run='          test "$R" = success'),
+    "workflow-default-shell": dict(
+        wfextra="defaults:\n  run:\n    shell: pwsh\n",
+        run='          test "$R" = success'),
+    "step-custom-shell": dict(
+        stepextra="        shell: pwsh\n", run='          test "$R" = success'),
+    "variable-from-earlier-step": dict(
+        between='      - run: echo "WANT=success" >> "$GITHUB_ENV"\n',
+        run='          test "$R" = "$WANT"'),
+}
+
+
+def _opt31_move_unsafe_workflow(**parts: str) -> str:
+    fields = {"wfextra": "", "jobextra": "", "between": "", "stepextra": ""}
+    fields.update(parts)
+    return _OPT31_MOVE_UNSAFE_GATE % fields
+
+
+def test_opt31_move_unsafe_fixture_fires_when_gate_is_builtin_only(
+        tmp_path: Path):
+    workflow = _opt31_move_unsafe_workflow(
+        stepextra="        shell: bash\n",
+        run=('          set -euo pipefail\n'
+             '          printf \'%s\\n\' "$R" >> "$GITHUB_STEP_SUMMARY"\n'
+             '          [ "$R" = success ] || { echo "test: $R" >&2; exit 1; }'))
+    assert "OPT31" in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize("case", sorted(_OPT31_MOVE_UNSAFE_CASES))
+def test_opt31_needs_check_that_reads_setup_state_stays_quiet(
+        tmp_path: Path, case: str):
+    workflow = _opt31_move_unsafe_workflow(**_OPT31_MOVE_UNSAFE_CASES[case])
+    assert "OPT31" not in _scan_one(tmp_path, workflow), case
+
+
 def test_opt33_no_draft_gate_on_matrix(tmp_path: Path):
     pos = """name: CI
 on: pull_request
