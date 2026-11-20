@@ -24,6 +24,7 @@ jobs:
     steps:
       - uses: github/codeql-action/init@v4
         with:
+          languages: javascript-typescript
           config: |
             paths-ignore:
               - tests/**
@@ -101,9 +102,10 @@ class _Client:
         if endpoint.startswith(f"repos/o/r/contents/{_WF}"):
             return {"content": base64.b64encode(_YAML.encode()).decode()}
         if endpoint == "repos/o/r/compare/base...docs":
-            return {"files": [{"filename": "docs/api.md"}]}
+            return {"status": "ahead", "files": [{"filename": "docs/api.md"}]}
         if endpoint == "repos/o/r/compare/docs...tests":
-            return {"files": [{"filename": "tests/api.test.ts"}]}
+            return {"status": "ahead",
+                    "files": [{"filename": "tests/api.test.ts"}]}
         if endpoint == "repos/o/r":
             return {"default_branch": "main"}
         match = re.match(r"repos/o/r/commits/pr-(\d+)/check-runs", endpoint)
@@ -150,3 +152,142 @@ def test_opt36_unchanged_scanner_inputs_collect_render_and_fully_verify(
     failed = [check for check in verifier.run_checks(
         report, report_path, findings_path, None) if not check.skipped and not check.ok]
     assert failed == [], [(check.name, check.detail) for check in failed]
+
+
+# --- Fail-open guards: a category whose inputs changed must never be skipped ---
+
+def _scanner_wf(jobs: dict) -> dict:
+    return {"on": {"schedule": [{"cron": "0 * * * *"}]}, "jobs": jobs}
+
+
+def _init(config: str | None = "paths-ignore:\n  - docs/**\n",
+          languages: str | None = "javascript-typescript") -> dict:
+    with_: dict = {}
+    if languages is not None:
+        with_["languages"] = languages
+    if config is not None:
+        with_["config"] = config
+    return {"uses": "github/codeql-action/init@v4", "with": with_}
+
+
+_ANALYZE = {"uses": "github/codeql-action/analyze@v4"}
+
+
+def _sched(*rows):
+    return [{"id": f"s{i}", "event": "schedule", "head_sha": sha,
+             "head_branch": "main", "conclusion": conclusion,
+             "run_started_at": f"2026-06-01T{i:02d}:00:00Z",
+             "created_at": f"2026-06-01T{i:02d}:00:00Z",
+             "updated_at": f"2026-06-01T{i:02d}:05:00Z"}
+            for i, (sha, conclusion) in enumerate(rows)]
+
+
+def _jobs(n=2):
+    return [[{"name": "scan", "conclusion": "success",
+              "started_at": f"2026-06-01T{i:02d}:00:00Z",
+              "completed_at": f"2026-06-01T{i:02d}:05:00Z"}] for i in range(n)]
+
+
+def _detect(wf, paths, rows=(("base", "success"), ("head", "success"))):
+    return cr._detect_opt36_schedule_burn(
+        "codeql.yml", _sched(*rows), _jobs(5), wf, 30, 0,
+        changed_paths_by_pair={("base", "head"): paths})
+
+
+def test_opt36_positive_interpreted_scanner_fires():
+    wf = _scanner_wf({"scan": {"steps": [_init(), _ANALYZE]}})
+    assert len(_detect(wf, ["docs/api.md"])) == 1
+
+
+def test_opt36_category_without_the_exclusion_is_never_skipped():
+    # Job "py" scans everything; job "js" ignores docs/**. A docs change is a
+    # relevant input for "py", so the union of exclusions must not apply.
+    wf = _scanner_wf({
+        "js": {"steps": [_init(), _ANALYZE]},
+        "py": {"steps": [_init(config=None, languages="python"), _ANALYZE]},
+    })
+    assert cr._opt36_scanner_paths_ignore(wf) == []
+    assert _detect(wf, ["docs/api.md"]) == []
+
+
+def test_opt36_categories_with_different_exclusions_withhold():
+    wf = _scanner_wf({
+        "js": {"steps": [_init(), _ANALYZE]},
+        "py": {"steps": [_init(config="paths-ignore:\n  - tests/**\n",
+                               languages="python"), _ANALYZE]},
+    })
+    assert _detect(wf, ["docs/api.md"]) == []
+
+
+def test_opt36_non_scanner_job_in_the_workflow_withholds():
+    wf = _scanner_wf({
+        "scan": {"steps": [_init(), _ANALYZE]},
+        "build": {"steps": [{"run": "make docs"}]},
+    })
+    assert _detect(wf, ["docs/api.md"]) == []
+
+
+def test_opt36_compiled_or_unknown_languages_withhold():
+    # paths-ignore does not stop CodeQL analysing compiled code the build
+    # touches, and an absent `languages` is auto-detected at run time.
+    for languages in ("java", "c-cpp", None, "${{ matrix.language }}"):
+        wf = _scanner_wf({"scan": {"steps": [_init(languages=languages), _ANALYZE]}})
+        assert _detect(wf, ["docs/api.md"]) == [], languages
+    mixed = _scanner_wf({"scan": {
+        "strategy": {"matrix": {"language": ["javascript-typescript", "java"]}},
+        "steps": [_init(languages="${{ matrix.language }}"), _ANALYZE]}})
+    assert _detect(mixed, ["docs/api.md"]) == []
+
+
+def test_opt36_resolved_interpreted_matrix_fires():
+    wf = _scanner_wf({"scan": {
+        "strategy": {"matrix": {"language": ["javascript-typescript", "python"]}},
+        "steps": [_init(languages="${{ matrix.language }}"), _ANALYZE]}})
+    assert len(_detect(wf, ["docs/api.md"])) == 1
+
+
+def test_opt36_workflow_or_scanner_config_change_is_relevant():
+    wf = _scanner_wf({"scan": {"steps": [
+        _init(config="paths-ignore:\n  - .github/**\n  - docs/**\n"), _ANALYZE]}})
+    assert _detect(wf, [".github/workflows/codeql.yml"]) == []
+    assert _detect(wf, [".github/codeql/codeql-config.yml"]) == []
+
+
+def test_opt36_rescan_after_a_failed_scan_is_not_redundant():
+    wf = _scanner_wf({"scan": {"steps": [_init(), _ANALYZE]}})
+    assert _detect(wf, ["docs/api.md"],
+                   rows=(("base", "failure"), ("head", "success"))) == []
+    assert _detect(wf, ["docs/api.md"],
+                   rows=(("base", None), ("head", "success"))) == []
+
+
+class _CompareClient:
+    def __init__(self, doc):
+        self.doc = doc
+
+    def json(self, endpoint, allow_missing=False):
+        return self.doc
+
+
+def _compare(doc):
+    wf = _scanner_wf({"scan": {"steps": [_init(), _ANALYZE]}})
+    runs = _sched(("base", "success"), ("head", "success"))
+    return cr._opt36_compare_paths(_CompareClient(doc), "o/r", runs, wf)[("base", "head")]
+
+
+def test_opt36_compare_that_is_not_a_forward_diff_is_incomplete():
+    files = [{"filename": "docs/api.md", "status": "modified"}]
+    assert _compare({"status": "ahead", "files": files}) == ["docs/api.md"]
+    # behind / diverged: the three-dot diff omits changes on the base side.
+    assert _compare({"status": "behind", "files": []}) is None
+    assert _compare({"status": "diverged", "files": files}) is None
+    assert _compare({"files": files}) is None
+
+
+def test_opt36_rename_out_of_a_scanned_path_is_relevant():
+    paths = _compare({"status": "ahead", "files": [
+        {"filename": "docs/old.ts", "previous_filename": "src/old.ts",
+         "status": "renamed"}]})
+    assert "src/old.ts" in paths
+    wf = _scanner_wf({"scan": {"steps": [_init(), _ANALYZE]}})
+    assert _detect(wf, paths) == []

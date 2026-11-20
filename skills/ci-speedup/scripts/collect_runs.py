@@ -17906,30 +17906,88 @@ def _consecutive_same_sha_run_ids(runs: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+# CodeQL languages whose analysis honours `paths-ignore`. For compiled
+# languages CodeQL analyses whatever the build compiles, so an "ignored" path can
+# still be a scan input; those (and auto-detected languages) withhold the skip.
+_OPT36_INTERPRETED_CODEQL_LANGUAGES = frozenset({
+    "javascript", "javascript-typescript", "typescript", "python", "ruby", "actions"})
+# Paths that change what a scan does even when its exclusions list them.
+_OPT36_ALWAYS_RELEVANT_PREFIXES = (".github/workflows/", ".github/codeql/",
+                                   ".github/actions/")
+
+
+def _opt36_codeql_languages(job: dict[str, Any], raw: Any) -> list[str] | None:
+    """Resolve a CodeQL init `languages` input; None when it cannot be read."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    match = re.fullmatch(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}", text)
+    if match:
+        key = match.group(1)
+        strategy = job.get("strategy")
+        matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+        if not isinstance(matrix, dict):
+            return None
+        values: list[str] = []
+        base = matrix.get(key)
+        if base is not None:
+            if not isinstance(base, list) or not all(isinstance(v, str) for v in base):
+                return None
+            values.extend(base)
+        include = matrix.get("include")
+        if include is not None:
+            if not isinstance(include, list):
+                return None
+            for row in include:
+                if not isinstance(row, dict):
+                    return None
+                if key in row:
+                    if not isinstance(row[key], str):
+                        return None
+                    values.append(row[key])
+        text = ",".join(values)
+    elif "${{" in text:
+        return None
+    langs = [part.strip().lower() for part in re.split(r"[,\s]+", text) if part.strip()]
+    return langs or None
+
+
 def _opt36_scanner_paths_ignore(wf_doc: dict[str, Any]) -> list[str]:
-    """Return explicit inline scanner exclusions that can be evaluated safely."""
+    """Return the one explicit inline CodeQL exclusion list every category shares.
+
+    Fails closed (empty list, so no unchanged-input claim) unless EVERY job is a
+    CodeQL category with a resolvable interpreted `languages` input and the same
+    inline `config` `paths-ignore`, and no external `config-file` is merged in:
+    a path one category ignores may be a real input of another."""
     try:
         import yaml
     except ImportError:
         return []
     jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
-    if not isinstance(jobs, dict):
+    if not isinstance(jobs, dict) or not jobs:
         return []
-    patterns: list[str] = []
-    saw_scanner = False
+    shared: list[str] | None = None
     for job in jobs.values():
-        if not isinstance(job, dict):
-            continue
-        for step in job.get("steps") or []:
-            if not isinstance(step, dict):
-                continue
-            uses = str(step.get("uses") or "").lower()
-            if any(token in uses for token in ("codeql-action/", "semgrep", "scan")):
-                saw_scanner = True
-            with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
+        if not isinstance(job, dict) or "uses" in job:
+            return []
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            return []
+        inits = [step for step in steps if isinstance(step, dict)
+                 and "codeql-action/init" in str(step.get("uses") or "").lower()]
+        if not inits:
+            return []
+        for step in inits:
+            with_ = step.get("with")
+            if not isinstance(with_, dict) or with_.get("config-file"):
+                return []
+            langs = _opt36_codeql_languages(job, with_.get("languages"))
+            if not langs or any(lang not in _OPT36_INTERPRETED_CODEQL_LANGUAGES
+                                for lang in langs):
+                return []
             raw = with_.get("config")
             if not isinstance(raw, str) or not raw.strip():
-                continue
+                return []
             try:
                 config = yaml.safe_load(raw)
             except yaml.YAMLError:
@@ -17937,10 +17995,15 @@ def _opt36_scanner_paths_ignore(wf_doc: dict[str, Any]) -> list[str]:
             values = config.get("paths-ignore") if isinstance(config, dict) else None
             if isinstance(values, str):
                 values = [values]
-            if isinstance(values, list):
-                patterns.extend(str(value) for value in values
-                                if isinstance(value, str) and value.strip())
-    return list(dict.fromkeys(patterns)) if saw_scanner else []
+            if not isinstance(values, list) or not values or not all(
+                    isinstance(value, str) and value.strip() for value in values):
+                return []
+            cleaned = list(dict.fromkeys(str(value) for value in values))
+            if shared is None:
+                shared = cleaned
+            elif shared != cleaned:
+                return []
+    return shared or []
 
 
 def _opt36_compare_paths(client: GhClient, repo: str,
@@ -17961,12 +18024,21 @@ def _opt36_compare_paths(client: GhClient, repo: str,
                     f"{quote(head, safe='')}")
         doc = client.json(endpoint, allow_missing=True)
         files = doc.get("files") if isinstance(doc, dict) else None
-        if not isinstance(files, list) or len(files) >= 300:
+        # Only a forward diff is complete: for `behind`/`diverged` the three-dot
+        # compare omits changes on the base side, so the inputs may differ.
+        if (not isinstance(files, list) or len(files) >= 300
+                or doc.get("status") not in ("ahead", "identical")):
             out[(base, head)] = None
             continue
         names = [str(row.get("filename") or "") for row in files
                  if isinstance(row, dict) and row.get("filename")]
-        out[(base, head)] = names if len(names) == len(files) else None
+        if len(names) != len(files):
+            out[(base, head)] = None
+            continue
+        # A rename out of a scanned path removes a scan input.
+        names.extend(str(row["previous_filename"]) for row in files
+                     if row.get("previous_filename"))
+        out[(base, head)] = list(dict.fromkeys(names))
     return out
 
 
@@ -17984,9 +18056,14 @@ def _opt36_redundant_input_pairs(
         if base == head:
             kind, paths = "same_head", []
         else:
+            # The recipe skips only against a last SUCCESSFUL scan, so a rerun
+            # after a failed or unknown-outcome scan is not redundant.
+            if str(before.get("conclusion") or "") != "success":
+                continue
             paths = changed_paths_by_pair.get((base, head))
             if paths is None or not patterns or not all(
-                    _opt32_ignored_by_patterns(path, patterns) for path in paths):
+                    not path.startswith(_OPT36_ALWAYS_RELEVANT_PREFIXES)
+                    and _opt32_ignored_by_patterns(path, patterns) for path in paths):
                 continue
             kind = "excluded_only"
         pairs.append({"base": base, "head": head, "run_id": _run_id(after),

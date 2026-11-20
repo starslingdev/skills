@@ -871,7 +871,8 @@ def test_opt36_schedule_burn_floors():
 _SCHEDULE_SCANNER_WF = {
     "on": {"schedule": [{"cron": "0 * * * *"}]},
     "jobs": {"scan": {"steps": [
-        {"uses": "github/codeql-action/init@v4", "with": {"config": """
+        {"uses": "github/codeql-action/init@v4", "with": {
+            "languages": "javascript-typescript", "config": """
 paths-ignore:
   - tests/**
   - docs/**
@@ -883,6 +884,8 @@ paths-ignore:
 
 def test_opt36_reports_consecutive_scans_whose_inputs_did_not_change():
     runs = _schedule_runs("base", "head")
+    for run in runs:
+        run["conclusion"] = "success"
     out = cr._detect_opt36_schedule_burn(
         "codeql.yml", runs, _jobs_per_run(), _SCHEDULE_SCANNER_WF, 30, 0,
         changed_paths_by_pair={("base", "head"): ["tests/a.test.ts", "docs/api.md"]})
@@ -898,6 +901,8 @@ def test_opt36_reports_consecutive_scans_whose_inputs_did_not_change():
 
 def test_opt36_keeps_a_scan_when_a_relevant_input_changed_or_diff_is_unreadable():
     runs = _schedule_runs("base", "head")
+    for run in runs:
+        run["conclusion"] = "success"
     relevant = cr._detect_opt36_schedule_burn(
         "codeql.yml", runs, _jobs_per_run(), _SCHEDULE_SCANNER_WF, 30, 0,
         changed_paths_by_pair={("base", "head"): ["src/server.ts"]})
