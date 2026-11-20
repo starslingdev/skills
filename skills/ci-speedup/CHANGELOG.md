@@ -37,6 +37,7 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-18** — Stop static cache-family inference at the first key expression, prefer a known cache tool over runner/platform words and unrelated key labels, and use a compiler-cache action's identity when sizing its configured limit, so an unrelated cache miss cannot confirm the finding (#360).
 - **2026-11-18** — Withhold per-commit typical-wait percentiles and queue/work projections when fewer than half of sampled commits have complete workflow job data, while retaining and disclosing every partial observation (#384).
 - **2026-11-18** — Keep equal-duration co-occurrence floors in canonical `checks[]` order so report verification breaks ties the same way as the renderer, independent of Python's hash seed and individual PR timing order (#383).
 - **2026-11-16** — Flag a measured Rust coverage long pole when its dominant `cargo llvm-cov` or `cargo tarpaulin` step uses Cargo's default debug-heavy, unoptimized test profile; keep explicitly optimized profiles quiet, fail closed on alternate manifests/profiles/environment overrides and package-scoped ambiguity, support unnamed and toolchain-qualified coverage steps, and leave savings uncredited until wall time improves with an unchanged covered-line count (#370).
