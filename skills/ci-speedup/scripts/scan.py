@@ -4552,8 +4552,10 @@ def _detect_opt29(doc: dict, raw: str) -> list[Hit]:
 _COMMENT_BODY_GUARD_RE = re.compile(
     r"github\.event\.comment\.body|context\.payload\.comment\.body", re.I)
 _COMMENT_AUTHOR_GUARD_RE = re.compile(
-    r"github\.(?:event\.comment\.user(?:\.(?:login|type))?|actor)|"
-    r"context\.(?:payload\.comment\.user(?:\.(?:login|type))?|actor)", re.I)
+    r"github\.(?:event\.(?:comment\.(?:user(?:\.(?:login|type))?|author_association)|"
+    r"sender(?:\.(?:login|type))?)|(?:triggering_)?actor)|"
+    r"context\.(?:payload\.(?:comment\.(?:user(?:\.(?:login|type))?|author_association)|"
+    r"sender(?:\.(?:login|type))?)|actor)", re.I)
 _COMMENT_EARLY_RETURN_RE = re.compile(
     r"\bif\b(?:(?!\b(?:await|else)\b)[\s\S]){0,300}?"
     r"(?:\breturn\b|\bexit\s+0\b|\bprocess\.exit\s*\(\s*0\s*\))",

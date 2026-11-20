@@ -1497,6 +1497,33 @@ jobs:
     assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+def test_opt108_job_sender_guard_covers_step_author_filter(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  cmd:
+    if: github.event.sender.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.comment.user.type != 'Bot'
+        run: node run.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_step_author_association_filter_fires(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  cmd:
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.comment.author_association == 'MEMBER'
+        run: node run.mjs
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
 def test_opt108_optional_reaction_does_not_make_required_job_skippable(tmp_path: Path):
     workflow = """name: Comment recorder
 on: issue_comment
