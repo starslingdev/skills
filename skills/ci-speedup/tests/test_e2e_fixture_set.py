@@ -657,6 +657,17 @@ def test_opt13_source_guard_ignores_path_after_unrelated_require(tmp_path):
     assert cr._opt13_source_output_guard(tmp_path)["safe"] is True
 
 
+def test_opt13_source_guard_withholds_commented_call_arguments(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "runtime.ts").write_text(
+        "const runtime = require(/* 1) Load generated code */ "
+        "'../dist/runtime.js');\n",
+        encoding="utf-8",
+    )
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+
 def test_pr_sample_day_floor_stays_coupled_through_the_findings_contract(
         monkeypatch, tmp_path):
     fixture = _busy_pr_sample_fixture(tmp_path)
