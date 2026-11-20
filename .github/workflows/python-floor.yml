@@ -30,17 +30,17 @@
 # That is also why it does not run on StarSling runners, and the runner is the
 # only convention it departs from — the added schedule and timeout aside.
 #
-# Being one unconditional job, it also needs no merge-queue handling beyond
-# adding the trigger, unlike the split workflows beside it.
-#
-# To enforce it, add the check named "python floor" to the required status
-# checks on main. Until someone does, it reports but does not block.
+# Being one unconditional job, it needs no merge-queue handling beyond the
+# `merge_group` trigger below, unlike the split workflows beside it. "python
+# floor" is a required status check on main, so without that trigger a
+# merge-queue entry would wait forever for it.
 name: Python floor
 
 on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
   # A floor break can also arrive without a commit of ours — a dependency that
   # drops 3.9 support, or a runner image change. The weekly run catches those,
   # though it only records the red in the Actions tab; nothing here pages

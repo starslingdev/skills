@@ -29,11 +29,15 @@ Thanks for your interest in improving `ci-speedup`. Pull requests are welcome.
   locally.
 
 - **Keep the changelog current.** Every change that alters skill behavior adds a
-  dated (UTC) bullet to
-  [`skills/ci-speedup/CHANGELOG.md`](skills/ci-speedup/CHANGELOG.md) under the
-  right Added / Changed / Fixed heading, **in the same PR** — if you changed the
-  skill and didn't touch its changelog, the PR is incomplete. Pure-docs or
-  test-only refactors that don't change behavior can be noted briefly or skipped.
+  changelog fragment, **in the same PR**: one new file
+  `skills/<skill>/changelog.d/<slug>.<added|changed|fixed|removed>.md` holding
+  the dated (UTC), PR-citing `(#N)` bullet that would have gone into
+  `CHANGELOG.md` (format in
+  [`skills/ci-speedup/changelog.d/README.md`](skills/ci-speedup/changelog.d/README.md)).
+  Don't edit `CHANGELOG.md` by hand — CI refuses it; a maintainer assembles the
+  fragments into it at release with `python3 maintainers/scripts/assemble_changelog.py`.
+  If you changed the skill and added no fragment, the PR is incomplete. Pure-docs
+  or test-only refactors that don't change behavior can be noted briefly or skipped.
 
 - **Stage by explicit path.** When committing, `git add` only the files you
   changed — never `git add -A` / `git add .`, which sweeps in unrelated or
@@ -51,7 +55,7 @@ External contributions are welcome and follow the standard fork flow:
 - **Fork, branch, and open a PR against `main`.**
 - **CI runs the full test suite on your PR** on GitHub-hosted runners (the
   `test (fork)` job in `ci.yml`), with no access to repo secrets.
-- **Internal pushes and PRs run on StarSling's own runners** (the
+- **Internal pushes, PRs and merge-queue entries run on StarSling's own runners** (the
   `test (self-hosted)` job in the same workflow — we dogfood what we sell). By
   design, fork-PR code never executes on those self-hosted runners; the hosted
   job gives you the identical suite.

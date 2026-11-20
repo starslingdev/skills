@@ -20,7 +20,8 @@ skills/
   ci-secure/                        # skill: the ten critical CI/CD attack vectors
   ci-speedup/                       # skill: measured speed waste (self-contained)
     SKILL.md                        # the skill's canonical contract — read it first
-    CHANGELOG.md                    # dated, PR-referenced change history (keep updated)
+    CHANGELOG.md                    # dated, PR-referenced change history (assembled; never hand-edited)
+    changelog.d/                    # pending changelog fragments, one file per change
     ARCHITECTURE.md                 # how the pipeline fits together
     scripts/                        # the deterministic engine (stdlib only)
     references/                     # the pattern catalog + methodology docs
@@ -63,10 +64,14 @@ These rules apply to EVERY shipped skill — `ci-speedup`, `ci-score`,
   `maintainers/sling/` tree to leak from; the repo-wide internal-identifier
   guard covers it, and it gets a per-skill guard the day it grows either
 - **Keep the changelog current.** Every change that alters a skill's behavior
-  adds a dated (UTC) bullet to THAT skill's `CHANGELOG.md` under the right
-  Added / Changed / Fixed heading, *in the same PR*. If you changed a skill and
-  didn't touch its changelog, the PR is incomplete. Pure-docs / test-only
-  refactors that don't change behavior can be noted briefly or skipped.
+  adds a fragment under `skills/<skill>/changelog.d/`, *in the same PR*: one
+  new file `<slug>.<added|changed|fixed|removed>.md` holding the dated (UTC),
+  PR-citing `(#N)` bullet that would have gone into `CHANGELOG.md` (format in
+  that directory's `README.md`). Never edit `CHANGELOG.md` by hand: CI refuses
+  it, and only `maintainers/scripts/assemble_changelog.py`, run by a maintainer
+  at release, writes it. If you changed a skill and added no fragment, the PR
+  is incomplete. Pure-docs / test-only refactors that don't change behavior can
+  be noted briefly or skipped.
 - **Tests.** From the repo root, `python3 -m pytest -v` runs every suite (the
   root `pyproject.toml` wires the paths). The suite needs pytest **and PyYAML** —
   `pip install -e ".[dev]"` installs both; without yaml, pytest aborts at
