@@ -848,6 +848,8 @@ implementation lands.
     "sources": {
       "collect_runs.py:_OPT106_MIN_PROFILE_S": 30.0,
       "collect_runs.py:_OPT106_MIN_JOB_SHARE": 0.2,
+      "blocking_path.py:_OPT106_MIN_PROFILE_S": 30.0,
+      "blocking_path.py:_OPT106_MIN_JOB_SHARE": 0.2,
       "verify_report.py:_VR_OPT106_MIN_PROFILE_S": 30.0,
       "verify_report.py:_VR_OPT106_MIN_JOB_SHARE": 0.2
     }

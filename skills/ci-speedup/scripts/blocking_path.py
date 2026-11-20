@@ -3048,34 +3048,58 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
 
 
 _RUNTIME_TS_LOADER_COMMAND_RE = re.compile(
-    r"^(?:##\[command\]|[>$+]\s+)?(?:"
+    r"^(?:##\[group\]Run\s+|##\[command\]|[>$+]\s+)?(?:"
     r"(?:npx\s+|pnpm\s+(?:exec\s+)?|yarn\s+|bunx\s+)?(?:tsx|ts-node)\b|"
     r"node\b[^\n]*(?:--loader(?:=|\s+)|--import(?:=|\s+))"
     r"(?:tsx|ts-node(?:/esm)?|jiti)\b)",
     re.IGNORECASE,
 )
 _RUNTIME_TS_LOADER_PROFILE_RE = re.compile(
-    r"\b(?P<loader>jiti|tsx|ts-node|TypeScript runtime loader)\s+"
-    r"self[ -]time\s*:\s*(?P<value>\d+(?:\.\d+)?)\s*"
-    r"(?P<unit>ms|s|sec(?:onds?)?|m|min(?:utes?)?)\b",
+    r"^CI_SPEEDUP_RUNTIME_TS_PROFILE_V1\s+"
+    r"loader=(?P<loader>jiti|tsx|ts-node)\s+"
+    r"self_ms=(?P<value>\d+(?:\.\d+)?)\s+"
+    r"profile=(?P<profile>\S+\.cpuprofile)\s+"
+    r"sha256=(?P<sha256>[0-9a-f]{64})$",
     re.IGNORECASE,
 )
+_OPT106_MIN_PROFILE_S = 30.0
+_OPT106_MIN_JOB_SHARE = 0.2
 
 
-def _runtime_ts_loader_leaf(lines: list[str]) -> dict[str, Any] | None:
-    """A runtime TS command plus an explicit profiler-owned loader duration."""
-    command = next((line.strip() for line in lines
-                    if _RUNTIME_TS_LOADER_COMMAND_RE.match(line.strip())), None)
-    if command is None:
+def _runtime_ts_loader_leaf(
+    lines: list[str], job_duration_s: float | None,
+) -> dict[str, Any] | None:
+    """A same-step runtime TS command plus a structured profile summary."""
+    if not isinstance(job_duration_s, (int, float)) or job_duration_s <= 0:
         return None
-    match = next((_RUNTIME_TS_LOADER_PROFILE_RE.search(line) for line in lines
-                  if _RUNTIME_TS_LOADER_PROFILE_RE.search(line)), None)
-    if match is None:
+    # GitHub's `##[group]Run ...` starts a step. Keep command and measurement in
+    # that same step so an unrelated later profile cannot be borrowed.
+    segments: list[list[str]] = []
+    segment: list[str] = []
+    for line in lines:
+        if line.startswith("##[group]Run ") and segment:
+            segments.append(segment)
+            segment = []
+        segment.append(line)
+    if segment:
+        segments.append(segment)
+    pair: tuple[str, re.Match[str]] | None = None
+    for rows in segments:
+        command = next((line.strip() for line in rows
+                        if _RUNTIME_TS_LOADER_COMMAND_RE.match(line.strip())), None)
+        match = next((_RUNTIME_TS_LOADER_PROFILE_RE.match(line.strip()) for line in rows
+                      if _RUNTIME_TS_LOADER_PROFILE_RE.match(line.strip())), None)
+        if command is not None and match is not None:
+            pair = (command, match)
+            break
+    if pair is None:
         return None
+    command, match = pair
     value = float(match.group("value"))
-    unit = match.group("unit").lower()
-    seconds = value / 1000.0 if unit == "ms" else value * 60.0 if unit[0] == "m" else value
-    if seconds <= 0:
+    seconds = value / 1000.0
+    if (seconds < _OPT106_MIN_PROFILE_S
+            or seconds > float(job_duration_s)
+            or seconds / float(job_duration_s) < _OPT106_MIN_JOB_SHARE):
         return None
     return {
         "fix_key": "runtime-ts-transpilation",
@@ -3085,15 +3109,18 @@ def _runtime_ts_loader_leaf(lines: list[str]) -> dict[str, Any] | None:
                       "value": round(seconds, 2), "unit": "s"},
         "deeper": [],
         "evidence": [command, match.group(0)],
-        "search": ["--loader", "--import", "self time"],
+        "search": ["--loader", "--import", "CI_SPEEDUP_RUNTIME_TS_PROFILE_V1"],
         "loader": match.group("loader").lower(),
         "profile_s": round(seconds, 2),
+        "profile_artifact": match.group("profile"),
+        "profile_sha256": match.group("sha256").lower(),
     }
 
 
 def _parse_log(text: str,
                iso: dict[str, Any] | None = None,
-               cache_path_sample: dict[str, Any] | None = None) -> dict[str, Any] | None:
+               cache_path_sample: dict[str, Any] | None = None,
+               job_duration_s: float | None = None) -> dict[str, Any] | None:
     """Detect the leaf root cause in a captured job log. `iso` is `scan.py`'s
     `test_runner_isolation` block — the config corroboration the OPT78
     (`vitest-isolate-pool`) leaf needs; omitted ⇒ an import-bound vitest run
@@ -3112,7 +3139,7 @@ def _parse_log(text: str,
     lines = _clean_log(text)
     joined = "\n".join(lines)
 
-    runtime_ts_loader = _runtime_ts_loader_leaf(lines)
+    runtime_ts_loader = _runtime_ts_loader_leaf(lines, job_duration_s)
     if runtime_ts_loader is not None:
         return runtime_ts_loader
 
@@ -7796,6 +7823,7 @@ def _demote_offcategory_leaf(
 def _derive_pole_leaf(
     pole: dict[str, Any], owner_key: str | None, logs: dict[str, str],
     iso: dict[str, Any] | None = None,
+    job_duration_s: float | None = None,
 ) -> "tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]":
     """The ONE leaf-derivation pipeline a pole's log runs through — captured here so the
     Long pole map (which drills the descent pole = pole 1 up top) and the per-pole loop
@@ -7804,7 +7832,8 @@ def _derive_pole_leaf(
     pole owns none → no log), parse, reconcile the cache-hit distribution, then split off an
     off-category leaf. Pure over its inputs, so calling it twice on the same pole is exact."""
     log_text = logs.get(owner_key) if owner_key is not None else None
-    leaf = _parse_log(log_text, iso) if log_text else None
+    leaf = (_parse_log(log_text, iso, job_duration_s=job_duration_s)
+            if log_text else None)
     # A restore line sits in nearly every job log. The dependency-cache leaf is
     # evidence only where the OPT96-gated sampling ran on this pole.
     if (leaf is not None and leaf.get("fix_key") == "dependency-cache"
@@ -15881,12 +15910,22 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     _supplied_keys = (set(logs) | set(samples) | set(log_runs) | set(steps)
                       | set(mags) | set(analyses))
     pole_owner_keys = _pole_owner_keys(doc, poles, _supplied_keys)
+    # Duration belongs to the SAME captured representative job as its log. It
+    # gates share-based leaves; a hand-supplied log has no trustworthy wall
+    # denominator and therefore cannot crown one.
+    pole_log_durations: dict[int, float] = {}
+    for entry in (doc.get("data_bundle") or {}).get("logs") or []:
+        _p = _pole_for_entry(poles, entry)
+        _d = _num(entry.get("duration_s"))
+        if _p is not None and _d is not None and _d > 0:
+            pole_log_durations[id(_p)] = _d
     # (log_text, leaf, offcat_leaf) for every rendered pole, derived ONCE. The map reads the
     # descent pole's entry; the loop reads its own pole's — the SAME object, so the map's
     # Level 3 and the pole's Level 3 can never disagree.
     _pole_leaves: dict[int, tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]] = {
         id(p): _derive_pole_leaf(p, pole_owner_keys.get(id(p)), logs,
-                                  doc.get("test_runner_isolation"))
+                                  doc.get("test_runner_isolation"),
+                                  pole_log_durations.get(id(p)))
         for p in pole_wfs}
 
     # ── Long pole map (owner UX edit 2026-07-19) ─────────────────────────────────────────
@@ -17332,7 +17371,10 @@ def _gap_poles(doc: dict[str, Any],
                 if "=" in key:
                     continue  # an un-bindable key (summary flags it) — never borrow
                 log_text = logs.get(key)
-                if not log_text or _catalog_leaf(_parse_log(log_text, _iso)) is not None:
+                if (not log_text
+                        or _catalog_leaf(_parse_log(
+                            log_text, _iso,
+                            job_duration_s=_num(entry.get("duration_s")))) is not None):
                     continue
                 base = _pole_for_entry(poles, entry) or dict(entry)
                 if _catalog_covers(base):

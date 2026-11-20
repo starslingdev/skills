@@ -154,6 +154,8 @@ REQUIRED_CURRENT_SOURCES = {
     "collect_runs.py:_OPT84_INSTALL_MIN_SHARE": 0.15,
     "collect_runs.py:_OPT106_MIN_JOB_SHARE": 0.2,
     "collect_runs.py:_OPT106_MIN_PROFILE_S": 30.0,
+    "blocking_path.py:_OPT106_MIN_JOB_SHARE": 0.2,
+    "blocking_path.py:_OPT106_MIN_PROFILE_S": 30.0,
     "collect_runs.py:_OPT98_CHURN_SAMPLE": 30,
     "collect_runs.py:_OPT98_DIFFERENT_RATIO": 1.5,
     "collect_runs.py:_OPT98_MIN_MERGES_PER_DAY": 30,

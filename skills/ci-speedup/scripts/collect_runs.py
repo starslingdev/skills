@@ -29075,7 +29075,7 @@ def _persist_pole_logs(
         # A replay-heavy test log can still contain an independent catalog leaf
         # (most commonly dependency-cache state). Preserve that drill; replay
         # exclusion applies only when the log has no other recognized work.
-        leaf0 = bp._parse_log(log, iso) or {}
+        leaf0 = bp._parse_log(log, iso, job_duration_s=repr_dur) or {}
         replay = bp._test_result_replay_share(log)
         if (not leaf0 and isinstance(replay, dict)
                 and replay.get("replayed") is True):
@@ -29273,6 +29273,7 @@ def _detect_runtime_ts_transpilation(
         if (not isinstance(seconds, (int, float))
                 or not isinstance(job_seconds, (int, float))
                 or seconds < _OPT106_MIN_PROFILE_S or job_seconds <= 0
+                or seconds > job_seconds
                 or seconds / job_seconds < _OPT106_MIN_JOB_SHARE):
             continue
         workflow = str(entry.get("workflow_file") or "")

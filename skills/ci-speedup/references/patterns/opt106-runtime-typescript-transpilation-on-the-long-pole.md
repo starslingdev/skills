@@ -13,8 +13,9 @@ category: 11
 # OPT106 — Runtime TypeScript Transpilation on the Long Pole
 
 **TL;DR**: A long-pole tool or test step starts through `tsx`, `ts-node`, or a
-`node --loader` / `node --import` TypeScript hook, and an explicit profiler
-summary attributes a material share of the job to the loader. Precompile the
+`node --loader` / `node --import` TypeScript hook, and a structured summary
+derived from a retained CPU profile attributes a material share of the job to
+the loader. Precompile the
 exact tool surface once, or preload a cached transform, then make any fallback
 to runtime transpilation fail loudly.
 
@@ -24,11 +25,16 @@ to runtime transpilation fail loudly.
 2. Its log contains a command boundary that directly invokes `tsx` or `ts-node`,
    or invokes `node` with a `tsx`, `ts-node`, or `jiti` loader hook. A prose
    mention does not count.
-3. The same log carries an explicit profiler-owned loader self-time. A
-   loader-looking command alone is not evidence of expensive transpilation: its
-   transform cache may already be warm.
+3. The same step emits `CI_SPEEDUP_RUNTIME_TS_PROFILE_V1` with the loader,
+   self-time in milliseconds, retained `.cpuprofile` filename and SHA-256. The
+   workflow produces this line from its CPU-profile parser; Node's
+   `--cpu-prof` flag does not emit such a summary by itself. A loader-looking
+   command or a free-form `jiti self time` line is not evidence of expensive
+   transpilation: the transform cache may already be warm, and unaffiliated log
+   text must not receive measured credit.
 4. The profiled self-time is at least 30 seconds and at least 20% of the job's
-   measured wall. Smaller observations stay silent.
+   measured wall, and does not exceed that wall. Smaller or impossible
+   observations stay silent.
 
 **Fix recipe**, safest first:
 
@@ -47,7 +53,7 @@ module resolution, source-map behavior, test coverage, failures, and exit
 status. A warm transform cache is acceptable only when its key includes every
 source and toolchain input that changes the emitted code.
 
-**Sizing**: the profiler's loader self-time is a ceiling on both per-run wall
+**Sizing**: the structured profile summary's loader self-time is a ceiling on both per-run wall
 clock and runner-minute saving. It is multiplied by the measured 30-day run
 volume, then clamped to the affected job's measured completed-run compute. The
 realized saving is the matched before/after difference after the guarded

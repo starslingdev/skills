@@ -15248,7 +15248,7 @@ _VR_OPT106_MIN_JOB_SHARE = 0.2
 
 
 def check_opt106_runtime_loader_provenance(findings_path: Path | None) -> Check:
-    """OPT106 credit remains bound to its captured profiler-owned pole fact."""
+    """OPT106 credit remains bound to its captured structured pole fact."""
     name = "OPT106 runtime-loader findings retain measured pole provenance"
     data, err = _load_findings_doc(findings_path)
     if err:
@@ -15280,10 +15280,14 @@ def check_opt106_runtime_loader_provenance(findings_path: Path | None) -> Check:
         if (job_seconds is None or job_seconds <= 0
                 or job_seconds != _num(finding.get("runtime_loader_job_s"))
                 or seconds is None
+                or seconds > job_seconds
                 or seconds / job_seconds < _VR_OPT106_MIN_JOB_SHARE):
             failures.append(f"{fid} does not retain a qualifying share of its measured job wall")
         if (str(fact.get("fix_key") or "") != "runtime-ts-transpilation"
-                or not str(fact.get("loader") or "")):
+                or not str(fact.get("loader") or "")
+                or not str(fact.get("profile_artifact") or "").endswith(".cpuprofile")
+                or not re.fullmatch(r"[0-9a-f]{64}",
+                                    str(fact.get("profile_sha256") or ""))):
             failures.append(f"{fid} lacks the runtime-loader leaf identity")
         wall = _num(finding.get("wall_clock_p50_s"))
         if seconds is not None and (wall is None or wall < 0 or wall > seconds):
