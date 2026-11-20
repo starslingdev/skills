@@ -1462,12 +1462,15 @@ Knip's `--include`, `--reporter` and issue-type flags (`--files`, `--exports`,
 `--dependencies` and the like) select or render issues from one project
 analysis, so the scanner can tell them apart from scope-defining arguments.
 Other analysis tools run several times over one scope are not flagged by this
-static form. Separate steps of one job match when the step's working
-directory, its `if:` condition and every other argument (`--config`,
-`--production`, `--workspace` and so on) are identical; a `>` redirect of the
-report counts as output. A different config, production mode, workspace,
-working directory or step condition stays quiet, and so do a run with `--fix`
-and a Knip line that follows a `cd` in its step. Evidence: the public
+static form. Each step's command is read through the shared run-leaf resolver,
+so package scripts (`pnpm knip:json`, `npm run knip`) and `\`-continued lines
+are followed. Runs in one job match, in one step or in several, when the
+working directory, the step `if:` condition and every other argument
+(`--config`, `--production`, `--workspace` and so on) are identical; a `>`
+redirect of the report counts as output. A different config, production mode,
+workspace, working directory or step condition stays quiet, and so do a run
+with `--fix`, a step that changes directory, and runs in one step that a
+conditional chain (`||`, `if`, `case`) chooses between. Evidence: the public
 [OpenClaw #185851](https://github.com/openclaw/openclaw/pull/185851) change
 took 91.3 s to 65.9 s.
 

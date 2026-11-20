@@ -651,7 +651,68 @@ jobs:
                 if finding["pattern"] == "OPT16"]
     assert len(findings) == 1
     assert "run it once and split or filter the combined report" in findings[0]["evidence"]
-    assert findings[0]["opt16_analysis_repeat"] == {"tool": "knip", "steps": 2}
+    assert findings[0]["opt16_analysis_repeat"] == {"tool": "knip", "runs": 2, "steps": 2}
+
+
+def _knip_scripts_repo(tmp_path: Path, json_script: str, md_script: str) -> str:
+    (tmp_path / "package.json").write_text(json.dumps({
+        "name": "fixture", "private": True,
+        "scripts": {"knip:json": json_script, "knip:md": md_script},
+    }), encoding="utf-8")
+    return """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm knip:json && pnpm knip:md
+"""
+
+
+def test_opt16_report_flag_variant_follows_package_scripts(tmp_path: Path):
+    workflow = _knip_scripts_repo(
+        tmp_path, "knip --reporter json > a.json", "knip --reporter markdown > b.md")
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [finding for finding in _scan(tmp_path)["findings"]
+                if finding["pattern"] == "OPT16"]
+    assert len(findings) == 1
+    assert findings[0]["opt16_analysis_repeat"] == {"tool": "knip", "runs": 2, "steps": 1}
+
+
+@pytest.mark.parametrize(
+    "json_script, md_script",
+    [
+        # Different workspaces are different analyses.
+        ("knip --workspace packages/api --reporter json > a.json",
+         "knip --workspace packages/web --reporter markdown > b.md"),
+        # The second report runs only when the first command fails.
+        ("knip --reporter json > a.json || knip --reporter markdown > b.md",
+         "echo done"),
+    ],
+)
+def test_opt16_report_flag_variant_package_scripts_over_other_scopes_stay_quiet(
+        tmp_path: Path, json_script: str, md_script: str):
+    workflow = _knip_scripts_repo(tmp_path, json_script, md_script)
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_report_flag_variant_reads_continued_lines(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          pnpm exec knip \\
+            --config knip.config.ts \\
+            --include dependencies
+      - run: |
+          pnpm exec knip \\
+            --config knip.config.ts \\
+            --include files,exports
+"""
+    assert "OPT16" in _scan_one(tmp_path, workflow)
 
 
 def test_opt16_report_flag_variant_counts_report_redirection_as_output(tmp_path: Path):
