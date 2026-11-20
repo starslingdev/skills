@@ -236,6 +236,8 @@ REQUIRED_CURRENT_SOURCES = {
     "verify_report.py:_VR_OPT84_INSTALL_MIN_SHARE": 0.15,
     "verify_report.py:_VR_OPT106_MIN_JOB_SHARE": 0.2,
     "verify_report.py:_VR_OPT106_MIN_PROFILE_S": 30.0,
+    "verify_report.py:_VR_OPT106_MIN_STEP_SHARE": 0.15,
+    "verify_report.py:_VR_OPT106_MIN_STEP_S": 20.0,
     "verify_report.py:_VR_PARTIAL_MISS_FLOOR_PCT": 40.0,
     "verify_report.py:_VR_POLE_HOLDS_UP_MIN_COUNT": 2,
     "verify_report.py:_VR_POLE_RECUR_FLOOR": 2,
@@ -370,7 +372,12 @@ def test_report_defaults_machine_contract_matches_the_engine():
         for row in contract.values()
         for source, value in row.get("sources", {}).items()
     }
-    changelog = (SKILL / "CHANGELOG.md").read_text(encoding="utf-8")
+    # A landing is recorded either in CHANGELOG.md or, until the next assembly,
+    # in a pending fragment under changelog.d/.
+    changelog = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in [SKILL / "CHANGELOG.md", *sorted((SKILL / "changelog.d").glob("*.md"))]
+        if p.name != "README.md")
     assert REQUIRED_VERIFIER_MIRRORS <= sources
     assert documented_sources == REQUIRED_CURRENT_SOURCES
     assert REQUIRED_PROVISIONAL_SOURCES.items() <= planned_sources.items()
