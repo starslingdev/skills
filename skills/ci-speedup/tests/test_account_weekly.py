@@ -216,3 +216,16 @@ def test_paired_comparison_needs_a_workload_statement_and_is_attributed(tmp_path
     assert "not a ci-speedup finding" in line.lower(), line
     assert "same jobs on both sides" in line, line
 
+def test_paired_effect_that_rounds_to_zero_is_not_called_a_saving() -> None:
+    from before_after import summarize_account_weekly
+
+    data = _observations()
+    data["paired_runs"] = {
+        "before_runner_minutes": [60.04, 60.04],
+        "after_runner_minutes": [60.0, 60.0],
+        "workload_change": "same jobs on both sides",
+    }
+    comparison = summarize_account_weekly(data)["paired_comparison"]
+    assert comparison["runner_minute_effect"] == "unchanged", comparison
+    assert comparison["runner_minute_delta"] == 0.0
+

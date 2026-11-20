@@ -143,12 +143,15 @@ def summarize_account_weekly(payload: dict[str, Any]) -> dict[str, Any]:
         before_median = round(float(statistics.median(before)), 3)
         after_median = round(float(statistics.median(after)), 3)
         raw_delta = round(after_median - before_median, 3)
-        if raw_delta < 0:
+        # Classify at the report's display precision (0.1 runner-minute), so a
+        # difference that renders as 0.0 is never labelled a saving or cost.
+        shown_delta = round(raw_delta, 1)
+        if shown_delta < 0:
             effect = "saving"
-            delta = abs(raw_delta)
-        elif raw_delta > 0:
+            delta = abs(shown_delta)
+        elif shown_delta > 0:
             effect = "added cost"
-            delta = raw_delta
+            delta = shown_delta
         else:
             effect = "unchanged"
             delta = 0.0
