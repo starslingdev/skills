@@ -7529,6 +7529,78 @@ def _post_completion_waste_corroborated(f: dict) -> bool:
     return False
 
 
+def _vr_opt36_glob_matches(path: str, pattern: str) -> bool:
+    """Independent conservative matcher for OPT36's stamped exclusions."""
+    path, pattern = path.lstrip("/"), pattern.strip().lstrip("/")
+    if not path or not pattern or any(char in pattern for char in "{}["):
+        return False
+    out: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*":
+            if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                index += 2
+                if index < len(pattern) and pattern[index] == "/":
+                    out.append("(?:.*/)?")
+                    index += 1
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(char))
+        index += 1
+    return re.fullmatch("".join(out), path) is not None
+
+
+def _vr_opt36_ignored(path: str, patterns: list[str]) -> bool:
+    ignored = False
+    for raw in patterns:
+        pattern = raw.strip()
+        negated = pattern.startswith("!")
+        if negated:
+            pattern = pattern[1:]
+        if _vr_opt36_glob_matches(path, pattern):
+            ignored = not negated
+    return ignored
+
+
+def _vr_opt36_unchanged_inputs_valid(f: dict) -> bool:
+    stamp = _as_dict(f.get("opt36_unchanged_inputs"))
+    pairs = [row for row in _as_list(stamp.get("pairs")) if isinstance(row, dict)]
+    patterns = [str(value) for value in _as_list(stamp.get("paths_ignore"))
+                if isinstance(value, str) and value]
+    if not pairs:
+        return False
+    same_head = excluded_only = 0
+    for row in pairs:
+        base, head = str(row.get("base") or ""), str(row.get("head") or "")
+        paths = row.get("changed_paths")
+        if not base or not head or not isinstance(paths, list):
+            return False
+        if row.get("kind") == "same_head":
+            same_head += 1
+            if base != head or paths:
+                return False
+        elif row.get("kind") == "excluded_only":
+            excluded_only += 1
+            if base == head or not patterns or not all(
+                    isinstance(path, str) and _vr_opt36_ignored(path, patterns)
+                    for path in paths):
+                return False
+        else:
+            return False
+    effect = _as_dict(f.get("runner_minute_effect"))
+    return (stamp.get("same_head_pairs") == same_head
+            and stamp.get("excluded_only_pairs") == excluded_only
+            and effect.get("direction") == "saving"
+            and abs((_num(effect.get("runner_min_per_month")) or -1.0)
+                    - (_num(f.get("runner_min_saving")) or -2.0)) < 0.001)
+
+
 def _non_pr_event_corroborated(f: dict, data: dict) -> bool:
     cert = _as_dict(f.get("tier2_neutrality"))
     subset = {str(e) for e in _as_list(f.get("tier2_run_subset_events")) if str(e)}
@@ -7547,17 +7619,20 @@ def _non_pr_event_corroborated(f: dict, data: dict) -> bool:
     evidence_text = _text_from_json(me).lower()
     table = _as_dict(me.get("table"))
     rows = _as_list(table.get("rows"))
-    # Currently only OPT36 emits a measured non_pr_event certificate. Pin the
-    # schedule/same-head-sha evidence shape so a future detector cannot promote a
-    # generic "non-PR" claim without its own corroboration.
+    # Currently only OPT36 emits a measured non_pr_event certificate. Preserve
+    # legacy same-head evidence and independently validate the newer stamped
+    # unchanged-input pairs so a generic non-PR claim cannot promote itself.
+    has_unchanged_stamp = isinstance(f.get("opt36_unchanged_inputs"), dict)
+    legacy_same_head = (not has_unchanged_stamp and "same-head_sha" in signal
+                        and "same-head_sha" in evidence_text)
+    unchanged_inputs = has_unchanged_stamp and _vr_opt36_unchanged_inputs_valid(f)
     return (
         str(f.get("pattern")) == "OPT36"
         and subset == {"schedule"}
         and "event=schedule" in signal
-        and "same-head_sha" in signal
         and "event=schedule" in ref
         and "schedule" in ref
-        and "same-head_sha" in evidence_text
+        and (legacy_same_head or unchanged_inputs)
         and bool(rows))
 
 

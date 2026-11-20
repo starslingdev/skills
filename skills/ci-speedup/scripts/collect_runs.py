@@ -18172,18 +18172,184 @@ def _consecutive_same_sha_run_ids(runs: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+# CodeQL languages whose analysis honours `paths-ignore`. For compiled
+# languages CodeQL analyses whatever the build compiles, so an "ignored" path can
+# still be a scan input; those (and auto-detected languages) withhold the skip.
+_OPT36_INTERPRETED_CODEQL_LANGUAGES = frozenset({
+    "javascript", "javascript-typescript", "typescript", "python", "ruby", "actions"})
+# Paths that change what a scan does even when its exclusions list them.
+_OPT36_ALWAYS_RELEVANT_PREFIXES = (".github/workflows/", ".github/codeql/",
+                                   ".github/actions/")
+
+
+def _opt36_codeql_languages(job: dict[str, Any], raw: Any) -> list[str] | None:
+    """Resolve a CodeQL init `languages` input; None when it cannot be read."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    match = re.fullmatch(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}", text)
+    if match:
+        key = match.group(1)
+        strategy = job.get("strategy")
+        matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+        if not isinstance(matrix, dict):
+            return None
+        values: list[str] = []
+        base = matrix.get(key)
+        if base is not None:
+            if not isinstance(base, list) or not all(isinstance(v, str) for v in base):
+                return None
+            values.extend(base)
+        include = matrix.get("include")
+        if include is not None:
+            if not isinstance(include, list):
+                return None
+            for row in include:
+                if not isinstance(row, dict):
+                    return None
+                if key in row:
+                    if not isinstance(row[key], str):
+                        return None
+                    values.append(row[key])
+        text = ",".join(values)
+    elif "${{" in text:
+        return None
+    langs = [part.strip().lower() for part in re.split(r"[,\s]+", text) if part.strip()]
+    return langs or None
+
+
+def _opt36_scanner_paths_ignore(wf_doc: dict[str, Any]) -> list[str]:
+    """Return the one explicit inline CodeQL exclusion list every category shares.
+
+    Fails closed (empty list, so no unchanged-input claim) unless EVERY job is a
+    CodeQL category with a resolvable interpreted `languages` input and the same
+    inline `config` `paths-ignore`, and no external `config-file` is merged in:
+    a path one category ignores may be a real input of another."""
+    try:
+        import yaml
+    except ImportError:
+        return []
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    if not isinstance(jobs, dict) or not jobs:
+        return []
+    shared: list[str] | None = None
+    for job in jobs.values():
+        if not isinstance(job, dict) or "uses" in job:
+            return []
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            return []
+        inits = [step for step in steps if isinstance(step, dict)
+                 and "codeql-action/init" in str(step.get("uses") or "").lower()]
+        if not inits:
+            return []
+        for step in inits:
+            with_ = step.get("with")
+            if not isinstance(with_, dict) or with_.get("config-file"):
+                return []
+            langs = _opt36_codeql_languages(job, with_.get("languages"))
+            if not langs or any(lang not in _OPT36_INTERPRETED_CODEQL_LANGUAGES
+                                for lang in langs):
+                return []
+            raw = with_.get("config")
+            if not isinstance(raw, str) or not raw.strip():
+                return []
+            try:
+                config = yaml.safe_load(raw)
+            except yaml.YAMLError:
+                return []
+            values = config.get("paths-ignore") if isinstance(config, dict) else None
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, list) or not values or not all(
+                    isinstance(value, str) and value.strip() for value in values):
+                return []
+            cleaned = list(dict.fromkeys(str(value) for value in values))
+            if shared is None:
+                shared = cleaned
+            elif shared != cleaned:
+                return []
+    return shared or []
+
+
+def _opt36_compare_paths(client: GhClient, repo: str,
+                         runs: list[dict[str, Any]],
+                         wf_doc: dict[str, Any]) -> dict[tuple[str, str], list[str] | None]:
+    """Read bounded compare results needed by the unchanged-input extension."""
+    if not _opt36_scanner_paths_ignore(wf_doc):
+        return {}
+    ordered = sorted(runs, key=_run_start_ts)
+    pairs = list(dict.fromkeys(
+        (str(before.get("head_sha") or ""), str(after.get("head_sha") or ""))
+        for before, after in zip(ordered, ordered[1:])
+        if before.get("head_sha") and after.get("head_sha")
+        and before.get("head_sha") != after.get("head_sha")))
+    out: dict[tuple[str, str], list[str] | None] = {}
+    for base, head in pairs:
+        endpoint = (f"repos/{repo}/compare/{quote(base, safe='')}..."
+                    f"{quote(head, safe='')}")
+        doc = client.json(endpoint, allow_missing=True)
+        files = doc.get("files") if isinstance(doc, dict) else None
+        # Only a forward diff is complete: for `behind`/`diverged` the three-dot
+        # compare omits changes on the base side, so the inputs may differ.
+        if (not isinstance(files, list) or len(files) >= 300
+                or doc.get("status") not in ("ahead", "identical")):
+            out[(base, head)] = None
+            continue
+        names = [str(row.get("filename") or "") for row in files
+                 if isinstance(row, dict) and row.get("filename")]
+        if len(names) != len(files):
+            out[(base, head)] = None
+            continue
+        # A rename out of a scanned path removes a scan input.
+        names.extend(str(row["previous_filename"]) for row in files
+                     if row.get("previous_filename"))
+        out[(base, head)] = list(dict.fromkeys(names))
+    return out
+
+
+def _opt36_redundant_input_pairs(
+    runs: list[dict[str, Any]], patterns: list[str],
+    changed_paths_by_pair: dict[tuple[str, str], list[str] | None],
+) -> list[dict[str, Any]]:
+    ordered = sorted(runs, key=_run_start_ts)
+    pairs: list[dict[str, Any]] = []
+    for before, after in zip(ordered, ordered[1:]):
+        base = str(before.get("head_sha") or "")
+        head = str(after.get("head_sha") or "")
+        if not base or not head:
+            continue
+        if base == head:
+            kind, paths = "same_head", []
+        else:
+            # The recipe skips only against a last SUCCESSFUL scan, so a rerun
+            # after a failed or unknown-outcome scan is not redundant.
+            if str(before.get("conclusion") or "") != "success":
+                continue
+            paths = changed_paths_by_pair.get((base, head))
+            if paths is None or not patterns or not all(
+                    not path.startswith(_OPT36_ALWAYS_RELEVANT_PREFIXES)
+                    and _opt32_ignored_by_patterns(path, patterns) for path in paths):
+                continue
+            kind = "excluded_only"
+        pairs.append({"base": base, "head": head, "run_id": _run_id(after),
+                      "kind": kind, "changed_paths": list(paths)})
+    return pairs
+
+
 def _detect_opt36_schedule_burn(
     wf_path: str, all_runs: list[dict[str, Any]],
     jobs_per_run: list[list[dict[str, Any]]], wf_doc: dict[str, Any],
-    monthly_schedule_volume: int | None, start_idx: int,
+    monthly_schedule_volume: int | None, start_idx: int, *,
+    changed_paths_by_pair: dict[tuple[str, str], list[str] | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Cron schedule burn (catalog OPT36) — measured upgrade.
 
     Static OPT36 already flags "too frequent cron". This measured promotion
     requires positive run-history evidence: consecutive scheduled runs on the
-    same head_sha, i.e. the workflow ran again without any code change. It sizes
-    only the schedule-event subset, using the event-filtered 30-day total count
-    and the workflow's measured mean job-minutes per run."""
+    same head_sha, or a complete compare whose files all match explicit scanner
+    exclusions. It sizes only the schedule-event subset, using the event-filtered
+    30-day total count and the workflow's measured mean job-minutes per run."""
     on = _wf_on(wf_doc)
     if not _on_has_event(on, "schedule"):
         return []
@@ -18192,8 +18358,13 @@ def _detect_opt36_schedule_burn(
     schedule_runs = [r for r in all_runs if str(r.get("event") or "") == "schedule"]
     if len(schedule_runs) < 2:
         return []
-    redundant, groups = _consecutive_same_sha_count(schedule_runs)
-    redundant_run_ids = _consecutive_same_sha_run_ids(schedule_runs)
+    patterns = _opt36_scanner_paths_ignore(wf_doc)
+    redundant_pairs = _opt36_redundant_input_pairs(
+        schedule_runs, patterns, changed_paths_by_pair or {})
+    redundant = len(redundant_pairs)
+    groups = redundant
+    redundant_run_ids = [str(row["run_id"]) for row in redundant_pairs
+                         if row.get("run_id")]
     if redundant <= 0:
         return []
 
@@ -18206,20 +18377,23 @@ def _detect_opt36_schedule_burn(
         return []
     repeated_pct = round(100 * redundant / max(len(schedule_runs), 1))
 
+    excluded_only = sum(row["kind"] == "excluded_only" for row in redundant_pairs)
+    same_head = redundant - excluded_only
     title = "Cron Schedule Too Frequent"
     evidence = (
-        f"{redundant} scheduled run(s) in {groups} consecutive same-head_sha group(s) "
-        f"re-ran without a code change in the sampled schedule slice "
+        f"{redundant} scheduled run(s) re-ran with unchanged scanner inputs in the "
+        f"sampled schedule slice ({same_head} same-head_sha; {excluded_only} diff(s) "
+        "touching only explicit scanner exclusions) "
         f"({repeated_pct}% of {len(schedule_runs)} schedule run(s)); "
-        f"~{credited:.0f} runner-min/mo of schedule-event compute ({basis}).")
+        f"runner-minute saving: ~{credited:.0f}/mo of schedule-event compute ({basis}).")
     me = _measured_evidence(
-        ["Workflow", "Consecutive same-head_sha schedule runs", "Mean compute/run", "Credited runner-min/mo"],
+        ["Workflow", "Consecutive unchanged-input schedule runs", "Mean compute/run", "Credited runner-min/mo"],
         [[f"`{wf_path}`", f"{redundant} redundant run(s) in {groups} group(s)",
           f"{per_run_min:.1f} job-min over {n_timed} timed run(s)", f"~{credited:.0f}"]],
         summary=evidence,
         note=("Schedule burn is counted only on event=schedule runs whose head_sha repeats "
-              "consecutively, so the detector proves the workflow ran again without a "
-              "code change. Basis: the count is from the all-status schedule slice; "
+              "or whose complete compare touches only explicit scanner exclusions. "
+              "Basis: the count is from the all-status schedule slice; "
               f"the per-run price is the mean of {n_timed} successful schedule-event "
               "timed run(s). "
               "GUARDRAIL: confirm the current cadence is not an operational SLA before "
@@ -18235,17 +18409,30 @@ def _detect_opt36_schedule_burn(
     f["sizing_basis"] = "measured"
     f["measured_signal"] = (
         f"event=schedule total_count x mean job-minutes "
-        f"({monthly_schedule_volume} schedule run(s)/30d; {redundant} same-head_sha "
-        f"redundant run(s); {n_timed} timed run(s); scale {scale:.3g})")
+        f"({monthly_schedule_volume} schedule run(s)/30d; {redundant} unchanged-input "
+        f"redundant run(s), including {same_head} same-head_sha; {n_timed} timed "
+        f"run(s); scale {scale:.3g})")
     f["tier2_neutrality"] = {
         "proof": "non_pr_event",
         "margin_s": None,
-        "ref": ("event=schedule subset only; consecutive same-head_sha schedule runs; "
+        "ref": ("event=schedule subset only; consecutive unchanged-input schedule runs; "
                 "schedule is not a developer PR/merge event"),
     }
     f["tier2_run_subset_events"] = ["schedule"]
     if redundant_run_ids:
         f["tier2_sample_run_ids"] = redundant_run_ids
+    f["runner_minute_effect"] = {"direction": "saving",
+                                 "runner_min_per_month": credited}
+    f["opt36_unchanged_inputs"] = {
+        "same_head_pairs": same_head,
+        "excluded_only_pairs": excluded_only,
+        "paths_ignore": patterns,
+        "pairs": redundant_pairs,
+    }
+    f["fix_strategy_detail"] = (
+        "Compare the current commit with each scanner category's last successful scan; "
+        "skip only categories with no relevant change, and run the scan whenever the "
+        "comparison cannot complete.")
     f["guardrail"] = ("Confirm the cron cadence is not an operational SLA; prefer widening "
                       "the interval only for cleanup/triage/build jobs where delayed execution "
                       "is acceptable.")
@@ -35950,9 +36137,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                                                          memo=job_memo)
                     jobs_fetch_failures += wf_failures
                     _accumulate_jobs(kept, schedule_jobs, {})
+                    opt36_changed_paths = _opt36_compare_paths(
+                        client, repo, schedule_runs, wf_doc)
                     new = _detect_opt36_schedule_burn(
                         wf_path, schedule_runs, schedule_jobs, wf_doc, schedule_monthly,
-                        next_id)
+                        next_id, changed_paths_by_pair=opt36_changed_paths)
                     next_id = max(next_id, max((int(f["id"][1:]) for f in new),
                                                default=next_id))
                     _supersede_static_opt36(findings, new)
