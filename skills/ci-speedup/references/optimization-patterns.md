@@ -4006,6 +4006,24 @@ concurrency:
 
 `push`, `merge_group`, `schedule`, and tag builds evaluate to `false` and run to completion. `merge_group` needs no separate carve-out here — cancelling a queued merge-group run can eject the PR from the merge queue, and this predicate already excludes it.
 
+**A non-cancelled group does not preserve every pending run.** GitHub keeps at
+most one running and one pending run in a concurrency group. If a third run
+joins while one is running and another is pending, the new run replaces the
+older pending run even when `cancel-in-progress` is false. When every non-PR
+commit must receive its own validation, keep the default cancellation predicate
+but give non-PR events a per-run group:
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.head_ref || github.run_id }}
+```
+
+This preserves PR supersession by branch while making each `push`,
+`merge_group`, `schedule`, tag, and manual run independent. Do not use this key
+for the widened feature-branch-push recipe below: unique push groups cannot
+cancel superseded feature-branch runs, so that recipe and an every-commit
+validation requirement are mutually exclusive for the same event.
+
 **The tension you must not "simplify" away.** The group key uses `github.head_ref || github.ref_name` — both are the **short** branch name (`head_ref` is set only on `pull_request`; `ref_name` is the short form on `push`, where `github.ref` would be the fully-formed `refs/heads/…`). That is deliberate: it lands a branch's `push` and `pull_request` runs in the **same** group, which is the whole point of the push+PR double-trigger dedup (OPT47). Writing `github.head_ref || github.ref` instead yields two different strings for one branch, the runs never share a group, and that saving is zero.
 
 **And that unification is exactly what makes the cancel predicate dangerous.** Cancellation is decided by the **incoming** run's `cancel-in-progress`, and it kills every in-progress run in the group *regardless of their settings*. A fork contributor commits on **their fork's `main`** and opens a PR (the most common fork workflow; a gitflow `main → develop` back-merge PR does the same): that PR run has `head_ref == "main"` → group `CI-main` — the **same group** the upstream repo's own `push: [main]` run sits in (`ref_name == "main"`). Without a guard its predicate is `true`, so it **cancels the in-flight push-to-`main` run** — the very harm this recipe exists to prevent, through a different door. The `&& github.head_ref != github.event.repository.default_branch` term closes it **for the default branch**: a PR whose head branch *is* the default branch never cancels. `github.event.repository.default_branch` is present on **both** the `push` and the `pull_request` payloads (and on `pull_request` it is the **base**/upstream repo's default branch, which is the one that matters), so it needs no per-repo substitution. Residual: the same name-collision applies to any *other* long-lived branch that both receives pushes and can appear as a PR head name (`release/1.x`, `develop`, `production`) — if pushes to such a branch must never be cancelled, add an explicit `&& github.head_ref != '<branch>'` term per branch, exactly as the widened form's release-branch note below prescribes for `github.ref`.
@@ -4035,6 +4053,11 @@ Keep the continuation lines at the **same indent** as `${{` (as above). YAML fol
 **When NOT to cancel at all**: release/deploy/publish workflows where partial completion is unsafe (artifacts uploaded, tags pushed, deployments in flight). Keep `cancel-in-progress: false` (or no concurrency) for those — the wasted-compute cost is justified. The scanner already suppresses OPT45/OPT46 on release-like workflows, but confirm it against the workflow's actual jobs before shipping.
 
 **Real-world example (2026-05)**: a `Pre-merge` workflow triggered on `push` with `branches-ignore: [main]` and had no top-level concurrency block. 62% of branches had ≥2 runs in a 30-day window. Adding the **widened** block above (this is a Flavor A / push-triggered case) saved an estimated 70-125 min/mo of runner compute.
+
+**Public evidence**: [OpenClaw Crabbox pull request #2286](https://github.com/openclaw/crabbox/pull/2286)
+keeps pull-request runs grouped by branch while adding the run ID to non-PR
+groups, so default-branch and manual validations cannot replace one another in
+the pending slot.
 
 **Tier-2 render note**: When the detector can prove overlap from real run timestamps, OPT46 is eligible for the first-class runner-minute section only if the finding is stamped `sizing_basis=measured` and carries a `tier2_neutrality` certificate. Modeled or uncertified instances stay in the residual "Also noticed" appendix.
 

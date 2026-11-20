@@ -1434,6 +1434,31 @@ def test_opt46_fires_only_on_overlapping_runs_with_cert():
     assert f["runner_min_range_s"][0] <= f["runner_min_range_s"][1]
 
 
+def test_opt46_pending_run_replacement_recipe_has_a_per_run_escape_hatch():
+    """Three racing runs expose GitHub's single pending slot; the recommendation
+    must preserve non-PR runs when every commit needs its own validation."""
+    raced = _overlapping("feature/x", 3)
+    finding = _opt46(_PUSH_WF, raced)[0]
+    guardrail = finding["measured_evidence"]["note"].split("GUARDRAIL:", 1)[1]
+
+    assert finding["runner_min_saving"] > 0
+    assert "runner-minute (bill) only" in finding["size_note"]
+    assert "one pending run" in guardrail
+    assert "`github.run_id`" in guardrail
+
+    safe = {
+        "on": {"push": {}, "pull_request": {}},
+        "name": "CI",
+        "concurrency": {
+            "group": "${{ github.workflow }}-${{ github.event_name == "
+                     "'pull_request' && github.head_ref || github.run_id }}",
+            "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+        },
+    }
+    assert _opt46(safe, raced) == []  # positive escape hatch is not re-reported
+    assert _opt46(_PUSH_WF, _sequential("feature/x", 3)) == []  # near miss: no race
+
+
 def test_opt46_does_NOT_fire_on_sequential_default_branch_runs():
     # THE core adversarial fix: a busy main with sequential (non-racing) commits
     # must NOT be charged as superseded — cancel-in-progress would cancel nothing.
