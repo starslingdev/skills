@@ -636,6 +636,189 @@ jobs:
     assert "OPT16" not in _scan_one(tmp_path, neg)
 
 
+def test_opt16_repeated_analysis_with_different_report_flags(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --config config/knip.config.ts --production --include dependencies
+      - run: pnpm exec knip --config config/knip.config.ts --production --include files,exports
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [finding for finding in _scan(tmp_path)["findings"]
+                if finding["pattern"] == "OPT16"]
+    assert len(findings) == 1
+    assert "run it once and split or filter the combined report" in findings[0]["evidence"]
+    assert findings[0]["opt16_analysis_repeat"] == {"tool": "knip", "runs": 2, "steps": 2}
+
+
+def _knip_scripts_repo(tmp_path: Path, json_script: str, md_script: str) -> str:
+    (tmp_path / "package.json").write_text(json.dumps({
+        "name": "fixture", "private": True,
+        "scripts": {"knip:json": json_script, "knip:md": md_script},
+    }), encoding="utf-8")
+    return """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm knip:json && pnpm knip:md
+"""
+
+
+def test_opt16_report_flag_variant_follows_package_scripts(tmp_path: Path):
+    workflow = _knip_scripts_repo(
+        tmp_path, "knip --reporter json > a.json", "knip --reporter markdown > b.md")
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [finding for finding in _scan(tmp_path)["findings"]
+                if finding["pattern"] == "OPT16"]
+    assert len(findings) == 1
+    assert findings[0]["opt16_analysis_repeat"] == {"tool": "knip", "runs": 2, "steps": 1}
+
+
+@pytest.mark.parametrize(
+    "json_script, md_script",
+    [
+        # Different workspaces are different analyses.
+        ("knip --workspace packages/api --reporter json > a.json",
+         "knip --workspace packages/web --reporter markdown > b.md"),
+        # The second report runs only when the first command fails.
+        ("knip --reporter json > a.json || knip --reporter markdown > b.md",
+         "echo done"),
+    ],
+)
+def test_opt16_report_flag_variant_package_scripts_over_other_scopes_stay_quiet(
+        tmp_path: Path, json_script: str, md_script: str):
+    workflow = _knip_scripts_repo(tmp_path, json_script, md_script)
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_report_flag_variant_reads_continued_lines(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          pnpm exec knip \\
+            --config knip.config.ts \\
+            --include dependencies
+      - run: |
+          pnpm exec knip \\
+            --config knip.config.ts \\
+            --include files,exports
+"""
+    assert "OPT16" in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_report_flag_variant_counts_report_redirection_as_output(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --reporter json > knip.json
+      - run: pnpm exec knip --reporter markdown > knip.md
+"""
+    assert "OPT16" in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        # Flags after `&&` belong to another command, not to Knip.
+        ("pnpm exec knip --include files && pnpm exec eslint . --format json",
+         "pnpm exec knip --include files && pnpm exec eslint . --format stylish"),
+        # `--fix` rewrites the tree, so the next run analyzes other files.
+        ("pnpm exec knip --fix --include exports",
+         "pnpm exec knip --fix --include files"),
+    ],
+)
+def test_opt16_report_flag_variant_ignores_other_commands_and_fixes(
+        tmp_path: Path, first: str, second: str):
+    workflow = ("name: CI\non: pull_request\njobs:\n  deadcode:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                f"      - run: {first}\n      - run: {second}\n")
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        # Mutually exclusive conditions: only one Knip run executes per event.
+        (
+            "      - if: github.event_name == 'pull_request'\n"
+            "        run: pnpm exec knip --reporter github-actions\n"
+            "      - if: github.event_name == 'push'\n"
+            "        run: pnpm exec knip --reporter json\n"
+        ),
+        # A `cd` earlier in the step changes the project scope.
+        (
+            "      - run: |\n"
+            "          cd packages/api\n"
+            "          pnpm exec knip --include dependencies\n"
+            "      - run: |\n"
+            "          cd packages/web\n"
+            "          pnpm exec knip --include files\n"
+        ),
+    ],
+)
+def test_opt16_report_flag_variant_withholds_unproven_shared_runs(
+        tmp_path: Path, steps: str):
+    workflow = ("name: CI\non: [push, pull_request]\njobs:\n  deadcode:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n" + steps)
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        (
+            "pnpm exec knip --config config/knip.config.ts --production --include dependencies",
+            "pnpm exec knip --config config/knip.scripts.config.ts --production --include exports",
+        ),
+        (
+            "pnpm exec knip --config config/knip.config.ts --production --include dependencies",
+            "pnpm exec knip --config config/knip.config.ts --include files",
+        ),
+        (
+            "pnpm exec eslint packages/api --format stylish",
+            "pnpm exec eslint packages/web --format json",
+        ),
+    ],
+)
+def test_opt16_report_flag_variant_keeps_distinct_analysis_scopes_quiet(
+        tmp_path: Path, commands: tuple[str, str]):
+    first, second = commands
+    workflow = f"""name: CI
+on: pull_request
+jobs:
+  analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - run: {first}
+      - run: {second}
+"""
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_one_combined_analysis_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --config config/knip.config.ts --production --include dependencies,files,exports
+"""
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
 def test_opt18_not_auto_emitted(tmp_path: Path):
     """OPT18 is NOT auto-emitted as a finding: which services a job needs can't
     be determined from the workflow YAML (it needs docker-compose.yml + the test
@@ -1667,6 +1850,324 @@ def test_opt114_context_npmrc_not_copied_into_image_does_not_reach_it(tmp_path: 
     assert copied_npmrc == []
 
 
+def test_opt109_always_failure_reporter_runs_on_healthy_prs(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci-pr-failure-report.mjs
+      - name: Classify completed PR failures
+        run: node scripts/ci-pr-failure-report.mjs
+  gate:
+    needs: [lint, test, failure-report]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.failure-report.result }}" != failure
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT109"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["failure-report"]
+    assert "failure() || cancelled()" in finding["evidence"]
+    assert "`needs.failure-report.result` of `success` or `skipped`" in finding["evidence"]
+    assert "runner-minute saving: unsized (it saves the reporter's compute" in finding["evidence"]
+
+
+def test_opt109_failure_only_reporter_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: failure() || cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert "OPT109" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt109_needs_result_guard_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: >-
+      always() && !cancelled() &&
+      (contains(needs.*.result, 'failure') ||
+      contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize failures
+        run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert "OPT109" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt109_always_job_with_real_work_is_not_a_reporter(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  cleanup-and-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run cleanup-resources
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert "OPT109" not in _scan_one(tmp_path, workflow)
+
+
+_OPT109_CHECKS = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+"""
+
+
+def _opt109_findings(tmp_path: Path, workflow: str) -> list[dict]:
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    data = _scan(tmp_path)
+    # A quiet negative must be quiet because the waste is absent, never because
+    # the fixture failed to parse.
+    assert data["scan_incomplete"] == []
+    return [row for row in data["findings"] if row["pattern"] == "OPT109"]
+
+
+def test_opt109_mixed_run_block_with_real_work_is_not_a_reporter(tmp_path: Path):
+    # One `run:` block that cleans up and then appends a summary does real work.
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          npm run cleanup-resources
+          echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_results_reporter_without_failure_scope_stays_quiet(tmp_path: Path):
+    # A job that posts every run's results is wanted on green runs too.
+    workflow = _OPT109_CHECKS + """  results-comment:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr comment "$PR" --body "lint ${{ needs.lint.result }}, test ${{ needs.test.result }}"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_failure_gated_steps_identify_a_reporter(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  notify:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure')
+        run: gh pr comment "$PR" --body "A required check failed"
+"""
+    findings = _opt109_findings(tmp_path, workflow)
+    assert [row["affected_jobs"] for row in findings] == [["notify"]]
+
+
+def test_opt109_direct_result_comparison_guard_stays_quiet(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always() && (needs.lint.result == 'failure' || needs.test.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_reporter_clearing_stale_failure_comment_stays_quiet(tmp_path: Path):
+    # On a green rerun this job edits the earlier failure comment; skipping it
+    # would leave a stale failure report behind.
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr comment "$PR" --edit-last --body "Checks ${{ needs.test.result }}"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_shared_setup_upstream_is_covered_transitively(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci
+  lint:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    findings = _opt109_findings(tmp_path, workflow)
+    assert [row["affected_jobs"] for row in findings] == [["failure-report"]]
+
+
+def test_opt109_reporter_missing_an_independent_check_stays_quiet(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run docs
+  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_evidence_says_how_the_downstream_gate_accepts_the_skip(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+  gate:
+    needs: [lint, test, failure-report]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.failure-report.result }}" = success
+"""
+    [finding] = _opt109_findings(tmp_path, workflow)
+    evidence = finding["evidence"]
+    # The gate is named, keeps a status function, and accepts `skipped` from the
+    # reporter only while every workload check must still succeed.
+    assert "`gate`" in evidence
+    assert "keep `if: always()`" in evidence
+    assert "`needs.failure-report.result` of `success` or `skipped`" in evidence
+    assert "every workload check to be `success`" in evidence
+    assert "a skipped job reports success" in evidence
+    # Its current success-only comparison is called out as the line to change.
+    assert "currently compares a result against `success`" in evidence
+    # The gate waits on the reporter, so the skip also shortens the healthy path.
+    assert "healthy path to `gate`" in evidence
+    assert "runner-minute saving: unsized (" in evidence
+
+
+def test_opt109_gate_without_status_function_is_told_to_add_one(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+  gate:
+    needs: [lint, test, failure-report]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+"""
+    [finding] = _opt109_findings(tmp_path, workflow)
+    assert "`gate` needs this reporter: add `if: always()`" in finding["evidence"]
+
+
+def test_opt109_aggregate_gate_that_fails_the_run_is_not_a_reporter(tmp_path: Path):
+    # A gate that exits non-zero is the required check itself, not a reporter.
+    workflow = _OPT109_CHECKS + """  fail-if-any-check-failed:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "A required check failed"
+            exit 1
+          fi
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_cancelled_exclusion_is_preserved_in_the_recommendation(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    [finding] = _opt109_findings(tmp_path, workflow)
+    assert "use `if: failure()`" in finding["evidence"]
+
+
 def test_opt108_unrelated_job_author_guard_does_not_cover_body_filter(tmp_path: Path):
     workflow = """name: Comment command
 on: pull_request_review_comment
@@ -1888,6 +2389,192 @@ jobs:
         run: npx playwright test smoke
 """
     assert "OPT31" not in _scan_one(tmp_path, neg)
+
+
+def test_opt31_needs_result_check_after_setup_pays_setup_on_failure(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  coverage-core:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./... -coverprofile=core.out
+  coverage-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./cmd/... -coverprofile=cli.out
+  coverage:
+    needs: [coverage-core, coverage-cli]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with: {go-version: '1.26'}
+      - name: Require all coverage producers
+        env:
+          CORE_RESULT: ${{ needs['coverage-core'].result }}
+          CLI_RESULT: ${{ needs['coverage-cli'].result }}
+        run: |
+          printf 'core=%s cli=%s\\n' "${CORE_RESULT:-missing}" "${CLI_RESULT:-missing}"
+          [[ "${CORE_RESULT:-}" == success && "${CLI_RESULT:-}" == success ]]
+      - run: go tool cover -func=core.out
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT31"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["coverage"]
+    assert "before checkout and toolchain setup" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt31_needs_result_check_first_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  coverage:
+    needs: [coverage-core, coverage-cli]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all coverage producers
+        env:
+          CORE_RESULT: ${{ needs['coverage-core'].result }}
+          CLI_RESULT: ${{ needs['coverage-cli'].result }}
+        run: '[[ "$CORE_RESULT" == success && "$CLI_RESULT" == success ]]'
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_needs_check_that_runs_a_repository_script_stays_quiet(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: ./scripts/check-result "$TEST_RESULT"
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_needs_check_that_cannot_fail_the_job_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - continue-on-error: true
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: 'test "$TEST_RESULT" = success'
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_setup_already_gated_on_needs_success_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.test.result == 'success'
+        uses: actions/checkout@v4
+      - env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: 'test "$TEST_RESULT" = success'
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+_OPT31_MOVE_UNSAFE_GATE = """name: CI
+on: pull_request
+%(wfextra)sjobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+%(jobextra)s    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+%(between)s      - name: Gate
+%(stepextra)s        env:
+          R: ${{ needs.test.result }}
+        run: |
+%(run)s
+"""
+
+_OPT31_MOVE_UNSAFE_CASES = {
+    # Each gate reads something checkout, setup or an earlier step provides,
+    # so moving it first could change the job's verdict.
+    "file-test": dict(run='          [[ "$R" == success && -f go.mod ]]'),
+    "then-runs-script": dict(run=(
+        '          if [ "$R" = success ]; then ./scripts/report.sh; fi\n'
+        '          test "$R" = success')),
+    "and-runs-tool": dict(
+        run='          test "$R" = success && go tool cover -func=c.out'),
+    "pipe-to-script": dict(run='          echo "$R" | ./check'),
+    "command-substitution": dict(
+        run='          [[ "$(cat VERSION)" == 1 && "$R" == success ]]'),
+    "input-redirect": dict(run='          test "$R" = success < input.txt'),
+    "step-working-directory": dict(
+        stepextra="        working-directory: app\n",
+        run='          test "$R" = success'),
+    "job-default-working-directory": dict(
+        jobextra="    defaults:\n      run:\n        working-directory: app\n",
+        run='          test "$R" = success'),
+    "workflow-default-shell": dict(
+        wfextra="defaults:\n  run:\n    shell: pwsh\n",
+        run='          test "$R" = success'),
+    "step-custom-shell": dict(
+        stepextra="        shell: pwsh\n", run='          test "$R" = success'),
+    "variable-from-earlier-step": dict(
+        between='      - run: echo "WANT=success" >> "$GITHUB_ENV"\n',
+        run='          test "$R" = "$WANT"'),
+}
+
+
+def _opt31_move_unsafe_workflow(**parts: str) -> str:
+    fields = {"wfextra": "", "jobextra": "", "between": "", "stepextra": ""}
+    fields.update(parts)
+    return _OPT31_MOVE_UNSAFE_GATE % fields
+
+
+def test_opt31_move_unsafe_fixture_fires_when_gate_is_builtin_only(
+        tmp_path: Path):
+    workflow = _opt31_move_unsafe_workflow(
+        stepextra="        shell: bash\n",
+        run=('          set -euo pipefail\n'
+             '          printf \'%s\\n\' "$R" >> "$GITHUB_STEP_SUMMARY"\n'
+             '          [ "$R" = success ] || { echo "test: $R" >&2; exit 1; }'))
+    assert "OPT31" in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize("case", sorted(_OPT31_MOVE_UNSAFE_CASES))
+def test_opt31_needs_check_that_reads_setup_state_stays_quiet(
+        tmp_path: Path, case: str):
+    workflow = _opt31_move_unsafe_workflow(**_OPT31_MOVE_UNSAFE_CASES[case])
+    assert "OPT31" not in _scan_one(tmp_path, workflow), case
 
 
 def test_opt33_no_draft_gate_on_matrix(tmp_path: Path):

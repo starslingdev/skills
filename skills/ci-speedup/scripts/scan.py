@@ -4580,7 +4580,190 @@ _MANIFEST_MUTATION_RE = re.compile(
     r"apply.*patch", re.I)
 
 
-def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
+# Knip computes one project graph, then filters that graph into issue groups or
+# renderings. Re-running the command only to change these selectors repeats the
+# expensive analysis. Keep scope-defining flags such as ``--config`` and
+# ``--production`` in the signature so distinct project scans stay separate.
+_OPT16_KNIP_VALUE_SELECTORS = {"--include", "--reporter", "--format", "--output"}
+_OPT16_KNIP_BOOLEAN_SELECTORS = {
+    "--binaries", "--class-members", "--dependencies", "--dev-dependencies",
+    "--duplicates", "--enum-members", "--exports", "--files",
+    "--include-entry-exports", "--namespace-members", "--ns-exports",
+    "--ns-types", "--optional-peer-dependencies", "--types", "--unlisted",
+    "--unresolved",
+}
+
+
+_OPT16_SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
+
+
+def _opt16_analysis_signature(command: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Return (scope, selectors) for a supported analysis invocation."""
+    try:
+        tokens = shlex.split(command, comments=True)
+    except ValueError:
+        return None
+    tool_index = next((index for index, token in enumerate(tokens)
+                       if re.fullmatch(r"knip(?:@[^\s]+)?", token)), None)
+    if tool_index is None:
+        return None
+
+    scope: list[str] = []
+    selectors: list[str] = []
+    index = 0
+    in_knip = False
+    while index < len(tokens):
+        token = tokens[index]
+        name, equals, value = token.partition("=")
+        if index == tool_index:
+            in_knip = True
+        elif token in _OPT16_SHELL_OPERATORS:
+            # Arguments after `&&`, `|` and so on belong to another command.
+            in_knip = False
+        if not in_knip or index == tool_index:
+            scope.append(token)
+            index += 1
+            continue
+        if name in {"--fix", "--fix-type", "--allow-remove-files"}:
+            return None  # Knip rewrites the tree; later runs see other files.
+        if token in {">", ">>"} and index + 1 < len(tokens):
+            selectors.append(f"{token}{tokens[index + 1]}")  # report destination
+            index += 2
+            continue
+        if name in _OPT16_KNIP_VALUE_SELECTORS:
+            if equals:
+                selectors.append(f"{name}={value}")
+                index += 1
+                continue
+            if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+                return None
+            selectors.append(f"{name}={tokens[index + 1]}")
+            index += 2
+            continue
+        if token in _OPT16_KNIP_BOOLEAN_SELECTORS:
+            selectors.append(token)
+            index += 1
+            continue
+        scope.append(token)
+        index += 1
+    if not selectors:
+        return None
+    return tuple(scope), tuple(selectors)
+
+
+_OPT16_CONDITIONAL_RE = re.compile(r"\|\||(?:^|[\s;(])(?:if|elif|else|case|until|while)\b")
+
+
+def _opt16_norm_dir(value: Any) -> str | None:
+    """A working directory as a repo-relative posix path ("" = root); None when
+    it is an expression or leaves the checkout."""
+    import posixpath
+    text = str(value or "").strip().replace("\\", "/")
+    if "${{" in text or text.startswith(("/", "~")):
+        return None
+    text = posixpath.normpath(text) if text else ""
+    if text == ".." or text.startswith("../"):
+        return None
+    return "" if text == "." else text
+
+
+def _opt16_analysis_repeat_hit(job_name: str, job: dict, doc: dict, raw: str,
+                               steps: list, mutation_idxs: set[int],
+                               package_scripts: dict[str, Any] | None) -> Hit | None:
+    """OPT16's repeated-analysis form: the same Knip analysis run more than once
+    in one job, over one scope, differing only in report or issue-selection
+    flags. Each step's command is read through the shared run-leaf resolver
+    (`collect_runs._resolve_run_leaves`), so package scripts (`pnpm knip:json`)
+    and `\\`-continued lines are followed. Anything the read cannot pin down (a
+    directory change, an expression working directory, a conditional chain
+    holding several runs) withholds that step's runs."""
+    import collect_runs as _cr  # lazy: the resolver lives with OPT82/OPT84
+
+    tal = package_scripts if isinstance(package_scripts, dict) else {}
+    scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
+                      if isinstance(v, dict)}
+    scripts_unreadable = frozenset(str(d) for d in
+                                   (tal.get("package_scripts_unreadable") or []))
+    walk_complete = tal.get("truncated") is False
+
+    def _defaults_wd(owner: Any) -> Any:
+        d = owner.get("defaults") if isinstance(owner, dict) else None
+        r = d.get("run") if isinstance(d, dict) else None
+        return r.get("working-directory") if isinstance(r, dict) else None
+
+    default_wd = _defaults_wd(job)
+    if default_wd is None:
+        default_wd = _defaults_wd(doc)
+    knip_in_scripts = any("knip" in str(body) for scripts in scripts_by_dir.values()
+                          for body in scripts.values())
+    groups: dict[tuple, list[tuple[int, str, tuple[str, ...]]]] = {}
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict) or not isinstance(step.get("run"), str):
+            continue
+        run = re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", step["run"])
+        if "knip" not in run and not knip_in_scripts:
+            continue
+        wd = _opt16_norm_dir(step.get("working-directory", default_wd))
+        if wd is None:
+            continue
+        res = _cr._resolve_run_leaves(run, wd, scripts_by_dir, scripts_unreadable,
+                                      walk_complete=walk_complete)
+        if any(u.get("kind") == "cd" for u in res.unresolved):
+            continue  # the project scope after a directory change is unknown
+        runs = []
+        for leaf in res.leaves:
+            if leaf.get("wd") is None:
+                continue
+            sig = _opt16_analysis_signature(shlex.join(leaf.get("tokens") or []))
+            if sig is not None:
+                runs.append((leaf, sig))
+        if not runs:
+            continue
+        if len(runs) > 1:
+            # Several runs in one step are proven to repeat only when nothing in
+            # the command or the scripts it follows chooses between them.
+            bodies = [run]
+            for leaf, _sig in runs:
+                eff = _cr._rl_effective_scripts(str(leaf.get("wd") or ""), scripts_by_dir,
+                                                scripts_unreadable, walk_complete) or {}
+                for link in leaf.get("chain") or []:
+                    bodies.append(str(eff.get(str(link).split()[-1], "")))
+            if any(_OPT16_CONDITIONAL_RE.search(b) for b in bodies):
+                runs = runs[:1]
+        # A step `if:` is part of the key: runs under different conditions may
+        # never execute together (one per event).
+        step_if = str(step.get("if") or "")
+        first_line = next((ln.strip() for ln in step["run"].splitlines() if ln.strip()), "")
+        for leaf, (scope, selectors) in runs:
+            groups.setdefault((scope, str(leaf.get("wd") or ""), step_if), []).append(
+                (i, first_line, selectors))
+    for (_scope, wd, _if), invocations in groups.items():
+        selector_sets = {selectors for _i, _line, selectors in invocations}
+        if len(invocations) < 2 or len(selector_sets) < 2:
+            continue
+        idxs = sorted({i for i, _line, _sel in invocations})
+        if any(idxs[0] <= mi <= idxs[-1] for mi in mutation_idxs):
+            continue
+        where = (f"{len(idxs)} separate steps" if len(idxs) > 1
+                 else "one step")
+        wd_note = f" (working-directory `{wd}`)" if wd else ""
+        return Hit(
+            line=_line_of_in_job(raw, job_name, invocations[0][1]),
+            affected_jobs=[job_name],
+            evidence=(f"job `{job_name}` runs the same Knip analysis "
+                      f"{len(invocations)} times in {where} with only report/include "
+                      f"selectors changed{wd_note}; run it once and split or "
+                      "filter the combined report, keeping each selection's "
+                      "pass/fail policy"),
+            match_text=job_name,
+            facts={"opt16_analysis_repeat": {"tool": "knip", "runs": len(invocations),
+                                             "steps": len(idxs)}},
+        )
+    return None
+
+
+def _detect_opt16(doc: dict, raw: str,
+                  package_scripts: dict[str, Any] | None = None) -> list[Hit]:
     """The same EXPENSIVE `run:` command (build/install/test) appears in ≥2
     separate steps of one job — wasteful rebuild (catalog OPT16). Two
     suppressions avoid false positives: the dedup key includes the step's
@@ -4608,6 +4791,7 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
                     continue
                 seen_in_step.add(c)
                 key_to_steps.setdefault((c, wd), []).append(i)
+        found = False
         for (cmd, wd), idxs in key_to_steps.items():
             if len(idxs) < 2:
                 continue
@@ -4627,7 +4811,15 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
                           f"{len(idxs)} separate steps{wd_note}: `{cmd[:80]}`"),
                 match_text=job_name,
             ))
+            found = True
             break  # one finding per job is enough
+        if found:
+            continue
+
+        hit = _opt16_analysis_repeat_hit(
+            job_name, job, doc, raw, steps, mutation_idxs, package_scripts)
+        if hit is not None:
+            hits.append(hit)
     return hits
 
 
@@ -5099,12 +5291,340 @@ def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT109 — Failure Reporter Runs on Healthy Pull Requests -----------------
+
+# The only job conditions read as "runs on a healthy run": `always()`, alone or
+# with `!cancelled()`. Any other term (a result comparison, an event or path
+# guard) may already skip healthy runs, so it is not understood and stays quiet.
+_OPT109_HEALTHY_TERMS = frozenset({"always()", "!cancelled()"})
+# A step condition that runs the step only when an upstream job failed or was
+# cancelled.
+_OPT109_FAILURE_GATE_RE = re.compile(
+    r"(?<!!)\bfailure\s*\(\s*\)|(?<!!)\bcancelled\s*\(\s*\)|"
+    r"(?<!!)contains\s*\(\s*needs\.\*\.result\s*,\s*['\"](?:failure|cancelled)['\"]\s*\)|"
+    r"\.result\s*==\s*['\"](?:failure|cancelled)['\"]",
+    re.I,
+)
+# Reporting that edits, hides or clears an earlier report may be what a green
+# rerun needs (a stale failure comment), so it is not report-only.
+_OPT109_MUTATION_RE = re.compile(
+    r"--edit-last|--delete|\b(?:delete|edit|update|minimi[sz]e|hide|clear|remove|"
+    r"resolve)\w*\b",
+    re.I,
+)
+_OPT109_STATUS_FN_RE = re.compile(r"\b(?:always|cancelled|failure)\s*\(\s*\)", re.I)
+_OPT109_SCRIPT_WORD_RE = re.compile(r"(?:report|summar|comment|notif)", re.I)
+_OPT109_REPORT_USES_RE = re.compile(
+    r"(?:comment|notify|notification|slack|discord|teams|report|summary)", re.I)
+# One shell command (as split by `_opt21_run_lines`) that only reports.
+_OPT109_REPORT_LINE_RES = (
+    # Log or step-summary output: echo / printf / cat / tee, or a `{ ... }`
+    # group redirected into the step summary.
+    re.compile(r"^(?:echo|printf|cat|tee)\b", re.I),
+    re.compile(r"^[{}](?:\s*>>?\s*\"?\$\{?GITHUB_STEP_SUMMARY\}?\"?)?$"),
+    re.compile(r"^gh\s+(?:pr|issue)\s+comment\b", re.I),
+    # A notification webhook.
+    re.compile(r"^curl\b.*(?:hooks\.slack\.com|discord(?:app)?\.com/api/webhooks|"
+               r"\$\{?\w*WEBHOOK\w*\}?)", re.I),
+    # Shell structure around those commands.
+    re.compile(r"^(?:if|elif)\s+\[\[?\s.*\]\]?$|^(?:then|else|fi|exit\s+0)$"),
+)
+_OPT109_SCRIPT_RE = re.compile(
+    r"^(?:(?:node|python3?|bash|sh|bun|deno\s+run|npx\s+tsx|tsx|ruby|pwsh)\s+)?"
+    r"(\.{0,2}/?[\w./-]+\.(?:m?js|cjs|ts|py|sh|rb|ps1))(?:\s|$)",
+    re.I,
+)
+_OPT109_ASSIGN_RE = re.compile(r"^(?:export\s+)?[A-Za-z_]\w*=")
+
+
+def _opt109_needs(job: dict) -> set[str]:
+    if not isinstance(job, dict):
+        return set()
+    needs = job.get("needs")
+    if isinstance(needs, str):
+        return {needs}
+    if isinstance(needs, list):
+        return {str(item) for item in needs if isinstance(item, str)}
+    return set()
+
+
+def _opt109_condition_terms(condition: str) -> list[str] | None:
+    """The `&&` terms of a job condition, or None when it holds anything other
+    than a plain conjunction (`||`, parentheses around alternatives, ...)."""
+    text = condition.strip()
+    wrapped = re.fullmatch(r"\$\{\{(.*)\}\}", text, re.S)
+    if wrapped:
+        text = wrapped.group(1)
+    text = re.sub(r"\s+", "", text).lower()
+    if not text or "||" in text:
+        return None
+    return text.split("&&")
+
+
+def _opt109_runs_on_healthy(condition: str) -> bool:
+    terms = _opt109_condition_terms(condition)
+    return bool(terms) and "always()" in terms and set(terms) <= _OPT109_HEALTHY_TERMS
+
+
+def _opt109_shell_lines(run: str) -> list[str]:
+    """Command lines of a `run:` body with heredoc bodies dropped (the opening
+    line is still checked)."""
+    kept: list[str] = []
+    terminator = None
+    for line in run.splitlines():
+        if terminator is not None:
+            if line.strip() == terminator:
+                terminator = None
+            continue
+        opened = re.search(r"<<-?\s*['\"]?(\w+)['\"]?", line)
+        if opened:
+            terminator = opened.group(1)
+        kept.append(line)
+    return _opt21_run_lines("\n".join(kept))
+
+
+def _opt109_report_line(command: str) -> bool:
+    if "$(" in command or "`" in command:
+        return False
+    if any(regex.search(command) for regex in _OPT109_REPORT_LINE_RES):
+        return True
+    if _OPT109_ASSIGN_RE.match(command):
+        return True
+    script = _OPT109_SCRIPT_RE.match(command)
+    return bool(script and _OPT109_SCRIPT_WORD_RE.search(script.group(1).rsplit("/", 1)[-1]))
+
+
+def _opt109_report_step(step: dict) -> bool:
+    """True only for a step that does nothing but post, summarize or notify.
+
+    Every shell command in a `run:` block must be a reporting command, so one
+    block that also does real work fails closed. Generic ``github-script`` is
+    accepted only when its script posts a comment or a summary and calls no
+    other API.
+    """
+    uses, run = _uses(step), _run(step)
+    with_values = step.get("with") if isinstance(step.get("with"), dict) else {}
+    text = "\n".join([run, *(str(v) for v in with_values.values())])
+    if _OPT109_MUTATION_RE.search(text):
+        return False
+    if run and not uses:
+        commands = _opt109_shell_lines(run)
+        return bool(commands) and all(_opt109_report_line(c) for c in commands)
+    if uses and not run:
+        if re.match(r"actions/github-script(?:@|$)", uses, re.I):
+            script = str(with_values.get("script") or "")
+            calls = re.findall(r"\.(\w+)\s*\(", script)
+            return (bool(re.search(r"\bcreateComment\b|\bcore\.summary\b", script))
+                    and all(c in {"createComment", "addRaw", "addHeading", "addTable",
+                                  "addList", "addLink", "write", "info", "warning",
+                                  "error", "notice", "join", "map", "filter",
+                                  "stringify"} for c in calls))
+        return bool(_OPT109_REPORT_USES_RE.search(uses))
+    return False
+
+
+def _opt109_closure(start: str, edges: dict[str, set[str]]) -> set[str]:
+    seen: set[str] = set()
+    stack = list(edges.get(start, ()))
+    while stack:
+        name = stack.pop()
+        if name not in seen:
+            seen.add(name)
+            stack.extend(edges.get(name, ()))
+    return seen
+
+
+def _opt109_gate_advice(reporter: str, gates: list[str], jobs: dict) -> str:
+    if not gates:
+        return (
+            "Any required aggregate gate that later reads this job must accept "
+            f"`needs.{reporter}.result` of `success` or `skipped`; every workload "
+            "check must be `success`."
+        )
+    named = ", ".join(f"`{g}`" for g in gates)
+    guarded = all(
+        _OPT109_STATUS_FN_RE.search(str((jobs.get(g) or {}).get("if") or "")) for g in gates)
+    reads_success = []
+    for gate in gates:
+        job = jobs.get(gate) or {}
+        text = "\n".join([str(job.get("if") or ""),
+                          *(_run(step) for step in _steps(job))])
+        if re.search(r"(?:==|!=|=)\s*['\"]?(?:success|skipped)\b|"
+                     r"contains\s*\(\s*needs\.\*\.result\s*,\s*['\"]skipped", text, re.I):
+            reads_success.append(f"`{gate}`")
+    advice = (
+        f"{named} needs this reporter: {'keep' if guarded else 'add'} `if: always()` "
+        "on it (without a status function a skipped need skips the gate, and a "
+        "skipped job reports success to a required check), accept "
+        f"`needs.{reporter}.result` of `success` or `skipped`, and require "
+        "every workload check to be `success` (for example fail when "
+        "`contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')`, "
+        "which a skipped reporter passes)."
+    )
+    if reads_success:
+        advice += (f" {', '.join(reads_success)} currently compares a result against "
+                   "`success` or `skipped`; change that comparison for the reporter.")
+    return advice
+
+
+def _detect_opt109(doc: dict, raw: str) -> list[Hit]:
+    """An always-running job that depends on every independent check and does
+    only failure reporting.  Conditions it cannot read, jobs that do other work
+    and reports that are not failure-only stay quiet (fail closed)."""
+    jobs = _jobs_from_doc(doc)
+    needs_of = {name: _opt109_needs(job) for name, job in jobs.items()}
+    dependants: dict[str, set[str]] = {name: set() for name in jobs}
+    for name, needs in needs_of.items():
+        for need in needs:
+            dependants.setdefault(need, set()).add(name)
+    hits: list[Hit] = []
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        condition = str(job.get("if") or "")
+        if not _opt109_runs_on_healthy(condition) or len(needs_of[job_name]) < 2:
+            continue
+
+        # Every independent check must be upstream of the reporter, directly or
+        # through another need (a shared `setup` job). Jobs downstream of the
+        # reporter, such as a final aggregate gate, are not checks it reports on.
+        upstream = _opt109_closure(job_name, needs_of)
+        downstream = _opt109_closure(job_name, dependants)
+        independent = set(jobs) - {job_name} - downstream
+        if not independent <= upstream:
+            continue
+
+        executable = [step for step in _steps(job) if _run(step) or _uses(step)]
+        reporting = [step for step in executable if not _opt108_setup_only(step)]
+        if not reporting or not all(_opt109_report_step(step) for step in reporting):
+            continue
+        # The report must be failure-only: the job says so in its id or name, or
+        # every reporting step is gated on a failed or cancelled need. A job that
+        # posts every run's results is wanted on green runs too.
+        label = f"{job_name} {job.get('name') or ''}"
+        if not (re.search(r"fail", label, re.I) or all(
+                _OPT109_FAILURE_GATE_RE.search(str(step.get("if") or ""))
+                for step in reporting)):
+            continue
+
+        terms = _opt109_condition_terms(condition) or []
+        recommendation = "`if: failure() || cancelled()`"
+        if "!cancelled()" in terms:
+            recommendation += (" (or use `if: failure()` to keep the job's existing "
+                               "exclusion of cancelled runs)")
+        gates = sorted(name for name in jobs if job_name in needs_of[name])
+        wall = (
+            " The skip also removes the reporter's queue and run time from the "
+            f"healthy path to {', '.join(f'`{g}`' for g in gates)}."
+            if gates else " No merge-wait effect: no job waits on the reporter."
+        )
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"job `{job_name}` needs every independent check but runs with "
+                f"`if: {condition.strip()}` only to post or summarize failures, so "
+                f"healthy runs still allocate its runner. Fix: use {recommendation}. "
+                + _opt109_gate_advice(job_name, gates, jobs) + wall
+                + " Bill effect: runner-minute saving: unsized (it saves the reporter's "
+                "compute on healthy runs, but this static finding has no measured "
+                "reporter compute or healthy-run share)."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+        ))
+    return hits
+
+
 # ---- OPT31 — Conditional Step With Unconditional Setup -----------------------
 
 _OPT31_INSTALL_RE = re.compile(
     r"playwright\s+install|apt-get\s+install|pip\s+install|npm\s+install\s+-g|"
     r"bunx\s+playwright\s+install", re.I)
 _OPT31_GATE_RE = re.compile(r"secrets\.|env\.", re.I)
+_OPT31_NEEDS_RESULT_RE = re.compile(
+    r"needs(?:\.\*|\.[A-Za-z0-9_-]+|\[\s*['\"][^'\"]+['\"]\s*\])\.result",
+    re.I,
+)
+_OPT31_EXPRESSION_RE = re.compile(r"\$\{\{.*?\}\}", re.S)
+_OPT31_NEEDS_EXPRESSION_RE = re.compile(
+    r"^\$\{\{\s*needs(?:\.\*|\.[A-Za-z0-9_-]+|"
+    r"\[\s*['\"][^'\"]+['\"]\s*\])\.result\s*\}\}$",
+    re.I | re.S,
+)
+_OPT31_EARLY_SETUP_RE = re.compile(
+    r"^(?:actions/checkout|[^/@]+/setup-[^/@]+)@", re.I)
+# First word of each simple command a movable gate may run: shell control,
+# output and test builtins only, so nothing depends on checkout or setup.
+_OPT31_GATE_COMMANDS = frozenset({
+    "printf", "echo", "test", "[", "[[", "exit", "false", "true", "set", ":",
+    "case", "esac", "fi", "}",
+})
+_OPT31_GATE_KEYWORDS = frozenset({"if", "elif", "then", "else", "!", "{"})
+_OPT31_DOUBLE_BRACKET_RE = re.compile(r"\[\[(.*?)\]\]")
+# Unary test operators that read the filesystem the moved gate would lose.
+_OPT31_FILE_TEST_RE = re.compile(r"(?:^|\s)!?\s*-[bcdefghkpLrsSuwxOGN](?=\s)")
+_OPT31_COMMAND_SPLIT_RE = re.compile(r"\|\||&&|;;|;|\|")
+_OPT31_SHELL_VAR_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
+_OPT31_RUNNER_VARS = frozenset({"CI", "HOME"})
+_OPT31_NEEDS_CHECK_FAIL_RE = re.compile(
+    r"(?:^|\n)\s*(?:test\b|\[\[?|false\b)|\bexit\s+[1-9]\d*\b|"
+    r"(?:\|\||&&)\s*(?:exit\s+[1-9]|false\b)",
+    re.I,
+)
+
+
+def _opt31_env_keys(node: Any) -> set[str]:
+    env = node.get("env") if isinstance(node, dict) else None
+    return {str(k) for k in env} if isinstance(env, dict) else set()
+
+
+def _opt31_run_defaults_movable(*nodes: Any) -> bool:
+    """No working directory and a POSIX shell at every defaults level."""
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        defaults = node.get("defaults")
+        run = defaults.get("run") if isinstance(defaults, dict) else None
+        if run is None:
+            continue
+        if not isinstance(run, dict):
+            return False
+        if run.get("working-directory") not in (None, ""):
+            return False
+        if run.get("shell") not in (None, "bash", "sh"):
+            return False
+    return True
+
+
+def _opt31_builtin_only(run: str) -> bool:
+    """Every simple command is a builtin that reads no file or tool."""
+    if any(token in run for token in ("$(", "`", "<", "\\\n")):
+        return False
+    for raw_line in run.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        spans = _OPT31_DOUBLE_BRACKET_RE.findall(line)
+        if any(_OPT31_FILE_TEST_RE.search(" " + span + " ") for span in spans):
+            return False
+        line = _OPT31_DOUBLE_BRACKET_RE.sub("[[ ]]", line)
+        for segment in _OPT31_COMMAND_SPLIT_RE.split(line):
+            # `>&2` / `2>&1` are redirects; any other lone `&` backgrounds.
+            if "&" in re.sub(r"\d*>&\d", "", segment):
+                return False
+            words = segment.split()
+            while words and words[0] in _OPT31_GATE_KEYWORDS:
+                words = words[1:]
+            if not words:
+                continue
+            if words[0] not in _OPT31_GATE_COMMANDS:
+                return False
+            if (words[0] in ("test", "[")
+                    and _OPT31_FILE_TEST_RE.search(" ".join(words) + " ")):
+                return False
+    return True
 
 
 def _opt31_tokens(install_line: str) -> set[str]:
@@ -5122,14 +5642,100 @@ def _opt31_tokens(install_line: str) -> set[str]:
     return toks
 
 
+def _opt31_needs_result_check(step: dict, step_if: str | None,
+                               job: dict, doc: dict) -> bool:
+    """A shell-only result gate that can fail without repository files/tools.
+
+    Every GitHub expression available to the step must be exactly one
+    ``needs.<job>.result`` value, and every command a shell builtin that reads
+    no file, tool, working directory or variable an earlier step could export,
+    so moving the step before checkout/toolchain setup cannot change its
+    verdict. Anything this cannot classify withholds the finding.
+    """
+    run = _run(step)
+    if not run or _uses(step) or step_if:
+        return False
+    continue_on_error = step.get("continue-on-error")
+    if continue_on_error not in (None, False):
+        return False
+    if step.get("working-directory") not in (None, ""):
+        return False
+    if step.get("shell") not in (None, "bash", "sh"):
+        return False
+    if not _opt31_run_defaults_movable(doc, job):
+        return False
+    env = step.get("env") if isinstance(step.get("env"), dict) else {}
+    dynamic_text = "\n".join((run, *(str(value) for value in env.values())))
+    expressions = _OPT31_EXPRESSION_RE.findall(dynamic_text)
+    if (not expressions
+            or not all(_OPT31_NEEDS_EXPRESSION_RE.fullmatch(expr.strip())
+                       for expr in expressions)):
+        return False
+    if not any(_OPT31_NEEDS_RESULT_RE.search(expr) for expr in expressions):
+        return False
+    script = _OPT31_EXPRESSION_RE.sub("needs_result", run)
+    known_vars = (_opt31_env_keys(step) | _opt31_env_keys(job)
+                  | _opt31_env_keys(doc) | _OPT31_RUNNER_VARS)
+    for name in _OPT31_SHELL_VAR_RE.findall(script):
+        if name not in known_vars and not name.startswith(("GITHUB_", "RUNNER_")):
+            return False  # may come from an earlier step's $GITHUB_ENV
+    if (not _opt31_builtin_only(script)
+            or not _OPT31_NEEDS_CHECK_FAIL_RE.search(script)):
+        return False
+    return True
+
+
+def _opt31_early_setup(step: dict, step_if: str | None) -> bool:
+    uses = _uses(step)
+    if not _OPT31_EARLY_SETUP_RE.search(uses):
+        return False
+    # A setup already conditional on producer results does not run on the
+    # unsuccessful path this extension prices. Complex result conditions fail
+    # closed rather than being called unconditional.
+    return not (step_if and _OPT31_NEEDS_RESULT_RE.search(step_if))
+
+
 def _detect_opt31(doc: dict, raw: str) -> list[Hit]:
-    """An unconditional install/setup step whose tool is only consumed by a
-    LATER step gated on a `secrets.`/`env.` condition (catalog OPT31)."""
+    """Setup paid before a conditional consumer or a needs-result failure gate."""
     hits: list[Hit] = []
     for job_name, job in _jobs_from_doc(doc).items():
         if not isinstance(job, dict):
             continue
         steps = _steps_with_if(job)
+        result_checks = [
+            i for i, (step, step_if) in enumerate(steps)
+            if _opt31_needs_result_check(step, step_if, job, doc)
+        ]
+        if result_checks:
+            first_check = min(result_checks)
+            setup_names = [
+                _uses(step).split("@", 1)[0]
+                for step, step_if in steps[:first_check]
+                if _opt31_early_setup(step, step_if)
+            ]
+            if setup_names:
+                check = steps[first_check][0]
+                label = str(check.get("name") or "needs-result check")
+                line = (_line_of_in_job(raw, job_name, label)
+                        or _line_of_in_job(raw, job_name,
+                                           (_run(check).splitlines() or [""])[0].strip())
+                        or 1)
+                hits.append(Hit(
+                    line=line,
+                    affected_jobs=[job_name],
+                    evidence=(
+                        f"job `{job_name}` runs {', '.join(f'`{name}`' for name in setup_names)} "
+                        f"before needs-result check `{label}`, so an unsuccessful dependency "
+                        "pays checkout or toolchain setup before the check fails. Move the "
+                        "needs-only result check before checkout and toolchain setup while "
+                        "preserving its exact success predicate. Runner-minute effect: saving "
+                        "the affected setup compute on unsuccessful dependency runs; not sized "
+                        "until that run share and those setup steps are measured."
+                    ),
+                    match_text=job_name,
+                    snippet=_block_lines(raw, line),
+                ))
+                continue
         for i, (s, s_if) in enumerate(steps):
             if "if" in s or s_if is not None:
                 continue  # gated, on the step or on its enclosing group
@@ -6884,7 +7490,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT76", "OPT108"})
+    "OPT39", "OPT76", "OPT108", "OPT109"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -6935,6 +7541,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT29": _detect_opt29,
     "OPT108": _detect_opt108,
     "OPT114": _detect_opt114,
+    "OPT109": _detect_opt109,
     "OPT31": _detect_opt31,
     "OPT32": _detect_opt32,
     "OPT33": _detect_opt33,
@@ -10663,6 +11270,10 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # A restore prefix can be seeded by a cache step in any workflow in the
     # repository, so OPT61 needs one repository-wide saved-key index.
     repo_cache_saved_keys = _cache_saved_keys(doc for _rel, doc, _raw in parsed)
+    # The package scripts a workflow command resolves through (OPT16's
+    # repeated-analysis form follows `pnpm knip:json` into them), read once and
+    # reused for the `type_aware_lint` block below.
+    type_aware_lint = _read_type_aware_lint(root)
 
     # --- Per-file pass ---
     for rel, doc, raw in parsed:
@@ -10676,6 +11287,8 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             fn = _DETECTORS.get(entry.pattern)
             if entry.pattern == "OPT61":
                 hits = list(_detect_opt61(doc, raw, saved_keys=repo_cache_saved_keys))
+            elif entry.pattern == "OPT16":
+                hits = list(_detect_opt16(doc, raw, package_scripts=type_aware_lint))
             elif fn is not None:
                 hits = list(fn(doc, raw))
             elif entry.match or entry.yaml_path:
@@ -10844,7 +11457,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # which type-aware rules are on, plus the package scripts a workflow's
         # `npm run lint` resolves through. NOT a finding — the config fact the
         # data-pass OPT82 detector joins to a slow lint job.
-        "type_aware_lint": _read_type_aware_lint(root),
+        "type_aware_lint": type_aware_lint,
         "catalog_patterns_total": len(catalog),
         "catalog_patterns_with_detector": len(static_entries) - len(unmatched_patterns),
         "catalog_patterns_without_detector": sorted(unmatched_patterns),

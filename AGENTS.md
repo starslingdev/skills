@@ -23,7 +23,8 @@ anything under the skill** — it is the authoritative spec.
 ```
 skills/ci-speedup/        the installable skill (self-contained)
   SKILL.md                canonical contract — read it first
-  CHANGELOG.md            dated, PR-referenced change history
+  CHANGELOG.md            dated, PR-referenced change history (assembled; never hand-edited)
+  changelog.d/            pending changelog fragments, one file per change
   ARCHITECTURE.md         how the pipeline fits together
   scripts/                the deterministic engine (stdlib only)
   references/             the pattern catalog + methodology docs
@@ -151,11 +152,22 @@ To triage a warning that is already published, use
 
 ## Changelog discipline
 
-Every change that alters **skill behavior** adds a dated (UTC) bullet to
-[`skills/ci-speedup/CHANGELOG.md`](skills/ci-speedup/CHANGELOG.md) under the
-right Added / Changed / Fixed heading, **in the same PR**. If you changed the
-skill and didn't touch its changelog, the PR is incomplete. Pure-docs or
-test-only refactors that don't change behavior can be noted briefly or skipped.
+Every change that alters **skill behavior** adds a changelog fragment under
+that skill's `changelog.d/` (for example
+[`skills/ci-speedup/changelog.d/`](skills/ci-speedup/changelog.d/README.md)),
+**in the same PR**: one new file named `<slug>.<added|changed|fixed|removed>.md`
+holding the dated (UTC) bullet, citing the PR as `(#N)`, that would have gone
+into `CHANGELOG.md`. Fragments never conflict, because no two PRs write the
+same file. Do not edit any skill's `CHANGELOG.md` by hand: the `test` check
+fails a PR that does. A maintainer runs
+`python3 maintainers/scripts/assemble_changelog.py` at release, which files
+every fragment under `## [Unreleased]`, newest first, deletes the fragments,
+and is the only change to `CHANGELOG.md` CI accepts (it must be exactly the
+assembler's output for the fragments the same change deletes).
+`python3 maintainers/scripts/assemble_changelog.py --check` validates fragments
+locally. If you changed the skill and added no fragment, the PR is incomplete.
+Pure-docs or test-only refactors that don't change behavior can be noted
+briefly or skipped.
 
 ## Staging discipline
 

@@ -1760,6 +1760,18 @@ _VR_OPT83_WITHHOLD_PHRASES = {
     "job_starts_a_container_or_background_server":
         "the job starts a container or a background server that the steps "
         "would all use at once",
+    "separate_job_matrix_job":
+        "the steps cannot share one runner, and the job is a matrix, so a sibling "
+        "job would repeat its setup in every cell and its added cost per run could "
+        "not be stated",
+    "separate_job_later_step_may_read_moved_output":
+        "the steps cannot share one runner, and a later step or a job output may "
+        "read what a moved step writes, so moving it to its own job could drop "
+        "that check",
+    "separate_job_prerequisite_unclassified":
+        "the steps cannot share one runner, and a step before them is not setup, "
+        "checkout or install, so what a sibling job would have to repeat is "
+        "unmeasured",
 }
 # OPT84's held-back gates (the renderer's `_OPT84_WITHHOLD_PHRASES`, copied).
 _VR_OPT84_WITHHOLD_PHRASES = {
@@ -7529,6 +7541,78 @@ def _post_completion_waste_corroborated(f: dict) -> bool:
     return False
 
 
+def _vr_opt36_glob_matches(path: str, pattern: str) -> bool:
+    """Independent conservative matcher for OPT36's stamped exclusions."""
+    path, pattern = path.lstrip("/"), pattern.strip().lstrip("/")
+    if not path or not pattern or any(char in pattern for char in "{}["):
+        return False
+    out: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*":
+            if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                index += 2
+                if index < len(pattern) and pattern[index] == "/":
+                    out.append("(?:.*/)?")
+                    index += 1
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(char))
+        index += 1
+    return re.fullmatch("".join(out), path) is not None
+
+
+def _vr_opt36_ignored(path: str, patterns: list[str]) -> bool:
+    ignored = False
+    for raw in patterns:
+        pattern = raw.strip()
+        negated = pattern.startswith("!")
+        if negated:
+            pattern = pattern[1:]
+        if _vr_opt36_glob_matches(path, pattern):
+            ignored = not negated
+    return ignored
+
+
+def _vr_opt36_unchanged_inputs_valid(f: dict) -> bool:
+    stamp = _as_dict(f.get("opt36_unchanged_inputs"))
+    pairs = [row for row in _as_list(stamp.get("pairs")) if isinstance(row, dict)]
+    patterns = [str(value) for value in _as_list(stamp.get("paths_ignore"))
+                if isinstance(value, str) and value]
+    if not pairs:
+        return False
+    same_head = excluded_only = 0
+    for row in pairs:
+        base, head = str(row.get("base") or ""), str(row.get("head") or "")
+        paths = row.get("changed_paths")
+        if not base or not head or not isinstance(paths, list):
+            return False
+        if row.get("kind") == "same_head":
+            same_head += 1
+            if base != head or paths:
+                return False
+        elif row.get("kind") == "excluded_only":
+            excluded_only += 1
+            if base == head or not patterns or not all(
+                    isinstance(path, str) and _vr_opt36_ignored(path, patterns)
+                    for path in paths):
+                return False
+        else:
+            return False
+    effect = _as_dict(f.get("runner_minute_effect"))
+    return (stamp.get("same_head_pairs") == same_head
+            and stamp.get("excluded_only_pairs") == excluded_only
+            and effect.get("direction") == "saving"
+            and abs((_num(effect.get("runner_min_per_month")) or -1.0)
+                    - (_num(f.get("runner_min_saving")) or -2.0)) < 0.001)
+
+
 def _non_pr_event_corroborated(f: dict, data: dict) -> bool:
     cert = _as_dict(f.get("tier2_neutrality"))
     subset = {str(e) for e in _as_list(f.get("tier2_run_subset_events")) if str(e)}
@@ -7547,17 +7631,20 @@ def _non_pr_event_corroborated(f: dict, data: dict) -> bool:
     evidence_text = _text_from_json(me).lower()
     table = _as_dict(me.get("table"))
     rows = _as_list(table.get("rows"))
-    # Currently only OPT36 emits a measured non_pr_event certificate. Pin the
-    # schedule/same-head-sha evidence shape so a future detector cannot promote a
-    # generic "non-PR" claim without its own corroboration.
+    # Currently only OPT36 emits a measured non_pr_event certificate. Preserve
+    # legacy same-head evidence and independently validate the newer stamped
+    # unchanged-input pairs so a generic non-PR claim cannot promote itself.
+    has_unchanged_stamp = isinstance(f.get("opt36_unchanged_inputs"), dict)
+    legacy_same_head = (not has_unchanged_stamp and "same-head_sha" in signal
+                        and "same-head_sha" in evidence_text)
+    unchanged_inputs = has_unchanged_stamp and _vr_opt36_unchanged_inputs_valid(f)
     return (
         str(f.get("pattern")) == "OPT36"
         and subset == {"schedule"}
         and "event=schedule" in signal
-        and "same-head_sha" in signal
         and "event=schedule" in ref
         and "schedule" in ref
-        and "same-head_sha" in evidence_text
+        and (legacy_same_head or unchanged_inputs)
         and bool(rows))
 
 
@@ -11016,23 +11103,26 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
         fid = str(f.get("id") or "?")
         cid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", fid)
         ids.add(cid)
+        st = _as_dict(f.get("independent_steps"))
+        separate = st.get("kind") == "opt83_separate_jobs"
         wc = _num(f.get("wall_clock_p50_s"))
-        if wc:
+        if wc and not separate:
             bad.append(f"{fid}: OPT83 carries wall_clock_p50_s {wc} - it is uncredited")
         if f.get("runner_min_saving") is not None:
             bad.append(f"{fid}: OPT83 carries runner_min_saving "
                        f"{f.get('runner_min_saving')!r} - it is uncredited")
-        if f.get("sizing_basis") != "uncredited":
+        expected_basis = "measured" if separate else "uncredited"
+        if f.get("sizing_basis") != expected_basis:
             bad.append(f"{fid}: OPT83 sizing_basis {f.get('sizing_basis')!r}, "
-                       "not 'uncredited'")
-        st = _as_dict(f.get("independent_steps"))
-        if st.get("kind") != "opt83_independent_steps":
+                       f"not {expected_basis!r}")
+        if st.get("kind") not in {"opt83_independent_steps", "opt83_separate_jobs"}:
             bad.append(f"{fid}: missing its opt83_independent_steps block")
             continue
-        ind = _as_dict(st.get("independence"))
-        missing = [k for k in _VR_OPT83_INDEPENDENCE_KEYS if ind.get(k) is not True]
-        if missing:
-            bad.append(f"{fid}: independence facts not stamped true: {missing}")
+        if not separate:
+            ind = _as_dict(st.get("independence"))
+            missing = [k for k in _VR_OPT83_INDEPENDENCE_KEYS if ind.get(k) is not True]
+            if missing:
+                bad.append(f"{fid}: independence facts not stamped true: {missing}")
         wfb = Path(str(f.get("workflow_file") or "")).name
         job = str(st.get("job") or "")
         pole = next((p for p in poles if Path(str(p.get("workflow_file") or "")).name
@@ -11069,7 +11159,29 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
                 bad.append(f"{fid}: step `{sn}` ({ps.get('category')}, {d}s of "
                            f"{job_p50}s) does not qualify as a candidate")
             p50s.append(d)
-        want = round(sum(p50s) - max(p50s), 1) if len(p50s) >= 2 else 0.0
+        if separate and len(p50s) >= 2:
+            moved = str(st.get("moved_step") or "")
+            moved_s = next((d for name, d in zip(names, p50s) if name == moved), None)
+            setup_s = _num(st.get("setup_s"))
+            if moved_s is None or setup_s is None or setup_s < 0:
+                bad.append(f"{fid}: separate-job moved_step/setup_s is incomplete")
+                want = 0.0
+            else:
+                finish = round(max(sum(p50s) - moved_s, moved_s + setup_s), 1)
+                want = round(sum(p50s) - finish, 1)
+                if _num(st.get("parallel_finish_s")) != finish:
+                    bad.append(f"{fid}: parallel_finish_s does not re-derive ({finish})")
+                effect = _as_dict(f.get("runner_minute_effect"))
+                expected_added = round(setup_s / 60.0, 4)
+                if (effect.get("direction") != "added_cost"
+                        or _num(effect.get("runner_min_per_run")) != expected_added
+                        or effect.get("additional_concurrent_runners") != 1):
+                    bad.append(f"{fid}: separate-job runner-minute effect does not "
+                               f"re-derive (added cost {expected_added} per run)")
+                if wc != want:
+                    bad.append(f"{fid}: wall_clock_p50_s {wc!r} != re-derived {want}")
+        else:
+            want = round(sum(p50s) - max(p50s), 1) if len(p50s) >= 2 else 0.0
         if _num(st.get("ceiling_s")) != want:
             bad.append(f"{fid}: ceiling_s {st.get('ceiling_s')!r} != re-derived "
                        f"{want} (sum of the steps' p50s minus the slowest)")
@@ -11104,6 +11216,23 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
                 bad.append(f"{fid}: its anchor is named outside its own section")
                 break
         flat = " ".join(body.split())
+        if separate:
+            effect = _as_dict(f.get("runner_minute_effect"))
+            added = _num(effect.get("runner_min_per_run")) or 0.0
+            for need, what in (
+                    (f"re-derived from measured p50s):** up to {want:.0f}s",
+                     "re-derived saving"),
+                    ("aggregator job's own pickup", "aggregator-pickup caveat"),
+                    (f"added cost, at least +{added:.2f} runner-min per run",
+                     "signed runner-minute effect"),
+                    ("duplicated-setup floor", "runner-minute floor label"),
+                    ("one additional concurrent runner", "runner-count effect"),
+                    ("always()", "aggregator condition"),
+                    ("every upstream result to be `success`", "aggregator success guard"),
+                    ("keeps the required check name", "required-check guard")):
+                if need not in flat:
+                    bad.append(f"{fid}: separate-job card is missing {what}")
+            continue
         # The label sits on the line that states the bound: the prompt's copy of
         # it does not label a bare number on the card.
         bound_line = next((" ".join(ln.split()) for ln in body.splitlines()
@@ -13085,7 +13214,7 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
             # job name matches, and the lane-isolation check independently
             # requires zero merge-gate wall-clock credit and a rendered tag.
             continue
-        if pat in {"OPT13", "OPT82"}:
+        if pat in {"OPT13", "OPT82", "OPT106"}:
             # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
             # keeps these benchmark-first cards on their drilled-pole jobs (the
             # card is the only place the measured ceiling and safety proof reach
@@ -15323,6 +15452,52 @@ _VR_OPT106_MIN_PROFILE_S = 30.0
 _VR_OPT106_MIN_JOB_SHARE = 0.2
 
 
+_VR_OPT106_MIN_STEP_S = 20.0
+_VR_OPT106_MIN_STEP_SHARE = 0.15
+
+
+def _vr_opt106_unprofiled_failures(fid: str, finding: dict, jobs: list[str],
+                                   poles: list) -> list[str]:
+    """An OPT106 finding without a loader profile is unsized on both axes, names
+    its true reason, leads its fix with measuring, and sits on a drilled pole
+    step above the step floors with the p50 it states."""
+    failures: list[str] = []
+    step = str(finding.get("runtime_loader_step") or "")
+    p50 = _num(finding.get("runtime_loader_step_p50_s"))
+    job_p50 = _num(finding.get("runtime_loader_job_p50_s"))
+    if finding.get("wall_clock_p50_s") is not None or finding.get("runner_min_saving") is not None:
+        failures.append(f"{fid} credits a saving without a measured loader share")
+    if p50 is None or job_p50 is None or job_p50 <= 0:
+        return failures + [f"{fid} lacks its step and job p50"]
+    reason = (f"loader share not measured; the step's measured p50 of "
+              f"{p50:.1f}s is an upper bound")
+    note = str(finding.get("size_note") or "")
+    if (f"wall-clock saving: unsized ({reason})" not in note
+            or f"runner-minute saving: unsized ({reason})" not in note):
+        failures.append(f"{fid} does not state both axes as unsized with its reason")
+    if not str(finding.get("fix_strategy") or "").startswith("Measure first"):
+        failures.append(f"{fid} fix does not lead with measuring the loader share")
+    if (not str(finding.get("runtime_loader") or "")
+            or not str(finding.get("runtime_loader_command") or "")):
+        failures.append(f"{fid} lacks the loader it resolved")
+    if p50 < _VR_OPT106_MIN_STEP_S or p50 < _VR_OPT106_MIN_STEP_SHARE * job_p50:
+        failures.append(f"{fid} step is below the long-pole step floors")
+    pole = next((p for p in poles if isinstance(p, dict)
+                 and str(p.get("workflow_file") or "")
+                 == str(finding.get("workflow_file") or "")
+                 and jobs and str(p.get("job") or "") == jobs[0]), None)
+    row = next((s for s in _as_list((pole or {}).get("steps"))
+                if isinstance(s, dict) and str(s.get("step") or "").strip() == step),
+               None)
+    pole_p50 = _num((row or {}).get("p50_s"))
+    pole_job = _num((pole or {}).get("job_p50_s"))
+    if (pole_p50 is None or pole_job is None
+            or round(pole_p50, 1) != round(p50, 1)
+            or round(pole_job, 1) != round(job_p50, 1)):
+        failures.append(f"{fid} step p50 is not its drilled pole's measured step")
+    return failures
+
+
 def check_opt106_runtime_loader_provenance(findings_path: Path | None) -> Check:
     """OPT106 credit remains bound to its captured structured pole fact."""
     name = "OPT106 runtime-loader findings retain measured pole provenance"
@@ -15334,10 +15509,14 @@ def check_opt106_runtime_loader_provenance(findings_path: Path | None) -> Check:
     if not findings:
         return Check(name, True, "no OPT106 finding")
     entries = _as_list(_as_dict(data.get("data_bundle")).get("logs"))
+    poles = _as_list(_as_dict(data.get("pr_critical_path")).get("poles"))
     failures: list[str] = []
     for finding in findings:
         fid = str(finding.get("id") or "OPT106")
         jobs = [str(job) for job in _as_list(finding.get("affected_jobs")) if str(job)]
+        if finding.get("sizing_basis") == "unmeasured_loader_share":
+            failures += _vr_opt106_unprofiled_failures(fid, finding, jobs, poles)
+            continue
         matches = [entry for entry in entries if isinstance(entry, dict)
                    and str(entry.get("workflow_file") or "")
                    == str(finding.get("workflow_file") or "")
