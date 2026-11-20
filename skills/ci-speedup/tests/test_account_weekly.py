@@ -229,3 +229,18 @@ def test_paired_effect_that_rounds_to_zero_is_not_called_a_saving() -> None:
     assert comparison["runner_minute_effect"] == "unchanged", comparison
     assert comparison["runner_minute_delta"] == 0.0
 
+def test_account_weekly_rejects_non_dates_and_non_finite_totals() -> None:
+    import pytest
+    from before_after import summarize_account_weekly
+
+    for field, value in (("week_start", "week 45"), ("runner_hours", float("nan")),
+                         ("runner_hours", float("inf")), ("jobs", 3.7)):
+        data = _observations()
+        data["weeks"][0][field] = value
+        with pytest.raises(ValueError):
+            summarize_account_weekly(data)
+
+    data = _observations()
+    data["paired_runs"]["workload_change"] = "same jobs on both sides"
+    data["paired_runs"]["before_runner_minutes"] = [float("nan"), 100.0]
+    assert summarize_account_weekly(data)["paired_comparison"]["available"] is False

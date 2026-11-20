@@ -3,12 +3,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import statistics
 import subprocess
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable
 from urllib.parse import quote
@@ -77,6 +78,13 @@ def summarize_account_weekly(payload: dict[str, Any]) -> dict[str, Any]:
         workload = str(raw.get("workload_change") or "").strip()
         if not week:
             raise ValueError(f"weeks[{index}].week_start is required")
+        try:
+            # ISO dates also make the chronological sort below correct.
+            week = date.fromisoformat(week).isoformat()
+        except ValueError as exc:
+            raise ValueError(
+                f"weeks[{index}].week_start must be an ISO date (YYYY-MM-DD)"
+            ) from exc
         if week in seen:
             raise ValueError(f"duplicate week_start: {week}")
         seen.add(week)
@@ -84,12 +92,18 @@ def summarize_account_weekly(payload: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"weeks[{index}].workload_change is required")
         try:
             runner_hours = float(raw["runner_hours"])
-            jobs = int(raw["jobs"])
-            merged = int(raw["merged_pull_requests"])
+            jobs_raw = float(raw["jobs"])
+            merged_raw = float(raw["merged_pull_requests"])
+            if not all(math.isfinite(v) for v in (runner_hours, jobs_raw, merged_raw)):
+                raise ValueError("non-finite total")
+            if not (jobs_raw.is_integer() and merged_raw.is_integer()):
+                raise ValueError("fractional count")
+            jobs = int(jobs_raw)
+            merged = int(merged_raw)
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
-                f"weeks[{index}] needs numeric runner_hours, jobs and "
-                "merged_pull_requests") from exc
+                f"weeks[{index}] needs finite numeric runner_hours and whole-number "
+                "jobs and merged_pull_requests") from exc
         if runner_hours < 0 or jobs < 0 or merged < 0:
             raise ValueError(f"weeks[{index}] totals cannot be negative")
         weeks.append({
@@ -116,7 +130,7 @@ def summarize_account_weekly(payload: dict[str, Any]) -> dict[str, Any]:
                 number = float(value)
             except (TypeError, ValueError):
                 return []
-            if number < 0:
+            if not math.isfinite(number) or number < 0:
                 return []
             out.append(number)
         return out
