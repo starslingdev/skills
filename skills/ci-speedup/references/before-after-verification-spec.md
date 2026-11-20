@@ -128,8 +128,10 @@ sample into an account total. Each supplied week must carry:
 
 The optional `paired_runs` input carries explicit before and after
 runner-minute observations. A before/after result requires at least **two paired
-runs per side**, with equal counts, and compares the two medians. The report
-states the effect as `runner-minute saving`, `runner-minute added cost`, or
+runs per side**, with equal counts, and a `workload_change` statement covering
+both sides, and compares the two medians. The report attributes the result to
+the supplied export: it is not a ci-speedup finding and is never counted in the
+report's savings. It states the effect as `runner-minute saving`, `runner-minute added cost`, or
 `runner-minute unchanged`; it never writes a bare signed zero. One observation
 per side remains visible as weekly context, but the paired comparison is
 withheld. This account view is descriptive runner-minute context and does not

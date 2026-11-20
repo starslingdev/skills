@@ -134,6 +134,11 @@ def summarize_account_weekly(payload: dict[str, Any]) -> dict[str, Any]:
             f"need at least {_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS} paired runs per side")
     elif len(before) != len(after):
         comparison["reason"] = "paired run counts differ"
+    elif not str(paired.get("workload_change") or "").strip():
+        # The verification spec states the workload beside every before/after
+        # result; a median delta with no workload statement is not a claim.
+        comparison["reason"] = (
+            "paired runs need a workload_change statement for both sides")
     else:
         before_median = round(float(statistics.median(before)), 3)
         after_median = round(float(statistics.median(after)), 3)
@@ -158,6 +163,7 @@ def summarize_account_weekly(payload: dict[str, Any]) -> dict[str, Any]:
             "runner_minute_change_pct": (
                 round(raw_delta / before_median * 100.0, 1)
                 if before_median else None),
+            "workload_change": str(paired.get("workload_change")).strip(),
         }
     return {"weeks": weeks, "paired_comparison": comparison}
 

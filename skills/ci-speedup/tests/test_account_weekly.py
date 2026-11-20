@@ -33,6 +33,7 @@ def _observations(*, after_hours: float = 60.0) -> dict:
         "paired_runs": {
             "before_runner_minutes": [120.0, 100.0],
             "after_runner_minutes": [65.0, 55.0],
+            "workload_change": "same jobs on both sides",
         },
     }
 
@@ -84,6 +85,7 @@ def test_account_weekly_series_normalizes_and_compares_paired_medians(tmp_path: 
         "runner_minute_effect": "saving",
         "runner_minute_delta": 50.0,
         "runner_minute_change_pct": -45.5,
+        "workload_change": "same jobs on both sides",
     }
 
     report = blocking_path.render({
@@ -108,6 +110,7 @@ def test_account_weekly_series_states_no_saving_when_work_is_unchanged(tmp_path:
     data["paired_runs"] = {
         "before_runner_minutes": [60.0, 60.0],
         "after_runner_minutes": [60.0, 60.0],
+        "workload_change": "same jobs on both sides",
     }
     completed, doc = _run_weekly_cli(tmp_path, data)
     assert completed.returncode == 0, completed.stderr
@@ -186,4 +189,30 @@ def test_invalid_account_weekly_series_stops_before_verification_reruns(
         "--verify-branch", "fix", "--account-weekly-series", str(source),
     ])
     assert rc == 1
+
+
+def test_paired_comparison_needs_a_workload_statement_and_is_attributed(tmp_path: Path) -> None:
+    from before_after import summarize_account_weekly
+
+    data = _observations()
+    del data["paired_runs"]["workload_change"]
+    summary = summarize_account_weekly(data)
+    assert summary["paired_comparison"]["available"] is False
+    assert "workload_change" in summary["paired_comparison"]["reason"]
+
+    data["paired_runs"]["workload_change"] = "same jobs on both sides"
+    summary = summarize_account_weekly(data)
+    assert summary["paired_comparison"]["available"] is True
+    assert summary["paired_comparison"]["workload_change"] == "same jobs on both sides"
+
+    report = blocking_path.render({
+        "repo": "example/repo", "repo_visibility": "private",
+        "skill_commit_sha": "abcdef0", "commit_sha": "0123456789abcdef",
+        "findings": [], "account_weekly": summary,
+        "data_sources": {"gh": "unavailable"},
+    })
+    line = next(x for x in report.splitlines() if "paired-run comparison" in x)
+    assert "supplied" in line.lower(), line
+    assert "not a ci-speedup finding" in line.lower(), line
+    assert "same jobs on both sides" in line, line
 

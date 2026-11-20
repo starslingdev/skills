@@ -14605,16 +14605,18 @@ def _account_weekly_block(value: Any) -> list[str]:
         delta = float(_num(paired.get("runner_minute_delta")) or 0)
         before_n = int(_num(paired.get("before_n")) or 0)
         after_n = int(_num(paired.get("after_n")) or 0)
+        workload = _flatten_cell(str(paired.get("workload_change") or "unstated"))
         lines += [
-            f"**Paired-run runner-minute effect:** runner-minute {effect}: "
-            f"{delta:.1f} per "
-            f"paired run, comparing the median of {before_n} before and "
-            f"{after_n} after runs.",
+            "**Supplied paired-run comparison (from your export, not a "
+            "ci-speedup finding, and not counted in this report's savings):** "
+            f"runner-minute {effect}: {delta:.1f} per paired run, comparing "
+            f"the median of {before_n} before and {after_n} after runs. "
+            f"Workload change: {workload}.",
             "",
         ]
     else:
         reason = _flatten_cell(str(paired.get("reason") or "paired observations unavailable"))
-        lines += [f"**Paired-run comparison withheld:** {reason}.", ""]
+        lines += [f"**Supplied paired-run comparison withheld:** {reason}.", ""]
     return lines
 
 
