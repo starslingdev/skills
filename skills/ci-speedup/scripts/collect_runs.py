@@ -23899,6 +23899,112 @@ def _opt24_log_timestamp(line: str) -> float | None:
         return None
 
 
+# OPT13's narrow automatic path is deliberately log-backed.  The general
+# "does this job need its build output?" question is semantic and remains a
+# manual review; this parser admits only a quality-script invocation whose own
+# log proves both a build/emit command and the quality command that follows it.
+_OPT13_QUALITY_COMMAND_RE = _re.compile(
+    r"(?:^|\s)(?:(?:pnpm|npm|yarn|bun)(?:\s+run)?\s+"
+    r"(?:lint|test|check|typecheck|type-check)\b|"
+    r"(?:vitest|jest|eslint|biome|prettier|pytest)\b)",
+    _re.IGNORECASE,
+)
+_OPT13_BUILD_COMMAND_RE = _re.compile(
+    r"(?:^|\s)(?:vite|next|nuxt|remix|astro|gatsby|ng|nest)\s+build\b|"
+    r"(?:^|\s)(?:webpack|rollup|rspack|turbopack|tsup|esbuild)\b|"
+    r"(?:^|\s)tsc\b[^\n]*(?:--emitDeclarationOnly|--declaration(?:\s+true)?\b)|"
+    r"(?:^|\s)(?:mvn|mvnw)\s+(?:[^\n]*\s)?package\b|"
+    r"(?:^|\s)(?:gradle|gradlew)\s+(?:[^\n]*\s)?assemble\b",
+    _re.IGNORECASE,
+)
+_OPT13_BUILD_SUMMARY_RE = _re.compile(
+    r"\bbuilt\s+in\s+(\d+(?:\.\d+)?)\s*(ms|s|sec(?:onds?)?|m|min(?:utes?)?)\b",
+    _re.IGNORECASE,
+)
+_OPT13_LOADS_BUILD_OUTPUT_RE = _re.compile(
+    r"(?:^|\s)(?:node|deno|bun)\s+(?:\./)?(?:dist|build|lib)/|"
+    r"(?:require|import)\s*\([^\n]*(?:dist|build|lib)/",
+    _re.IGNORECASE,
+)
+
+
+def _opt13_command_text(line: str) -> str:
+    """Return command text only; package-manager banners and output stay inert."""
+    clean = _OPT24_LOG_TS_RE.sub("", line).strip()
+    clean = _re.sub(r"^(?:##\[command\]|[>$+]\s*)", "", clean).strip()
+    return clean
+
+
+def _opt13_build_label(command: str) -> str:
+    """Closed-vocabulary label: never copy untrusted job-log text to a report."""
+    for pattern, label in (
+        (r"\bvite\s+build\b", "vite build"),
+        (r"\bnext\s+build\b", "next build"),
+        (r"\bnuxt\s+build\b", "nuxt build"),
+        (r"\b(?:remix|astro|gatsby|ng|nest)\s+build\b", "framework build"),
+        (r"\b(?:webpack|rollup|rspack|turbopack|tsup|esbuild)\b", "bundle build"),
+        (r"\btsc\b", "TypeScript declaration emit"),
+        (r"\b(?:mvn|mvnw)\b", "Maven package build"),
+        (r"\b(?:gradle|gradlew)\b", "Gradle assemble build"),
+    ):
+        if _re.search(pattern, command, _re.IGNORECASE):
+            return label
+    return "build"
+
+
+def _opt13_build_in_quality_log(log: str) -> dict[str, Any] | None:
+    """A measured build hidden inside a lint/test wrapper, or ``None``.
+
+    Fail closed when the same log shows a command loading compiled output.  A
+    framework build can validate more than the quality command, so the emitted
+    recipe shrinks it to a runtime-only target and keeps one full validation
+    build; it never recommends deleting the only production-build gate.
+    """
+    records = [(_opt24_log_timestamp(line), _opt13_command_text(line))
+               for line in log.splitlines()]
+    commands = [text for _stamp, text in records]
+    if not any(_OPT13_QUALITY_COMMAND_RE.search(text) for text in commands):
+        return None
+    if any(_OPT13_LOADS_BUILD_OUTPUT_RE.search(text) for text in commands):
+        return None
+    build_at = next((index for index, (_stamp, text) in enumerate(records)
+                     if _OPT13_BUILD_COMMAND_RE.search(text)), None)
+    if build_at is None:
+        return None
+    # A quality command must occur outside the build command itself.  This
+    # rejects a plain build job whose log happens to mention tests in prose.
+    quality_after = next(
+        (index for index in range(build_at + 1, len(records))
+         if _OPT13_QUALITY_COMMAND_RE.search(records[index][1])), None)
+    quality_before = any(
+        _OPT13_QUALITY_COMMAND_RE.search(text)
+        for _stamp, text in records[:build_at])
+    if quality_after is None and not quality_before:
+        return None
+
+    seconds: float | None = None
+    for _stamp, text in records[build_at + 1:]:
+        match = _OPT13_BUILD_SUMMARY_RE.search(text)
+        if match:
+            value = float(match.group(1))
+            unit = match.group(2).lower()
+            seconds = value / 1000.0 if unit == "ms" else value * 60.0 if unit[0] == "m" else value
+            break
+        if _OPT13_QUALITY_COMMAND_RE.search(text):
+            break
+    if seconds is None and quality_after is not None:
+        start = records[build_at][0]
+        end = records[quality_after][0]
+        if start is not None and end is not None and end > start:
+            seconds = end - start
+    if seconds is None or seconds <= 0:
+        return None
+    return {
+        "build_command": _opt13_build_label(records[build_at][1]),
+        "build_s": round(seconds, 1),
+    }
+
+
 def _opt24_static_job_name(name: str) -> str:
     """The stable part of a workflow job name that contains matrix expressions."""
     static = _re.sub(r"\$\{\{.*?\}\}", "", name)
@@ -29016,6 +29122,7 @@ def _persist_pole_logs(
             except OSError as e:
                 logger.warning("could not save pole magnitude sample %s: %s", mag_fn, e)
                 mag_fn = None
+        opt13_fact = _opt13_build_in_quality_log(log)
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
             "leaf_fix_key": leaf0.get("fix_key"),
@@ -29024,10 +29131,65 @@ def _persist_pole_logs(
             "duration_s": round(repr_dur, 1), "selected": "nearest-p50",
             "sample": [{"html_url": j.get("html_url", ""), "duration_s": round(d, 1)}
                        for d, j in qual],
+            **({"opt13_build_in_script": opt13_fact} if opt13_fact else {}),
         })
         logger.debug("saved pole log for %s -> %s (closest to P50 of %d qualifying "
                      "runs)", job, fn, len(qual))
     return manifest
+
+
+def _detect_opt13_build_in_scripts(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Turn conservative, measured pole-log facts into OPT13 findings."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    for entry in pole_logs:
+        fact = entry.get("opt13_build_in_script")
+        if not isinstance(fact, dict):
+            continue
+        seconds = fact.get("build_s")
+        if not isinstance(seconds, (int, float)) or seconds <= 0:
+            continue
+        wf = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        command = str(fact.get("build_command") or "build")
+        runs = volume_by_workflow.get(wf)
+        runner_min = (round(float(seconds) * runs / 60.0, 1)
+                      if isinstance(runs, int) and runs > 0 else None)
+        url = str(entry.get("html_url") or "")
+        shown = _link(float(seconds), url)
+        runner_effect = (f"saves +{runner_min:.1f} runner-minutes/month"
+                         if runner_min is not None
+                         else "runner-minute saving not sized because monthly run volume is unavailable")
+        evidence = (
+            f"The representative `{job}` log runs `{command}` inside its quality "
+            f"script; the build itself takes {shown}."
+        )
+        measured = _measured_evidence(
+            ["Job", "Build command", "Measured build", "Representative run"],
+            [[f"`{job}`", f"`{command}`", f"{float(seconds):.1f}s",
+              f"[job log]({url})" if url else "captured job log"]],
+            f"The quality script spends {float(seconds):.1f}s in build work.",
+            "Only the measured build interval is credited; keep one full build as a validation gate.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT13", "MEDIUM", "Build Step in Jobs That Don't Need It",
+            wf, job, evidence,
+            "Add a runtime-only build target for this quality job first; keep the full build "
+            "once in the artifacts/validation job, then compare the same workload before and after.",
+            "opt13--build-step-in-jobs-that-dont-need-it", idx,
+            wc_p50=float(seconds), rm=runner_min,
+            size_note=(f"measured build interval {float(seconds):.1f}s; {runner_effect}"),
+            realization="direct", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        if isinstance(runs, int):
+            finding["workflow_runs_30d"] = runs
+        out.append(finding)
+    return out
 
 
 # =============================================================================
@@ -33254,6 +33416,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             opt96_findings=[f for f in findings if f.get("pattern") == "OPT96"],
             wf_docs=_wf_docs,
             cache_effective_paths=findings_doc.get("cache_effective_paths"))
+        new = _detect_opt13_build_in_scripts(pole_logs, vol_by_wf, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        findings_doc["findings"] = findings
     _opt96_check_default_branch(findings_doc, default_branch)
     _ground_opt96(findings, drill_poles or poles, _wf_docs,
                   fetch_gaps={str(g.get("workflow_file")) for g in _sample_gaps()})

@@ -429,6 +429,58 @@ def test_opt14_credit_is_capped_by_measured_completed_compute_through_collect(
     assert [check for check in full_checks if not check.skipped and not check.ok] == []
 
 
+def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
+        monkeypatch, tmp_path):
+    """Measured package-script internals, not the wrapper name, decide OPT13."""
+    positive = tmp_path / "opt13-build-in-script"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    responses_path = positive / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    recorded["logs"]["1103"] = """\
+2026-01-28T00:00:00.0000000Z > pnpm test
+2026-01-28T00:00:01.0000000Z > project@test
+2026-01-28T00:00:02.0000000Z > vite build
+2026-01-28T00:02:02.0000000Z ✓ built in 120.00s
+2026-01-28T00:02:03.0000000Z > vitest run
+2026-01-28T00:12:00.0000000Z Tests 48 passed
+"""
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+
+    positive_root = tmp_path / "run-opt13-positive"
+    positive_root.mkdir()
+    doc, report, checks = run_fixture(
+        positive, monkeypatch, positive_root, max_runs=20)
+    finding = next(row for row in doc["findings"]
+                   if row.get("pattern") == "OPT13")
+    assert finding["wall_clock_p50_s"] == 120.0
+    assert finding["runner_min_saving"] > 0
+    assert "runtime-only" in finding["fix_strategy"]
+    assert "saves" in finding["size_note"]
+    assert "Build Step in Jobs That Don't Need It" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    negative = tmp_path / "opt13-quality-only"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", negative)
+    negative_responses = negative / "responses.json"
+    recorded = json.loads(negative_responses.read_text(encoding="utf-8"))
+    recorded["logs"]["1103"] = """\
+2026-01-28T00:00:00.0000000Z > pnpm test
+2026-01-28T00:00:01.0000000Z > project@test
+2026-01-28T00:00:02.0000000Z > vitest run
+2026-01-28T00:12:00.0000000Z Tests 48 passed
+"""
+    negative_responses.write_text(json.dumps(recorded), encoding="utf-8")
+
+    negative_root = tmp_path / "run-opt13-negative"
+    negative_root.mkdir()
+    negative_doc, _negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT13"]
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
 def test_pr_sample_day_floor_stays_coupled_through_the_findings_contract(
         monkeypatch, tmp_path):
     fixture = _busy_pr_sample_fixture(tmp_path)
