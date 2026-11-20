@@ -43,10 +43,10 @@ quiet.
 credited removable run's own completed-job compute, after reserving conservative
 hourly replacement slots. Jobs with commit-specific side effects (a deployment
 `environment`, a deploy/release/publish name, or a publish, push, deploy or
-migration step) stay on their push event and are left out of that compute. Developer merge wait is unchanged because the
-pull-request gate stays unchanged. The report states the signed runner-minute
-effect for the fetched sample window, and a monthly estimate when the
-workflow's 30-day default-branch push-run count is readable: the sample saving
+migration step) stay on their push event and are left out of that compute.
+Developer merge wait is unchanged because the pull-request gate stays unchanged.
+The report states the signed runner-minute effect for the fetched sample
+window, and a monthly estimate when the workflow's 30-day default-branch push-run count is readable: the sample saving
 times that count over the sampled push runs, capped at the workflow's measured
 30-day validation compute, labelled as an estimate from the sampled runs. When
 the 30-day count is unreadable the monthly saving is reported as unsized, with

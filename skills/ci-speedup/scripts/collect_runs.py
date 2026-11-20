@@ -32008,8 +32008,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # `_DEFAULT_BRANCH_PUSH_SAMPLE_MAX` commits, memoised with every other job read.
     _push_lane = findings_doc.get("default_branch_push_lane") or {}
     _push_jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    if (_push_shas
-            and _push_lane.get("status") in {"complete", "frequency_incomplete"}):
+    if _push_shas and _push_lane.get("status") == "complete":
         _push_rows_by_sha = {
             _sha: [(_push_run_wf.get(str(_run.get("id") or id(_run)), ""), _run)
                    for _run in _push_runs_by_sha[_sha]]
@@ -32265,6 +32264,26 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _push_lane["drill"]["finding_id"] = (
                     _push_lane["drill"]["finding_ids"][0]
                     if _push_lane["drill"]["finding_ids"] else None)
+    # OPT107 needs only a bounded set of per-run compute, not a proven monthly
+    # push count.  Keep that timing sample available when the cached run page is
+    # truncated, without turning on the full push-lane projection/drill (whose
+    # monthly frequency is intentionally withheld in that state).
+    _opt107_jobs_by_run = dict(_push_jobs_by_run)
+    if (_push_shas and _push_lane.get("status") == "frequency_incomplete"):
+        _opt107_rows = list(_push_run_rows)
+        _prefetch_json(client, [
+            _run_jobs_endpoint(repo, run.get("id"))
+            for run in _opt107_rows
+            if not job_memo.contains(_fetch_run_jobs, repo, run.get("id"))
+        ])
+        _opt107_kept, _opt107_failures = _gather_run_jobs(
+            client, repo, _opt107_rows, keep_empty=True, memo=job_memo)
+        jobs_fetch_failures += _opt107_failures
+        for _run, _jobs in _opt107_kept:
+            _rid = str(_run.get("id") or "")
+            _opt107_jobs_by_run[(_push_run_wf.get(_rid, ""), _rid)] = list(_jobs)
+        _push_lane["opt107_job_fetch_count"] = len(_opt107_rows)
+        _push_lane["opt107_job_fetch_failures"] = int(_opt107_failures)
     _chain_facts = _stamp_chain_facts(
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
@@ -33474,7 +33493,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 }
                 _opt107_push_jobs = {
                     run_id_value: list(jobs)
-                    for (run_wf, run_id_value), jobs in _push_jobs_by_run.items()
+                    for (run_wf, run_id_value), jobs in _opt107_jobs_by_run.items()
                     if run_wf == wf_path and run_id_value in _opt107_run_ids
                 }
                 def _opt107_volume(_wf_id: Any = wf_id) -> int | None:

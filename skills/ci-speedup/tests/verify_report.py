@@ -16545,10 +16545,6 @@ def _vr_push_label(name: str) -> str:
             else clean[:_VR_PUSH_LABEL_WIDTH - 1] + "…")
 
 
-_HYGIENE_CAP_TIP_RE = re.compile(
-    r"\*\*\+\d+ more hygiene pattern\(s\) \(\d+ occurrence\(s\)\) not shown\*\*")
-
-
 def check_default_branch_push_lane_isolated(
         report: str, findings_path: Path | None = None) -> Check:
     """Re-derive the post-merge lane and keep it out of merge-gate claims."""
@@ -16664,14 +16660,9 @@ def check_default_branch_push_lane_isolated(
             and finding.get("pattern") == pattern
             and finding.get("lane") == "push"
             for finding in _as_list(data.get("findings")))
-        # A group ranked below the rendered-group cap is not rendered at all, so
-        # it has no tag to omit; the cap's own "+N more ... not shown" line
-        # discloses it.
-        ranked_below_cap = (not matching_groups and _HYGIENE_CAP_TIP_RE.search(report))
         if (not any(
                 label in details or grouped_label in details
                 for details in matching_groups)
-                and not ranked_below_cap
                 and not (push_route and f"**Catalog route:** {pattern}." in block)):
             failures.append(
                 f"report omits the static finding group's {label} tag")
