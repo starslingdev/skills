@@ -2357,7 +2357,7 @@ impact: MEDIUM
 class: static
 detector: bespoke
 risk: MEDIUM
-affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,pyproject.toml,pytest.ini,setup.cfg,.bazelrc,.config/nextest.toml,jest.config.*,vitest.config.*,package.json"
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,**/*_test.go,pyproject.toml,pytest.ini,setup.cfg,.bazelrc,.config/nextest.toml,jest.config.*,vitest.config.*,package.json"
 fix_strategy: measure-test-concurrency
 title_template: "Test concurrency is set by guess, not measurement"
 -->
@@ -2372,7 +2372,7 @@ title_template: "Test concurrency is set by guess, not measurement"
 
 **Detection heuristic**:
 
-A configured Jest `maxWorkers` below 100% is static evidence to measure, never evidence of a saving. A log-level `test-loop-serial` observation can also point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another. In both cases the safe worker count still has to be measured.
+A configured Jest `maxWorkers` below 100% is static evidence to measure, never evidence of a saving. A log-level `test-loop-serial` observation can also point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another. For Go, the long-pole `go test` log (run directly, through `gotestsum`, or through a `make` target or repository script whose recipe is a plain `go test` line) identifies a test taking at least 10 seconds from verbose `--- PASS` lines or `go test -json` events, with its package when the log prints it; the source is matched in that package, and a test name defined in more than one place without a measured package is withheld. Without per-test times, a plain `ok <package> Ns` (or gotestsum) line of at least 10 seconds leads to a static read of that package's tests; the wall-clock effect is then unsized, because the package's measured time is only an upper bound. The source must then prove that its table-driven subtests each create their own `t.TempDir` with a store opened on it and an `httptest` server (or their own config and server, blocked only by `t.Setenv`), omit `t.Parallel()`, capture no parent-scope or package-level variable, and read rows from a literal table that names no variable and opens nothing. A parent `defer`, `t.Setenv` or `t.Chdir`, any `t.Chdir`, `os.Setenv`/`os.Chdir`, global `http` mux or default registration, or other process-global mutation withholds it. Unreadable source or an unclassified resource withholds the Go finding. In every case the safe worker count still has to be measured.
 
 1. The slow step runs tests, and concurrency is set explicitly (serial, or a fixed number), or not at all on a runner whose test tool defaults to serial. Look everywhere it can be set: the test command, the workflow, and the test tool's own config files (for example `local_test_jobs` and a `test_env` thread count such as `RUST_TEST_THREADS` in `.bazelrc`, or pytest, jest and nextest config files).
 2. The setting does not match the runner: compare it with the core count of the job's runner label. If the label is custom and its core count is not documented, measure it first with a one-line probe step (`nproc`, or `[Environment]::ProcessorCount` on Windows).
@@ -2401,9 +2401,10 @@ The table carries no seconds and no modeled saving. Time the settings on the rep
 **Fix recipe**:
 
 1. Separate what cannot share: give each worker its own resource (a per-worker database name, an ephemeral port, a per-worker temp directory), and move tests that truly cannot run concurrently onto a serial lane that still runs in the same command (run the parallel set, then the serial set).
-2. Replace real-time waits with deterministic synchronization, so workers are not idle.
-3. Measure: on the same runner class and commit, with test-result caching off so the tests really run, time the current setting and two or three others (for example the core count and twice it), several runs each. Keep the fastest; stop at the first setting that regresses.
-4. Pin the measured value in configuration, per runner class, with a comment naming the measurement; re-measure when the runner changes.
+2. In Go table tests whose cases already own those resources, pass configuration explicitly instead of calling `t.Setenv` only where the code under test takes that value from the config; a case whose code still reads the environment keeps `t.Setenv` and stays serial. On a module whose `go` directive is below 1.22, copy the loop variable before `t.Run`. Then call `t.Parallel()` at the start of each independent subtest. Keep cases that share process-global state serial.
+3. Replace real-time waits with deterministic synchronization, so workers are not idle.
+4. Measure: on the same runner class and commit, with test-result caching off so the tests really run, time the current setting and two or three others (for example the core count and twice it), several runs each. For Go, include a focused `go test -race` run and confirm the same cases and failures. Keep the fastest; stop at the first setting that regresses.
+5. Pin the measured value in configuration, per runner class, with a comment naming the measurement; re-measure when the runner changes.
 
 **Guardrail**: the same tests pass at every setting compared, and the flake rate does not rise. Watch memory: a setting that runs out of memory on some runs is not faster.
 
@@ -2413,6 +2414,11 @@ The table carries no seconds and no modeled saving. Time the settings on the rep
 
 - openai/codex [#31352](https://github.com/openai/codex/pull/31352) (2026-07-07): "Controlled forced-test-execution measurements in #31339 found that 8 local jobs reduced Bazel elapsed time on every shard by 19–29%, including the slow shard from 835.5s to 609.3s, while 12 jobs regressed." The PR raised the Windows test shards' local test-jobs cap from 4 to 8, the measured best, not the highest value tried.
 - openai/openai-agents-python [#2563](https://github.com/openai/openai-agents-python/pull/2563) (2026-03-01): replaced "real-time waits in several slow tests with deterministic synchronization", moved shard-safe tests onto `pytest-xdist`, and isolated Redis/Dapr-sensitive files onto "a serial lane that still runs automatically". `make tests` "averaged 53.59 seconds before these changes and 14.34 seconds after them", measured "on the same machine" across three warm-cache runs: a local measurement, not a CI run.
+
+**Real-world examples (OpenClaw)**, their numbers and changes, not a forecast for another repository:
+
+- openclaw/crabbox [#1761](https://github.com/openclaw/crabbox/pull/1761) reported two HTTP test groups falling from 88.498 seconds to 42.304 seconds in a focused local race run after independent cases became parallel.
+- openclaw/crabbox [#2455](https://github.com/openclaw/crabbox/pull/2455) opted independent subtests into parallel execution in its slow checkpoint and installer tests.
 
 **Risk**: **MEDIUM**. More workers can expose tests that share state, which shows up as new flakes; the serial lane and the guardrail contain that.
 
