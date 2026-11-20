@@ -724,27 +724,6 @@ jobs:
     assert "OPT110" not in _scan_one(tmp_path, workflow, "release.yml")
 
 
-def test_opt110_release_workflow_producer_is_not_a_consumer(tmp_path: Path):
-    workflow = """name: Release build
-on:
-  push:
-    tags: ['v*']
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - run: mkdir -p dist && npm run build
-      - uses: actions/upload-artifact@v4
-        with: {name: runtime-bundle, path: dist}
-"""
-    _write_workflow(tmp_path, "release.yml", workflow)
-    findings = [
-        row for row in _scan(tmp_path)["findings"]
-        if row["pattern"] == "OPT110"
-    ]
-    assert len(findings) == 1
-
-
 def test_opt110_dynamic_download_selector_holds_back_the_finding(tmp_path: Path):
     workflow = """name: CI
 on: pull_request
@@ -762,6 +741,147 @@ jobs:
         with: {name: '${{ inputs.artifact }}'}
 """
     assert "OPT110" not in _scan_one(tmp_path, workflow)
+
+
+_OPT110_BUILD = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+"""
+_OPT110_UPLOAD = """      - uses: actions/upload-artifact@v4
+        with: {name: %s, path: %s}
+"""
+
+# Shapes whose artifact may have a consumer the repository scan cannot rule
+# out (a person reading diagnostics, a release or deploy, an external reusable
+# workflow or API client). Each must stay quiet: the finding is withheld.
+_OPT110_OUTSIDE_CONSUMER_SHAPES = {
+    "failure_diagnostic": _OPT110_BUILD + """      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: {name: browser-trace, path: traces/}
+""",
+    "always_logs": _OPT110_BUILD + """      - if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with: {name: e2e-logs, path: logs/}
+""",
+    "diagnostic_name": _OPT110_BUILD + _OPT110_UPLOAD % (
+        "playwright-report", "playwright-report/"),
+    "deploy_pages": _OPT110_BUILD + _OPT110_UPLOAD % ("github-pages", "site.tar")
+    + """  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/deploy-pages@v4
+""",
+    "third_party_download": _OPT110_BUILD + _OPT110_UPLOAD % ("bundle", "dist")
+    + """  use:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dawidd6/action-download-artifact@v6
+        with: {workflow: ci.yml}
+""",
+    "external_reusable_workflow": _OPT110_BUILD
+    + _OPT110_UPLOAD % ("bundle", "dist") + """  e2e:
+    needs: build
+    uses: example-org/shared/.github/workflows/e2e.yml@v1
+""",
+    "workflow_call_producer": """name: Build
+on: workflow_call
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+""" + _OPT110_UPLOAD % ("bundle", "dist"),
+    "artifact_url_output": _OPT110_BUILD + """      - id: up
+        uses: actions/upload-artifact@v4
+        with: {name: preview-build, path: dist}
+      - run: echo "${{ steps.up.outputs.artifact-url }}" >> "$GITHUB_STEP_SUMMARY"
+""",
+    "artifacts_api_client": _OPT110_BUILD + _OPT110_UPLOAD % ("bundle", "dist")
+    + """  fetch:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.listWorkflowRunArtifacts({owner: 'o', repo: 'r', run_id: 1});
+""",
+    "deploy_environment_job": """name: CI
+on: push
+jobs:
+  ship:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: npm run build
+""" + _OPT110_UPLOAD % ("site-build", "dist"),
+    "release_named_artifact": _OPT110_BUILD + _OPT110_UPLOAD % (
+        "release-binaries", "out/"),
+    "tag_release_workflow": """name: Build
+on:
+  push:
+    tags: ['v*']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+""" + _OPT110_UPLOAD % ("runtime-bundle", "dist"),
+    "local_action_downloads": _OPT110_BUILD + _OPT110_UPLOAD % ("bundle", "dist")
+    + """  use:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/fetch-build
+""",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_OPT110_OUTSIDE_CONSUMER_SHAPES))
+def test_opt110_possible_outside_consumer_withholds_the_finding(
+        tmp_path: Path, shape: str):
+    action = tmp_path / ".github" / "actions" / "fetch-build" / "action.yml"
+    action.parent.mkdir(parents=True)
+    action.write_text("""name: fetch build
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with: {path: dist}
+""")
+    _write_workflow(tmp_path, "ci.yml", _OPT110_OUTSIDE_CONSUMER_SHAPES[shape])
+    assert "OPT110" not in _patterns(_scan(tmp_path))
+
+
+def test_opt110_unrelated_local_action_keeps_the_finding(tmp_path: Path):
+    action = tmp_path / ".github" / "actions" / "setup" / "action.yml"
+    action.parent.mkdir(parents=True)
+    action.write_text("""name: setup
+runs:
+  using: composite
+  steps:
+    - run: npm ci
+      shell: bash
+""")
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/setup
+      - run: npm run build:runtime
+      - uses: actions/upload-artifact@v4
+        with: {name: dist-runtime-build, path: dist/runtime.tar.gz}
+""")
+    assert "OPT110" in _patterns(_scan(tmp_path))
 
 
 def test_opt16_within_job_duplicate(tmp_path: Path):

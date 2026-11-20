@@ -18,11 +18,20 @@ external system uses the artifact either.
 
 **Detection heuristic**: Index each literal `actions/upload-artifact` name
 across the repository. Match it against literal `actions/download-artifact`
-names and patterns, `gh run download` selectors, and uploaded paths referenced
-by release or deploy steps. A download without a selector consumes all names.
-Withhold the finding when a download selector is dynamic or unreadable. The
-repository scan cannot see a human download or an external API consumer, so a
-remaining finding is explicitly unverified outside the repository.
+names and patterns, `gh run download` selectors, `actions/deploy-pages`, other
+artifact actions that name the artifact, and uploaded paths referenced by
+release or deploy steps. A download without a selector consumes all names.
+Withhold every finding when a download selector is dynamic or unreadable, or
+when the repository calls the artifacts API, an external reusable workflow, a
+third-party artifact action without a literal name, or a local action that may
+download. Withhold an upload whose likely reader is a person or a delivery:
+uploads gated on `failure()`, `always()` or `cancelled()`, diagnostic names or
+paths (logs, reports, traces, coverage, screenshots), release- or deploy-named
+artifacts, `github-pages`, uploads whose URL or id output is read, and every
+upload in a reusable (`workflow_call`), tag- or release-triggered or
+release-like workflow or in a release or deploy job. The scan cannot see a
+human download or an external API consumer, so a remaining finding is
+explicitly unverified outside the repository.
 
 **Fix recipe (safest first)**:
 
@@ -42,9 +51,7 @@ separate retention quantity, not runner-minute saving. Removing an off-path
 upload normally does not shorten pull-request merge wait.
 
 **Public evidence**: [OpenClaw pull request #154095](https://github.com/openclaw/openclaw/pull/154095)
-removed two build-archive packing and upload paths after confirming no
-repository job consumed them, while retaining diagnostic, proof and release
-artifacts that still had consumers.
+is the public example of this shape.
 
 **Risk**: MEDIUM. A repository-local search cannot disprove human downloads or
 external API use. Removing a diagnostic or release artifact can break incident

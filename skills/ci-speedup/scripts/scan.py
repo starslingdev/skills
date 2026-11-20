@@ -4049,8 +4049,79 @@ def _opt110_step_blob(step: dict) -> str:
     ))
 
 
+# A person reads these when a run fails or for a report; they are diagnostics,
+# not build output, and the repository cannot see that reader.
+_OPT110_DIAGNOSTIC_RE = re.compile(
+    r"(?:^|[\s./_-])(?:allure|coverage|junit|reports?|results?|logs?|traces?|"
+    r"screenshots?|videos?|diagnostics?|debug|dumps?|crash(?:es)?|core|sarif|"
+    r"profiles?|benchmarks?|bench|snapshots?|diffs?|playwright|cypress)"
+    r"(?:$|[\s./_-])",
+    re.IGNORECASE,
+)
+_OPT110_RUN_STATUS_IF_RE = re.compile(
+    r"\b(?:failure|always|cancelled)\s*\(", re.IGNORECASE)
+# REST/CLI artifact consumers that select by run, not by a literal name.
+_OPT110_ARTIFACT_API_RE = re.compile(
+    r"(?:list\w*Artifacts|downloadArtifact|getArtifact|/actions/artifacts|"
+    r"/actions/runs/\S*/artifacts|\bgh\s+api\b[^\n]*artifacts)",
+    re.IGNORECASE,
+)
+
+
+def _opt110_on_events(doc: dict) -> Any:
+    return doc.get("on") or doc.get(True)
+
+
+def _opt110_tag_triggered(on: Any) -> bool:
+    if not isinstance(on, dict):
+        return False
+    push = on.get("push")
+    if isinstance(push, dict) and ("tags" in push or "tags-ignore" in push):
+        return True
+    return "release" in on
+
+
+def _opt110_job_ships(job_name: str, job: dict) -> bool:
+    """A job that releases or deploys: its uploads may be the shipped record."""
+    if job.get("environment"):
+        return True
+    if _RELEASE_NAME_RE.search(f"{job_name}\n{job.get('name') or ''}"):
+        return True
+    if _RELEASE_OP_RE.search(_job_run_blob(job)):
+        return True
+    return any(_RELEASE_OP_RE.search(_uses(s)) for s in _steps(job))
+
+
+def _opt110_upload_withheld(step: dict, name: str, paths: list[str]) -> bool:
+    """An upload whose likely reader is a person or a release, not a job."""
+    if _OPT110_RUN_STATUS_IF_RE.search(str(step.get("if") or "")):
+        return True
+    identity = "\n".join([str(step.get("name") or ""), name, *paths])
+    return bool(_OPT110_DIAGNOSTIC_RE.search(identity)
+                or _RELEASE_NAME_RE.search(identity)
+                or name == "github-pages")
+
+
+def _opt110_local_action_may_download(root: Path | None, uses: str) -> bool:
+    """Whether a local action could consume artifacts; unreadable means yes."""
+    if root is None:
+        return True
+    base = root / uses.split("@", 1)[0].removeprefix("./").rstrip("/")
+    for candidate in (base / "action.yml", base / "action.yaml"):
+        if candidate.is_file():
+            try:
+                text = candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return True
+            return bool(re.search(r"download-artifact|deploy-pages", text, re.I)
+                        or _OPT110_GH_DOWNLOAD_RE.search(text)
+                        or _OPT110_ARTIFACT_API_RE.search(text))
+    return True
+
+
 def _detect_opt110_unused_artifacts(
-        parsed: list[tuple[str, dict, str]]) -> list[tuple[str, str, Hit]]:
+        parsed: list[tuple[str, dict, str]],
+        root: Path | None = None) -> list[tuple[str, str, Hit]]:
     """Uploads with no repository-visible consumer.
 
     Match literal names across every workflow against download-artifact and
@@ -4065,12 +4136,24 @@ def _detect_opt110_unused_artifacts(
 
     for rel, doc, raw in parsed:
         release_like = _is_release_like(doc)
+        on = _opt110_on_events(doc)
+        producer_withheld = (release_like or _opt110_tag_triggered(on)
+                             or _on_includes(on, ("workflow_call",)))
         for job_name, job in _jobs_from_doc(doc).items():
             if not isinstance(job, dict):
                 continue
+            job_uses = str(job.get("uses") or "")
+            if job_uses and not job_uses.startswith("./"):
+                return []  # an external reusable workflow may download anything
+            job_withheld = producer_withheld or _opt110_job_ships(job_name, job)
             for step in _steps(job):
                 uses = _uses(step).lower()
                 values = step.get("with") if isinstance(step.get("with"), dict) else {}
+                if _OPT110_ARTIFACT_API_RE.search(_opt110_step_blob(step)):
+                    return []  # selects artifacts by run, not by literal name
+                if uses.startswith("./") and _opt110_local_action_may_download(
+                        root, _uses(step)):
+                    return []
                 if "actions/upload-artifact" in uses:
                     name, _ = _artifact_selector(step, upload=True)
                     if not name or _opt110_dynamic(name):
@@ -4080,6 +4163,12 @@ def _detect_opt110_unused_artifacts(
                         if line.strip() and not line.lstrip().startswith("!")
                         and not _opt110_dynamic(line.strip())
                     ]
+                    step_id = str(step.get("id") or "")
+                    if (job_withheld or _opt110_upload_withheld(step, name, paths)
+                            or (step_id and re.search(
+                                rf"steps\.{re.escape(step_id)}\.outputs\.artifact",
+                                raw))):
+                        continue
                     line = (_line_of_in_job(raw, job_name, "upload-artifact")
                             or _line_of_in_job(raw, job_name, name) or 1)
                     uploads.append({
@@ -4097,6 +4186,15 @@ def _detect_opt110_unused_artifacts(
                         unreadable_download = True
                     else:
                         downloads.append((name, pattern))
+                elif "deploy-pages" in uses:
+                    downloads.append((str(values.get("artifact_name") or "github-pages"), ""))
+                elif "artifact" in uses and "upload" not in uses:
+                    # A third-party artifact action: trust only a literal name.
+                    name = str(values.get("name") or "").strip()
+                    if name and not _opt110_dynamic(name):
+                        downloads.append((name, ""))
+                    else:
+                        unreadable_download = True
                 shell_downloads, shell_unreadable = _opt110_gh_downloads(_run(step))
                 downloads.extend(shell_downloads)
                 unreadable_download = unreadable_download or shell_unreadable
@@ -9137,7 +9235,7 @@ def _cross_workflow_hits(parsed: list[tuple[str, dict, str]], root: Path,
     out += _detect_opt40(parsed, root)
     out += _detect_opt4_ephemeral_mounts(parsed, root)
     out += _detect_opt12_duplicate_test_work(parsed)
-    out += _detect_opt110_unused_artifacts(parsed)
+    out += _detect_opt110_unused_artifacts(parsed, root)
     turbo_hits, incomplete = _detect_turbo(root, _ci_turbo_tasks(root, parsed))
     out += turbo_hits
     cache_hits, cache_held = _detect_opt96(parsed, root, default_branch, branch_source)
