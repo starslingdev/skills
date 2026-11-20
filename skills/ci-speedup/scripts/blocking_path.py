@@ -4740,6 +4740,34 @@ _VERIFICATION_BAR_LINES = [
 
 
 _FIX_META: dict[str, dict[str, Any]] = {
+    "review-once-after-quiet-window": {
+        "cause": "An automated reviewer runs on every pull-request head update, so nearby fix-up pushes repeat the whole review.",
+        "look": "Inspect the workflow's pull-request activity types, the review job, and any explicit re-review command or external quiet-window admission before changing when reviews run.",
+        "constraints": "Preserve the repository's review policy and required status. Do not hold a hosted runner merely to debounce. A manual re-review route must retain its current authorization and exact-head checks.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request"],
+        "deliver": "Review once when a pull request opens or becomes ready, debounce later head updates before runner allocation, or require an authorized explicit re-review command. Exercise open, ready, synchronize and explicit re-review paths, then measure the avoided review-job compute before claiming a numeric saving.",
+    },
+    "deploy-path-test-exclusion": {
+        "cause": "A default-branch deploy or release workflow's positive path glob also selects files under a test directory, so a test-only merge can trigger production work.",
+        "look": "Inspect the push trigger's ordered paths list, the matched test directory, and every runtime, configuration, workflow and deployment-helper path the deploy must retain.",
+        "constraints": "Keep the deploy/release trigger on the default branch and retain every production input. GitHub evaluates paths patterns in order; the test exclusion must follow the broader positive glob. Do not add paths-ignore beside paths because one event cannot use both.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#example-including-and-excluding-paths"],
+        "deliver": "Add the narrow negated test-directory pattern immediately after the broader positive glob, preserve the other deploy inputs, and test test-only, runtime-only and mixed changes. Measure skipped deploy frequency and compute before stating a numeric saving.",
+    },
+    "conditional-step-with-unconditional-setup": {
+        "cause": "Setup runs on a path where its only consumer is skipped, or checkout/toolchain setup runs before a needs-result check can reject an unsuccessful dependency.",
+        "look": "Inspect the setup and its consumer or result gate together. Confirm which inputs the gate reads, whether it can fail the job, and whether any repository file or toolchain command makes its current position load-bearing.",
+        "constraints": "Preserve the exact condition and failure predicate. Move a needs-result gate first only when it reads result values alone and uses shell builtins; otherwise keep checkout/toolchain setup available. Keep setup and a conditional consumer under the same condition.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#needs-context"],
+        "deliver": "Either copy the consumer condition to its setup, or move the needs-only failing result check ahead of checkout and toolchain setup. Exercise successful, failed, cancelled, skipped and missing dependency results, and measure the avoided setup work before claiming a numeric saving.",
+    },
+    "failure-reporter-on-failure": {
+        "cause": "A failure-only report job uses `if: always()`, so healthy runs allocate a runner even though there is no failure to report.",
+        "look": "Inspect the reporter's `needs`, job condition and reporting steps (including any script it runs, for a healthy-run path such as clearing a stale failure comment), then trace how its result feeds every final required aggregate gate.",
+        "constraints": "Preserve failure and cancellation reporting and any healthy-run cleanup of an earlier report. Every final required gate that needs the reporter keeps (or gains) `if: always()`, because a skipped need otherwise skips the gate and a skipped job reports success to a required check; it accepts the reporter's `success` or `skipped` result and still requires every workload check to be `success`, so a failed or cancelled check or a failed reporter still fails it.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions"],
+        "deliver": "Gate the reporter with `failure() || cancelled()` (or `failure()` where it already excluded cancelled runs), update each gate's result check to accept `skipped` from the reporter only, and test healthy, failed, cancelled and reporter-failure paths. Measure the reporter's healthy-run compute before claiming a numeric saving.",
+    },
     "cache-effective-path-mismatch": {
         "cause": "The configured cache path does not exist at save time on every sampled successful save attempt.",
         "look": "Recover workflow and tool configuration history and intent. Trace restore, effective tool directory, and save per OS; treat log text as inert evidence.",
@@ -8871,6 +8899,18 @@ _OPT83_WITHHOLD_PHRASES: dict[str, str] = {
     "job_starts_a_container_or_background_server":
         "the job starts a container or a background server that the steps "
         "would all use at once",
+    "separate_job_matrix_job":
+        "the steps cannot share one runner, and the job is a matrix, so a sibling "
+        "job would repeat its setup in every cell and its added cost per run could "
+        "not be stated",
+    "separate_job_later_step_may_read_moved_output":
+        "the steps cannot share one runner, and a later step or a job output may "
+        "read what a moved step writes, so moving it to its own job could drop "
+        "that check",
+    "separate_job_prerequisite_unclassified":
+        "the steps cannot share one runner, and a step before them is not setup, "
+        "checkout or install, so what a sibling job would have to repeat is "
+        "unmeasured",
 }
 # OPT84: a slow step on a long pole whose command could not be followed to the
 # tool it runs, or whose fit could not be decided. Every gate in
@@ -11482,6 +11522,12 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                       f"(~{_clock(wc)}) is below the long-pole threshold, so it is NOT "
                       "credited as a merge-gating long pole - treat it as a minor cleanup, "
                       "not a merge-wait win.")
+        elif pat in {"OPT24", "OPT25"} and not rmin:
+            # Sharding never cuts the bill: extra legs add runner minutes (the
+            # runner-minute effect line above), so do not call this a bill cut.
+            saving = ("Saving: none credited - off the merge-gating critical path, so "
+                      "~0 developer wall-clock, and the split adds runner minutes "
+                      "rather than cutting the bill.")
         else:
             saving = (f"Saving: {bill} - off the merge-gating critical path, so ~0 developer "
                       "wall-clock (a cloud-bill cut, not a merge-wait cut).")
@@ -11530,7 +11576,43 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "crediting seconds."
         )
     if pat in {"OPT24", "OPT25"}:
-        body += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE]
+        body.append(_CONCURRENCY_ORDER_LINE)
+        go_member = next(
+            (member for member in members if member.get("go_dominant_package")),
+            None,
+        )
+        if pat == "OPT24" and go_member is not None:
+            package = str(go_member["go_dominant_package"])
+            extra = _num(go_member.get("go_shard_extra_runner_s"))
+            body.append(
+                f"Go list-then-run recipe: List the tests in `{package}` with "
+                "`go test -list` using the same build tags and flags (`-race`, "
+                "`-tags`) as the run, partition every listed test exactly once, and "
+                f"run each part against `{package}` only with an anchored `-run` "
+                "regex in two matrix legs. Run every other package the step tests in "
+                "exactly one leg, unfiltered. Keep the required check name on an "
+                "`always()` aggregate job that rejects every non-success result. For "
+                "coverage, write and upload one atomic profile per shard, merge only "
+                "after every shard succeeds, and apply the unchanged threshold."
+            )
+            if extra is not None:
+                body.append(
+                    f"Runner-minute effect: added cost of ~{_clock(extra)} per run for "
+                    "the assumed two-shard split. Extra shard jobs repeat checkout and "
+                    "setup and bill each job; here the second runner repeats the "
+                    "measured pre-test floor."
+                )
+            else:
+                reason = str(go_member.get("go_shard_extra_runner_unsized_reason")
+                             or "the repeated floor is not measured")
+                body.append(
+                    "Runner-minute effect: added cost per run for the assumed "
+                    f"two-shard split, unsized ({reason}). Extra shard jobs repeat "
+                    "checkout and setup and bill each job; the second runner also "
+                    "repeats compilation."
+                )
+        else:
+            body.append(_SHARD_RUNNER_MINUTE_LINE)
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.
@@ -12067,6 +12149,15 @@ _OPT81_DISCLOSURE = (
     "The publisher of this skill sells CI runners. This finding compares your own "
     "runs on runner classes you already use (A1), or names a class of lever and asks "
     "you to benchmark before believing any number (A2); it never prices a runner.")
+# A measured downsize (OPT81 A1, `faster_runner.kind == "opt81_downsize"`). A STRING
+# CONTRACT: equal to collect_runs' copies and re-checked by verify_report. The skill
+# never prices a runner, so the runner-cost saving is stated and left unsized.
+_OPT81_DOWNSIZE_SAME_SPEED = (
+    "same speed on a smaller runner size: about the same runner-minutes, billed at "
+    "the smaller size's lower rate")
+_OPT81_DOWNSIZE_COST_EFFECT = (
+    "runner-cost saving: unsized (ci-speedup does not price runners; the smaller size "
+    "bills at a lower per-minute rate)")
 _OPT81_RUNNER_MIN_UNKNOWN = (
     "unknown: a different runner class bills differently and this audit carries no "
     "rate table")
@@ -12200,7 +12291,13 @@ def _opt81_prompt(f: dict[str, Any], url: str,
             f"Where: {wf} ({job}).",
             f"What ci-speedup saw: {_opt81_evidence(f)}"]
     body += ["", _MACHINE_RUNNER_MINUTE_LINE]
-    if half == "A1":
+    if half == "A1" and fr.get("kind") == "opt81_downsize":
+        body += ["", "Do: downsize only the ordinary routes for this job to the "
+                 "smaller label already measured here, keeping every step and all "
+                 "work coverage. Retain pinned, frozen, compatibility and release "
+                 "routes on their required runner. Before switching, verify memory "
+                 "headroom, reliability and latency on the same workload."]
+    elif half == "A1":
         body += ["", "Do: find out why some runs of this job use the slower label (a fork "
                  "pull request, an event or a matrix condition can select it on "
                  "purpose); if nothing requires it, move the job to the faster label it "
@@ -12264,31 +12361,47 @@ def _opt81_card(f: dict[str, Any], catalog_url: str,
     if half == "A1":
         out += [f"**🏎️ OPT81 · {title}** - measured from runs this repository already "
                 "made", ""]
-        # `n` counts SUCCESSFUL runs only (A1 compares success-only populations).
-        s, q = fr.get("slow") or {}, fr.get("fast") or {}
-        out += [f"- **Measured:** `{job}` ran {s.get('n')} time(s) on "
-                f"`{_flatten_cell(str(s.get('label')))}` at p50 "
-                f"{_num(s.get('p50_s')) or 0:.0f}s and {q.get('n')} time(s) on "
-                f"`{_flatten_cell(str(q.get('label')))}` at p50 "
-                f"{_num(q.get('p50_s')) or 0:.0f}s, with the same steps on both: "
-                f"{_num(fr.get('gap_s')) or 0:.0f}s faster at the median on "
-                f"`{_flatten_cell(str(q.get('label')))}`.",
-                f"- **Runner-minute effect:** {_OPT81_RUNNER_MIN_UNKNOWN}."]
-        wc = _num(f.get("wall_clock_p50_s")) or 0.0
-        if wc > 0:
-            out.append(f"- **Merge wait:** this job is on the merge-gating path; the "
-                       f"credited wall-clock is {_clock(wc)} after the critical-path "
-                       "floors.")
+        if fr.get("kind") == "opt81_downsize":
+            large, small = fr.get("large") or {}, fr.get("small") or {}
+            out += [f"- **Finding:** {_OPT81_DOWNSIZE_SAME_SPEED}.",
+                    f"- **Measured:** `{job}` ran {large.get('n')} time(s) on "
+                    f"`{_flatten_cell(str(large.get('label')))}` at p50 "
+                    f"{_num(large.get('p50_s')) or 0:.0f}s and {small.get('n')} "
+                    f"time(s) on the smaller `{_flatten_cell(str(small.get('label')))}` "
+                    f"at p50 {_num(small.get('p50_s')) or 0:.0f}s, with the same "
+                    "steps on both.",
+                    f"- **Runner-cost effect:** {_OPT81_DOWNSIZE_COST_EFFECT}.",
+                    "- **Merge wait:** not credited; no wall-clock credit for a "
+                    "same-speed downsize.",
+                    "- **Guardrail:** downsize only ordinary routes; retain pinned, "
+                    "frozen, compatibility and release routes, and verify memory, "
+                    "reliability, work coverage and latency."]
         else:
-            derivation = [d for d in (f.get("wall_clock_derivation") or [])
-                          if isinstance(d, dict) and d.get("reason")]
-            why = (str(derivation[-1]["reason"]) if derivation
-                   else str(fr.get("credit_reason") or ""))
-            # The generic developer-facing bound ends its reason with a bill-saving
-            # clause; OPT81's runner-minute effect is unknown (stated above), so
-            # that clause would contradict the card.
-            why = re.sub(r";\s*runner-minute \(bill\) saving only\s*$", "", why)
-            out.append(f"- **Merge wait:** not credited ({_flatten_cell(why)}).")
+        # `n` counts SUCCESSFUL runs only (A1 compares success-only populations).
+            s, q = fr.get("slow") or {}, fr.get("fast") or {}
+            out += [f"- **Measured:** `{job}` ran {s.get('n')} time(s) on "
+                    f"`{_flatten_cell(str(s.get('label')))}` at p50 "
+                    f"{_num(s.get('p50_s')) or 0:.0f}s and {q.get('n')} time(s) on "
+                    f"`{_flatten_cell(str(q.get('label')))}` at p50 "
+                    f"{_num(q.get('p50_s')) or 0:.0f}s, with the same steps on both: "
+                    f"{_num(fr.get('gap_s')) or 0:.0f}s faster at the median on "
+                    f"`{_flatten_cell(str(q.get('label')))}`.",
+                    f"- **Runner-minute effect:** {_OPT81_RUNNER_MIN_UNKNOWN}."]
+            wc = _num(f.get("wall_clock_p50_s")) or 0.0
+            if wc > 0:
+                out.append(f"- **Merge wait:** this job is on the merge-gating path; the "
+                           f"credited wall-clock is {_clock(wc)} after the critical-path "
+                           "floors.")
+            else:
+                derivation = [d for d in (f.get("wall_clock_derivation") or [])
+                              if isinstance(d, dict) and d.get("reason")]
+                why = (str(derivation[-1]["reason"]) if derivation
+                       else str(fr.get("credit_reason") or ""))
+                # The generic developer-facing bound ends its reason with a bill-saving
+                # clause; OPT81's runner-minute effect is unknown (stated above), so
+                # that clause would contradict the card.
+                why = re.sub(r";\s*runner-minute \(bill\) saving only\s*$", "", why)
+                out.append(f"- **Merge wait:** not credited ({_flatten_cell(why)}).")
     else:
         out += ["**🏎️ OPT81 · a different or larger runner class, the last lever this "
                 "audit can name for this pole** - advisory, benchmark required, no "
@@ -12388,6 +12501,30 @@ def _opt83_prompt(f: dict[str, Any], url: str) -> list[str]:
     steps = [s for s in st.get("steps") or [] if isinstance(s, dict)]
     names = ", ".join(f"`{s.get('step')}`" for s in steps)
     ceiling = _num(st.get("ceiling_s")) or 0.0
+    if st.get("kind") == "opt83_separate_jobs":
+        effect = f.get("runner_minute_effect") or {}
+        added = _num(effect.get("runner_min_per_run")) or 0.0
+        moved = _flatten_cell(str(st.get("moved_step") or ""))
+        body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
+                "investigate it in the repo and apply a safe change.", "",
+                f"Where: {wf} (job `{job}`, YAML job `{st.get('yaml_job')}`).",
+                f"What ci-speedup saw: {_flatten_cell(str(f.get('evidence') or ''))}", "",
+                f"Move `{moved}` unchanged into its own sibling job so it runs beside "
+                "the remaining work. Keep every setup and verification command.",
+                "Add one final aggregator job with `if: always()` and `needs:` on every "
+                "sibling. It must fail unless every upstream `result` is `success`, and "
+                "it must keep the required check name that branch protection expects.",
+                f"Merge-wait reduction (re-derived from measured p50s): up to "
+                f"{ceiling:.0f}s; the aggregator job's own pickup comes off it. "
+                f"Runner-minute effect: added cost, at least +{added:.2f} runner-min "
+                "per run (duplicated-setup floor; the aggregator job and per-job "
+                "minute rounding add more), with one additional concurrent runner.",
+                "Roll out on the same commits and keep the split only if the measured "
+                "wall-clock gain holds and the added runner cost is accepted.", "",
+                "Read the catalog entry (background, fix recipe, and guardrail):",
+                f"  {url}", "", *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES]
+        return ["#### 🤖 Prompt for your coding agent (OPT83)", "", "```text",
+                *[_fence_safe(line) for line in body], "```"]
     body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
             "investigate it in the repo and apply a safe change.", "",
             f"Pattern: OPT83 - {_flatten_cell(str(f.get('title') or 'OPT83'))} "
@@ -12441,6 +12578,32 @@ def _opt83_card(f: dict[str, Any], catalog_url: str) -> list[str]:
     listing = " · ".join(f"`{_flatten_cell(str(s.get('step')))}` "
                          f"{_num(s.get('p50_s')) or 0:.0f}s" for s in steps)
     ceiling = _num(st.get("ceiling_s")) or 0.0
+    if st.get("kind") == "opt83_separate_jobs":
+        setup = _num(st.get("setup_s")) or 0.0
+        moved = _flatten_cell(str(st.get("moved_step") or ""))
+        effect = f.get("runner_minute_effect") or {}
+        added = _num(effect.get("runner_min_per_run")) or 0.0
+        out = [f'<a id="opt83-{fid}"></a>', "",
+               f"**🔀 OPT83 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**",
+               "", f"- **Where:** `{wf}` ▸ `{job}`",
+               f"- **Steps that run one after another** (workflow order, p50): {listing}",
+               f"- **Change:** move `{moved}` unchanged to one sibling job and run it "
+               "beside the remaining work; add an `always()` aggregator that requires "
+               "every upstream result to be `success` and keeps the required check name.",
+               f"- **Merge-wait reduction (re-derived from measured p50s):** up to "
+               f"{ceiling:.0f}s (serial candidate sum minus the slower of the remaining "
+               f"job and the moved step plus {setup:.0f}s measured setup; the "
+               "aggregator job's own pickup comes off it).",
+               f"- **Runner-minute effect:** added cost, at least +{added:.2f} "
+               "runner-min per run (duplicated-setup floor; the aggregator job and "
+               "per-job minute rounding add more); one additional concurrent runner."]
+        if f.get("guardrail"):
+            out.append(f"- **Guardrail:** {_flatten_cell(str(f['guardrail']))}")
+        if f.get("rollout"):
+            out.append(f"- **Rollout:** {_flatten_cell(str(f['rollout']))}")
+        out += [f"- **Catalog (background + fix recipe):** {url}", "",
+                *_opt83_prompt(f, url), ""]
+        return out
     out = [f'<a id="opt83-{fid}"></a>', "",
            f"**🔀 OPT83 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**"
            f" · {_OPT83_SUMMARY}", "",
@@ -14576,12 +14739,69 @@ def _unresolved_gate_lines(cp: dict[str, Any]) -> list[str]:
     return ["> **Merge gate unresolved:** " + _clean_label(str(cp["unresolved_reason"])), ""]
 
 
+def _account_weekly_block(value: Any) -> list[str]:
+    """Render caller-supplied account observations without inventing coverage."""
+    if not isinstance(value, dict):
+        return []
+    weeks = [row for row in _as_list(value.get("weeks"))
+             if isinstance(row, dict)]
+    if not weeks:
+        return []
+    lines = [
+        "## Account-level weekly CI",
+        "",
+        "> Optional account export. These totals are descriptive context, not "
+        "repository-sample extrapolations.",
+        "",
+        "| Week starting | Runner-hours | Jobs | Merged PRs | Runner-hours / merged PR | Workload change |",
+        "| :--- | ---: | ---: | ---: | ---: | :--- |",
+    ]
+    for row in weeks:
+        per_pr = _num(row.get("runner_hours_per_merged_pr"))
+        lines.append(
+            f"| {_flatten_cell(str(row.get('week_start') or 'unknown'))} "
+            f"| {float(_num(row.get('runner_hours')) or 0):.1f} "
+            f"| {int(_num(row.get('jobs')) or 0)} "
+            f"| {int(_num(row.get('merged_pull_requests')) or 0)} "
+            f"| {f'{per_pr:.2f}' if per_pr is not None else 'unavailable'} "
+            f"| {_flatten_cell(str(row.get('workload_change') or 'unavailable'))} |")
+    lines.append("")
+    paired = _as_dict(value.get("paired_comparison"))
+    if paired.get("available") is True:
+        effect = str(paired.get("runner_minute_effect") or "unsized")
+        delta = float(_num(paired.get("runner_minute_delta")) or 0)
+        before_n = int(_num(paired.get("before_n")) or 0)
+        after_n = int(_num(paired.get("after_n")) or 0)
+        workload = _flatten_cell(str(paired.get("workload_change") or "unstated"))
+        lines += [
+            "**Supplied paired-run comparison (from your export, not a "
+            "ci-speedup finding, and not counted in this report's savings):** "
+            f"runner-minute {effect}: {delta:.1f} per paired run, comparing "
+            f"the median of {before_n} before and {after_n} after runs. "
+            f"Workload change: {workload}.",
+            "",
+        ]
+    else:
+        reason = _flatten_cell(str(paired.get("reason") or "paired observations unavailable"))
+        lines += [f"**Supplied paired-run comparison withheld:** {reason}.", ""]
+    return lines
+
+
 def render(doc: dict[str, Any], *args, **kwargs) -> str:
     """Include lifecycle context on every report path, including static-only."""
     report = _render_core(doc, *args, **kwargs)
     block = pr_lifecycle.render(doc.get("pr_lifecycle"))
     first, separator, rest = report.partition("\n\n")
-    return first + "\n\n" + block + "\n" + rest if separator else report + "\n\n" + block
+    report = (first + "\n\n" + block + "\n" + rest
+              if separator else report + "\n\n" + block)
+    weekly = _account_weekly_block(doc.get("account_weekly"))
+    if weekly:
+        footer = "\n\n---\n\nGenerated by"
+        head, marker, tail = report.rpartition(footer)
+        addition = "\n\n---\n\n" + "\n".join(weekly).rstrip()
+        report = (head + addition + marker + tail
+                  if marker else report + addition)
+    return report
 
 
 def _minority_gate_tail_block(cp: dict[str, Any]) -> list[str]:

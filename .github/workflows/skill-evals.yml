@@ -24,6 +24,9 @@
 #     `.github/workflows/claude.yml` shows the other pattern (comment-triggered, base-repo
 #     context) if on-demand fork coverage is ever wanted.
 #
+# No merge_group trigger, for the same reasons it is not required: it is path-filtered,
+# token-spending and non-deterministic, so the merge queue must never wait on it.
+#
 # Start advisory, exactly as the ci-secure gate itself ships advisory: let it report on a few
 # contract PRs, then decide whether it has earned being required.
 name: Skill evals

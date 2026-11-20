@@ -202,6 +202,10 @@ def test_opt81_verifier_constants_stay_coupled_to_the_engine():
     assert vr._VR_OPT81_MIN_SAMPLES_PER_LABEL == cr._OPT81_MIN_SAMPLES_PER_LABEL == 8
     assert vr._VR_OPT81_MIN_GAP_S == cr._OPT81_MIN_GAP_S == 30.0
     assert vr._VR_OPT81_MIN_GAP_FRAC == cr._OPT81_MIN_GAP_FRAC == 0.25
+    assert (vr._VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL
+            == cr._OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL == 5)
+    assert (vr._VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC
+            == cr._OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC == 0.05)
     assert vr._VR_OPT81_COVERED_FRAC == cr._OPT81_COVERED_FRAC
     assert vr._VR_OPT81_CACHE_LEVER_MIN_S == cr._OPT81_CACHE_LEVER_MIN_S
     assert vr._VR_OPT81_CHEAPER_STRUCTURAL == cr._OPT81_CHEAPER_STRUCTURAL
@@ -450,10 +454,205 @@ def test_opt81_a1_gap_below_floor_is_a_verdict_not_a_held_back_candidate():
     assert found == [] and withheld.get("gap_below_floor") == 1
 
 
+_LARGE8 = "ubuntu-24.04-8-cores"
+_SMALL4 = "ubuntu-24.04-4-cores"
+
+
+def _downsize(large=(100, 101, 99, 102, 100), small=(103, 104, 102, 105, 103),
+              large_label=_LARGE8, small_label=_SMALL4, job=None):
+    runs = _alt_runs(slow_label=large_label, slow=list(large),
+                     fast_label=small_label, fast=list(small))
+    if job:
+        for run in runs:
+            for j in run:
+                j["name"] = job
+    return _a1(runs)
+
+
+_SAME_SPEED = ("same speed on a smaller runner size: about the same runner-minutes, "
+               "billed at the smaller size's lower rate")
+_UNSIZED_REASON = ("ci-speedup does not price runners; the smaller size bills at a "
+                   "lower per-minute rate")
+_COST_EFFECT = f"runner-cost saving: unsized ({_UNSIZED_REASON})"
+_NEVER_PRICES = ("The publisher of this skill sells CI runners. This finding compares "
+                 "your own runs on runner classes you already use (A1), or names a "
+                 "class of lever and asks you to benchmark before believing any number "
+                 "(A2); it never prices a runner.")
+# The 2026-07-20 rule: ci-speedup never prices a runner. No ratio, no rate source,
+# no currency figure, on any downsize surface.
+_PRICING_RE = re.compile(
+    r"price[ _]ratio|rate ratio|rate card|runner_cost_frac|price_source|price_read|"
+    r"actions-runner-pricing|docs\.github\.com/en/billing|\$\s?\d|\d\s?USD", re.I)
+
+
+def _assert_no_pricing(text: str) -> None:
+    m = _PRICING_RE.search(text)
+    assert m is None, f"pricing text {m.group(0)!r} in: ...{text[max(0, m.start() - 80):m.end() + 80]}..."
+
+
+def test_opt81_reports_a_smaller_runner_as_same_speed_with_an_unsized_cost_saving():
+    """Issue #398 under the 2026-07-20 rule: the smaller size runs about as fast, so
+    it uses about the same runner-minutes billed at a lower rate. ci-speedup never
+    prices a runner, so the runner-cost saving is unsized, and nothing is credited
+    as wall-clock or runner-minutes."""
+    found, withheld, cands, *_ = _downsize()
+
+    assert len(found) == 1, (withheld, cands)
+    f = found[0]
+    fr = f["faster_runner"]
+    assert fr["kind"] == "opt81_downsize"
+    assert fr["large"]["size"] == "8" and fr["small"]["size"] == "4"
+    assert fr["slowdown_frac"] == pytest.approx(0.03, abs=0.001)
+    assert f["runner_cost_effect"] == {"direction": "unsized", "reason": _UNSIZED_REASON}
+    assert fr["runner_cost_effect"] == f["runner_cost_effect"]
+    # The report's group heading reads this, so it never says "no bill saving".
+    assert f["runner_min_unsized_reason"] == _UNSIZED_REASON
+    assert "runner_minute_effect" not in f and "runner_minute_effect" not in fr
+    assert f["wall_clock_p50_s"] == 0.0 and f.get("runner_min_saving") is None
+    assert _SAME_SPEED in f["evidence"].lower()
+    assert _COST_EFFECT in f["evidence"] and _COST_EFFECT in f["size_note"]
+    assert "no wall-clock credit" in f["size_note"]
+    assert fr["disclosure"] == _NEVER_PRICES and _NEVER_PRICES in f["evidence"]
+    _assert_no_pricing(json.dumps(f))
+    assert cands == []
+
+
+def test_opt81_downsize_is_unsized_the_same_way_for_every_runner_class():
+    """No size is priced, so a StarSling pair reads exactly like a GitHub pair."""
+    found, *_ = _downsize(large_label="starsling-ubuntu-24.04-4",
+                          small_label="starsling-ubuntu-24.04-2")
+    assert found[0]["runner_cost_effect"] == {"direction": "unsized",
+                                              "reason": _UNSIZED_REASON}
+    assert found[0]["runner_min_unsized_reason"] == _UNSIZED_REASON
+    _assert_no_pricing(json.dumps(found[0]))
+
+
+def test_opt81_smaller_runner_more_than_five_percent_slower_stays_quiet():
+    found, withheld, cands, *_ = _downsize(large=[100] * 5, small=[107] * 5)
+
+    assert found == []
+    assert withheld.get("downsize_slowdown_above_limit") == 1
+    # A measured verdict, never a held-back candidate.
+    assert cands == [] and "fewer_than_min_samples_on_two_labels" not in withheld
+
+
+def test_opt81_two_images_are_not_a_downsize():
+    """Near miss: a 16-core 22.04 route and an 8-core 24.04 route differ in image
+    (a compatibility pin), not only in size."""
+    found, withheld, *_ = _downsize(large_label="ubuntu-22.04-16-cores",
+                                    small_label="ubuntu-24.04-8-cores")
+    assert found == [], withheld
+
+
+@pytest.mark.parametrize("job", ["bench (compat)", "release build",
+                                 "test-pinned-runner", "frozen image smoke"])
+def test_opt81_pinned_or_compatibility_routes_are_never_downsized(job):
+    found, withheld, cands, *_ = _downsize(job=job)
+    assert found == []
+    assert withheld.get("downsize_pinned_or_compatibility_route") == 1
+    assert cands == []
+
+
+def test_opt81_a_size_matrix_is_never_downsized():
+    """Near miss: both sizes run in every run (a runner matrix). Dropping the large
+    leg would remove a configured leg, not move a route, so it stays quiet."""
+    runs = _runs(slow_label=_LARGE8, slow=[100] * 5, fast_label=_SMALL4,
+                 fast=[103] * 5)
+    found, withheld, cands, *_ = _a1(runs)
+    assert found == [], withheld
+    assert withheld.get("downsize_runner_matrix") == 1 and cands == []
+
+
+def test_opt81_ordinary_job_names_with_route_words_inside_still_fire():
+    # Whole words only: "pinpoint" and "compatible-api" are not pinned/release routes.
+    for job in ("pinpoint tests", "compatible-api lint"):
+        found, *_ = _downsize(job=job)
+        assert len(found) == 1, job
+
+
+def test_opt81_downsize_card_states_an_unsized_runner_cost_saving_and_no_price():
+    found, *_ = _downsize(large=[100] * 5, small=[103] * 5)
+    card = "\n".join(bp._opt81_card(found[0], "https://example.invalid/catalog"))
+
+    assert f"smaller `{_SMALL4}`" in card
+    assert _SAME_SPEED in card.lower()
+    assert f"**Runner-cost effect:** {_COST_EFFECT}." in card
+    assert "**Runner-minute effect:**" not in card
+    assert "runner-minutes per job run" not in card
+    assert "**Merge wait:** not credited" in card
+    assert all(word in card for word in ("pinned", "frozen", "compatibility"))
+    assert _NEVER_PRICES in card
+    _assert_no_pricing(card)
+
+
+def test_opt81_verifier_rejects_any_price_on_a_downsize_finding():
+    vr = _load_verify_report()
+    found, *_ = _downsize(large=[100] * 5, small=[103] * 5)
+    assert vr._opt81_a1_rederived(found[0]) == []
+
+    def problems(mutate):
+        f = copy.deepcopy(found[0])
+        mutate(f)
+        return vr._opt81_a1_rederived(f)
+
+    def add_ratio(f):
+        f["runner_cost_effect"]["price_ratio"] = 0.5455
+        f["faster_runner"]["runner_cost_effect"]["price_ratio"] = 0.5455
+    assert any("price" in p for p in problems(add_ratio))
+
+    def add_rate_url(f):
+        f["evidence"] += (" Rates: https://docs.github.com/en/billing/reference/"
+                          "actions-runner-pricing")
+    assert any("price" in p for p in problems(add_rate_url))
+
+    def add_dollars(f):
+        f["size_note"] += "; about $12.40 a month"
+    assert any("price" in p for p in problems(add_dollars))
+
+    def drop_reason(f):
+        del f["runner_min_unsized_reason"]
+    assert any("runner_min_unsized_reason" in p for p in problems(drop_reason))
+
+    def sized(f):
+        f["runner_cost_effect"] = {"direction": "saving", "runner_cost_frac": 0.44}
+        f["faster_runner"]["runner_cost_effect"] = dict(f["runner_cost_effect"])
+    assert problems(sized)
+
+
+def test_opt81_downsize_text_and_route_gate_stay_coupled_and_carry_no_rate_table():
+    vr = _load_verify_report()
+    assert (vr._VR_OPT81_DOWNSIZE_PINNED_ROUTE_RE.pattern
+            == cr._OPT81_DOWNSIZE_PINNED_ROUTE_RE.pattern)
+    assert (vr._VR_OPT81_DOWNSIZE_COST_EFFECT == bp._OPT81_DOWNSIZE_COST_EFFECT
+            == cr._OPT81_DOWNSIZE_COST_EFFECT == _COST_EFFECT)
+    assert cr._OPT81_DOWNSIZE_UNSIZED_REASON == _UNSIZED_REASON
+    for mod in (cr, bp, vr):
+        assert not [n for n in vars(mod) if re.search(r"RATE_PER_MIN|PRICE_SOURCE", n)
+                    and "OPT81" in n], mod.__name__
+
+
+def test_opt81_disclosure_never_prices_a_runner_in_every_copy():
+    vr = _load_verify_report()
+    assert cr._OPT81_DISCLOSURE == bp._OPT81_DISCLOSURE == vr._VR_OPT81_DISCLOSURE \
+        == _NEVER_PRICES
+    catalog = (_SKILL_DIR / "references" / "optimization-patterns.md").read_text()
+    for text in (_OPT81_FILE.read_text(), catalog):
+        assert _NEVER_PRICES in text
+        assert "prices only a move" not in text
+
+
 def test_opt81_a1_three_qualifying_labels_withhold():
     runs = _runs(extra=lambda i: [_job("bench", "starsling-ubuntu-24.04", 70, 100 + i)])
     found, withheld, cands, *_ = _a1(runs)
     assert found == [] and withheld.get("more_than_two_qualifying_runner_labels") == 1
+
+
+def test_opt81_downsize_floor_does_not_block_an_existing_eight_sample_pair():
+    runs = _runs(extra=lambda i: (
+        [_job("bench", "starsling-ubuntu-24.04-2", 90, 100 + i)] if i < 5 else []))
+    found, withheld, *_ = _a1(runs)
+    assert len(found) == 1, withheld
+    assert found[0]["faster_runner"]["kind"] != "opt81_downsize"
 
 
 def test_opt81_a1_drops_an_unclassifiable_population_and_still_compares():
@@ -757,6 +956,8 @@ def _opt81_texts() -> dict[str, str]:
         "a1 finding": json.dumps(a1),
         "a2 finding": json.dumps(a2),
         "a1 card + prompt": "\n".join(bp._opt81_card(a1, url)),
+        "a1 downsize finding": json.dumps(_downsize()[0][0]),
+        "a1 downsize card + prompt": "\n".join(bp._opt81_card(_downsize()[0][0], url)),
         "a2 card + prompt": "\n".join(bp._opt81_card(a2, url)),
         "a2 held back": "\n".join(bp._opt81_card(a2, url, held_back_by="x")),
         "unrouted section": "\n".join(bp._opt81_unrouted_block([a1, a2], url)),
@@ -1429,6 +1630,40 @@ def test_opt81_a1_credit_survives_the_real_cascade_renders_and_verifies(
     path.write_text(json.dumps(doc), encoding="utf-8")
     r = vr.check_opt81_runner_comparison_rederived(md, path)
     assert r.ok, r.detail
+
+
+def test_opt81_downsize_runs_through_collect_and_full_report_verifier(
+        monkeypatch, tmp_path):
+    """The acceptance shape enters through the GitHub-client boundary, not a
+    renderer-only stamp, and the complete report verifier accepts the result."""
+    vr = _load_verify_report()
+    plan = [leg for pair in zip(
+        [("ubuntu-24.04-8-cores", 100)] * 5,
+        [("ubuntu-24.04-4-cores", 103)] * 5,
+    ) for leg in pair]
+    doc = _collect(monkeypatch, plan,
+                   seed={"skill_commit_sha": "installed:unversioned"})
+    findings = [f for f in _o81(doc, "A1")
+                if f["faster_runner"].get("kind") == "opt81_downsize"]
+    assert len(findings) == 1, doc.get("opt81_withheld_by_gate")
+    report = bp.render(doc, {}, {}, {}, "2026-06-08")
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failed = [check for check in vr.run_checks(
+        report, report_path, findings_path, None) if not check.skipped and not check.ok]
+    assert failed == [], [(check.name, check.detail) for check in failed]
+    fid = findings[0]["id"]
+    n, block = vr._opt81_rendered_block(report, fid)
+    assert n == 1
+    _assert_no_pricing(block)
+    assert f"**Runner-cost effect:** {_COST_EFFECT}." in block
+    assert not [ln for ln in report.splitlines()
+                if "OPT81" in ln and "no bill saving" in ln]
 
 
 def test_opt81_a2_fires_through_collect_on_a_pull_request_pole(monkeypatch):
