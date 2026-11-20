@@ -285,6 +285,13 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
     assert failures == [], [(check.name, check.detail) for check in failures]
     assert "List the tests in `example/project` with `go test -list`" in report
     assert "Runner-minute effect: added cost of ~15m 00s per run" in report
+    opt24 = report.split("<summary><strong>OPT24", 1)[1].split("</details>", 1)[0]
+    # The partition covers only the dominant package; every other package the
+    # step tested must still run, exactly once, or the split drops validation.
+    assert "every other package the step tests in exactly one leg" in opt24
+    assert "same build tags and flags" in opt24
+    # Sharding adds runner minutes; the prompt must not call it a bill cut.
+    assert "a cloud-bill cut" not in opt24
 
     missing_probe_row = report.replace(
         "| test compile log probe | 3 job log(s) read | "

@@ -11482,6 +11482,12 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                       f"(~{_clock(wc)}) is below the long-pole threshold, so it is NOT "
                       "credited as a merge-gating long pole - treat it as a minor cleanup, "
                       "not a merge-wait win.")
+        elif pat in {"OPT24", "OPT25"} and not rmin:
+            # Sharding never cuts the bill: extra legs add runner minutes (the
+            # runner-minute effect line above), so do not call this a bill cut.
+            saving = ("Saving: none credited - off the merge-gating critical path, so "
+                      "~0 developer wall-clock, and the split adds runner minutes "
+                      "rather than cutting the bill.")
         else:
             saving = (f"Saving: {bill} - off the merge-gating critical path, so ~0 developer "
                       "wall-clock (a cloud-bill cut, not a merge-wait cut).")
@@ -11542,12 +11548,14 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             extra = _num(go_member.get("go_shard_extra_runner_s")) or 0.0
             body.append(
                 f"Go list-then-run recipe: List the tests in `{package}` with "
-                "`go test -list`, partition every test exactly once, and run each "
-                "part with an anchored `-run` regex in two matrix legs. Keep the "
-                "required check name on an `always()` aggregate job that rejects "
-                "every non-success result. For coverage, write and upload one atomic "
-                "profile per shard, merge only after every shard succeeds, and apply "
-                "the unchanged threshold."
+                "`go test -list` using the same build tags and flags (`-race`, "
+                "`-tags`) as the run, partition every listed test exactly once, and "
+                f"run each part against `{package}` only with an anchored `-run` "
+                "regex in two matrix legs. Run every other package the step tests in "
+                "exactly one leg, unfiltered. Keep the required check name on an "
+                "`always()` aggregate job that rejects every non-success result. For "
+                "coverage, write and upload one atomic profile per shard, merge only "
+                "after every shard succeeds, and apply the unchanged threshold."
             )
             body.append(
                 f"Runner-minute effect: added cost of ~{_clock(extra)} per run for "
