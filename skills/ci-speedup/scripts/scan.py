@@ -4571,6 +4571,37 @@ def _comment_guard_dimensions(text: str) -> set[str]:
     return dimensions
 
 
+# `const body = context.payload.comment.body`, `BODY="${{ github.event.comment.body }}"`.
+_COMMENT_ALIAS_RE = re.compile(
+    r"(?:\b(?:const|let|var)\s+)?\b([A-Za-z_$][\w$]*)\s*=\s*[\"']?(?:\$\{\{\s*)?"
+    r"((?:github\.|context\.)[\w.]+)")
+
+
+def _opt108_rejection_dimensions(script: str, env: dict) -> set[str]:
+    """Comment inputs that an explicit early return in `script` tests. A
+    variable read from the comment (a JS/shell assignment, or the step's
+    `env:`) counts as that input; an early return whose condition never
+    touches the comment rejects nothing comment-shaped."""
+    aliases: dict[str, set[str]] = {}
+    for name, value in (env or {}).items():
+        dims = _comment_guard_dimensions(str(value))
+        if dims:
+            aliases[str(name)] = dims
+            aliases[f"process.env.{name}"] = dims
+    for m in _COMMENT_ALIAS_RE.finditer(script):
+        dims = _comment_guard_dimensions(m.group(2))
+        if dims:
+            aliases[m.group(1)] = dims
+    dimensions: set[str] = set()
+    for m in _COMMENT_EARLY_RETURN_RE.finditer(script):
+        text = m.group(0)
+        dimensions.update(_comment_guard_dimensions(text))
+        for name, dims in aliases.items():
+            if re.search(r"(?<![\w$.])\$?\{?" + re.escape(name) + r"(?![\w$])", text):
+                dimensions.update(dims)
+    return dimensions
+
+
 def _opt108_setup_only(step: dict) -> bool:
     """Checkout, `setup-*`, cache or a dependency-install step: it only serves
     the handler that follows, so it does not make the job required work for
@@ -4604,8 +4635,8 @@ def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
                 dimensions.update(_comment_guard_dimensions(step_if))
             with_values = step.get("with") if isinstance(step.get("with"), dict) else {}
             script = "\n".join((_run(step), str(with_values.get("script") or "")))
-            if _COMMENT_EARLY_RETURN_RE.search(script):
-                dimensions.update(_comment_guard_dimensions(script))
+            step_env = step.get("env") if isinstance(step.get("env"), dict) else {}
+            dimensions.update(_opt108_rejection_dimensions(script, step_env))
             if (_run(step) or _uses(step)) and (
                     dimensions or not _opt108_setup_only(step)):
                 step_dimensions.append(dimensions)

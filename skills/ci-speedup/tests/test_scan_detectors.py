@@ -1464,6 +1464,39 @@ jobs:
     assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+def test_opt108_early_return_unrelated_to_the_comment_stays_quiet(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!process.env.TOKEN) return;
+            await record(body);
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_shell_exit_on_env_aliased_comment_body_fires(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          if [[ "$BODY" != /deploy* ]]; then exit 0; fi
+          ./deploy.sh
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
 def test_opt108_optional_reaction_does_not_make_required_job_skippable(tmp_path: Path):
     workflow = """name: Comment recorder
 on: issue_comment
