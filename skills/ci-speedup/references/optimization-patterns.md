@@ -3416,16 +3416,18 @@ fix_strategy: multi-language-matrix-without-path-filter
 title_template: "Multi-Language Matrix Without Path Filter"
 -->
 
-**Anti-pattern**: A security/static-analysis workflow uses a matrix to run language-specific scanners (CodeQL, Snyk, Semgrep, dependency-scan) but never gates the matrix legs on whether files of THAT language changed. CodeQL Python runs on JS-only PRs, CodeQL JavaScript runs on Python-only PRs — both consume runner time + analysis time for zero signal.
+**Anti-pattern**: A pull-request workflow runs language-specific work when the change touches none of that language's inputs. This includes a security scanner's language matrix and separate Go, Rust, or Python contract/proof jobs. The unused lane still installs its toolchain and runs its checks, consuming runner time for no signal.
 
 **Detection heuristic**:
 
 - Workflow declares a matrix with `language: [javascript, python, ...]` (or similar)
 - Uses `github/codeql-action/init` (or `snyk/actions`, `returntocorp/semgrep-action`, etc.) with `languages: ${{ matrix.language }}`
+- Or a job identifies itself as a Go, Rust, or Python lane and installs that toolchain with `setup-go`, `setup-python`, a Rust toolchain action, or `rustup toolchain install`
 - The workflow has NO preceding `dorny/paths-filter` job or per-leg `if:` checking changed file extensions
 - **Activation fidelity**: only flag when the workflow actually runs on every PR — suppress when the `pull_request:` trigger is `types:`-gated to a non-lifecycle activity (e.g. `types: [labeled]`), since the legs then don't run on a normal PR. (Shared `_pr_trigger_runs_every_pr` in `scan.py`; see OPT33.)
+- **Measured admission**: for a per-language job, fetch the changed files of the already-sampled pull requests. Credit only the affected job's measured billed-equivalent minutes on diffs confidently owned by another language or documentation. An unknown input, incomplete file list, or failed lookup runs the job and receives no saving credit.
 
-**Fix**: Add a pre-job that uses `dorny/paths-filter@v3` to detect which languages changed, then gate each matrix leg with `if: needs.changes.outputs.<lang> == 'true'`. Example:
+**Fix**: Derive each lane's complete input set from the repository, then select jobs from the exact pull-request comparison. Run every language job when the lookup is missing, incomplete, capped, malformed, or contains an input whose owner is unknown. A paths-filter pre-job is sufficient for simple repositories; a conservative owner-selection script is safer where languages share generated files or fixtures. Example:
 
 ```yaml
 jobs:
@@ -3453,9 +3455,9 @@ jobs:
       (matrix.language == 'python'     && needs.changes.outputs.python == 'true')
 ```
 
-Caveat: GitHub renders skipped matrix legs as "skipped" (not "passed"). If you have a required-status-check rule on `codeql (javascript)`, change it to `codeql` without the matrix-leg suffix, or make the leg's terminal step a no-op success rather than `if:`-skipping the whole leg. Document the chosen approach in the workflow.
+Caveat: GitHub renders skipped matrix legs and jobs as "skipped" (not "passed"). Keep an unchanged required aggregate check, or deliberately update branch protection so a language-specific required check is not left expected forever. Document the chosen approach in the workflow.
 
-**Real-world example (blen-starter-kit deep-scan)**: `security.yml` runs CodeQL Python and JavaScript on every PR regardless of which app changed. JS-only PRs paid Python init+analyze (~30-60s) for nothing, and vice versa.
+**Public evidence**: [OpenClaw PR #193865](https://github.com/openclaw/openclaw/pull/193865) adds fail-open pull-request owner selection for independent TypeScript and Rust contract proofs. Exact, complete comparisons may omit an unaffected owner; deleted, unknown, malformed, capped, or failed comparisons retain both jobs.
 
 **Risk**: MEDIUM. If a polyglot file (a Python/JS bridge, or a config that affects both) changes, both legs should still run. The `paths-filter` rules need to be inclusive enough to catch shared config files.
 

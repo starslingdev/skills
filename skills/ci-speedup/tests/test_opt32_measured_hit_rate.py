@@ -96,6 +96,61 @@ def test_opt32_measures_three_of_sixty_through_collect_and_full_verifier(
     assert "modeled upper bound" in report
 
 
+def test_opt39_measures_irrelevant_language_pr_compute_through_collect_and_verifier(
+        monkeypatch, tmp_path):
+    paths = {
+        number: ([f"docs/guide-{number}.md"] if number <= 30
+                 else [f"internal/check_{number}.go"])
+        for number in range(1, 61)
+    }
+    client = _PathFilterClient(paths)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1",
+        "pattern": "OPT39",
+        "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"],
+        "opt39_languages": ["go"],
+        "opt39_job_kind": "per-language-toolchain",
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT39")
+    measurement = finding.get("language_path_measurement", {})
+    assert measurement.get("status") == "measured"
+    assert measurement.get("irrelevant_prs") == 30
+    assert measurement.get("sampled_prs") == 60
+    assert measurement.get("sample_runner_minutes_saved") == 120.0
+    assert finding.get("runner_min_saving") == 600.0
+    assert finding.get("runner_minute_effect", {}).get("direction") == "saving"
+    assert "30 of 60 sampled pull-request runs" in finding["evidence"]
+    assert "one 60-run pull-request sample" in finding["evidence"]
+    report = _verify_full(doc, tmp_path)
+    assert "30 of 60 sampled pull-request runs" in report
+    assert "600.0 runner-minutes per 30 days" in report
+
+
+@pytest.mark.parametrize("paths", [
+    {number: [f"internal/check_{number}.go"] for number in range(1, 61)},
+    {number: [f"test/fixtures/case-{number}.json"] for number in range(1, 61)},
+])
+def test_opt39_with_no_proven_irrelevant_language_run_is_withheld(
+        monkeypatch, paths):
+    client = _PathFilterClient(paths)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], "opt39_languages": ["go"],
+        "opt39_job_kind": "per-language-toolchain",
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    assert not any(f.get("pattern") == "OPT39" for f in doc["findings"]), (
+        "OPT39 needs positive evidence of a classified irrelevant pull-request run")
+
+
 def test_opt32_zero_hit_is_also_noticed_and_csv_is_not_skipped(monkeypatch, tmp_path):
     paths = {n: (["docs/x.csv"] if n == 1 else [f"src/file{n}.py"])
              for n in range(1, 61)}

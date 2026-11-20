@@ -4827,10 +4827,86 @@ def _detect_opt33(doc: dict, raw: str) -> list[Hit]:
 _SCANNER_RE = re.compile(
     r"github/codeql-action|snyk/actions|returntocorp/semgrep|semgrep-action", re.I)
 
+_OPT39_TOOLCHAIN_ACTIONS = {
+    "go": re.compile(r"(?:^|/)setup-go@", re.I),
+    "python": re.compile(r"(?:^|/)setup-python@", re.I),
+    "rust": re.compile(
+        r"(?:^|/)(?:rust-toolchain|setup-rust-toolchain)@", re.I),
+}
+_OPT39_TOOLCHAIN_COMMANDS = {
+    "rust": re.compile(r"\brustup\s+toolchain\s+(?:install|add)\b", re.I),
+}
+_OPT39_LANGUAGE_NAME_RE = {
+    "go": re.compile(r"(?:^|[^a-z])go(?:[^a-z]|$)", re.I),
+    "python": re.compile(r"(?:python|\bpy\b)", re.I),
+    "rust": re.compile(r"(?:rust|cargo)", re.I),
+}
+
+
+def _opt39_job_languages(job_name: str, job: dict) -> list[str]:
+    """Known language toolchains in a job that identifies itself as language-specific.
+
+    The name requirement keeps a repository's ordinary primary test job from being
+    called a per-language lane merely because it installs that repository's runtime.
+    """
+    display = f"{job_name} {job.get('name') or ''}"
+    languages: list[str] = []
+    for language, name_re in _OPT39_LANGUAGE_NAME_RE.items():
+        if not name_re.search(display):
+            continue
+        for step in _steps(job):
+            uses = _uses(step)
+            command = str(step.get("run") or "") if isinstance(step, dict) else ""
+            action_re = _OPT39_TOOLCHAIN_ACTIONS.get(language)
+            command_re = _OPT39_TOOLCHAIN_COMMANDS.get(language)
+            if ((action_re is not None and action_re.search(uses))
+                    or (command_re is not None and command_re.search(command))):
+                languages.append(language)
+                break
+    return languages
+
+
+def _opt39_trigger_path_language(pattern: str) -> str | None:
+    """Return the known language owner for one conservative PR `paths:` entry."""
+    if pattern.strip().startswith("!"):
+        return None
+    value = pattern.strip().lower().lstrip("/")
+    if not value:
+        return None
+    base = value.rsplit("/", 1)[-1]
+    # The workflow/config itself is a shared input for whichever language job owns
+    # this trigger. It does not make an otherwise language-scoped trigger broad.
+    if value.startswith(".github/workflows/"):
+        return "shared"
+    if (".go" in value or base in {"go.mod", "go.sum", "go.work", "go.work.sum"}):
+        return "go"
+    if (".rs" in value or value.startswith("crates/")
+            or any(token in value for token in (
+                "cargo.toml", "cargo.lock", "rust-toolchain", "rustfmt.toml",
+                "clippy.toml"))):
+        return "rust"
+    if (".py" in value or any(token in value for token in (
+            "pyproject.toml", "requirements", "poetry.lock", "uv.lock",
+            "setup.py", "setup.cfg", "tox.ini"))):
+        return "python"
+    return None
+
+
+def _opt39_trigger_is_language_scoped(on: object, languages: list[str]) -> bool:
+    if not isinstance(on, dict):
+        return False
+    pull_request = on.get("pull_request")
+    paths = pull_request.get("paths") if isinstance(pull_request, dict) else None
+    if isinstance(paths, str):
+        paths = [paths]
+    if not isinstance(paths, list) or not paths:
+        return False
+    owners = [_opt39_trigger_path_language(str(path)) for path in paths]
+    return all(owner == "shared" or owner in languages for owner in owners)
+
 
 def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
-    """A `language` matrix scanner (CodeQL/Snyk/Semgrep) with no
-    `dorny/paths-filter` gate and no per-leg `if:` (catalog OPT39 heuristic)."""
+    """A language-specific PR job with no changed-path gate (OPT39)."""
     # The finding's claim is "every language leg runs on every PR" — only true if the
     # workflow actually triggers on PRs. A push-only / schedule-only CodeQL workflow runs
     # on ZERO PRs, so the claim would be false (the OPT33 blind spot). Gate on `on:` and
@@ -4849,24 +4925,44 @@ def _detect_opt39(doc: dict, raw: str) -> list[Hit]:
             continue
         strategy = job.get("strategy") or {}
         matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
-        if not isinstance(matrix, dict) or "language" not in matrix:
-            continue
-        if not any(_SCANNER_RE.search(_uses(s)) for s in _steps(job)):
+        scanner_matrix = (isinstance(matrix, dict) and "language" in matrix
+                          and any(_SCANNER_RE.search(_uses(s)) for s in _steps(job)))
+        job_languages = _opt39_job_languages(job_name, job)
+        if not scanner_matrix and not job_languages:
             continue
         jif = job.get("if")
         leg_gated = isinstance(jif, str) and ("needs." in jif or "matrix.language" in jif)
-        if has_paths_filter or leg_gated:
+        if scanner_matrix and (has_paths_filter or leg_gated):
             continue
+        if job_languages and (leg_gated or _opt39_trigger_is_language_scoped(
+                on, job_languages)):
+            continue
+        if scanner_matrix:
+            evidence = (f"job `{job_name}` runs a `language` matrix scanner with no "
+                        f"`dorny/paths-filter` gate — every language leg runs on "
+                        f"{scope} regardless of which language changed")
+            line = _line_of_in_job(raw, job_name, "language")
+            facts = {"opt39_job_kind": "language-matrix"}
+        else:
+            language_text = ", ".join(job_languages)
+            evidence = (
+                f"job `{job_name}` installs the {language_text} toolchain for "
+                f"{scope} with no changed-path job gate, so it also runs when "
+                f"the pull request changes none of that language's inputs")
+            line = _line_of_in_job(raw, job_name, f"{job_name}:")
+            facts = {
+                "opt39_job_kind": "per-language-toolchain",
+                "opt39_languages": job_languages,
+            }
         hits.append(Hit(
             # Anchor on THIS job's `language` matrix line, not the file-global
             # first `language` substring elsewhere in the file (the OPT33/OPT29
             # hazard) — e.g. an earlier job's `if: matrix.language` expression.
-            line=_line_of_in_job(raw, job_name, "language"),
+            line=line,
             affected_jobs=[job_name],
-            evidence=(f"job `{job_name}` runs a `language` matrix scanner with no "
-                      f"`dorny/paths-filter` gate — every language leg runs on "
-                      f"{scope} regardless of which language changed"),
+            evidence=evidence,
             match_text=job_name,
+            facts=facts,
         ))
     return hits
 

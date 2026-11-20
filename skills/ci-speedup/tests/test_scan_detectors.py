@@ -1991,6 +1991,136 @@ jobs:
     assert "OPT39" not in _scan_one(tmp_path, neg, name="codeql.yml")
 
 
+def test_opt39_per_language_job_without_change_gate(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  go-contract:
+    name: Go contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+
+    assert finding is not None, (
+        "OPT39 should flag a pull-request Go job with no language-path gate")
+    assert finding["affected_jobs"] == ["go-contract"]
+    assert finding["opt39_languages"] == ["go"]
+    assert "go toolchain" in finding["evidence"]
+
+
+def test_opt39_per_language_job_with_change_gate_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+  go-contract:
+    name: Go contracts
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_language_scoped_pull_request_trigger_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Rust proof
+on:
+  pull_request:
+    paths:
+      - '**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+jobs:
+  rust-proof:
+    name: Rust proof
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "proof.yml").write_text(workflow, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_rust_workspace_with_rustup_install_is_detected(tmp_path: Path):
+    workflow = """
+name: Runtime conformance
+on:
+  pull_request:
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "runtime.yml").write_text(workflow, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["opt39_languages"] == ["rust"]
+
+
+def test_opt39_primary_language_job_is_not_assumed_to_be_an_optional_lane(
+        tmp_path: Path):
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v6
+      - run: pytest
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
 def test_opt62_clean_on_self_hosted(tmp_path: Path):
     pos = """name: CI
 on: push
