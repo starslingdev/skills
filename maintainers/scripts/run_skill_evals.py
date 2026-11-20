@@ -81,14 +81,15 @@ class HarnessError(Exception):
 def plugin_ignore(directory: str, names: list[str]) -> list[str]:
     """What the skill copy withholds: the answer key. `evals/` holds every
     expected string, `tests/test_*.py` and `tests/fixtures/` the oracle and
-    corpus, `CHANGELOG.md` narrates the checks. `tests/verify_report.py` stays:
+    corpus, `CHANGELOG.md` and the pending fragments in `changelog.d/`
+    narrate the checks. `tests/verify_report.py` stays:
     the skill runs it."""
     d = Path(directory)
     out = []
     for n in names:
         if d.name == "tests" and (n.startswith("test_") or n in ("fixtures", "conftest.py")):
             out.append(n)
-        elif n in ("evals", "CHANGELOG.md", "__pycache__") and (d / "SKILL.md").exists():
+        elif n in ("evals", "CHANGELOG.md", "changelog.d", "__pycache__") and (d / "SKILL.md").exists():
             out.append(n)
         elif n == "__pycache__":
             out.append(n)
