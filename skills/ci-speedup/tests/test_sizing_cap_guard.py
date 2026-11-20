@@ -496,6 +496,9 @@ _RUNTIME_MEASURED_COVERED = {
 _MEASURED_EXEMPT = {
     "OPT43", "OPT97", "OPT48", "OPT46", "OPT47", "OPT64", "OPT65", "OPT77", "OPT79", "OPT80",
     "OPT107",
+    # OPT108: bill-only, no wall-clock saving; its runner-minute cap is
+    # re-derived by verify_report's check_opt108_comment_saving_rederived.
+    "OPT108",
 }  # queue/advisory/bill-only
 
 

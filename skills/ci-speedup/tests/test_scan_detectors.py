@@ -1351,6 +1351,246 @@ jobs:
     assert "OPT29" not in _scan_one(tmp_path, neg)
 
 
+def test_opt108_comment_filter_inside_step_still_starts_a_runner(tmp_path: Path):
+    workflow = """name: Comment command
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  react:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    _write_workflow(tmp_path, "comment.yml", workflow)
+
+    finding = next(
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT108"
+    )
+    assert finding["affected_jobs"] == ["react"]
+    assert "job-level `if:`" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt108_comment_filter_at_job_level_skips_the_runner(tmp_path: Path):
+    workflow = """name: Comment command
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  react:
+    if: contains(github.event.comment.body, '/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_unrelated_job_author_guard_does_not_cover_body_filter(tmp_path: Path):
+    workflow = """name: Comment command
+on: pull_request_review_comment
+jobs:
+  react:
+    if: github.actor != 'automation[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(github.event.comment.body, '/review')
+        run: node scripts/review.mjs
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "review-comment.yml")
+
+
+def test_opt108_ordinary_return_value_is_not_a_comment_rejection(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            function commentBody() {
+              return context.payload.comment.body;
+            }
+            await record(commentBody());
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_setup_before_filtered_handler_still_fires(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  react:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm ci
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_setup_alone_with_unfiltered_work_stays_quiet(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_chained_setup_and_required_work_stays_quiet(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci && node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_early_return_unrelated_to_the_comment_stays_quiet(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!process.env.TOKEN) return;
+            await record(body);
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_shell_exit_on_env_aliased_comment_body_fires(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          if [[ "$BODY" != /deploy* ]]; then exit 0; fi
+          ./deploy.sh
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_job_sender_guard_covers_step_author_filter(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  cmd:
+    if: github.event.sender.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.comment.user.type != 'Bot'
+        run: node run.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_step_author_association_filter_fires(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  cmd:
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.comment.author_association == 'MEMBER'
+        run: node run.mjs
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_unreadable_parallel_group_holds_the_finding_back(tmp_path: Path):
+    """The unread group may hold work every comment needs, so "every step is
+    filtered" cannot be known for the job."""
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          run: node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    _write_workflow(tmp_path, "comment.yml", workflow)
+    data = _scan(tmp_path)
+    assert "OPT108" not in _patterns(data)
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/comment.yml"]
+    assert gaps and "job_has_an_unreadable_parallel_group" in gaps[0]["reason"], gaps
+
+
+def test_opt108_optional_reaction_does_not_make_required_job_skippable(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_setup_before_filtered_handler_still_reports(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  react:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
 def test_opt31_conditional_setup(tmp_path: Path):
     pos = """name: CI
 on: pull_request

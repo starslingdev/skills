@@ -6368,6 +6368,82 @@ def check_opt64_minimum_sample(report: str, findings_path: Path | None) -> Check
                  else f"{len(ranked)} ranked OPT64 row(s) meet the minimum sample")
 
 
+_VR_OPT108_SHORT_RUN_S = 30.0
+_VR_OPT108_MIN_PRICED_RUNS = 3
+
+
+def _vr_opt108_problems(f: dict) -> list[str]:
+    """Re-derive one OPT108 finding's comment-run saving from its stamped
+    measurement (`collect_runs._size_opt108_comment_runs`)."""
+    fid = str(f.get("id") or "OPT108")
+    m = _as_dict(f.get("comment_runner_measurement"))
+    saving = _num(f.get("runner_min_saving"))
+    wall = _num(f.get("wall_clock_p50_s"))
+    if wall:
+        return [f"{fid}: comment runs do not gate a merge, but wall_clock_p50_s={wall}"]
+    if m.get("status") != "measured":
+        if saving is not None:
+            return [f"{fid}: runner_min_saving={saving} without a measured "
+                    "comment-run sample"]
+        return []
+    sampled = _num(m.get("sampled_runs")) or 0
+    comment = _num(m.get("comment_runs")) or 0
+    short = _num(m.get("short_success_runs")) or 0
+    monthly = _num(m.get("workflow_runs_30d")) or 0
+    mean_short = _num(m.get("mean_short_billable_min")) or 0
+    mean_affected = _num(m.get("affected_mean_billable_min")) or 0
+    cap = _num(m.get("affected_compute_min_30d"))
+    bad = []
+    if _num(m.get("short_floor_s")) != _VR_OPT108_SHORT_RUN_S:
+        bad.append(f"{fid}: short_floor_s={m.get('short_floor_s')}, expected "
+                   f"{_VR_OPT108_SHORT_RUN_S}")
+    if (_num(m.get("priced_runs")) or 0) < _VR_OPT108_MIN_PRICED_RUNS:
+        bad.append(f"{fid}: priced_runs={m.get('priced_runs')} is below "
+                   f"{_VR_OPT108_MIN_PRICED_RUNS}")
+    affected = {
+        str(name) for name in _as_list(f.get("affected_jobs")) if str(name).strip()
+    }
+    sized = {
+        str(name) for name in _as_list(m.get("sized_affected_jobs"))
+        if str(name).strip()
+    }
+    if not sized or not sized.issubset(affected):
+        bad.append(
+            f"{fid}: sized_affected_jobs={sorted(sized)} is not a non-empty "
+            f"subset of affected_jobs={sorted(affected)}")
+    if not (0 < short <= comment <= sampled):
+        bad.append(f"{fid}: short={short}, comment={comment}, sampled={sampled} "
+                   "is not 0 < short <= comment <= sampled")
+        return bad
+    want_cap = round(monthly * mean_affected, 1)
+    if cap is None or abs(cap - want_cap) > max(0.11, 0.001 * want_cap):
+        bad.append(f"{fid}: affected_compute_min_30d={cap}, re-derived {want_cap}")
+    want = round(min(monthly * short / sampled * mean_short, want_cap), 1)
+    if saving is None or abs(saving - want) > max(0.11, 0.001 * want):
+        bad.append(f"{fid}: runner_min_saving={saving}, re-derived {want}")
+    elif cap is not None and saving > cap + 0.11:
+        bad.append(f"{fid}: runner_min_saving={saving} exceeds the affected jobs' "
+                   f"measured {cap} runner-min per 30 days")
+    return bad
+
+
+def check_opt108_comment_saving_rederived(report: str, findings_path: Path | None) -> Check:
+    """OPT108's runner-minute saving is re-derived from the stamped comment-run
+    sample, never exceeds the affected jobs' measured compute, carries no
+    wall-clock credit, and is absent when the sample was not measured."""
+    name = "OPT108 comment-run saving re-derives and stays within measured compute"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    rows = [f for f in _as_list(data.get("findings"))
+            if isinstance(f, dict) and f.get("pattern") == "OPT108"]
+    if not rows:
+        return Check(name, True, "no OPT108 finding", skipped=True)
+    bad = [msg for f in rows for msg in _vr_opt108_problems(f)]
+    return Check(name, not bad, "; ".join(bad) if bad
+                 else f"{len(rows)} OPT108 finding(s) re-derived")
+
+
 def _tier2_findings(data: dict) -> list[dict]:
     return [f for f in _as_list(data.get("findings"))
             if isinstance(f, dict)
@@ -17619,6 +17695,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_headline_matches_stamp(report, findings_path, report_path),
         check_tier2_savings_rows_backed_by_cost_spine(report, findings_path),
         check_opt64_minimum_sample(report, findings_path),
+        check_opt108_comment_saving_rederived(report, findings_path),
         check_runner_minute_spine_contract(report, findings_path),
         check_cost_spine_contents_count_matches_table(report, findings_path),
         check_cost_spine_runner_host_split(report, findings_path),

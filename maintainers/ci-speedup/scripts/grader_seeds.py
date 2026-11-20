@@ -149,6 +149,7 @@ TRIAGE_ALLOWLIST = {
     "Tier-2 headline claim names the top stamped finding": AUTO_SEED,                             # check_tier2_headline_matches_stamp
     "Tier-2 savings rows are backed by runner-minute cost spine": AUTO_SEED,                      # check_tier2_savings_rows_backed_by_cost_spine
     "OPT64 is ranked only on enough retried runs": AUTO_SEED,                                     # check_opt64_minimum_sample
+    "OPT108 comment-run saving re-derives and stays within measured compute": AUTO_SEED,       # check_opt108_comment_saving_rederived
     "runner-minute cost spine source block is re-derivable": AUTO_SEED,                           # check_runner_minute_spine_contract
     "cost-spine Contents count matches the rows the table shows": AUTO_SEED,                      # check_cost_spine_contents_count_matches_table
     "cost spine names the minutes on runners GitHub does not host": AUTO_SEED,                    # check_cost_spine_runner_host_split
@@ -279,6 +280,7 @@ CHECK_CLASS = {
     "Tier-2 headline claim names the top stamped finding": "mis-ranked-lever",  # top bill-axis claim names the wrong ranked row
     "Tier-2 savings rows are backed by runner-minute cost spine": "fabricated-or-unsupported-finding",  # rendered savings rows not backed by cost-spine rows
     "OPT64 is ranked only on enough retried runs": "fabricated-or-unsupported-finding",  # a ranked retry saving resting on too few retried runs, or on a flaky retry
+    "OPT108 comment-run saving re-derives and stays within measured compute": "fabricated-or-unsupported-finding",  # a comment-run saving the stamped short-run sample does not re-derive, above the workflow's measured compute, or carrying wall-clock credit
     "runner-minute cost spine source block is re-derivable": "fabricated-or-unsupported-finding",  # cost-spine source rows/totals not backed by rates/stamps
     "cost-spine Contents count matches the rows the table shows": "fabricated-or-unsupported-finding",  # a Contents row count the rendered table does not show
     "cost spine names the minutes on runners GitHub does not host": "unscrubbed-or-disclosure-risk",  # minutes on non-GitHub runners presented as GitHub-billable without the disclosure
