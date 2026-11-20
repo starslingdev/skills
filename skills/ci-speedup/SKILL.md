@@ -92,8 +92,8 @@ the scanner never fabricates a finding to fill the gap.
 
 **Irreducibly-semantic patterns are NOT auto-detected.** OPT15 and broad OPT13
 judgment stay disclosed as uncovered catalog judgments. OPT13's sole exception requires a
-timed build then quality command, a separate same-workflow full build, and a clean repository-wide
-JS/TS Node-output backstop; its interval stays an uncredited ceiling until benchmarked.
+timed build then quality command, a separate non-optional full build for the same package, and a
+clean repository-wide JS/TS Node-output backstop; its interval stays uncredited until benchmarked.
 
 ## Structural / critical-path findings (the high-leverage track)
 

@@ -29214,7 +29214,6 @@ _OPT13_VALIDATION_BUILD_LINE_RE = _re.compile(
     r"(?:vite|next|nuxt|remix|astro|gatsby|ng|nest)\s+build"
     r"(?:\s+--[\w-]+(?:=\S+)?)*|"
     r"(?:webpack|rollup|rspack|turbopack|tsup|esbuild)(?:\s+--[\w-]+(?:=\S+)?)*|"
-    r"tsc\b[^\n]*(?:--emitDeclarationOnly|--declaration(?:\s+true)?\b)|"
     r"(?:mvn|mvnw)\s+(?:[^\n]*\s)?package|"
     r"(?:gradle|gradlew)\s+(?:[^\n]*\s)?assemble)\s*$",
     _re.IGNORECASE,
@@ -29222,14 +29221,35 @@ _OPT13_VALIDATION_BUILD_LINE_RE = _re.compile(
 _OPT13_SOURCE_OUTPUT_RE = _re.compile(
     r"\bnew\s+Worker\s*\(|\bworker_threads\b|\bchild_process\b|"
     r"\.(?:fork|spawn|exec|execFile|execSync)\s*\(|"
-    r"(?:require|import)\s*\([^\n]*(?:dist|build|lib)/|"
-    r"\bfrom\s+['\"][^'\"]*(?:dist|build|lib)/|"
+    r"(?:require|import)\s*\(\s*['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
+    r"\bimport\s+['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
+    r"\bfrom\s+['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
     r"__dirname[^\n]*\.js['\"]",
     _re.IGNORECASE,
 )
 _OPT13_SOURCE_SUFFIXES = frozenset({
     ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
 })
+
+
+def _opt13_run_directory(job: dict[str, Any], step: dict[str, Any]) -> str | None:
+    """Repository-relative directory for a run step, or ``None`` if dynamic/unsafe."""
+    value = step.get("working-directory")
+    if value is None:
+        defaults = job.get("defaults")
+        run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+        value = (run_defaults or {}).get("working-directory") \
+            if isinstance(run_defaults, dict) else None
+    if value is None:
+        return "."
+    if not isinstance(value, str) or "${{" in value:
+        return None
+    from pathlib import PurePosixPath
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    normalized = str(path)
+    return normalized if normalized not in ("", ".") else "."
 
 
 def _opt13_validation_build_job(
@@ -29240,6 +29260,45 @@ def _opt13_validation_build_job(
     jobs = (doc or {}).get("jobs") if isinstance(doc, dict) else None
     if not isinstance(jobs, dict):
         return None
+    affected_spec: dict[str, Any] | None = None
+    for key, candidate in jobs.items():
+        if not isinstance(candidate, dict):
+            continue
+        name = str(candidate.get("name") or key)
+        static_name = _opt24_static_job_name(name) if "${{" in name else ""
+        if (affected_job in {str(key), name}
+                or (static_name and (affected_job == static_name
+                                     or affected_job.startswith(static_name + " ")))):
+            affected_spec = candidate
+            break
+    if affected_spec is None:
+        return None
+    run_steps = [step for step in (affected_spec.get("steps") or [])
+                 if isinstance(step, dict) and isinstance(step.get("run"), str)]
+    quality_dirs = {
+        directory
+        for step in run_steps
+        for directory in [_opt13_run_directory(affected_spec, step)]
+        if directory is not None and any(
+            _OPT13_QUALITY_COMMAND_RE.search(line)
+            for line in str(step.get("run") or "").splitlines()
+        )
+    }
+    if not quality_dirs:
+        # The invoked package script can be hidden behind make or another
+        # wrapper in YAML.  A job whose run steps all share one static directory
+        # still gives the job-scoped log one unambiguous package boundary.
+        quality_dirs = {
+            directory
+            for step in run_steps
+            for directory in [_opt13_run_directory(affected_spec, step)]
+            if directory is not None
+        }
+    # A log is job-scoped, so multiple or dynamic quality-step directories
+    # cannot be bound to the measured command safely.
+    if len(quality_dirs) != 1:
+        return None
+    affected_dir = next(iter(quality_dirs))
     for key, spec in jobs.items():
         if (not isinstance(spec, dict) or spec.get("if") is not None
                 or spec.get("continue-on-error") not in (None, False)):
@@ -29255,8 +29314,9 @@ def _opt13_validation_build_job(
             if (step.get("if") is not None
                     or step.get("continue-on-error") not in (None, False)):
                 continue
-            if any(_OPT13_VALIDATION_BUILD_LINE_RE.fullmatch(line)
-                   for line in str(step.get("run") or "").splitlines()):
+            if (_opt13_run_directory(spec, step) == affected_dir
+                    and any(_OPT13_VALIDATION_BUILD_LINE_RE.fullmatch(line)
+                            for line in str(step.get("run") or "").splitlines())):
                 return {"workflow_file": str(affected_workflow), "job": name}
     return None
 
@@ -29268,10 +29328,15 @@ def _opt13_source_output_guard(root: "Path | None") -> dict[str, Any]:
                 "reason": "repository source was unavailable"}
     checked = 0
     for path in root.rglob("*"):
+        try:
+            relative_parts = path.relative_to(root).parts
+        except ValueError:
+            return {"safe": False, "source_files_checked": checked,
+                    "reason": "a source path escaped the repository root"}
         if (path.is_symlink() or not path.is_file()
                 or path.suffix.lower() not in _OPT13_SOURCE_SUFFIXES
                 or any(part in {".git", "node_modules", "dist", "build",
-                                "test", "tests", "__tests__"} for part in path.parts)
+                                "test", "tests", "__tests__"} for part in relative_parts)
                 or ".test." in path.name or ".spec." in path.name):
             continue
         try:
