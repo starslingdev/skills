@@ -46,5 +46,3 @@ and meaningful automation events.
 **Risk**: MEDIUM. Moving a condition earlier can suppress a command or actor
 that the handler previously accepted. Preserve the handler's exact semantics
 and prove both accepted and rejected cases before removing its inner guard.
-
----

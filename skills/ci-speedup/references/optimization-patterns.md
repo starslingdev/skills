@@ -3535,8 +3535,6 @@ and prove both accepted and rejected cases before removing its inner guard.
 
 ---
 
----
-
 ### OPT90 — Every Pull Request Pays for Coverage That Could Run After Merge
 
 <!-- METADATA
