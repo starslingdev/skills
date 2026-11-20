@@ -1128,6 +1128,84 @@ runner, so no warning was emitted.
 
 ---
 
+### OPT112 — Restored Go Build Cache Trimmed Before Reuse
+
+<!-- METADATA
+pattern: OPT112
+impact: HIGH
+class: data-driven
+detector: same-key-go-cache-age-slowdown
+risk: LOW
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,**/*.go,go.mod,go.sum"
+fix_strategy: restored-go-build-cache-trimmed-before-reuse
+title_template: "Restored Go Build Cache Trimmed Before Reuse"
+-->
+
+**TL;DR**: `actions/setup-go` and `actions/cache` restore Go build-cache
+entries with their saved modification times. `cmd/go` trims entries unused for
+five days (plus a one-hour mtime granularity), at most once a day, when a Go
+command finishes. Once the restored archive is past that limit, the job's first
+Go command deletes every entry it did not itself use, and a later command with
+different flags (for example a plain build after `-race` tests) recompiles what
+the archive held. Mark the restored files as recently used before the first Go
+command so `cmd/go` keeps both populations.
+
+**Detection heuristic** (every gate required; reads only what an ordinary job
+prints, no extra flags or markers):
+
+1. A captured long-pole job log restores a Go build cache: setup-go's standard
+   `Cache restored from key: setup-go-*` line, or an `actions/cache` step whose
+   logged `path:` input names `go-build` or `GOCACHE`. Two different Go keys in
+   one log, or a later step that touches the Go build cache (the fix already in
+   place), withhold the finding.
+2. GitHub's cache inventory returns exactly one archive for that key; its
+   `created_at` splits the job's sampled successful runs into runs that
+   restored it while it was younger than five days (fresh) and runs that
+   restored it at least five days and one hour after creation (old).
+3. At least two fresh and two old runs are confirmed from their own logs to
+   restore that same exact key without a retention step.
+4. The old runs' median job duration exceeds the fresh runs' median by at least
+   30 seconds, and every old run is slower than the fresh median.
+5. Missing or ambiguous cache metadata, too few runs in either window, or no
+   slowdown keeps the finding quiet.
+
+**Fix recipe**, safest first:
+
+1. Immediately after `setup-go` or `actions/cache`, resolve `go env GOCACHE`,
+   create it on a cache miss, and touch every restored file before any Go
+   command runs.
+2. Keep the existing cache key, flags, package set, race coverage, and failure
+   behavior. Do not substitute a warm-up build: the warm-up can trim the other
+   flag population before it is used.
+3. Pin the retention step's position in a workflow contract test, then compare
+   the same job before and after. Confirm the later build no longer recompiles
+   the broad package set and that every test still runs.
+
+**Guardrail**: touching cache entries changes only their access recency; it must
+not turn an untrusted cache into executable input, weaken the cache key, skip a
+race or non-race build, or hide a failed restore. On a cache miss, the retention
+step is a no-op. Preserve Go's own cache validation and every existing test flag.
+
+**Sizing**: the wall-clock saving is the measured median slowdown of old-archive
+runs over fresh-archive runs of the same cache key, the same job and the same
+dependency set. The runner-minute saving is stated as a ceiling: that slowdown
+times the workflow's 30-day run count, because runs that restore an archive
+younger than five days save nothing. The comparison is between sampled runs,
+not a before/after of the fix, so confirm it on the same job after adding the
+retention step.
+
+**Real-world example (OpenClaw)**, their numbers, not a forecast for another
+repository: openclaw/crabbox [#2833](https://github.com/openclaw/crabbox/pull/2833)
+reported the first in-test CLI build falling from a 135-second mean to 30
+seconds after retaining restored Go cache entries, while the race-shard test
+time fell by about 110 seconds.
+
+**Risk**: **LOW**. The change is reversible and leaves cache keys and test
+commands intact, but its ordering is load-bearing: it must run after restore
+and before the first Go command.
+
+---
+
 ### OPT11 — Redundant Environment Variables
 
 <!-- METADATA
@@ -3063,6 +3141,73 @@ title_template: "Conditional Step With Unconditional Setup"
 **Real-world example (blen-starter-kit)**: `ci.yml` `web-quality` job has `Install Playwright Chromium` (line 92, ~16s) followed by `Web smoke e2e` (line 95) gated on `if: env.CLERK_SECRET_KEY != '' && env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY != ''`. PRs from forks (no Clerk secrets) pay 16s for setup that's never consumed.
 
 **Risk**: LOW. The fix is purely defensive — add the same `if:` to the upstream step. If the conditions diverge later, both steps still execute together (consumer just runs without setup, which would surface as a clear error).
+
+---
+
+### OPT109 — Failure Reporter Runs on Healthy Pull Requests
+
+<!-- METADATA
+pattern: OPT109
+impact: MEDIUM
+class: static
+detector: yaml-job-correlated
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: failure-reporter-on-failure
+title_template: "Failure reporter runs on healthy pull requests"
+-->
+
+**Anti-pattern**: A job depends on every independent check, does nothing except
+post a failure comment, summary or notification, and uses `if: always()`. GitHub
+therefore allocates its runner on healthy pull requests where there is no
+failure to report.
+
+**Detection heuristic**: Find a job with at least two `needs` whose condition is
+`always()`, alone or with `!cancelled()`; any other term (a result comparison,
+an event guard) may already skip healthy runs and stays quiet. Every
+independent job must be upstream of it, directly or through another need such
+as a shared `setup` job; a later aggregate gate may depend on the reporter.
+Beyond checkout, setup and dependency installs, every step must only report:
+each shell command is a summary, log, `gh pr|issue comment`, webhook or
+report-named script call, or a recognized comment, notification or report
+action. The report must be failure-only: the job's id or name says so, or every
+reporting step is gated on a failed or cancelled need. Fail closed on any other
+command, a non-zero `exit` (that job is a gate), and a step that edits, hides
+or clears an earlier report.
+
+**Fix recipe (safest first)**:
+
+1. Confirm the reporter does nothing on a healthy run that you still need, such
+   as clearing or updating an earlier failure comment after a green rerun. Keep
+   that path before gating the job.
+2. Change the reporter condition to `if: failure() || cancelled()` (or
+   `if: failure()` when it used `always() && !cancelled()`, to keep excluding
+   cancelled runs) so the job is skipped when all of its dependencies succeed.
+3. In every final required aggregate gate that `needs` the reporter: keep (or
+   add) `if: always()`, because without a status-check function a skipped need
+   skips the gate and a skipped job reports success to a required check. Accept
+   `needs.<reporter>.result` of `success` or `skipped`, and require every
+   workload check to be `success`, for example by failing when
+   `contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')`,
+   which a skipped reporter passes. Change any comparison that demands
+   `success` from the reporter, or rejects `skipped` for every need.
+4. Test the truth table: all checks pass (reporter skipped, gate passes); one
+   check fails (reporter runs, gate fails); one check is cancelled (gate
+   fails); and the reporter itself fails (gate fails).
+
+**Sizing**: Runner-minute effect is a **saving**: the failure reporter's billed
+compute on healthy runs. It stays unsized until the reporter job's measured
+compute and the healthy-run share are available. When a final gate needs the
+reporter, the skip also removes the reporter's queue and run time from the
+healthy path to that gate; otherwise there is no merge-wait effect.
+
+**Public evidence**: [OpenClaw pull request #191007](https://github.com/openclaw/openclaw/pull/191007)
+is the public example of this shape and of the fix: a failure-or-cancellation
+condition on the reporter, with the final required gate treating its skip as
+success.
+
+**Risk**: MEDIUM. A blanket change can make the final required gate fail on the
+reporter's expected skip, let a skipped gate pass a required check, or conceal a
+cancelled workload job. Exercise the full result truth table before rollout.
 
 ---
 
@@ -5270,38 +5415,50 @@ title_template: "Runtime TypeScript Transpilation on the Long Pole"
 -->
 
 **TL;DR**: A long-pole tool or test step starts through `tsx`, `ts-node`, or a
-`node --loader` / `node --import` TypeScript hook, and a structured summary
-derived from a retained CPU profile attributes a material share of the job to
-the loader. Precompile the
-exact tool surface once, or preload a cached transform, then make any fallback
-to runtime transpilation fail loudly.
+`node --loader` / `--import` / `--require` TypeScript hook, transpiling the same
+files on every process start. Measure the loader's share of the step, then
+precompile the exact tool surface once, or preload a cached transform, and make
+any fallback to runtime transpilation fail loudly.
 
-**Detection heuristic** (every gate required):
+**Detection heuristic** (default path, every gate required):
 
-1. The captured representative job is a measured long pole.
-2. Its log contains a command boundary that directly invokes `tsx` or `ts-node`,
-   or invokes `node` with a `tsx`, `ts-node`, or `jiti` loader hook. A prose
-   mention does not count.
-3. The same step emits `CI_SPEEDUP_RUNTIME_TS_PROFILE_V1` with the loader,
-   self-time in milliseconds, retained `.cpuprofile` filename and SHA-256. The
-   workflow produces this line from its CPU-profile parser; Node's
-   `--cpu-prof` flag does not emit such a summary by itself. A loader-looking
-   command or a free-form `jiti self time` line is not evidence of expensive
-   transpilation: the transform cache may already be warm, and unaffiliated log
-   text must not receive measured credit.
-4. The profiled self-time is at least 30 seconds and at least 20% of the job's
-   measured wall, and does not exceed that wall. Smaller or impossible
-   observations stay silent.
+1. The step is on a measured long pole: its measured p50 is at least 20 seconds
+   and at least 15% of the pole job's p50 (the OPT83 step floors).
+2. The step's workflow `run:` command, resolved through `package.json` scripts
+   the same way OPT84 reads them (`pnpm test` -> `tsx --test src/*.test.ts`),
+   starts a runtime TypeScript loader: the `tsx`, `ts-node` or `ts-node-esm`
+   binary (directly or through `npx`, `pnpm exec`, `yarn`, `bunx`); `node` with
+   `--loader`, `--experimental-loader`, `--import`, `-r` or `--require` naming
+   `tsx` or `ts-node` (`tsx/esm`, `ts-node/register`, `ts-node/esm` ...); or a
+   `NODE_OPTIONS` carrying such a flag, inline (`cross-env` and `env` read
+   through) or in the step, job or workflow `env`. A package script whose name
+   only starts with a loader name (`yarn tsx-lint`), an `echo`, a comment, and
+   a precompiled `node dist/...` do not count. A command the read cannot follow
+   (an expression, a directory change, an unreadable script) stays quiet.
+
+Without a profile the loader's share of the step is unknown, so the finding is
+unsized on both axes and its fix starts with measuring it.
+
+**Upgrade path** (profiled): when the same step also emits
+`CI_SPEEDUP_RUNTIME_TS_PROFILE_V1` with the loader, self-time in milliseconds,
+retained `.cpuprofile` filename and SHA-256 (produced by the workflow's own
+CPU-profile parser; Node's `--cpu-prof` flag does not emit such a summary by
+itself), and that self-time is at least 30 seconds and at least 20% of the job's
+measured wall without exceeding it, the finding is sized from the profile.
+A free-form `jiti self time` line or a summary in another step is not evidence.
 
 **Fix recipe**, safest first:
 
-1. Identify the exact TypeScript entry surfaces the measured command loads.
+1. Measure first: profile one run of the step (`node --cpu-prof`, or one
+   instrumented run) to learn the loader's self time. Skip the rest if it is
+   small.
+2. Identify the exact TypeScript entry surfaces the measured command loads.
    Precompile those surfaces once, or preload their cached transform through the
    existing module graph. Keep the same module format, inputs, and outputs.
-2. Add a guard around the exercised path that records every runtime-loader
+3. Add a guard around the exercised path that records every runtime-loader
    fallback and fails if the count is non-zero. The guard is part of the fix:
    without it, a new entry surface can silently restore the long pole.
-3. Compare generated bytes where applicable, run the same tests, and profile the
+4. Compare generated bytes where applicable, run the same tests, and profile the
    same command again on the same runner class and cache state.
 
 **Guardrail**: do not skip an entry surface, commit stale generated output, or
@@ -5310,16 +5467,19 @@ module resolution, source-map behavior, test coverage, failures, and exit
 status. A warm transform cache is acceptable only when its key includes every
 source and toolchain input that changes the emitted code.
 
-**Sizing**: the structured profile summary's loader self-time is a ceiling on both per-run wall
-clock and runner-minute saving. It is multiplied by the measured 30-day run
-volume, then clamped to the affected job's measured completed-run compute. The
-realized saving is the matched before/after difference after the guarded
-replacement; the report never credits more than the profiled self-time.
+**Sizing**: on the default path both axes read
+"unsized (loader share not measured; the step's measured p50 of N s is an upper
+bound)"; the step's duration is never credited as a saving. On the profiled
+path the loader self-time is a ceiling on both per-run wall clock and
+runner-minute saving: "runner-minute saving: at most N/month (profiled loader
+ceiling from 1 representative run x R workflow runs in 30 days)", clamped to the
+affected job's measured completed-run compute. The realized saving is the
+matched before/after difference after the guarded replacement.
 
 **Real-world example (OpenClaw)**, their numbers, not a forecast for another
 repository: openclaw/openclaw [#109757](https://github.com/openclaw/openclaw/pull/109757)
-reported a prompt-snapshot step falling from 354 seconds to 54 seconds after
-preloading the exact plugin surfaces and adding a zero-runtime-loader guard.
+reported 354 seconds falling to 54 seconds for the runtime-transpilation fix in
+that pull request.
 
 **Risk**: **MEDIUM**. The mechanical change is reversible, but a missing entry
 surface can leave CI green while testing a different path. The fallback guard
