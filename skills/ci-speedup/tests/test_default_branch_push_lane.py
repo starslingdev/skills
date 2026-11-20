@@ -329,6 +329,9 @@ def test_opt107_keeps_bounded_timing_when_monthly_frequency_is_incomplete(
         created_before="2026-01-02T00:00:00Z")
 
     assert doc["default_branch_push_lane"]["status"] == "frequency_incomplete"
+    assert doc["default_branch_push_lane"]["facts"] == []
+    assert "drill" not in doc["default_branch_push_lane"]
+    assert doc["default_branch_push_lane"]["opt107_job_fetch_count"] > 0
     matches = [finding for finding in doc["findings"]
                if finding.get("pattern") == "OPT107"]
     assert len(matches) == 1
