@@ -4549,15 +4549,25 @@ def _detect_opt29(doc: dict, raw: str) -> list[Hit]:
 
 # ---- OPT108 — Comment Filter Runs After Runner Allocation --------------------
 
-_COMMENT_TRIGGER_GUARD_RE = re.compile(
-    r"github\.(?:event\.comment\.(?:body|user(?:\.(?:login|type))?)|actor)|"
-    r"context\.(?:payload\.comment|actor)",
-    re.I,
-)
+_COMMENT_BODY_GUARD_RE = re.compile(
+    r"github\.event\.comment\.body|context\.payload\.comment\.body", re.I)
+_COMMENT_AUTHOR_GUARD_RE = re.compile(
+    r"github\.(?:event\.comment\.user(?:\.(?:login|type))?|actor)|"
+    r"context\.(?:payload\.comment\.user(?:\.(?:login|type))?|actor)", re.I)
 _COMMENT_EARLY_RETURN_RE = re.compile(
     r"\breturn\b|\bexit\s+0\b|\bprocess\.exit\s*\(\s*0\s*\)",
     re.I,
 )
+
+
+def _comment_guard_dimensions(text: str) -> set[str]:
+    """Which independent comment inputs an admission expression filters."""
+    dimensions: set[str] = set()
+    if _COMMENT_BODY_GUARD_RE.search(text):
+        dimensions.add("body")
+    if _COMMENT_AUTHOR_GUARD_RE.search(text):
+        dimensions.add("author")
+    return dimensions
 
 
 def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
@@ -4572,20 +4582,16 @@ def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
         if not isinstance(job, dict):
             continue
         job_if = str(job.get("if") or "")
-        if _COMMENT_TRIGGER_GUARD_RE.search(job_if):
-            continue
-        filtered_inside = False
+        job_dimensions = _comment_guard_dimensions(job_if)
+        inner_dimensions: set[str] = set()
         for step, step_if in _steps_with_if(job):
-            if step_if and _COMMENT_TRIGGER_GUARD_RE.search(step_if):
-                filtered_inside = True
-                break
+            if step_if:
+                inner_dimensions.update(_comment_guard_dimensions(step_if))
             with_values = step.get("with") if isinstance(step.get("with"), dict) else {}
             script = "\n".join((_run(step), str(with_values.get("script") or "")))
-            if (_COMMENT_TRIGGER_GUARD_RE.search(script)
-                    and _COMMENT_EARLY_RETURN_RE.search(script)):
-                filtered_inside = True
-                break
-        if not filtered_inside:
+            if _COMMENT_EARLY_RETURN_RE.search(script):
+                inner_dimensions.update(_comment_guard_dimensions(script))
+        if not inner_dimensions or inner_dimensions.issubset(job_dimensions):
             continue
         line = _line_of_in_job(raw, job_name, f"{job_name}:")
         hits.append(Hit(

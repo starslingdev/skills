@@ -1397,6 +1397,20 @@ jobs:
     assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+def test_opt108_unrelated_job_author_guard_does_not_cover_body_filter(tmp_path: Path):
+    workflow = """name: Comment command
+on: pull_request_review_comment
+jobs:
+  react:
+    if: github.actor != 'automation[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(github.event.comment.body, '/review')
+        run: node scripts/review.mjs
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "review-comment.yml")
+
+
 def test_opt31_conditional_setup(tmp_path: Path):
     pos = """name: CI
 on: pull_request
