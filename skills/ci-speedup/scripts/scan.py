@@ -4555,7 +4555,8 @@ _COMMENT_AUTHOR_GUARD_RE = re.compile(
     r"github\.(?:event\.comment\.user(?:\.(?:login|type))?|actor)|"
     r"context\.(?:payload\.comment\.user(?:\.(?:login|type))?|actor)", re.I)
 _COMMENT_EARLY_RETURN_RE = re.compile(
-    r"\breturn\b|\bexit\s+0\b|\bprocess\.exit\s*\(\s*0\s*\)",
+    r"\bif\b(?:(?!\b(?:await|else)\b)[\s\S]){0,300}?"
+    r"(?:\breturn\b|\bexit\s+0\b|\bprocess\.exit\s*\(\s*0\s*\))",
     re.I,
 )
 
@@ -4583,14 +4584,25 @@ def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
             continue
         job_if = str(job.get("if") or "")
         job_dimensions = _comment_guard_dimensions(job_if)
-        inner_dimensions: set[str] = set()
+        step_dimensions: list[set[str]] = []
         for step, step_if in _steps_with_if(job):
+            dimensions: set[str] = set()
             if step_if:
-                inner_dimensions.update(_comment_guard_dimensions(step_if))
+                dimensions.update(_comment_guard_dimensions(step_if))
             with_values = step.get("with") if isinstance(step.get("with"), dict) else {}
             script = "\n".join((_run(step), str(with_values.get("script") or "")))
             if _COMMENT_EARLY_RETURN_RE.search(script):
-                inner_dimensions.update(_comment_guard_dimensions(script))
+                dimensions.update(_comment_guard_dimensions(script))
+            if _run(step) or _uses(step):
+                step_dimensions.append(dimensions)
+        # Moving a step condition to the job boundary is safe only when the
+        # same input governs every executable step.  An optional reaction does
+        # not make a required recorder job skippable.
+        inner_dimensions = (
+            set.intersection(*step_dimensions)
+            if step_dimensions and all(step_dimensions)
+            else set()
+        )
         if not inner_dimensions or inner_dimensions.issubset(job_dimensions):
             continue
         line = _line_of_in_job(raw, job_name, f"{job_name}:")

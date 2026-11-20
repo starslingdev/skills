@@ -1411,6 +1411,38 @@ jobs:
     assert "OPT108" in _scan_one(tmp_path, workflow, "review-comment.yml")
 
 
+def test_opt108_ordinary_return_value_is_not_a_comment_rejection(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            function commentBody() {
+              return context.payload.comment.body;
+            }
+            await record(commentBody());
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_optional_reaction_does_not_make_required_job_skippable(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
 def test_opt31_conditional_setup(tmp_path: Path):
     pos = """name: CI
 on: pull_request
