@@ -2740,6 +2740,58 @@ jobs:
     assert "OPT46" not in _scan_one(tmp_path, workflow)
 
 
+def _opt46_aggregate_workflow(run_block: str) -> str:
+    body = "\n".join(f"          {line}" for line in run_block.splitlines())
+    return f"""name: CI
+on: pull_request
+concurrency:
+  group: ${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number }}}}
+  cancel-in-progress: true
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  verdict:
+    needs: lint
+    if: ${{{{ always() }}}}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        env:
+          LINT_RESULT: ${{{{ needs.lint.result }}}}
+          RESULTS: ${{{{ toJSON(needs) }}}}
+        run: |
+{body}
+"""
+
+
+@pytest.mark.parametrize("run_block", [
+    'test "$LINT_RESULT" = success\nCI=true npm test',
+    'if test "$LINT_RESULT" = success; then npm test; fi',
+    'test "$LINT_RESULT" = success; rm -rf build',
+    'test "$LINT_RESULT" = success || echo `./notify.sh`',
+    'test "$LINT_RESULT" = success && ./scripts/deploy',
+])
+def test_opt46_real_work_after_a_result_check_is_not_an_aggregate(
+        tmp_path: Path, run_block: str):
+    """Every simple command on a line must be a result check, not just the
+    line's first word: real work chained after one stays quiet."""
+    assert "OPT46" not in _scan_one(
+        tmp_path, _opt46_aggregate_workflow(run_block))
+
+
+@pytest.mark.parametrize("run_block", [
+    "echo \"$RESULTS\" | jq -e 'all(.[]; .result == \"success\")'",
+    'if [[ "$LINT_RESULT" == success && -n "$RESULTS" ]]; then exit 0; fi\nexit 1',
+    'echo "lint: $LINT_RESULT" >> "$GITHUB_STEP_SUMMARY"\n'
+    'test "$LINT_RESULT" = success',
+])
+def test_opt46_result_only_verdict_shapes_still_fire(
+        tmp_path: Path, run_block: str):
+    assert "OPT46" in _scan_one(tmp_path, _opt46_aggregate_workflow(run_block))
+
+
 def test_opt5_suppressed_when_pnpm_action_setup_caches(tmp_path: Path):
     neg = """name: CI
 on: push

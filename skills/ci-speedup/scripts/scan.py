@@ -1689,18 +1689,37 @@ _OPT46_NEEDS_RESULT_RE = re.compile(
     r"(?:to|from)JSON\s*\(\s*needs\s*\)",
     re.I,
 )
-_OPT46_RESULT_SHELL_RE = re.compile(
-    r"(?:set\b|echo\b|printf\b|test\b|\[\[?|if\b|then\b|elif\b|else\b|fi\b|"
-    r"case\b|esac\b|for\b|do\b|done\b|exit\b|[A-Za-z_][A-Za-z0-9_]*=|"
-    r"[\"']?\$\{)",
-    re.I,
-)
-_OPT46_REAL_WORK_RE = re.compile(
-    r"(?:^|[;&|()]\s*)(?:npm|pnpm|yarn|bun|node|python\d*|pytest|cargo|go|make|"
-    r"mvn|gradle|docker|podman|git|gh|curl|wget|terraform|kubectl|helm|dotnet|"
-    r"ruby|bundle|\.?(?:\./)+|[\w./-]+\.sh)\b",
-    re.I,
-)
+# Every simple command in a verdict script must start with one of these words
+# (after shell keywords and `VAR=value` assignments are stripped). Anything
+# else, including a command chained after a result check, is possible real work.
+_OPT46_RESULT_COMMANDS = frozenset({
+    "echo", "printf", "test", "[", "[[", "exit", "set", "true", "false", ":",
+    "jq", "case", "esac", "for", "done", "fi"})
+_OPT46_SHELL_KEYWORDS = frozenset({"if", "elif", "then", "else", "do", "!"})
+_OPT46_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*")
+
+
+def _opt46_result_only_script(run: str) -> bool:
+    """True when every simple command in ``run`` only inspects or reports."""
+    script = run.replace("\\\n", " ")
+    if "$(" in script or "`" in script:
+        return False
+    for raw_line in script.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Neutralise quoted text and test brackets so their `&&`, `|` or `;`
+        # are not read as command separators.
+        line = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "''", line)
+        line = re.sub(r"\[\[.*?\]\]", "[[ ]]", line)
+        for command in re.split(r"&&|\|\||;;|[;|]", line):
+            words = command.split()
+            while words and (words[0] in _OPT46_SHELL_KEYWORDS
+                             or _OPT46_ASSIGNMENT_RE.fullmatch(words[0])):
+                words.pop(0)
+            if words and words[0] not in _OPT46_RESULT_COMMANDS:
+                return False
+    return True
 
 
 def _opt46_cancellation_enabled(doc: dict) -> bool:
@@ -1732,21 +1751,7 @@ def _opt46_result_only_step(step: dict) -> bool:
         return "alls-green" in uses and bool(_OPT46_NEEDS_RESULT_RE.search(step_text))
     if not run or not _OPT46_NEEDS_RESULT_RE.search(step_text):
         return False
-    for raw_line in run.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if "$(" in line or _OPT46_REAL_WORK_RE.search(line):
-            return False
-        if re.match(r"(?:if|elif)\b", line, re.I) and not re.match(
-                r"(?:if|elif)\s+(?:test\b|\[\[?)", line, re.I):
-            return False
-        if re.match(r"(?:then|else|fi|do|done|esac)\b", line, re.I) and not re.fullmatch(
-                r"(?:then|else|fi|do|done|esac)\s*;?", line, re.I):
-            return False
-        if not _OPT46_RESULT_SHELL_RE.match(line):
-            return False
-    return True
+    return _opt46_result_only_script(run)
 
 
 def _detect_opt46_cancelled_aggregate(doc: dict, raw: str) -> list[Hit]:
