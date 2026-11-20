@@ -1372,6 +1372,7 @@ def test_named_fixtures_exercise_their_defining_interactions(
     assert "per-invocation-startup" in fixture_facts(
         docs["per-test-startup"], [])["leaves"]
     assert "state-leak canary" in reports["per-test-startup"]
+    assert "Runner-minute effect: saving" in reports["per-test-startup"]
     replayed_pole = next(
         pole for pole in docs["replayed-test-cache"]["pr_critical_path"]["poles"]
         if pole.get("job") == "build")

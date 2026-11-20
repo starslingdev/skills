@@ -4145,6 +4145,10 @@ def _parse_log(text: str,
                 re.I,
             ),
             False,
+            None,
+            "test process",
+            None,
+            "per-invocation-startup",
         ),
         (
             "cargo test binary",
@@ -4156,6 +4160,10 @@ def _parse_log(text: str,
             re.compile(r"^running\s+\d+\s+tests?\b", re.I),
             re.compile(r"^test result:\s+(?:ok|FAILED)\.", re.I),
             False,
+            None,
+            "test binary",
+            None,
+            "per-invocation-startup",
         ),
         (
             "verification script",
@@ -4165,6 +4173,41 @@ def _parse_log(text: str,
             re.compile(
                 r"^Verification (?:passed|failed):\s*(?P<id>\S.+?)\s*$", re.I),
             True,
+            None,
+            "verification process",
+            None,
+            "per-invocation-startup",
+        ),
+        (
+            "tool",
+            re.compile(r"^Tool process started:\s*(?P<owner>[\w.-]+)\s+"
+                       r"category=(?P<category>build|scan)\s+"
+                       r"item=(?P<id>\S+)\s*$", re.I),
+            re.compile(r"^Tool ready:\s*(?P<owner>[\w.-]+)\s+"
+                       r"category=(?P<category>build|scan)\s+"
+                       r"item=(?P<id>\S+)\s*$", re.I),
+            re.compile(r"^Tool process finished:\s*(?P<owner>[\w.-]+)\s+"
+                       r"category=(?P<category>build|scan)\s+"
+                       r"item=(?P<id>\S+)\s*$", re.I),
+            True,
+            "owner",
+            "tool process",
+            "category",
+            "per-item-{category}-startup",
+        ),
+        (
+            "worker-pool case",
+            re.compile(r"^Worker pool started:\s*(?P<owner>[\w.-]+)\s+"
+                       r"case=(?P<id>\S+)\s*$", re.I),
+            re.compile(r"^Worker pool ready:\s*(?P<owner>[\w.-]+)\s+"
+                       r"case=(?P<id>\S+)\s*$", re.I),
+            re.compile(r"^Worker pool stopped:\s*(?P<owner>[\w.-]+)\s+"
+                       r"case=(?P<id>\S+)\s*$", re.I),
+            True,
+            "owner",
+            "worker pool",
+            None,
+            "per-case-worker-pool-startup",
         ),
     )
     timestamped: list[tuple[datetime, str, str]] = []
@@ -4174,20 +4217,28 @@ def _parse_log(text: str,
         if sep and when is not None:
             timestamped.append((when, message.strip(), raw.strip()))
     startup_leaf: dict[str, Any] | None = None
-    for profile_name, boundary_re, work_re, done_re, bind_identity in startup_profiles:
+    for (profile_name, boundary_re, work_re, done_re, bind_identity,
+         owner_group, process_kind, category_group, fix_key_template) in startup_profiles:
         boundaries = [
-            (line_i, when, match.group("id"), raw)
+            (line_i, when, match.group("id"),
+             match.group(owner_group) if owner_group else None,
+             match.group(category_group).lower() if category_group else None, raw)
             for line_i, (when, message, raw) in enumerate(timestamped)
             if (match := boundary_re.match(message))
         ]
         if len(boundaries) < 10 or len({row[2] for row in boundaries}) != len(boundaries):
+            continue
+        if owner_group and len({row[3] for row in boundaries}) != 1:
+            continue
+        if category_group and len({row[4] for row in boundaries}) != 1:
             continue
         startups: list[float] = []
         iterations: list[float] = []
         measurements: list[tuple[str, str, str]] = []
         work_messages: list[str] = []
         complete = True
-        for pos, (line_i, started, identity, boundary_raw) in enumerate(boundaries):
+        for pos, (line_i, started, identity, owner, category,
+                  boundary_raw) in enumerate(boundaries):
             next_line = (boundaries[pos + 1][0]
                          if pos + 1 < len(boundaries) else len(timestamped))
             next_started = (boundaries[pos + 1][1]
@@ -4206,6 +4257,16 @@ def _parse_log(text: str,
             if (bind_identity
                     and (work_match.group("id") != identity
                          or done_match.group("id") != identity)):
+                complete = False
+                break
+            if (owner_group
+                    and (work_match.group(owner_group) != owner
+                         or done_match.group(owner_group) != owner)):
+                complete = False
+                break
+            if (category_group
+                    and (work_match.group(category_group).lower() != category
+                         or done_match.group(category_group).lower() != category)):
                 complete = False
                 break
             if (not (started < work <= done)
@@ -4231,6 +4292,9 @@ def _parse_log(text: str,
             for message in work_messages
         )
         startup_leaf = {
+            # Keep OPT85's family in one precedence slot. The literal default lets the
+            # closed-world leaf-order guard identify that slot; the profile-specific
+            # identity below narrows category reconciliation without another detector.
             "fix_key": "per-invocation-startup",
             "unit_label": ((
                 f"{count} serial {profile_name} iterations each launch a fresh "
@@ -4253,10 +4317,14 @@ def _parse_log(text: str,
             ],
             "search": ["process boundary", "startup", "run concurrently"],
             "iteration_count": count,
+            "process_kind": process_kind,
             "startup_median_s": round(startup_median, 2),
             "iteration_median_s": round(iteration_median, 2),
             "modeled_saving_s": None if collection_completion_only else modeled,
         }
+        resolved_fix_key = fix_key_template.format(category=category or "")
+        if resolved_fix_key != startup_leaf["fix_key"]:
+            startup_leaf["fix_key"] = resolved_fix_key
         break
     if startup_leaf is not None:
         return startup_leaf
@@ -5036,8 +5104,9 @@ _FIX_META: dict[str, dict[str, Any]] = {
                  "strictly serial execution, and measured startup is at least half of "
                  "the median iteration.",
         "look": "`{wf}` and the command that emits the named process boundaries — "
-                "identify which setup is repeated in every process and whether one "
-                "long-lived process can perform the same complete set of checks.",
+                "identify which setup is repeated in every process or worker pool and "
+                "whether bounded batches or retained workers can perform the same "
+                "complete set of work.",
         "constraints": "Preserve every case and failure. Prove isolation adversarially: "
                        "put a deliberately broken iteration at several positions and "
                        "confirm each position still fails the job, then add a state-leak "
@@ -5048,12 +5117,17 @@ _FIX_META: dict[str, dict[str, Any]] = {
                        "time, compare the old and new paths over real pull-request "
                        "traffic, and permanently retain real subprocess coverage for "
                        "argument parsing, exit codes, stream wiring, signals and "
-                       "process-boundary isolation.",
+                       "process-boundary isolation. Put a measured memory ceiling on "
+                       "each batch or retained pool. Runner-minute effect: saving — "
+                       "the same runner does less repeated startup work; the exact "
+                       "monthly saving is not sized because this drilled log has no "
+                       "monthly execution count.",
         "docs": ["OPT85 in the ci-speedup catalog — reuse a process or measure safe "
                  "iteration concurrency"],
-        "deliver": "Reuse one process for the serial iterations when the tool supports "
-                   "it, or run proven-independent iterations concurrently with a measured "
-                   "worker cap. Keep the full case count, the broken-position checks and "
+        "deliver": "Safest first, keep a bounded worker pool alive across cases or batch "
+                   "several items per tool process with a measured memory cap; otherwise "
+                   "run proven-independent iterations concurrently with a measured worker "
+                   "cap. Keep the full case count, the broken-position checks and "
                    "the state-leak canary. Roll out one suite at a time, compare old and "
                    "new paths on real pull requests, keep boundary-dependent subprocess "
                    "tests permanently, then re-measure startup and total iteration wall.",
@@ -5454,6 +5528,9 @@ _FIX_META: dict[str, dict[str, Any]] = {
 # one kind crown the other's measured pole.
 _FIX_META["within-job-duplicate-test"] = _FIX_META["within-job-duplicate-work"]
 _FIX_META["within-job-duplicate-build"] = _FIX_META["within-job-duplicate-work"]
+_FIX_META["per-item-build-startup"] = _FIX_META["per-invocation-startup"]
+_FIX_META["per-item-scan-startup"] = _FIX_META["per-invocation-startup"]
+_FIX_META["per-case-worker-pool-startup"] = _FIX_META["per-invocation-startup"]
 
 
 def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -7734,6 +7811,9 @@ _LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
     "per-invocation-startup": "test",
+    "per-item-build-startup": "build",
+    "per-item-scan-startup": "scan",
+    "per-case-worker-pool-startup": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
     "vendored-lib-build": "build",

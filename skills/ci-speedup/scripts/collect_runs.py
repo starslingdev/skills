@@ -18430,7 +18430,13 @@ def _detect_opt46_superseded_runs(
               "default branch and on release tags. ROUTING: this workflow triggers on "
               f"{trig} — with a `pull_request` trigger use the catalog's DEFAULT "
               "(PR-scoped) predicate; without one, the PR-scoped predicate is never "
-              "true and saves nothing, so use the catalog's WIDENED predicate."))
+              "true and saves nothing, so use the catalog's WIDENED predicate. "
+              "PENDING-RUN SAFETY: GitHub keeps at most one pending run in a "
+              "concurrency group, so a third arrival replaces the second pending run "
+              "even when cancellation is disabled. If every non-PR commit must be "
+              "validated, use the catalog's event-and-PR-number group with "
+              "`github.run_id` as the non-PR fallback; do not use the widened "
+              "cancellation recipe for those protected runs."))
     f = _new_finding(
         "OPT46", "MEDIUM", title, wf_path, "", evidence,
         "superseded-runs-not-cancelled-missing-concurrency-or-cancel-",
@@ -33180,6 +33186,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "playwright-parallel": "OPT24",
                     "pytest-no-xdist": "OPT24",
                     "per-invocation-startup": "OPT85",
+                    "per-item-build-startup": "OPT85",
+                    "per-item-scan-startup": "OPT85",
+                    "per-case-worker-pool-startup": "OPT85",
                     "test-isolated-serial": "OPT24",
                     "test-loop-serial": "OPT24",
                     "vendored-lib-build": "OPT86",
