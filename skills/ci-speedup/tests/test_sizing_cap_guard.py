@@ -326,6 +326,35 @@ def test_opt24_inline_sizing_respects_physical_bound():
         assert (f.get("wall_clock_p50_s") or 0) > 0  # non-vacuous: it credited a saving
 
 
+def test_opt112_inline_sizing_respects_physical_bound():
+    """OPT112 credits the measured same-key slowdown and stays within the pole."""
+    runs = [{"age_days": 1.0, "duration_s": 300.0, "url": ""},
+            {"age_days": 2.0, "duration_s": 310.0, "url": ""}]
+    old = [{"age_days": 6.0, "duration_s": 400.0, "url": ""},
+           {"age_days": 7.0, "duration_s": 410.0, "url": ""}]
+    entries = [{
+        "workflow_file": "ci.yml",
+        "job": "go tests",
+        "duration_s": 400.0,
+        "go_cache_trim": {
+            "cache_key": "setup-go-Linux-x64-key",
+            "fresh_runs": runs, "old_runs": old,
+            "fresh_median_s": 305.0, "old_median_s": 405.0, "slowdown_s": 100.0,
+        },
+    }]
+    findings = cr._detect_go_cache_trim(entries, {"ci.yml": 20}, 0)
+    assert findings, "fixture should produce an OPT112 finding"
+    crit = {"long_pole_job": "go tests", "long_pole_p50": 400.0,
+            "floor_p50": 90.0, "job_p50": {"go tests": 400.0}}
+    assert _physical_bound_violation(findings[0], crit) is None
+    assert findings[0]["wall_clock_p50_s"] == 100.0
+    assert findings[0]["runner_min_saving"] == round(100.0 * 20 / 60.0, 1)
+    assert "runner-minute saving: at most" in findings[0]["size_note"]
+    # A slowdown longer than the job itself cannot be trim loss.
+    entries[0]["duration_s"] = 90.0
+    assert cr._detect_go_cache_trim(entries, {"ci.yml": 20}, 0) == []
+
+
 def test_opt25_inline_sizing_respects_physical_bound():
     """OPT25 (matrix/shard imbalance) sizes a rebalance/split saving and routes it
     through `_cap_wall_clock(crit)`. With a slow leg beside a slower non-matrix
@@ -475,6 +504,7 @@ def test_opt21_edge_sizing_ignores_an_unmeasured_unrelated_job():
 # class-wide guard can't go blind to a detector added later.
 _RUNTIME_MEASURED_COVERED = {
     "OPT19", "OPT21", "OPT24", "OPT25", "OPT49", "OPT50", "OPT51", "OPT100",
+    "OPT112",
 }
 # OPT46/OPT47/OPT64/OPT107 are run-elimination bill levers, OPT65 is exact billing
 # rounding waste below the cluster floor, OPT77 credits removed setup
