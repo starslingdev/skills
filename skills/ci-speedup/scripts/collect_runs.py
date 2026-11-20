@@ -5891,6 +5891,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     # OPT108: measured from the comment workflow's short successful runs
     # (`_size_opt108_comment_runs`); unsized with its reason otherwise.
     "OPT108": {"model": "measured"},
+    "OPT112": {"model": "measured"},
     "OPT29": {"model": "runner-min-only", "hit_rate": 0.1, "cost_basis": "affected_jobs",
               "cost_basis_rate_label": "the merge_group-run share",
               "cost_basis_label": "the merge_group-run share of the job's compute reclaimed by "
@@ -6533,6 +6534,252 @@ def _measure_opt32_path_filters(
                       "`*.md`, `docs/**/*.md`, `LICENSE*`, `.github/*.md`.")
         finding["evidence"] = (str(finding.get("evidence") or "").rstrip()
                                + measured + coverage + suffix)
+
+
+_OPT39_LANGUAGE_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "go": (".go",),
+    "python": (".py", ".pyi"),
+    "rust": (".rs",),
+}
+def _opt39_paths_classification(
+        paths: list[str], language_inputs: list[str], workflow_inputs: list[str]) -> str:
+    """Classify exact-run paths against an explicit, complete owner map."""
+    if not paths:
+        return "unknown"
+    for path in paths:
+        if any(_opt32_glob_matches(path, pattern) for pattern in language_inputs):
+            return "relevant"
+        if not any(_opt32_glob_matches(path, pattern) for pattern in workflow_inputs):
+            return "unknown"
+    return "irrelevant"
+
+
+def _opt39_exact_changed_files(
+        client: GhClient, repo: str, run: dict[str, Any]) -> list[str] | None:
+    """Read the exact base/head comparison captured on one historical PR run."""
+    pulls = run.get("pull_requests")
+    if not isinstance(pulls, list) or not pulls or not isinstance(pulls[0], dict):
+        return None
+    pull = pulls[0]
+    base = (pull.get("base") or {}).get("sha") if isinstance(pull.get("base"), dict) else None
+    head = (pull.get("head") or {}).get("sha") if isinstance(pull.get("head"), dict) else None
+    # The run tested its own commit. A pull request's recorded head can be a
+    # later push, so price the run's commit whenever the run names one.
+    run_head = run.get("head_sha")
+    if isinstance(run_head, str) and re.fullmatch(r"[0-9a-fA-F]{40}", run_head):
+        head = run_head
+    if not (isinstance(base, str) and isinstance(head, str)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", base)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", head)):
+        return None
+    doc = client.json(f"repos/{repo}/compare/{base}...{head}")
+    files = doc.get("files") if isinstance(doc, dict) else None
+    if not isinstance(files, list) or not files or len(files) >= 300:
+        return None
+    paths: list[str] = []
+    supported = {"added", "modified", "removed", "renamed", "copied", "changed",
+                 "unchanged"}
+    for row in files:
+        if not isinstance(row, dict) or row.get("status") not in supported:
+            return None
+        filename = row.get("filename")
+        previous = row.get("previous_filename")
+        if not isinstance(filename, str) or not filename:
+            return None
+        if row.get("status") == "renamed" and not isinstance(previous, str):
+            return None
+        if previous is not None and not isinstance(previous, str):
+            return None
+        paths.append(filename)
+        if previous:
+            paths.append(previous)
+    return paths
+
+
+def _opt39_unsized(finding: dict[str, Any], reason: str, **counts: Any) -> None:
+    finding["language_path_measurement"] = {
+        "status": "unmeasured", "reason": reason, **counts}
+    finding["wall_clock_p50_s"] = 0.0
+    finding["runner_min_saving"] = None
+    finding["runner_minute_effect"] = {"direction": "unsized", "reason": reason}
+    finding["tier"] = 2
+    finding["realization"] = "none"
+    finding["sizing_basis"] = "measured"
+    finding["size_note"] = (
+        f"runner-minute saving not sized ({reason}); changed-path lookup must "
+        "run the job whenever it is unknown or fails")
+
+
+def _measure_opt39_language_jobs(
+    client: GhClient,
+    repo: str,
+    findings: list[dict[str, Any]],
+    sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
+    jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
+    vol_by_wf: dict[str, int | None],
+    job_graph: Any,
+) -> None:
+    """Measure OPT39 per-language jobs from the sampled PRs and their job compute."""
+    targets = [
+        finding for finding in findings
+        if finding.get("pattern") == "OPT39"
+        and finding.get("opt39_job_kind") == "per-language-toolchain"
+    ]
+
+    def withhold(finding: dict[str, Any]) -> None:
+        if finding in findings:
+            findings.remove(finding)
+
+    for finding in targets:
+        workflow = str(finding.get("workflow_file") or "")
+        languages = {
+            str(language).lower() for language in finding.get("opt39_languages") or []
+            if str(language).lower() in _OPT39_LANGUAGE_SUFFIXES
+        }
+        if not languages:
+            withhold(finding)
+            continue
+        language_inputs = [
+            str(pattern) for pattern in finding.get("opt39_language_inputs") or []
+            if isinstance(pattern, str) and pattern.strip()
+        ]
+        workflow_inputs = [
+            str(pattern) for pattern in finding.get("opt39_workflow_inputs") or []
+            if isinstance(pattern, str) and pattern.strip()
+        ]
+        if not language_inputs or not workflow_inputs:
+            _opt39_unsized(
+                finding, "the job's complete language input map is not declared",
+                sampled_prs=0, unknown_prs=0, missing_job_rows=0)
+            continue
+        workflow_runs = list(sampled_runs_by_wf.get(workflow, []))
+        sampled_runs = [
+            run for run in workflow_runs
+            if str(run.get("event") or "") in {"pull_request", "pull_request_target"}
+        ]
+        if not workflow_runs or not sampled_runs:
+            withhold(finding)
+            continue
+        if any(not isinstance(_run_pr_number(run), int) for run in sampled_runs):
+            withhold(finding)
+            continue
+        exact_paths: dict[str, list[str] | None] = {}
+        for run in sampled_runs:
+            run_id = _run_id(run)
+            if not run_id:
+                withhold(finding)
+                break
+            exact_paths[run_id] = _opt39_exact_changed_files(client, repo, run)
+        if finding not in findings:
+            continue
+        if any(paths is None for paths in exact_paths.values()):
+            withhold(finding)
+            continue
+        classifications = {
+            run_id: _opt39_paths_classification(
+                paths or [], language_inputs, workflow_inputs)
+            for run_id, paths in exact_paths.items()
+        }
+        if any(value == "unknown" for value in classifications.values()):
+            withhold(finding)
+            continue
+        aliases: set[str] = set()
+        for job_name in finding.get("affected_jobs") or []:
+            aliases.update(_own_workflow_job_identities(
+                job_graph, workflow, str(job_name)))
+        rows: list[tuple[int, str, float]] = []
+        missing_job_rows = 0
+        for run_jobs in jobs_per_run_by_wf.get(workflow, []):
+            run_id = next((
+                str(job.get("_run_id")) for job in run_jobs
+                if job.get("_run_id") not in (None, "")
+            ), "")
+            if not run_id or run_id not in classifications:
+                continue
+            matched = [
+                job for job in run_jobs
+                if _whole_run_cancel_base_key(str(job.get("name") or "")) in aliases
+            ]
+            priced = [_billable_equiv_min(job) for job in matched]
+            if not matched or any(value is None for value in priced):
+                missing_job_rows += 1
+                continue
+            classification = classifications.get(run_id, "unknown")
+            rows.append((run_id, classification,
+                         float(sum(value for value in priced if value is not None))))
+        classified = rows
+        if missing_job_rows:
+            _opt39_unsized(
+                finding, "some affected job timings were missing or unreadable",
+                sampled_prs=len(classified), unknown_prs=0,
+                missing_job_rows=missing_job_rows)
+            continue
+        if not classified:
+            withhold(finding)
+            continue
+        monthly_volume = vol_by_wf.get(workflow)
+        if not isinstance(monthly_volume, int) or monthly_volume <= 0:
+            _opt39_unsized(
+                finding, "the workflow's 30-day run volume is unknown or zero",
+                sampled_prs=len(classified), unknown_prs=0,
+                missing_job_rows=missing_job_rows)
+            continue
+        irrelevant = [row for row in classified if row[1] == "irrelevant"]
+        if not irrelevant:
+            withhold(finding)
+            continue
+        sample_saved = sum(row[2] for row in irrelevant)
+        pr_volume = monthly_volume * len(sampled_runs) / len(workflow_runs)
+        saving = round(sample_saved / len(classified) * pr_volume, 1)
+        total_sample_compute = sum(row[2] for row in classified)
+        cap = round(total_sample_compute / len(classified) * pr_volume, 1)
+        saving = min(saving, cap)
+        language_text = "/".join(sorted(languages))
+        population = (
+            f"one {len(workflow_runs)}-run workflow sample "
+            f"({len(sampled_runs)} pull-request runs; {len(classified)} priced)"
+        )
+        measurement = {
+            "status": "measured",
+            "languages": sorted(languages),
+            "sampled_prs": len(classified),
+            "irrelevant_prs": len(irrelevant),
+            "unknown_prs": 0,
+            "missing_job_rows": missing_job_rows,
+            "sample_runner_minutes_saved": round(sample_saved, 1),
+            "sample_runner_minutes_total": round(total_sample_compute, 1),
+            "workflow_runs_30d": monthly_volume,
+            "estimated_pr_runs_30d": round(pr_volume, 1),
+            "workflow_sampled_runs": len(workflow_runs),
+            "pr_sampled_runs": len(sampled_runs),
+            "runner_minutes_per_30d": saving,
+            "affected_compute_cap_min_30d": cap,
+            "sample_population": population,
+        }
+        finding["language_path_measurement"] = measurement
+        finding["wall_clock_p50_s"] = 0.0
+        finding["runner_min_saving"] = saving
+        finding["runner_minute_effect"] = {
+            "direction": "saving", "runner_min_per_month": saving}
+        finding["tier"] = 2
+        finding["realization"] = "none"
+        finding["sizing_basis"] = "measured"
+        finding["size_note"] = (
+            f"runner-minute saving: {saving:.1f} per 30 days from {population}; "
+            "pull-request wall-clock is not credited because an unchanged required "
+            "aggregate may still gate the merge")
+        finding["evidence"] = (
+            str(finding.get("evidence") or "").rstrip()
+            + f" Measured {len(irrelevant)} of {len(classified)} sampled pull-request "
+              f"runs with no "
+              f"{language_text} input; their affected jobs used {sample_saved:.1f} "
+              f"runner-minutes in {population}, projecting a saving of {saving:.1f} "
+              f"runner-minutes per 30 days from {monthly_volume} workflow runs."
+            + f" The 30-day scale applies the sample's {len(sampled_runs)} of "
+              f"{len(workflow_runs)} pull-request event share to the workflow's "
+              f"{monthly_volume} total runs."
+            + " Unknown or failed changed-path lookups must run every language job."
+        )
 
 
 _CACHE_SIZING_PATTERNS = frozenset(
@@ -8022,6 +8269,9 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
               "the affected jobs' measured cost-spine billable"),
     "OPT106": (_RM_DOOR_CLAMP,
                "profiled runtime TypeScript loader self time — measured per-run "
+               "credit clamped to the affected job's measured cost-spine billable"),
+    "OPT112": (_RM_DOOR_CLAMP,
+               "measured same-key fresh-versus-old Go build-cache slowdown — "
                "credit clamped to the affected job's measured cost-spine billable"),
     # DERIVE — whole-run cancel re-derives hit_rate x the affected jobs' measured
     # billable (implemented by `_reground_whole_run_cancel_saving`, run first).
@@ -29442,6 +29692,206 @@ def _cache_path_sample(client, repo: str, jobs: list, facts: list,
                          for fact, s in zip(facts, state) if s["valid"] and s["runs"]]}
 
 
+# The key is quoted into the report, so only a cache key's ordinary characters
+# are admitted; a restore line carrying anything else is treated as no restore.
+_GO_CACHE_RESTORE_RE = _re.compile(
+    r"^Cache restored from key:\s*(?P<key>[A-Za-z0-9_.+=/:,@-]{1,512})\s*$",
+    _re.IGNORECASE)
+_GO_STEP_HEADER_RE = _re.compile(r"^##\[group\]Run\s+(?P<head>.+)$")
+# A step that names the Go build cache and touches files is a retention step
+# (the issue's own fix); its presence withholds the finding.
+_GO_BUILD_CACHE_NAME_RE = _re.compile(r"GOCACHE|go-build", _re.IGNORECASE)
+_GO_CACHE_TOUCH_RE = _re.compile(r"(?:^|[\s;&|(])touch\b")
+# cmd/go (src/cmd/go/internal/cache/cache.go) trims entries whose mtime is older
+# than trimLimit (5 days) plus mtimeInterval (1 hour), at most once per
+# trimInterval (24 hours), when a go command closes the cache. An archive older
+# than this at restore time is fully exposed to the first command's trim; one
+# younger than five days loses nothing to it.
+_OPT112_FRESH_ARCHIVE_DAYS = 5.0
+_OPT112_TRIM_CUTOFF_DAYS = 5.0 + 1.0 / 24.0
+_OPT112_MIN_SLOWDOWN_S = 30.0
+_OPT112_MIN_RUNS_PER_WINDOW = 2
+_OPT112_MAX_FRESH_LOGS = 4
+_OPT112_MAX_OLD_LOGS = 4
+
+
+def _step_with_inputs(lines: list[str]) -> list[str]:
+    """The `with:` input lines GitHub echoes in a step's group header.
+
+    The runner also echoes job/step `env:` into every step group; those lines
+    describe the environment, not what this step caches, so they stop the scan.
+    """
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        bare = line.strip()
+        if bare == "with:":
+            inside = True
+            continue
+        if bare == "env:" or bare.startswith("##[endgroup]"):
+            if inside:
+                break
+            continue
+        if inside:
+            out.append(line)
+    return out
+
+
+def _go_cache_restore_fact(log: str) -> dict[str, Any] | None:
+    """The exact Go build-cache key an ordinary job log restored, if any.
+
+    Reads only what `actions/setup-go` and `actions/cache` print by default:
+    setup-go's `Cache restored from key: setup-go-...` line, or an
+    `actions/cache` step whose logged `path:` input names the Go build cache.
+    `retained` is True when a later step touches the Go build cache (the fix
+    is already present). Two different restored Go keys are ambiguous: None.
+    """
+    records, untimestamped, total = _opt80_log_records(log)
+    if not records or (total and untimestamped / total > _OPT80_MAX_UNTIMESTAMPED_FRACTION):
+        return None
+    steps: list[tuple[str, list[str]]] = []
+    keys: list[tuple[int, str]] = []
+    for _stamp, text in records:
+        header = _GO_STEP_HEADER_RE.match(text)
+        if header:
+            steps.append((header.group("head").strip(), [text]))
+            continue
+        if steps:
+            steps[-1][1].append(text)
+        match = _GO_CACHE_RESTORE_RE.match(text)
+        if not match or not steps:
+            continue
+        key = match.group("key")
+        head, lines = steps[-1]
+        go_restore = (key.lower().startswith("setup-go-")
+                      or ("actions/cache" in head.lower()
+                          and any(_GO_BUILD_CACHE_NAME_RE.search(line)
+                                  for line in _step_with_inputs(lines))))
+        if go_restore:
+            keys.append((len(steps) - 1, key))
+    if not keys or len({key for _i, key in keys}) != 1:
+        return None
+    first_step = keys[0][0]
+    retained = any(
+        any(_GO_CACHE_TOUCH_RE.search(line) for line in lines)
+        and any(_GO_BUILD_CACHE_NAME_RE.search(line) for line in lines)
+        for _head, lines in steps[first_step + 1:])
+    return {"cache_key": keys[0][1], "retained": retained}
+
+
+def _go_cache_archive_created(
+    client: "GhClient", repo: str, key: str,
+) -> _dt.datetime | None:
+    """Creation time of the one cache archive stored under exactly ``key``."""
+    if not key:
+        return None
+    payload = client.json(
+        f"repos/{repo}/actions/caches?key={quote(key, safe='')}&per_page=10",
+        allow_missing=True,
+    )
+    rows = payload.get("actions_caches") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    exact = [row for row in rows if isinstance(row, dict)
+             and str(row.get("key") or "") == key]
+    if len(exact) != 1:
+        return None
+    created = _parse_dt(str(exact[0].get("created_at") or ""))
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=_dt.timezone.utc)
+    return created
+
+
+def _go_cache_trim_fact(
+    client: "GhClient", repo: str, log: str, repr_job: dict[str, Any],
+    qual: list[tuple[float, dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Measure trim loss as a same-key natural experiment over sampled runs.
+
+    The representative log names the exact restored Go build-cache archive; its
+    creation time splits the job's sampled successful runs into those that
+    restored it while every entry was younger than cmd/go's trim limit (fresh)
+    and those that restored it past the limit (old). Each compared run's own
+    log must show the same exact key and no retention step. The finding needs
+    no instrumentation: only the restore line setup-go/actions/cache print, the
+    jobs API durations and the cache inventory's ``created_at``.
+    """
+    restore = _go_cache_restore_fact(log)
+    if restore is None or restore["retained"]:
+        return None
+    key = str(restore["cache_key"])
+    created = _go_cache_archive_created(client, repo, key)
+    if created is None:
+        return None
+
+    def _age_days(job: dict[str, Any]) -> float | None:
+        started = _parse_dt(str(job.get("started_at") or ""))
+        if started is None:
+            return None
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=_dt.timezone.utc)
+        return (started - created).total_seconds() / 86400.0
+
+    fresh_pool: list[tuple[float, float, dict[str, Any]]] = []
+    old_pool: list[tuple[float, float, dict[str, Any]]] = []
+    for duration, job in qual:
+        if job.get("conclusion") != "success" or not duration:
+            continue
+        age = _age_days(job)
+        if age is None or age < 0:
+            continue
+        if age < _OPT112_FRESH_ARCHIVE_DAYS:
+            fresh_pool.append((age, float(duration), job))
+        elif age >= _OPT112_TRIM_CUTOFF_DAYS:
+            old_pool.append((age, float(duration), job))
+    if (len(fresh_pool) < _OPT112_MIN_RUNS_PER_WINDOW
+            or len(old_pool) < _OPT112_MIN_RUNS_PER_WINDOW):
+        return None
+    fresh_pool.sort(key=lambda row: row[0])
+    # The representative is already in hand; then the runs nearest the boundary.
+    old_pool.sort(key=lambda row: (row[2].get("id") != repr_job.get("id"), row[0]))
+    known = {repr_job.get("id"): log}
+
+    def _confirmed(pool, limit):
+        out = []
+        for age, duration, job in pool[:limit]:
+            text = known.get(job.get("id"))
+            if text is None:
+                text = _fetch_job_log(client, repo, job)
+            fact = _go_cache_restore_fact(text or "")
+            if (fact is None or fact["retained"]
+                    or fact["cache_key"] != key):
+                continue
+            out.append((age, duration, str(job.get("html_url") or "")))
+        return out
+
+    fresh = _confirmed(fresh_pool, _OPT112_MAX_FRESH_LOGS)
+    if len(fresh) < _OPT112_MIN_RUNS_PER_WINDOW:
+        return None
+    old = _confirmed(old_pool, _OPT112_MAX_OLD_LOGS)
+    if len(old) < _OPT112_MIN_RUNS_PER_WINDOW:
+        return None
+    fresh_median = statistics.median(row[1] for row in fresh)
+    old_median = statistics.median(row[1] for row in old)
+    slowdown = old_median - fresh_median
+    # Every old-archive run must sit above the fresh median: one slow outlier
+    # cannot carry the comparison.
+    if (slowdown < _OPT112_MIN_SLOWDOWN_S
+            or min(row[1] for row in old) <= fresh_median):
+        return None
+    return {
+        "cache_key": key,
+        "archive_created_at": created.isoformat().replace("+00:00", "Z"),
+        "fresh_runs": [{"age_days": round(a, 1), "duration_s": round(d, 1), "url": u}
+                       for a, d, u in fresh],
+        "old_runs": [{"age_days": round(a, 1), "duration_s": round(d, 1), "url": u}
+                     for a, d, u in old],
+        "fresh_median_s": round(fresh_median, 1),
+        "old_median_s": round(old_median, 1),
+        "slowdown_s": round(slowdown, 1),
+    }
+
+
 def _persist_pole_logs(
     client: "GhClient", repo: str, poles: list[dict[str, Any]],
     jobs_per_run_by_wf: dict[str, list], data_dir: "Path", mag_runs: int = 3,
@@ -29693,6 +30143,7 @@ def _persist_pole_logs(
         opt13_fact = _opt13_build_in_quality_log(log)
         runtime_ts_loader = (leaf0 if leaf0.get("fix_key") == "runtime-ts-transpilation"
                              else None)
+        go_cache_trim = _go_cache_trim_fact(client, repo, log, repr_job, qual)
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
             "leaf_fix_key": leaf0.get("fix_key"),
@@ -29704,6 +30155,7 @@ def _persist_pole_logs(
             **({"opt13_build_in_script": opt13_fact} if opt13_fact else {}),
             **({"runtime_ts_loader": runtime_ts_loader}
                if runtime_ts_loader else {}),
+            **({"go_cache_trim": go_cache_trim} if go_cache_trim else {}),
         })
         logger.debug("saved pole log for %s -> %s (closest to P50 of %d qualifying "
                      "runs)", job, fn, len(qual))
@@ -29852,6 +30304,476 @@ def _detect_runtime_ts_transpilation(
         finding["runtime_loader_job_s"] = float(job_seconds)
         finding["runtime_loader"] = str(fact.get("loader") or "runtime TypeScript loader")
         if isinstance(runs, int):
+            finding["workflow_runs_30d"] = runs
+        out.append(finding)
+    return out
+
+
+
+# --- OPT106, uninstrumented path -------------------------------------------
+# Issue #397's default detection: a heavy step on a drilled long pole whose
+# RESOLVED command runs TypeScript through a runtime loader. Without a profile
+# the loader's share of the step is unknown, so the finding is unsized on both
+# axes and its fix leads with measuring. The step's p50 is stated only as an
+# upper bound, never credited. Routing reuses OPT83's floors (at least
+# `_OPT83_MIN_STEP_S` seconds and `_OPT83_MIN_SHARE` of the pole's job p50) and
+# OPT84's YAML step join and package-script resolver; anything the read cannot
+# pin down (an expression, a directory change, an unreadable script) stays
+# quiet, never a guessed loader.
+_OPT106_LOADER_BINARIES = frozenset({"tsx", "ts-node", "ts-node-esm"})
+_OPT106_LOADER_MODULES = frozenset({
+    "tsx", "tsx/esm", "tsx/cjs", "ts-node", "ts-node/esm", "ts-node/register",
+    "ts-node/register/transpile-only", "ts-node/esm/transpile-only"})
+_OPT106_NODE_LOADER_FLAGS = frozenset({
+    "--loader", "--experimental-loader", "--import", "-r", "--require"})
+_OPT106_ENV_WRAPPERS = frozenset({"cross-env", "env"})
+# node options that take their value as the next token; the option loop skips
+# that value instead of mistaking it for the script name.
+_OPT106_NODE_VALUE_FLAGS = frozenset({
+    "--loader", "--experimental-loader", "--import", "-r", "--require",
+    "--conditions", "-C", "--input-type", "--env-file", "--title",
+    "--redirect-warnings", "--stack-trace-limit", "--max-old-space-size"})
+_OPT106_SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "\n"})
+_OPT106_RUNNER_PREFIXES: tuple[tuple[str, ...], ...] = (
+    ("npm", "exec", "--"), ("npm", "exec"), ("pnpm", "exec"), ("pnpm", "dlx"),
+    ("yarn", "exec"), ("yarn", "dlx"), ("bun", "x"), ("npx",), ("bunx",))
+_OPT106_ASSIGN_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_OPT106_MAX_EXPANSIONS = 20
+
+
+def _opt106_node_options_loader(value: Any) -> "str | None":
+    """The loader flag a NODE_OPTIONS value carries (`--import tsx`), else None."""
+    import shlex
+    try:
+        toks = shlex.split(str(value or ""))
+    except ValueError:
+        return None
+    for i, tok in enumerate(toks):
+        flag, eq, val = tok.partition("=")
+        if flag not in _OPT106_NODE_LOADER_FLAGS:
+            continue
+        mod = val if eq else (toks[i + 1] if i + 1 < len(toks) else "")
+        if mod in _OPT106_LOADER_MODULES:
+            return f"{flag} {mod}"
+    return None
+
+
+def _opt106_loader_in_tokens(tokens: list[str], env_loader: "str | None",
+                             via_js: bool) -> "str | None":
+    """The runtime TypeScript loader a command's tokens start, else None.
+
+    Leading `VAR=value` assignments and `cross-env` / `env` wrappers are read
+    (a NODE_OPTIONS among them counts like a step/job/workflow one), runner
+    prefixes (`npx`, `pnpm exec`, ...) are stripped, then: a `tsx` / `ts-node`
+    / `ts-node-esm` binary; `node` with `--loader`, `--import`, `-r` or
+    `--require` naming tsx or ts-node; or NODE_OPTIONS carrying such a flag on
+    a `node` process or a JS tool reached through a runner or package script
+    (`via_js`). An `echo`, a comment or any other binary is not a loader."""
+    t = list(tokens)
+    inline_env: "str | None" = None
+    inline_supplied = False
+    while t:
+        if t[0].rsplit("/", 1)[-1] in _OPT106_ENV_WRAPPERS:
+            t = t[1:]
+            continue
+        if _OPT106_ASSIGN_RE.match(t[0]):
+            name, _eq, val = t[0].partition("=")
+            if name == "NODE_OPTIONS":
+                # An inline NODE_OPTIONS replaces the inherited one, even when
+                # it is empty or names no loader.
+                inline_supplied = True
+                inline_env = _opt106_node_options_loader(val)
+            t = t[1:]
+            continue
+        break
+    for prefix in _OPT106_RUNNER_PREFIXES:
+        if tuple(t[:len(prefix)]) == prefix:
+            t = t[len(prefix):]
+            while t and t[0].startswith("-") and t[0] != "--":
+                t = t[1:]
+            if t[:1] == ["--"]:
+                t = t[1:]
+            via_js = True
+            break
+    if not t:
+        return None
+    binary = t[0].rsplit("/", 1)[-1]
+    if binary in _OPT106_LOADER_BINARIES:
+        return binary
+    env = inline_env if inline_supplied else env_loader
+    if binary == "node":
+        i = 1
+        while i < len(t):
+            tok = t[i]
+            if tok == "--" or not tok.startswith("-"):
+                break  # the script name (or end of options)
+            flag, eq, val = tok.partition("=")
+            takes_value = flag in _OPT106_NODE_VALUE_FLAGS and not eq
+            if flag in _OPT106_NODE_LOADER_FLAGS:
+                mod = val if eq else (t[i + 1] if i + 1 < len(t) else "")
+                if mod in _OPT106_LOADER_MODULES:
+                    return f"node {flag} {mod}"
+            i += 2 if takes_value else 1
+        return f"NODE_OPTIONS={env}" if env else None
+    if env and via_js and binary not in ("echo", "printf", "#", "true", ":"):
+        return f"NODE_OPTIONS={env}"
+    return None
+
+
+def _opt106_raw_segment_overrides(cmd: str) -> "dict[tuple[str, ...], tuple[str | None, bool]]":
+    """Inline `NODE_OPTIONS=...` assignments in a raw command, keyed by the
+    segment's tokens with the leading assignments and `env` / `cross-env`
+    wrappers removed (the form the run-leaf resolver hands back). The value is
+    `(loader or None, True)`: an inline NODE_OPTIONS replaces the inherited
+    one even when it names no loader. Unparseable text yields no overrides."""
+    import shlex
+    out: dict[tuple[str, ...], tuple["str | None", bool]] = {}
+    for line in str(cmd or "").splitlines():
+        try:
+            lex = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+            lex.whitespace_split = True
+            lex.commenters = "#"
+            toks = list(lex)
+        except ValueError:
+            continue
+        seg: list[str] = []
+        for tok in toks + [";"]:
+            if tok in _OPT106_SHELL_SEPARATORS or set(tok) <= set(";&|"):
+                rest = list(seg)
+                supplied, loader = False, None
+                while rest:
+                    if rest[0].rsplit("/", 1)[-1] in _OPT106_ENV_WRAPPERS:
+                        rest = rest[1:]
+                        continue
+                    if _OPT106_ASSIGN_RE.match(rest[0]):
+                        name, _eq, val = rest[0].partition("=")
+                        if name == "NODE_OPTIONS":
+                            supplied, loader = True, _opt106_node_options_loader(val)
+                        rest = rest[1:]
+                        continue
+                    break
+                if supplied and rest:
+                    out[tuple(rest)] = (loader, True)
+                seg = []
+            else:
+                seg.append(tok)
+    return out
+
+
+def _opt106_inline_override(toks: list[str]) -> "tuple[str | None, bool] | None":
+    """`(loader or None, True)` when the tokens start with an inline
+    `NODE_OPTIONS=` assignment (through `env` / `cross-env`), else None."""
+    rest = list(toks)
+    found: "tuple[str | None, bool] | None" = None
+    while rest:
+        if rest[0].rsplit("/", 1)[-1] in _OPT106_ENV_WRAPPERS:
+            rest = rest[1:]
+            continue
+        if _OPT106_ASSIGN_RE.match(rest[0]):
+            name, _eq, val = rest[0].partition("=")
+            if name == "NODE_OPTIONS":
+                found = (_opt106_node_options_loader(val), True)
+            rest = rest[1:]
+            continue
+        break
+    return found
+
+
+def _opt106_override_for_chain(
+        raw: "dict[tuple[str, ...], tuple[str | None, bool]]", entry: str,
+) -> "tuple[str | None, bool] | None":
+    """The inline NODE_OPTIONS override of the raw segment that started a
+    package-script chain: same package manager, same script name
+    (`pnpm gen` and `pnpm run gen` both start `pnpm run gen`). None when no
+    raw segment matches, or when more than one does with different values."""
+    parts = entry.split()
+    if len(parts) < 2:
+        return None
+    found = {v for k, v in raw.items()
+             if k and k[0] == parts[0] and k[-1] == parts[-1]}
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def _opt106_resolve_loader(run: str, wd: str,
+                           scripts_by_dir: dict[str, dict[str, str]],
+                           scripts_unreadable: "frozenset[str]",
+                           walk_complete: bool, env_loader: "str | None",
+                           ) -> "tuple[str, str] | None":
+    """`(loader, command)` for the first runtime TypeScript loader the step's
+    resolved command starts, following package scripts (`pnpm test` ->
+    `tsx --test ...`) the way OPT84 does. None when no resolved command starts
+    one, including when part of the command cannot be followed."""
+    import shlex
+    # (cmd, cwd, chain, via_js, depth, inherited NODE_OPTIONS loader or None,
+    #  whether an inherited inline NODE_OPTIONS replaced the step env)
+    queue: list[tuple[str, str, list[str], bool, int, "str | None", bool]] = [
+        (run, wd, [], False, 0, None, False)]
+    budget = _OPT106_MAX_EXPANSIONS
+    while queue:
+        cmd, cwd, chain, via, depth, inh_env, inh_supplied = queue.pop(0)
+        raw = _opt106_raw_segment_overrides(cmd)
+        base_env = inh_env if inh_supplied else env_loader
+        res = _resolve_run_leaves(cmd, cwd, scripts_by_dir, scripts_unreadable,
+                                  chain=list(chain), walk_complete=walk_complete)
+        segments: list[tuple[list[str], list[str]]] = []
+        for u in res.unresolved:
+            if u.get("kind") != "delegated":
+                continue
+            try:
+                toks = shlex.split(str(u.get("segment") or ""), comments=True)
+            except ValueError:
+                continue
+            segments.append((toks, list(u.get("chain") or [])))
+        for lf in res.leaves:
+            lf_toks = list(lf.get("tokens") or [])
+            segments.append((lf_toks, list(lf.get("chain") or [])))
+            op = _opt84_opaque_leaf(lf)
+            if (op is not None and op[0] == "expand" and lf.get("wd") is not None
+                    and budget > 0 and depth < _OPT82_MAX_SCRIPT_DEPTH):
+                budget -= 1
+                ov = _opt106_inline_override(lf_toks) or raw.get(tuple(lf_toks))
+                child_env, child_sup = (ov if ov is not None
+                                        else (inh_env, inh_supplied))
+                queue.append((op[1], str(lf["wd"]), list(lf.get("chain") or []),
+                              True, depth + 1, child_env, child_sup))
+        for toks, seg_chain in segments:
+            if toks[:1] == ["#"] or (toks and toks[0].startswith("#")):
+                continue
+            ov = raw.get(tuple(toks))
+            if ov is None and seg_chain:
+                # A package-script body inherits the NODE_OPTIONS set inline on
+                # the call that started it (`NODE_OPTIONS=... pnpm gen`).
+                ov = _opt106_override_for_chain(raw, str(seg_chain[0]))
+            seg_env = ov[0] if ov is not None else base_env
+            loader = _opt106_loader_in_tokens(toks, seg_env,
+                                              via or bool(seg_chain))
+            if loader is not None:
+                return loader, " ".join(toks)
+    return None
+
+
+def _detect_runtime_ts_loader_steps(
+    poles: list[dict[str, Any]], wf_docs: dict[str, Any],
+    block: "dict[str, Any] | None", start_idx: int,
+    seen: "set[tuple[str, str]] | None" = None,
+) -> list[dict[str, Any]]:
+    """OPT106 without a profile: a heavy long-pole step whose resolved command
+    runs TypeScript through a runtime loader. Unsized on both axes."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    seen = set() if seen is None else seen
+    tal: dict[str, Any] = block if isinstance(block, dict) else {}
+    scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
+                      if isinstance(v, dict)}
+    scripts_unreadable = frozenset(str(d) for d in
+                                   (tal.get("package_scripts_unreadable") or []))
+    walk_complete = tal.get("truncated") is False
+
+    def _finite(v: Any) -> "float | None":
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None
+        return x if math.isfinite(x) else None
+
+    def _defaults_wd(m: Any) -> Any:
+        d = m.get("defaults") if isinstance(m, dict) else None
+        r = d.get("run") if isinstance(d, dict) else None
+        return r.get("working-directory") if isinstance(r, dict) else None
+
+    for p in poles or []:
+        if not isinstance(p, dict):
+            continue
+        wf = str(p.get("workflow_file") or "")
+        job = str(p.get("job") or "")
+        if not wf or not job or (wf, job) in seen:
+            continue
+        job_p50 = _finite(p.get("job_p50_s")) or 0.0
+        steps = [s for s in (p.get("steps") or []) if isinstance(s, dict)]
+        if job_p50 <= 0 or not steps:
+            continue
+        floor = max(_OPT83_MIN_STEP_S, _OPT83_MIN_SHARE * job_p50)
+        cands = []
+        for s in steps:
+            d = _finite(s.get("p50_s"))
+            name = str(s.get("step") or "").strip()
+            if d is not None and name and d >= floor:
+                cands.append((name, d))
+        if not cands:
+            continue
+        doc = wf_docs.get(wf) if isinstance(wf_docs, dict) else None
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        hit = _opt83_match_yaml_job(jobs, job) if isinstance(jobs, dict) else None
+        if hit is None:
+            continue
+        _yaml_key, spec = hit
+        walk = job_walk(spec)
+        by_name: dict[str, list[int]] = {}
+        for i, lf in enumerate(walk.leaves):
+            n = _opt79_yaml_step_display(lf.step)
+            if n:
+                by_name.setdefault(n, []).append(i)
+        for name, p50 in sorted(cands, key=lambda c: -c[1]):
+            idxs = by_name.get(name, [])
+            if len(idxs) != 1:
+                continue
+            st = walk.leaves[idxs[0]].step
+            run = st.get("run")
+            if st.get("uses") or not isinstance(run, str):
+                continue
+            raw_wd = st.get("working-directory",
+                            _defaults_wd(spec) if _defaults_wd(spec) is not None
+                            else _defaults_wd(doc))
+            env_values = [e.get("NODE_OPTIONS") for e in
+                          (st.get("env"), spec.get("env"), doc.get("env"))
+                          if isinstance(e, dict) and "NODE_OPTIONS" in e]
+            if ("${{" in run or "${{" in str(raw_wd or "")
+                    or any("${{" in str(v) for v in env_values[:1])
+                    or _OPT83_CD_RE.search(run)):
+                continue
+            wd_raw = str(raw_wd or "").strip()
+            wd = _opt82_norm_dir(raw_wd)
+            wd = _posixpath.normpath(wd) if wd else ""
+            if wd_raw.startswith(("/", "~")) or wd == ".." or wd.startswith("../"):
+                continue
+            wd = "" if wd == "." else wd
+            env_loader = (_opt106_node_options_loader(env_values[0])
+                          if env_values else None)
+            found = _opt106_resolve_loader(run, wd, scripts_by_dir,
+                                           scripts_unreadable, walk_complete,
+                                           env_loader)
+            if found is None:
+                continue
+            loader, command = found
+            seen.add((wf, job))
+            reason = (f"loader share not measured; the step's measured p50 of "
+                      f"{p50:.1f}s is an upper bound")
+            evidence = (
+                f"Long-pole job `{job}` spends a measured p50 of {p50:.1f}s "
+                f"({100.0 * p50 / job_p50:.0f}% of its {job_p50:.1f}s p50) in step "
+                f"`{name}`, whose resolved command `{command}` runs TypeScript "
+                f"through a runtime loader (`{loader}`). How much of the step the "
+                "loader takes has not been measured.")
+            measured = _measured_evidence(
+                ["Job", "Step", "Step p50", "Job p50", "Loader"],
+                [[f"`{job}`", f"`{name}`", f"{p50:.1f}s", f"{job_p50:.1f}s",
+                  f"`{loader}`"]],
+                (f"The step's {p50:.1f}s p50 bounds what removing runtime "
+                 "transpilation can save; the loader's share is unmeasured."),
+                "Profile one run before crediting any saving.",
+            )
+            idx += 1
+            finding = _new_finding(
+                "OPT106", "HIGH", "Runtime TypeScript Transpilation on the Long Pole",
+                wf, job, evidence,
+                "Measure first: profile one run of this step (`node --cpu-prof`, or "
+                "one instrumented run) to learn the loader's self time. Then "
+                "precompile the exact TypeScript surfaces once (or preload a cached "
+                "transform) and add a guard that fails if any exercised path falls "
+                "back to the runtime loader.",
+                "opt106--runtime-typescript-transpilation-on-the-long-pole", idx,
+                wc_p50=None, rm=None,
+                size_note=(f"wall-clock saving: unsized ({reason}); "
+                           f"runner-minute saving: unsized ({reason})"),
+                realization="none", measured_evidence=measured,
+            )
+            finding["sizing_basis"] = "unmeasured_loader_share"
+            finding["runtime_loader"] = loader
+            finding["runtime_loader_command"] = command
+            finding["runtime_loader_step"] = name
+            finding["runtime_loader_step_p50_s"] = round(p50, 1)
+            finding["runtime_loader_job_p50_s"] = round(job_p50, 1)
+            out.append(finding)
+            break
+    return out
+
+
+def _detect_go_cache_trim(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Turn a same-key fresh-versus-old Go cache slowdown into OPT112."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    for entry in pole_logs:
+        fact = entry.get("go_cache_trim")
+        if not isinstance(fact, dict):
+            continue
+        seconds = fact.get("slowdown_s")
+        fresh = fact.get("fresh_runs")
+        old = fact.get("old_runs")
+        job_seconds = entry.get("duration_s")
+        if (not isinstance(seconds, (int, float)) or isinstance(seconds, bool)
+                or seconds < _OPT112_MIN_SLOWDOWN_S
+                or not isinstance(job_seconds, (int, float))
+                or job_seconds <= 0 or seconds > job_seconds
+                or not isinstance(fresh, list) or not isinstance(old, list)
+                or len(fresh) < _OPT112_MIN_RUNS_PER_WINDOW
+                or len(old) < _OPT112_MIN_RUNS_PER_WINDOW):
+            continue
+        workflow = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        runs = volume_by_workflow.get(workflow)
+        sample = (f"{len(old)} old-archive vs {len(fresh)} fresh-archive sampled "
+                  "runs of the same cache key")
+        runner_min = (round(float(seconds) * runs / 60.0, 1)
+                      if isinstance(runs, int) and not isinstance(runs, bool)
+                      and runs > 0 else None)
+        if runner_min is not None:
+            runner_effect = (
+                f"runner-minute saving: at most {runner_min:.1f}/month (median "
+                f"slowdown from {sample} x {runs} workflow runs in 30 days; runs "
+                "that restore an archive younger than five days save nothing)")
+        elif isinstance(runs, int) and not isinstance(runs, bool) and runs <= 0:
+            runner_effect = ("runner-minute saving: unsized (the 30-day volume "
+                             "window holds no runs of this workflow)")
+        else:
+            runner_effect = ("runner-minute saving: unsized (30-day run volume for "
+                             "this workflow is unavailable)")
+        key = str(fact.get("cache_key") or "")
+        fresh_median = float(fact.get("fresh_median_s") or 0.0)
+        old_median = float(fact.get("old_median_s") or 0.0)
+        evidence = (
+            f"`{job}` restores the same exact Go build-cache archive (`{key}`) in "
+            f"every compared run. Runs that restored it within five days of its "
+            f"creation took a median {fresh_median:.0f}s; runs that restored it "
+            f"after Go's five-day trim limit took a median {old_median:.0f}s, "
+            f"{float(seconds):.0f}s slower ({sample})."
+        )
+        rows = [[f"`{job}`", label, f"{float(run.get('age_days') or 0.0):.1f} days",
+                 f"{float(run.get('duration_s') or 0.0):.1f}s",
+                 f"[job log]({run['url']})" if run.get("url") else "sampled job"]
+                for label, group in (("fresh", fresh), ("old", old))
+                for run in group if isinstance(run, dict)]
+        measured = _measured_evidence(
+            ["Job", "Archive", "Archive age at start", "Job wall", "Run"], rows,
+            (f"Same cache key, median job wall {fresh_median:.1f}s while the archive "
+             f"was younger than five days and {old_median:.1f}s after; the "
+             f"{float(seconds):.1f}s difference is the measured trim loss."),
+            "The difference compares sampled runs, not a before/after of the fix; "
+            "confirm with the same job after adding the retention step.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT112", "HIGH", "Restored Go Build Cache Trimmed Before Reuse",
+            workflow, job, evidence,
+            "Touch every restored `GOCACHE` file immediately after setup and before "
+            "the first Go command. Do not add a warm-up build: it can trim the other "
+            "flag population instead. Preserve the cache key and test flags, then "
+            "compare the same job before and after.",
+            "opt112--restored-go-build-cache-trimmed-before-reuse", idx,
+            wc_p50=float(seconds), rm=runner_min,
+            size_note=(f"measured median slowdown {float(seconds):.1f}s per old-archive "
+                       f"run; {runner_effect}"),
+            realization="tail", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        finding["go_cache_key"] = key
+        finding["go_cache_archive_created_at"] = str(fact.get("archive_created_at") or "")
+        finding["go_cache_slowdown_s"] = float(seconds)
+        finding["go_cache_fresh_runs"] = len(fresh)
+        finding["go_cache_old_runs"] = len(old)
+        if isinstance(runs, int) and not isinstance(runs, bool):
             finding["workflow_runs_30d"] = runs
         out.append(finding)
     return out
@@ -34375,6 +35297,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         new = _detect_runtime_ts_transpilation(pole_logs, vol_by_wf, next_id)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
+        new = _detect_go_cache_trim(pole_logs, vol_by_wf, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
         findings_doc["findings"] = findings
     _opt96_check_default_branch(findings_doc, default_branch)
     _ground_opt96(findings, drill_poles or poles, _wf_docs,
@@ -34390,6 +35315,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         vol_by_wf, job_memo, findings_doc.get("workflow_job_graph"))
 
     _changed_files: dict[int, list[str] | None] = {}
+    _measure_opt39_language_jobs(
+        client, repo, findings, sampled_runs_by_wf, jobs_per_run_by_wf,
+        vol_by_wf, findings_doc.get("workflow_job_graph"))
     _measure_opt32_path_filters(
         client, repo, findings, sampled_runs_by_wf, _wf_docs,
         changed_files=_changed_files)
@@ -34693,6 +35621,36 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             if act is not None:
                 f["workflow_activity"] = act
         _o84_next = max(_o84_next, max((int(f["id"][1:]) for f in new), default=_o84_next))
+        findings.extend(new)
+
+    # OPT106 uninstrumented path: a heavy long-pole step whose resolved command
+    # runs TypeScript through a runtime loader. A job the profile path already
+    # reported (sized from its loader profile) is skipped. Unsized; no gh call.
+    _o106_seen = {(str(f.get("workflow_file") or ""),
+                   str((f.get("affected_jobs") or [""])[0]))
+                  for f in findings if str(f.get("pattern")) == "OPT106"}
+    _o106_next = max((int(f["id"][1:]) for f in findings
+                      if f.get("id", "").startswith("f") and f["id"][1:].isdigit()),
+                     default=0)
+    for _o106_pole in list((findings_doc.get("pr_critical_path") or {}).get("poles") or []):
+        try:
+            new = _detect_runtime_ts_loader_steps(
+                [_o106_pole], _wf_docs, findings_doc.get("type_aware_lint"),
+                _o106_next, seen=_o106_seen)
+        except Exception as e:  # noqa: BLE001 — never take the data pass down
+            _o106_p = _o106_pole if isinstance(_o106_pole, dict) else {}
+            _o106_wf = str(_o106_p.get("workflow_file") or "")
+            logger.warning("OPT106 loader-step detector failed on %s: %s: %s",
+                           _o106_wf, type(e).__name__, e)
+            _skip_detectors(_o106_wf, ["OPT106"],
+                            f"the runtime-loader step check failed ({type(e).__name__})")
+            new = []
+        for f in new:
+            act = activity_by_wf.get(str(f.get("workflow_file") or ""))
+            if act is not None:
+                f["workflow_activity"] = act
+        _o106_next = max(_o106_next, max((int(f["id"][1:]) for f in new),
+                                         default=_o106_next))
         findings.extend(new)
 
     # OPT81 A2: the runner-size advisory, the lever of LAST RESORT on a
