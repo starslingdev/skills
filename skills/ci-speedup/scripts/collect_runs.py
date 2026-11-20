@@ -5888,6 +5888,9 @@ _SIZING: dict[str, dict[str, Any]] = {
     # construction (hit_rate ≤ 1). hit_rate 0.1 is the merge_group-run share; the
     # credited figure is a CEILING (only provisioning is actually wasted today,
     # since the steps already skip), disclosed as such.
+    # OPT108: measured from the comment workflow's short successful runs
+    # (`_size_opt108_comment_runs`); unsized with its reason otherwise.
+    "OPT108": {"model": "measured"},
     "OPT29": {"model": "runner-min-only", "hit_rate": 0.1, "cost_basis": "affected_jobs",
               "cost_basis_rate_label": "the merge_group-run share",
               "cost_basis_label": "the merge_group-run share of the job's compute reclaimed by "
@@ -6191,6 +6194,238 @@ def _opt32_changed_files(client: GhClient, repo: str, pr_number: int) -> list[st
     # therefore cannot prove the PR ended at the API ceiling; treating the
     # prefix as complete could falsely classify a later code file as ignored.
     return None
+
+
+_OPT108_COMMENT_EVENTS = frozenset({"issue_comment", "pull_request_review_comment"})
+# A successful comment run under this wall time started a runner only to reject
+# the comment: the same self-skip floor the drill uses (`_NOOP_FLOOR_S`).
+_OPT108_SHORT_RUN_S = 30.0
+# Short runs that must be priced before a saving is credited (`_MIN_TIMED_RUNS`).
+_OPT108_MIN_PRICED_RUNS = 3
+_OPT108_UNSIZED_PLACEHOLDER = (
+    "not sized until matching short successful runs confirm the rejected share.")
+_OPT108_NO_WALL_CLOCK = ("comment-triggered runs do not gate a pull-request merge, so "
+                         "there is no wall-clock effect on the pull-request path")
+
+
+def _opt108_short_comment_runs(
+        all_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Successful comment-event runs that finished under `_OPT108_SHORT_RUN_S`: the
+    runner started, the handler rejected the comment, the job exited."""
+    out = []
+    for run in all_runs:
+        wall = _run_wall_s(run)
+        if (str(run.get("event") or "") in _OPT108_COMMENT_EVENTS
+                and str(run.get("conclusion") or "") == "success"
+                and wall is not None and 0 < wall < _OPT108_SHORT_RUN_S):
+            out.append(run)
+    return out
+
+
+def _opt108_mean_billable_min(
+        jobs_per_run: list[list[dict[str, Any]]]) -> tuple[float, int]:
+    """(mean billed-equivalent minutes per run, runs priced): each job rounds up
+    to the minute (`_billable_equiv_min`), as GitHub bills it, so a 12-second
+    rejected comment costs a full minute. A known skipped/absent affected job
+    contributes zero; a run with an affected job whose timing is unreadable is
+    left out rather than counted as free."""
+    per_run: list[int] = []
+    for run_jobs in jobs_per_run:
+        mins = [
+            0 if str(job.get("conclusion") or "") == "skipped"
+            else _billable_equiv_min(job)
+            for job in run_jobs
+        ]
+        if any(m is None for m in mins):
+            continue
+        total = sum(int(m) for m in mins if m is not None)
+        per_run.append(total)
+    if not per_run:
+        return 0.0, 0
+    return sum(per_run) / len(per_run), len(per_run)
+
+
+def _opt108_unmeasured(finding: dict[str, Any], reason: str, **counts: Any) -> None:
+    finding["comment_runner_measurement"] = {
+        "status": "unmeasured", "reason": reason, **counts}
+    finding["wall_clock_p50_s"] = None
+    finding["runner_min_saving"] = None
+    finding["tier"] = 2
+    finding["realization"] = "none"
+    finding["size_note"] = (f"runner-minute saving not sized ({reason}); "
+                            f"{_OPT108_NO_WALL_CLOCK}")
+
+
+def _size_opt108_comment_runs(
+    finding: dict[str, Any],
+    all_runs: list[dict[str, Any]],
+    short_jobs: list[list[dict[str, Any]]],
+    affected_jobs_per_run: list[list[dict[str, Any]]],
+    monthly_volume: int | None,
+) -> None:
+    """Size OPT108 from the workflow's own run history (pure).
+
+    The saving is the measured compute of rejected comments: the share of the
+    sampled all-status runs that are short successful comment runs, times the
+    30-day run volume, times those runs' mean billed minutes (each job rounded
+    up to the minute). It is capped at the affected jobs' measured billed
+    compute over the same volume. Wall-clock is not
+    affected: comment runs do not gate a merge."""
+    sampled = len(all_runs)
+    comment_runs = sum(str(r.get("event") or "") in _OPT108_COMMENT_EVENTS
+                       for r in all_runs)
+    short = _opt108_short_comment_runs(all_runs)
+    counts = {"sampled_runs": sampled, "comment_runs": comment_runs,
+              "short_success_runs": len(short), "short_floor_s": _OPT108_SHORT_RUN_S}
+    if not isinstance(monthly_volume, int) or monthly_volume <= 0:
+        _opt108_unmeasured(finding, "the workflow's 30-day run volume is unknown or zero",
+                           **counts)
+        return
+    if not comment_runs:
+        _opt108_unmeasured(finding, "no comment-triggered runs in the sampled run list",
+                           **counts)
+        return
+    if not short:
+        _opt108_unmeasured(
+            finding,
+            f"no successful comment-triggered run finished under {_OPT108_SHORT_RUN_S:.0f}s "
+            f"in the {sampled} sampled runs", **counts)
+        return
+    mean_short, priced = _opt108_mean_billable_min(short_jobs)
+    if priced < _OPT108_MIN_PRICED_RUNS:
+        _opt108_unmeasured(
+            finding,
+            f"only {priced} short successful run(s) could be priced; at least "
+            f"{_OPT108_MIN_PRICED_RUNS} are needed", priced_runs=priced, **counts)
+        return
+    mean_affected, affected_priced = _opt108_mean_billable_min(
+        list(affected_jobs_per_run) + list(short_jobs))
+    raw = monthly_volume * len(short) / sampled * mean_short
+    cap = round(monthly_volume * mean_affected, 1)
+    saving = round(min(raw, cap), 1)
+    finding["comment_runner_measurement"] = {
+        "status": "measured", **counts, "priced_runs": priced,
+        "mean_short_billable_min": round(mean_short, 4),
+        "workflow_runs_30d": monthly_volume,
+        "affected_priced_runs": affected_priced,
+        "affected_mean_billable_min": round(mean_affected, 4),
+        "affected_compute_min_30d": cap,
+        "capped": raw > cap,
+    }
+    finding["wall_clock_p50_s"] = 0.0
+    finding["runner_min_saving"] = saving
+    finding["tier"] = 2
+    finding["realization"] = "none"
+    finding["sizing_basis"] = "measured"
+    measured = (
+        f"measured: {len(short)} of {sampled} sampled runs were successful "
+        f"comment-triggered runs under {_OPT108_SHORT_RUN_S:.0f}s; at {mean_short:.2f} "
+        f"billed minutes each over {priced} priced runs and {monthly_volume} runs per "
+        f"30 days, about {saving:.1f} runner-minutes per 30 days, capped at the "
+        f"affected jobs' measured {cap:.1f}.")
+    evidence = str(finding.get("evidence") or "")
+    if _OPT108_UNSIZED_PLACEHOLDER in evidence:
+        evidence = evidence.replace(_OPT108_UNSIZED_PLACEHOLDER, measured)
+    else:
+        evidence = (evidence.rstrip() + " " + measured).strip()
+    finding["evidence"] = evidence
+    finding["measured_signal"] = (
+        f"{len(short)} of {sampled} sampled runs short successful comment runs; "
+        f"{saving:.1f} runner-min per 30 days")
+    finding["size_note"] = f"runner-minute (bill) saving only; {_OPT108_NO_WALL_CLOCK}"
+
+
+def _measure_opt108_comment_runs(
+    client: GhClient, repo: str, findings: list[dict[str, Any]],
+    all_status_page, wf_by_path: dict[str, dict[str, Any]],
+    jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
+    vol_by_wf: dict[str, int | None], job_memo: "_JobFetchMemo",
+    job_graph: Any,
+) -> int:
+    """Measure every OPT108 finding off its workflow's cached all-status page.
+    Comment workflows are usually triaged (no job fetch), so the short runs'
+    jobs are fetched here. Returns the count of failed job fetches."""
+    failures = 0
+    credited_jobs_by_workflow: dict[str, set[str]] = {}
+    for finding in findings:
+        if finding.get("pattern") != "OPT108":
+            continue
+        wf_path = str(finding.get("workflow_file") or "")
+        requested_jobs = {
+            str(name) for name in (finding.get("affected_jobs") or [])
+            if str(name).strip()
+        }
+        credited_jobs = credited_jobs_by_workflow.setdefault(wf_path, set())
+        sized_jobs = requested_jobs - credited_jobs
+        if not sized_jobs:
+            _opt108_unmeasured(
+                finding,
+                "the finding's affected jobs were already credited by another "
+                "OPT108 finding in this workflow",
+                sized_affected_jobs=[],
+            )
+            continue
+        aliases: dict[str, str] = {}
+        for job_name in sized_jobs:
+            for alias in _own_workflow_job_identities(job_graph, wf_path, job_name):
+                aliases[alias] = job_name
+        wf_id = (wf_by_path.get(wf_path) or {}).get("id")
+        all_runs = all_status_page(wf_path, wf_id) if wf_id is not None else None
+        if all_runs is None:
+            _opt108_unmeasured(finding, "the workflow's run list could not be fetched")
+            continue
+        short_ids = {run.get("id") for run in _opt108_short_comment_runs(all_runs)}
+        # Every sampled run is priced (memoised, so runs the cost spine already
+        # read cost nothing): the short ones are the saving, all of them are the
+        # workflow's measured compute that caps it.
+        kept, failed = (_gather_run_jobs(client, repo, all_runs, memo=job_memo)
+                        if short_ids else ([], 0))
+        failures += failed
+
+        matched_jobs: set[str] = set()
+
+        def affected_only(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            selected = []
+            for job in jobs:
+                name = str(job.get("name") or "").strip()
+                matched = aliases.get(_whole_run_cancel_base_key(name))
+                if matched is not None:
+                    matched_jobs.add(matched)
+                    selected.append(job)
+            return selected
+
+        short_jobs = [
+            affected_only(jobs) for run, jobs in kept if run.get("id") in short_ids]
+        workflow_jobs = [
+            affected_only(jobs) for run, jobs in kept if run.get("id") not in short_ids]
+        if not workflow_jobs:
+            workflow_jobs = [
+                affected_only(jobs)
+                for jobs in (jobs_per_run_by_wf.get(wf_path) or [])
+            ]
+        if short_ids and not matched_jobs:
+            _opt108_unmeasured(
+                finding,
+                "the affected job identities could not be resolved in the "
+                "sampled job lists",
+                sized_affected_jobs=[],
+                sampled_runs=len(all_runs),
+                comment_runs=sum(
+                    str(run.get("event") or "") in _OPT108_COMMENT_EVENTS
+                    for run in all_runs
+                ),
+                short_success_runs=len(_opt108_short_comment_runs(all_runs)),
+                short_floor_s=_OPT108_SHORT_RUN_S,
+            )
+            continue
+        _size_opt108_comment_runs(
+            finding, all_runs, short_jobs, workflow_jobs, vol_by_wf.get(wf_path))
+        measurement = finding.get("comment_runner_measurement")
+        if isinstance(measurement, dict):
+            measurement["sized_affected_jobs"] = sorted(matched_jobs)
+            if measurement.get("status") == "measured":
+                credited_jobs.update(matched_jobs)
+    return failures
 
 
 def _measure_opt32_path_filters(
@@ -34120,6 +34355,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # sampled pull requests. Reuse the run sample already selected above, fetch
     # changed files for those PRs only, and stamp the measured fraction before
     # the common sizing pass consumes it.
+    # OPT108 is sized only from the comment workflow's own short successful runs.
+    jobs_fetch_failures += _measure_opt108_comment_runs(
+        client, repo, findings, _all_status_page, wf_by_path, jobs_per_run_by_wf,
+        vol_by_wf, job_memo, findings_doc.get("workflow_job_graph"))
+
     _changed_files: dict[int, list[str] | None] = {}
     _measure_opt32_path_filters(
         client, repo, findings, sampled_runs_by_wf, _wf_docs,

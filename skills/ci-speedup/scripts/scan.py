@@ -4547,6 +4547,132 @@ def _detect_opt29(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT108 — Comment Filter Runs After Runner Allocation --------------------
+
+_COMMENT_BODY_GUARD_RE = re.compile(
+    r"github\.event\.comment\.body|context\.payload\.comment\.body", re.I)
+_COMMENT_AUTHOR_GUARD_RE = re.compile(
+    r"github\.(?:event\.(?:comment\.(?:user(?:\.(?:login|type))?|author_association)|"
+    r"sender(?:\.(?:login|type))?)|(?:triggering_)?actor)|"
+    r"context\.(?:payload\.(?:comment\.(?:user(?:\.(?:login|type))?|author_association)|"
+    r"sender(?:\.(?:login|type))?)|actor)", re.I)
+_COMMENT_EARLY_RETURN_RE = re.compile(
+    r"\bif\b(?:(?!\b(?:await|else)\b)[\s\S]){0,300}?"
+    r"(?:\breturn\b|\bexit\s+0\b|\bprocess\.exit\s*\(\s*0\s*\))",
+    re.I,
+)
+
+
+def _comment_guard_dimensions(text: str) -> set[str]:
+    """Which independent comment inputs an admission expression filters."""
+    dimensions: set[str] = set()
+    if _COMMENT_BODY_GUARD_RE.search(text):
+        dimensions.add("body")
+    if _COMMENT_AUTHOR_GUARD_RE.search(text):
+        dimensions.add("author")
+    return dimensions
+
+
+# `const body = context.payload.comment.body`, `BODY="${{ github.event.comment.body }}"`.
+_COMMENT_ALIAS_RE = re.compile(
+    r"(?:\b(?:const|let|var)\s+)?\b([A-Za-z_$][\w$]*)\s*=\s*[\"']?(?:\$\{\{\s*)?"
+    r"((?:github\.|context\.)[\w.]+)")
+
+
+def _opt108_rejection_dimensions(script: str, env: dict) -> set[str]:
+    """Comment inputs that an explicit early return in `script` tests. A
+    variable read from the comment (a JS/shell assignment, or the step's
+    `env:`) counts as that input; an early return whose condition never
+    touches the comment rejects nothing comment-shaped."""
+    aliases: dict[str, set[str]] = {}
+    for name, value in (env or {}).items():
+        dims = _comment_guard_dimensions(str(value))
+        if dims:
+            aliases[str(name)] = dims
+            aliases[f"process.env.{name}"] = dims
+    for m in _COMMENT_ALIAS_RE.finditer(script):
+        dims = _comment_guard_dimensions(m.group(2))
+        if dims:
+            aliases[m.group(1)] = dims
+    dimensions: set[str] = set()
+    for m in _COMMENT_EARLY_RETURN_RE.finditer(script):
+        text = m.group(0)
+        dimensions.update(_comment_guard_dimensions(text))
+        for name, dims in aliases.items():
+            if re.search(r"(?<![\w$.])\$?\{?" + re.escape(name) + r"(?![\w$])", text):
+                dimensions.update(dims)
+    return dimensions
+
+
+def _opt108_setup_only(step: dict) -> bool:
+    """Checkout, `setup-*`, cache or a dependency-install step: it only serves
+    the handler that follows, so it does not make the job required work for
+    every comment. Anything else counts as independent work (fail closed)."""
+    uses, run = _uses(step), _run(step)
+    if uses and not run:
+        return bool(_OPT21_SETUP_USES_RE.match(uses))
+    if run and not uses:
+        commands = _opt21_run_lines(run)
+        return bool(commands) and all(
+            "|" not in command and _OPT21_SETUP_LINE_RE.match(command)
+            for command in commands
+        )
+    return False
+
+
+def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
+    """A comment-triggered job filters body/author input only after GitHub has
+    allocated its runner. Require a readable step-level condition or explicit
+    early return so a job that intentionally handles every comment stays quiet."""
+    on = doc.get("on") or doc.get(True)
+    if not _on_includes(on, ("issue_comment", "pull_request_review_comment")):
+        return []
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        job_if = str(job.get("if") or "")
+        job_dimensions = _comment_guard_dimensions(job_if)
+        step_dimensions: list[set[str]] = []
+        for step, step_if in _steps_with_if(job):
+            dimensions: set[str] = set()
+            if step_if:
+                dimensions.update(_comment_guard_dimensions(step_if))
+            with_values = step.get("with") if isinstance(step.get("with"), dict) else {}
+            script = "\n".join((_run(step), str(with_values.get("script") or "")))
+            step_env = step.get("env") if isinstance(step.get("env"), dict) else {}
+            dimensions.update(_opt108_rejection_dimensions(script, step_env))
+            if (_run(step) or _uses(step)) and (
+                    dimensions or not _opt108_setup_only(step)):
+                step_dimensions.append(dimensions)
+        # Moving a step condition to the job boundary is safe only when the
+        # same input governs every executable step.  An optional reaction does
+        # not make a required recorder job skippable.
+        inner_dimensions = (
+            set.intersection(*step_dimensions)
+            if step_dimensions and all(step_dimensions)
+            else set()
+        )
+        if not inner_dimensions or inner_dimensions.issubset(job_dimensions):
+            continue
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"comment-triggered job `{job_name}` filters comment body or author "
+                "only inside a step and has no equivalent job-level `if:`; move the "
+                "same admission condition to the job while preserving every accepted "
+                "command and actor. Runner-minute effect: saving the affected job's "
+                "measured compute on rejected comments; not sized until matching short "
+                "successful runs confirm the rejected share."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+        ))
+    return hits
+
+
 # ---- OPT31 — Conditional Step With Unconditional Setup -----------------------
 
 _OPT31_INSTALL_RE = re.compile(
@@ -6004,7 +6130,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT76"})
+    "OPT39", "OPT76", "OPT108"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -6053,6 +6179,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT28": _detect_opt28,
     "OPT76": _detect_opt76,
     "OPT29": _detect_opt29,
+    "OPT108": _detect_opt108,
     "OPT31": _detect_opt31,
     "OPT32": _detect_opt32,
     "OPT33": _detect_opt33,
