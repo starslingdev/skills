@@ -29855,6 +29855,13 @@ _OPT106_LOADER_MODULES = frozenset({
 _OPT106_NODE_LOADER_FLAGS = frozenset({
     "--loader", "--experimental-loader", "--import", "-r", "--require"})
 _OPT106_ENV_WRAPPERS = frozenset({"cross-env", "env"})
+# node options that take their value as the next token; the option loop skips
+# that value instead of mistaking it for the script name.
+_OPT106_NODE_VALUE_FLAGS = frozenset({
+    "--loader", "--experimental-loader", "--import", "-r", "--require",
+    "--conditions", "-C", "--input-type", "--env-file", "--title",
+    "--redirect-warnings", "--stack-trace-limit", "--max-old-space-size"})
+_OPT106_SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "\n"})
 _OPT106_RUNNER_PREFIXES: tuple[tuple[str, ...], ...] = (
     ("npm", "exec", "--"), ("npm", "exec"), ("pnpm", "exec"), ("pnpm", "dlx"),
     ("yarn", "exec"), ("yarn", "dlx"), ("bun", "x"), ("npx",), ("bunx",))
@@ -29892,6 +29899,7 @@ def _opt106_loader_in_tokens(tokens: list[str], env_loader: "str | None",
     (`via_js`). An `echo`, a comment or any other binary is not a loader."""
     t = list(tokens)
     inline_env: "str | None" = None
+    inline_supplied = False
     while t:
         if t[0].rsplit("/", 1)[-1] in _OPT106_ENV_WRAPPERS:
             t = t[1:]
@@ -29899,7 +29907,10 @@ def _opt106_loader_in_tokens(tokens: list[str], env_loader: "str | None",
         if _OPT106_ASSIGN_RE.match(t[0]):
             name, _eq, val = t[0].partition("=")
             if name == "NODE_OPTIONS":
-                inline_env = _opt106_node_options_loader(val) or inline_env
+                # An inline NODE_OPTIONS replaces the inherited one, even when
+                # it is empty or names no loader.
+                inline_supplied = True
+                inline_env = _opt106_node_options_loader(val)
             t = t[1:]
             continue
         break
@@ -29917,20 +29928,98 @@ def _opt106_loader_in_tokens(tokens: list[str], env_loader: "str | None",
     binary = t[0].rsplit("/", 1)[-1]
     if binary in _OPT106_LOADER_BINARIES:
         return binary
-    env = inline_env or env_loader
+    env = inline_env if inline_supplied else env_loader
     if binary == "node":
-        for i, tok in enumerate(t[1:], start=1):
-            if not tok.startswith("-"):
-                break
+        i = 1
+        while i < len(t):
+            tok = t[i]
+            if tok == "--" or not tok.startswith("-"):
+                break  # the script name (or end of options)
             flag, eq, val = tok.partition("=")
+            takes_value = flag in _OPT106_NODE_VALUE_FLAGS and not eq
             if flag in _OPT106_NODE_LOADER_FLAGS:
                 mod = val if eq else (t[i + 1] if i + 1 < len(t) else "")
                 if mod in _OPT106_LOADER_MODULES:
                     return f"node {flag} {mod}"
+            i += 2 if takes_value else 1
         return f"NODE_OPTIONS={env}" if env else None
     if env and via_js and binary not in ("echo", "printf", "#", "true", ":"):
         return f"NODE_OPTIONS={env}"
     return None
+
+
+def _opt106_raw_segment_overrides(cmd: str) -> "dict[tuple[str, ...], tuple[str | None, bool]]":
+    """Inline `NODE_OPTIONS=...` assignments in a raw command, keyed by the
+    segment's tokens with the leading assignments and `env` / `cross-env`
+    wrappers removed (the form the run-leaf resolver hands back). The value is
+    `(loader or None, True)`: an inline NODE_OPTIONS replaces the inherited
+    one even when it names no loader. Unparseable text yields no overrides."""
+    import shlex
+    out: dict[tuple[str, ...], tuple["str | None", bool]] = {}
+    for line in str(cmd or "").splitlines():
+        try:
+            lex = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+            lex.whitespace_split = True
+            lex.commenters = "#"
+            toks = list(lex)
+        except ValueError:
+            continue
+        seg: list[str] = []
+        for tok in toks + [";"]:
+            if tok in _OPT106_SHELL_SEPARATORS or set(tok) <= set(";&|"):
+                rest = list(seg)
+                supplied, loader = False, None
+                while rest:
+                    if rest[0].rsplit("/", 1)[-1] in _OPT106_ENV_WRAPPERS:
+                        rest = rest[1:]
+                        continue
+                    if _OPT106_ASSIGN_RE.match(rest[0]):
+                        name, _eq, val = rest[0].partition("=")
+                        if name == "NODE_OPTIONS":
+                            supplied, loader = True, _opt106_node_options_loader(val)
+                        rest = rest[1:]
+                        continue
+                    break
+                if supplied and rest:
+                    out[tuple(rest)] = (loader, True)
+                seg = []
+            else:
+                seg.append(tok)
+    return out
+
+
+def _opt106_inline_override(toks: list[str]) -> "tuple[str | None, bool] | None":
+    """`(loader or None, True)` when the tokens start with an inline
+    `NODE_OPTIONS=` assignment (through `env` / `cross-env`), else None."""
+    rest = list(toks)
+    found: "tuple[str | None, bool] | None" = None
+    while rest:
+        if rest[0].rsplit("/", 1)[-1] in _OPT106_ENV_WRAPPERS:
+            rest = rest[1:]
+            continue
+        if _OPT106_ASSIGN_RE.match(rest[0]):
+            name, _eq, val = rest[0].partition("=")
+            if name == "NODE_OPTIONS":
+                found = (_opt106_node_options_loader(val), True)
+            rest = rest[1:]
+            continue
+        break
+    return found
+
+
+def _opt106_override_for_chain(
+        raw: "dict[tuple[str, ...], tuple[str | None, bool]]", entry: str,
+) -> "tuple[str | None, bool] | None":
+    """The inline NODE_OPTIONS override of the raw segment that started a
+    package-script chain: same package manager, same script name
+    (`pnpm gen` and `pnpm run gen` both start `pnpm run gen`). None when no
+    raw segment matches, or when more than one does with different values."""
+    parts = entry.split()
+    if len(parts) < 2:
+        return None
+    found = {v for k, v in raw.items()
+             if k and k[0] == parts[0] and k[-1] == parts[-1]}
+    return next(iter(found)) if len(found) == 1 else None
 
 
 def _opt106_resolve_loader(run: str, wd: str,
@@ -29943,10 +30032,15 @@ def _opt106_resolve_loader(run: str, wd: str,
     `tsx --test ...`) the way OPT84 does. None when no resolved command starts
     one, including when part of the command cannot be followed."""
     import shlex
-    queue: list[tuple[str, str, list[str], bool, int]] = [(run, wd, [], False, 0)]
+    # (cmd, cwd, chain, via_js, depth, inherited NODE_OPTIONS loader or None,
+    #  whether an inherited inline NODE_OPTIONS replaced the step env)
+    queue: list[tuple[str, str, list[str], bool, int, "str | None", bool]] = [
+        (run, wd, [], False, 0, None, False)]
     budget = _OPT106_MAX_EXPANSIONS
     while queue:
-        cmd, cwd, chain, via, depth = queue.pop(0)
+        cmd, cwd, chain, via, depth, inh_env, inh_supplied = queue.pop(0)
+        raw = _opt106_raw_segment_overrides(cmd)
+        base_env = inh_env if inh_supplied else env_loader
         res = _resolve_run_leaves(cmd, cwd, scripts_by_dir, scripts_unreadable,
                                   chain=list(chain), walk_complete=walk_complete)
         segments: list[tuple[list[str], list[str]]] = []
@@ -29959,17 +30053,27 @@ def _opt106_resolve_loader(run: str, wd: str,
                 continue
             segments.append((toks, list(u.get("chain") or [])))
         for lf in res.leaves:
-            segments.append((list(lf.get("tokens") or []), list(lf.get("chain") or [])))
+            lf_toks = list(lf.get("tokens") or [])
+            segments.append((lf_toks, list(lf.get("chain") or [])))
             op = _opt84_opaque_leaf(lf)
             if (op is not None and op[0] == "expand" and lf.get("wd") is not None
                     and budget > 0 and depth < _OPT82_MAX_SCRIPT_DEPTH):
                 budget -= 1
+                ov = _opt106_inline_override(lf_toks) or raw.get(tuple(lf_toks))
+                child_env, child_sup = (ov if ov is not None
+                                        else (inh_env, inh_supplied))
                 queue.append((op[1], str(lf["wd"]), list(lf.get("chain") or []),
-                              True, depth + 1))
+                              True, depth + 1, child_env, child_sup))
         for toks, seg_chain in segments:
             if toks[:1] == ["#"] or (toks and toks[0].startswith("#")):
                 continue
-            loader = _opt106_loader_in_tokens(toks, env_loader,
+            ov = raw.get(tuple(toks))
+            if ov is None and seg_chain:
+                # A package-script body inherits the NODE_OPTIONS set inline on
+                # the call that started it (`NODE_OPTIONS=... pnpm gen`).
+                ov = _opt106_override_for_chain(raw, str(seg_chain[0]))
+            seg_env = ov[0] if ov is not None else base_env
+            loader = _opt106_loader_in_tokens(toks, seg_env,
                                               via or bool(seg_chain))
             if loader is not None:
                 return loader, " ".join(toks)

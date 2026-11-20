@@ -691,6 +691,15 @@ def _loader_pole(run: str, *, p50: float = 300.0, job_p50: float = 400.0,
      "NODE_OPTIONS=--require ts-node/register"),
     ("yarn gen", {"gen": "cross-env NODE_OPTIONS=--import=tsx node gen.ts"},
      None, None, "NODE_OPTIONS=--import tsx"),
+    # An inline NODE_OPTIONS on a package-script call reaches the script body.
+    ("NODE_OPTIONS='--import tsx' pnpm gen", {"gen": "node gen.ts"}, None, None,
+     "NODE_OPTIONS=--import tsx"),
+    # ... and after a shell separator.
+    ("true && NODE_OPTIONS='--import tsx' node scripts/gen.ts", {}, None, None,
+     "NODE_OPTIONS=--import tsx"),
+    # node options with a separate value do not end the option scan.
+    ("node --require ./setup.cjs --import tsx scripts/gen.ts", {}, None, None,
+     "node --import tsx"),
 ])
 def test_runtime_typescript_loader_step_forms_fire(run, scripts, env, wf_env,
                                                    expected):
@@ -716,6 +725,18 @@ def test_runtime_typescript_loader_step_forms_fire(run, scripts, env, wf_env,
 def test_runtime_typescript_loader_step_near_misses_stay_quiet(run, scripts, p50):
     poles, wf_docs = _loader_pole(run.replace("\\n", "\n"), p50=p50)
     block = {"package_scripts": {"": scripts}, "truncated": False}
+    assert cr._detect_runtime_ts_loader_steps(poles, wf_docs, block, 0) == []
+
+
+@pytest.mark.parametrize("run", [
+    "env NODE_OPTIONS='' node dist/a.js",
+    "NODE_OPTIONS='--max-old-space-size=4096' node dist/a.js",
+])
+def test_runtime_typescript_loader_inline_override_replaces_inherited_loader(run):
+    """A step that overrides NODE_OPTIONS (empty, or without a loader) is not
+    reported for the workflow-level loader it already replaced."""
+    poles, wf_docs = _loader_pole(run, wf_env={"NODE_OPTIONS": "--import tsx"})
+    block = {"package_scripts": {"": {}}, "truncated": False}
     assert cr._detect_runtime_ts_loader_steps(poles, wf_docs, block, 0) == []
 
 
