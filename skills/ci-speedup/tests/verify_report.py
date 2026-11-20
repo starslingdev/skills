@@ -1760,6 +1760,18 @@ _VR_OPT83_WITHHOLD_PHRASES = {
     "job_starts_a_container_or_background_server":
         "the job starts a container or a background server that the steps "
         "would all use at once",
+    "separate_job_matrix_job":
+        "the steps cannot share one runner, and the job is a matrix, so a sibling "
+        "job would repeat its setup in every cell and its added cost per run could "
+        "not be stated",
+    "separate_job_later_step_may_read_moved_output":
+        "the steps cannot share one runner, and a later step or a job output may "
+        "read what a moved step writes, so moving it to its own job could drop "
+        "that check",
+    "separate_job_prerequisite_unclassified":
+        "the steps cannot share one runner, and a step before them is not setup, "
+        "checkout or install, so what a sibling job would have to repeat is "
+        "unmeasured",
 }
 # OPT84's held-back gates (the renderer's `_OPT84_WITHHOLD_PHRASES`, copied).
 _VR_OPT84_WITHHOLD_PHRASES = {
@@ -11133,8 +11145,12 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
             effect = _as_dict(f.get("runner_minute_effect"))
             added = _num(effect.get("runner_min_per_run")) or 0.0
             for need, what in (
-                    (f"Measured merge-wait reduction:** {want:.0f}s", "measured saving"),
-                    (f"added cost {added:.2f} per run", "signed runner-minute effect"),
+                    (f"re-derived from measured p50s):** up to {want:.0f}s",
+                     "re-derived saving"),
+                    ("aggregator job's own pickup", "aggregator-pickup caveat"),
+                    (f"added cost, at least +{added:.2f} runner-min per run",
+                     "signed runner-minute effect"),
+                    ("duplicated-setup floor", "runner-minute floor label"),
                     ("one additional concurrent runner", "runner-count effect"),
                     ("always()", "aggregator condition"),
                     ("every upstream result to be `success`", "aggregator success guard"),

@@ -8871,6 +8871,18 @@ _OPT83_WITHHOLD_PHRASES: dict[str, str] = {
     "job_starts_a_container_or_background_server":
         "the job starts a container or a background server that the steps "
         "would all use at once",
+    "separate_job_matrix_job":
+        "the steps cannot share one runner, and the job is a matrix, so a sibling "
+        "job would repeat its setup in every cell and its added cost per run could "
+        "not be stated",
+    "separate_job_later_step_may_read_moved_output":
+        "the steps cannot share one runner, and a later step or a job output may "
+        "read what a moved step writes, so moving it to its own job could drop "
+        "that check",
+    "separate_job_prerequisite_unclassified":
+        "the steps cannot share one runner, and a step before them is not setup, "
+        "checkout or install, so what a sibling job would have to repeat is "
+        "unmeasured",
 }
 # OPT84: a slow step on a long pole whose command could not be followed to the
 # tool it runs, or whose fit could not be decided. Every gate in
@@ -12401,9 +12413,11 @@ def _opt83_prompt(f: dict[str, Any], url: str) -> list[str]:
                 "Add one final aggregator job with `if: always()` and `needs:` on every "
                 "sibling. It must fail unless every upstream `result` is `success`, and "
                 "it must keep the required check name that branch protection expects.",
-                f"Measured merge-wait reduction: {ceiling:.0f}s. Runner-minute effect: "
-                f"added cost {added:.2f} per run from duplicated setup, with one "
-                "additional concurrent runner.",
+                f"Merge-wait reduction (re-derived from measured p50s): up to "
+                f"{ceiling:.0f}s; the aggregator job's own pickup comes off it. "
+                f"Runner-minute effect: added cost, at least +{added:.2f} runner-min "
+                "per run (duplicated-setup floor; the aggregator job and per-job "
+                "minute rounding add more), with one additional concurrent runner.",
                 "Roll out on the same commits and keep the split only if the measured "
                 "wall-clock gain holds and the added runner cost is accepted.", "",
                 "Read the catalog entry (background, fix recipe, and guardrail):",
@@ -12475,11 +12489,13 @@ def _opt83_card(f: dict[str, Any], catalog_url: str) -> list[str]:
                f"- **Change:** move `{moved}` unchanged to one sibling job and run it "
                "beside the remaining work; add an `always()` aggregator that requires "
                "every upstream result to be `success` and keeps the required check name.",
-               f"- **Measured merge-wait reduction:** {ceiling:.0f}s (serial candidate "
-               "sum minus the slower of the remaining job and the moved step plus "
-               f"{setup:.0f}s measured setup).",
-               f"- **Runner-minute effect:** added cost {added:.2f} per run from "
-               "duplicated setup; one additional concurrent runner."]
+               f"- **Merge-wait reduction (re-derived from measured p50s):** up to "
+               f"{ceiling:.0f}s (serial candidate sum minus the slower of the remaining "
+               f"job and the moved step plus {setup:.0f}s measured setup; the "
+               "aggregator job's own pickup comes off it).",
+               f"- **Runner-minute effect:** added cost, at least +{added:.2f} "
+               "runner-min per run (duplicated-setup floor; the aggregator job and "
+               "per-job minute rounding add more); one additional concurrent runner."]
         if f.get("guardrail"):
             out.append(f"- **Guardrail:** {_flatten_cell(str(f['guardrail']))}")
         if f.get("rollout"):

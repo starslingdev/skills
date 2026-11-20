@@ -20786,6 +20786,9 @@ _OPT83_HELD_BACK_GATES = frozenset({
     "siblings_share_tool_state",
     "candidate_runs_an_install",
     "job_starts_a_container_or_background_server",
+    "separate_job_matrix_job",
+    "separate_job_later_step_may_read_moved_output",
+    "separate_job_prerequisite_unclassified",
 })
 # The independence facts every OPT83 finding stamps (all True, or it would not
 # exist). The verifier requires every key.
@@ -20840,6 +20843,10 @@ _OPT83_TOOL_STATE_RES = (
     _OPT83_COVERAGE_RE,
 )
 _OPT83_FULL_RUNNER_RE = _re.compile(r"\bgo\s+test\b", _re.I)
+# The step categories a sibling job repeats as setup. Its duplicated time is the
+# separate-job extension's added runner cost (a floor: the aggregator job and
+# per-job minute rounding come on top).
+_OPT83_SEPARATE_SETUP_CATEGORIES = frozenset({"setup", "checkout", "install"})
 # A Lighthouse audit shares the runner's cores with whatever runs beside it, which skews
 # the scores its budget gates on (OPT103), and each `lhci collect` also clears the shared
 # `.lighthouseci/` folder. So any candidate set with a Lighthouse step is held back,
@@ -21230,13 +21237,39 @@ def _detect_opt83_parallel_steps(
         if full_runner_steps and container_or_background:
             _no("job_starts_a_container_or_background_server", wf, job, cand_names)
             continue
+        if full_runner_steps and isinstance(spec.get("strategy"), dict):
+            # A sibling job of a matrix job repeats its setup once per cell: the
+            # added runner cost and runner count per run could not be stated.
+            _no("separate_job_matrix_job", wf, job, cand_names)
+            continue
+        cand_ids = [str(s.get("id")) for s in cands if s.get("id")]
+        if full_runner_steps and (
+                walk.leaves[max(run) + 1:]
+                or any(f"steps.{sid}." in json.dumps(spec.get("outputs"), default=str)
+                       for sid in cand_ids)):
+            # A step after them (a coverage gate, a report upload) or a job output
+            # may read what the moved step writes. Moved unchanged to its own
+            # runner, that file or output is gone from this job, so the later
+            # check would fail or check less. Which it reads cannot be told.
+            _no("separate_job_later_step_may_read_moved_output", wf, job, cand_names)
+            continue
+        if full_runner_steps and any(
+                (measured.get(names[i]) or ("", 0.0))[0]
+                not in _OPT83_SEPARATE_SETUP_CATEGORIES
+                for i in range(min(run))):
+            # The sibling job must repeat what the moved step needs. A step before
+            # them that is not setup, checkout or install (code generation, a
+            # build) or that has no measured time may be needed: the duplicated
+            # work, and so the saving and the added cost, are unmeasured.
+            _no("separate_job_prerequisite_unclassified", wf, job, cand_names)
+            continue
         if full_runner_steps:
             # These steps are independent in purpose, but cannot safely share one
             # workspace or one runner's cores. Put one in a sibling job instead.
             p50s = [measured[name][1] for name in cand_names]
             setup_s = round(sum(
                 duration for name, (category, duration) in measured.items()
-                if name not in cand_names and category in {"setup", "checkout", "install"}
+                if name not in cand_names and category in _OPT83_SEPARATE_SETUP_CATEGORIES
             ), 1)
             choices = []
             serial_s = sum(p50s)
@@ -21257,9 +21290,10 @@ def _detect_opt83_parallel_steps(
                 "independent checks, but sharing one runner is unsafe because they "
                 "share tool state or each uses the runner's cores. Moving "
                 f"`{moved}` to a sibling job adds {setup_s:.0f}s of measured setup "
-                f"there and re-derives {saving_s:.0f}s of merge-wait reduction; "
-                f"runner-minute effect: added cost {runner_added:.2f} per run from "
-                "the duplicated setup, with one additional concurrent runner.")
+                f"there and re-derives up to {saving_s:.0f}s of merge-wait reduction "
+                "(the aggregator job's own pickup comes off it); runner-minute effect: "
+                f"added cost, at least +{runner_added:.2f} runner-min per run "
+                "(duplicated-setup floor), with one additional concurrent runner.")
             me = _measured_evidence(
                 ["Step", "Category", "p50", "Working directory"],
                 [[f"`{name}`", measured[name][0], f"{measured[name][1]:.0f}s",
@@ -21272,9 +21306,10 @@ def _detect_opt83_parallel_steps(
                 wf, job, evidence, _OPT83_FIX_STRATEGY,
                 _catalog_anchor("OPT83", _OPT83_TITLE), start_idx + len(out) + 1,
                 wc_p50=saving_s, rm=None,
-                size_note=(f"measured wall-clock saving {saving_s:.0f}s; runner-minute "
-                           f"effect: added cost {runner_added:.2f} per run from "
-                           "duplicated setup; one additional concurrent runner"),
+                size_note=(f"wall-clock saving up to {saving_s:.0f}s, re-derived from "
+                           "measured step p50s; runner-minute effect: added cost, at "
+                           f"least +{runner_added:.2f} runner-min per run "
+                           "(duplicated-setup floor); one additional concurrent runner"),
                 realization="none", measured_evidence=me)
             f["pattern_class"] = "structural"
             f["sizing_basis"] = "measured"
