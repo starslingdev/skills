@@ -4741,11 +4741,11 @@ _VERIFICATION_BAR_LINES = [
 
 _FIX_META: dict[str, dict[str, Any]] = {
     "failure-reporter-on-failure": {
-        "cause": "A report-only job uses `if: always()`, so healthy runs allocate a runner even though there is no failure to report.",
-        "look": "Inspect the reporter's `needs`, job condition and reporting steps, then trace how its result feeds the final required aggregate gate.",
-        "constraints": "Preserve failure and cancellation reporting. The final required gate must accept the reporter's intentional healthy-run skip but still reject a failed or cancelled workload check and a failed reporter.",
+        "cause": "A failure-only report job uses `if: always()`, so healthy runs allocate a runner even though there is no failure to report.",
+        "look": "Inspect the reporter's `needs`, job condition and reporting steps (including any script it runs, for a healthy-run path such as clearing a stale failure comment), then trace how its result feeds every final required aggregate gate.",
+        "constraints": "Preserve failure and cancellation reporting and any healthy-run cleanup of an earlier report. Every final required gate that needs the reporter keeps (or gains) `if: always()`, because a skipped need otherwise skips the gate and a skipped job reports success to a required check; it accepts the reporter's `success` or `skipped` result and still requires every workload check to be `success`, so a failed or cancelled check or a failed reporter still fails it.",
         "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions"],
-        "deliver": "Gate the reporter with `failure() || cancelled()`, update the aggregate gate's result truth table, and test healthy, failed, cancelled and reporter-failure paths. Measure the reporter's healthy-run compute before claiming a numeric saving.",
+        "deliver": "Gate the reporter with `failure() || cancelled()` (or `failure()` where it already excluded cancelled runs), update each gate's result check to accept `skipped` from the reporter only, and test healthy, failed, cancelled and reporter-failure paths. Measure the reporter's healthy-run compute before claiming a numeric saving.",
     },
     "cache-effective-path-mismatch": {
         "cause": "The configured cache path does not exist at save time on every sampled successful save attempt.",
