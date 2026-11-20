@@ -57,9 +57,9 @@ def _startup_log(
             )
         elif shape == "tool-loop":
             messages = (
-                f"Tool process started: plugin-builder item=plugin-{i}",
-                f"Tool ready: plugin-builder item=plugin-{i}",
-                f"Tool process finished: plugin-builder item=plugin-{i}",
+                f"Tool process started: plugin-builder category=build item=plugin-{i}",
+                f"Tool ready: plugin-builder category=build item=plugin-{i}",
+                f"Tool process finished: plugin-builder category=build item=plugin-{i}",
             )
         elif shape == "worker-pool":
             messages = (
@@ -168,14 +168,17 @@ def test_opt85_requires_verification_markers_for_the_same_process():
 
 
 @pytest.mark.parametrize(
-    ("shape", "kind"),
-    [("tool-loop", "tool process"), ("worker-pool", "worker pool")],
+    ("shape", "kind", "fix_key"),
+    [
+        ("tool-loop", "tool process", "per-item-build-startup"),
+        ("worker-pool", "worker pool", "per-case-worker-pool-startup"),
+    ],
 )
-def test_opt85_measures_non_test_process_and_pool_startup(shape, kind):
+def test_opt85_measures_non_test_process_and_pool_startup(shape, kind, fix_key):
     leaf = bp._parse_log(_startup_log(shape))
 
     assert leaf is not None
-    assert leaf["fix_key"] == "per-invocation-startup"
+    assert leaf["fix_key"] == fix_key
     assert leaf["process_kind"] == kind
     assert leaf["iteration_count"] == 10
     assert leaf["modeled_saving_s"] == pytest.approx(27.0)
@@ -183,11 +186,13 @@ def test_opt85_measures_non_test_process_and_pool_startup(shape, kind):
 
 def test_opt85_non_test_loop_requires_one_repeated_tool():
     text = _startup_log("tool-loop").replace(
-        "plugin-builder item=plugin-9", "other-builder item=plugin-9")
+        "plugin-builder category=build item=plugin-9",
+        "other-builder category=build item=plugin-9",
+    )
 
     leaf = bp._parse_log(text)
 
-    assert leaf is None or leaf["fix_key"] != "per-invocation-startup"
+    assert leaf is None or leaf["fix_key"] != "per-item-build-startup"
 
 
 def test_opt85_stays_silent_when_one_process_batches_the_items():
@@ -213,6 +218,21 @@ def test_opt85_process_batching_recipe_is_bounded_and_states_cost_direction():
     assert "bounded worker pool" in meta["deliver"]
     assert "measured memory cap" in meta["deliver"]
     assert "Runner-minute effect: saving" in meta["constraints"]
+
+
+def test_opt85_test_profile_cannot_crown_a_build_dominant_pole():
+    leaf = bp._parse_log(_startup_log("pytest"))
+
+    assert leaf is not None
+    assert bp._offcategory_leaf(leaf, {"dominant_category": "build"}) is True
+
+
+def test_opt85_tool_profile_cannot_crown_another_category():
+    leaf = bp._parse_log(_startup_log("tool-loop"))
+
+    assert leaf is not None
+    assert bp._offcategory_leaf(leaf, {"dominant_category": "build"}) is False
+    assert bp._offcategory_leaf(leaf, {"dominant_category": "scan"}) is True
 
 
 @pytest.mark.parametrize("text", [

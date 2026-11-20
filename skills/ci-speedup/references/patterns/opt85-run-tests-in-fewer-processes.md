@@ -12,7 +12,7 @@ category: 14
 
 # OPT85 — Repeated Work Runs in Many Processes Instead of Bounded Batches
 
-**Auto-detected from a drilled log.** The `per-invocation-startup` leaf requires at least ten timestamped, strictly serial iterations from a declared tool signature. It measures process boundary → first work and boundary → completion for every iteration. For non-test loops, the structured boundary must also name one repeated tool or worker pool and a unique item or case. Unparseable timestamps, mixed tools, overlapping iterations, retries and periodic progress lines fail closed.
+**Auto-detected from a drilled log.** The OPT85 startup leaves require at least ten timestamped, strictly serial iterations from a declared tool signature. They measure process boundary → first work and boundary → completion for every iteration. For non-test loops, the structured boundary must also name one repeated tool, its `build` or `scan` category, and a unique item; pool boundaries name one pool and a unique case. This category is checked against the pole's measured dominant step, so startup in a shorter test step cannot explain a build-dominant job. Unparseable timestamps, mixed tools, overlapping iterations, retries and periodic progress lines fail closed.
 
 **TL;DR**: A slow job spends most of each serial iteration starting the same tool process or worker pool. Keep a bounded pool alive across cases, or process a memory-capped batch of items per tool start. Tests still keep every case, while packaging and analysis loops still keep every input.
 
@@ -29,7 +29,7 @@ category: 14
 
 1. The drilled long pole's dominant step category is `build`, `scan` or `test`. This is a gate only: it holds before and after a regression alike, so it cannot identify one by itself.
 2. Process per case: a declared pytest invocation, Cargo test-binary banner, or structured verification-script boundary starts each iteration; its first-work and completion lines are timestamped.
-3. Tool/pool loop: structured `started`, `ready` and `finished`/`stopped` lines carry the same tool or pool identity and a unique item or case identity. A mixed-tool loop is withheld rather than treated as reusable startup.
+3. Tool/pool loop: structured `started`, `ready` and `finished`/`stopped` lines carry the same tool or pool identity and a unique item or case identity. A tool loop also declares `build` or `scan`; that exact category must dominate the pole. A mixed-tool or mixed-category loop is withheld rather than treated as reusable startup.
 4. For either measured shape, at least ten unique iterations must be strictly serial. Median startup must be at least half the median iteration, and count × median startup must reach 20 seconds.
 5. Binary per file: the crate has several `tests/*.rs` files, and the captured log shows one `Running tests/<name>.rs` line per file. Corroborate with timing: the link time per binary (`cargo test --no-run` timed, or `cargo build --timings`) and the gaps between binaries in the log.
 
