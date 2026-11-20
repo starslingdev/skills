@@ -610,6 +610,160 @@ jobs:
     assert "OPT14" in _scan_one(tmp_path, pos)
 
 
+def test_opt110_upload_without_a_repository_consumer_is_unverified_waste(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build:runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-runtime-build
+          path: dist/runtime.tar.gz
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT110"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["build"]
+    assert "dist-runtime-build" in finding["evidence"]
+    assert "unverified outside this repository" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt110_matching_download_action_is_a_consumer(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: dist, path: dist}
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {name: dist}
+      - run: npm test
+"""
+    assert "OPT110" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt110_cross_workflow_gh_download_is_a_consumer(tmp_path: Path):
+    _write_workflow(tmp_path, "build.yml", """name: Build
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: worker-bundle, path: dist/worker.tgz}
+""")
+    _write_workflow(tmp_path, "deploy.yml", """name: Deploy
+on: workflow_dispatch
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh run download "$RUN_ID" --name worker-bundle
+      - run: ./deploy worker-bundle
+""")
+    assert "OPT110" not in _patterns(_scan(tmp_path))
+
+
+def test_opt110_different_download_name_does_not_confirm_consumption(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-bundle, path: dist/runtime.tgz}
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {name: coverage-report}
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT110"
+    ]
+    assert len(findings) == 1
+    assert "runtime-bundle" in findings[0]["evidence"]
+
+
+def test_opt110_release_step_using_the_uploaded_path_is_a_consumer(
+        tmp_path: Path):
+    workflow = """name: Release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build:runtime
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-bundle, path: dist/runtime.tgz}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/runtime.tgz
+"""
+    assert "OPT110" not in _scan_one(tmp_path, workflow, "release.yml")
+
+
+def test_opt110_release_workflow_producer_is_not_a_consumer(tmp_path: Path):
+    workflow = """name: Release build
+on:
+  push:
+    tags: ['v*']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: mkdir -p dist && npm run build
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-bundle, path: dist}
+"""
+    _write_workflow(tmp_path, "release.yml", workflow)
+    findings = [
+        row for row in _scan(tmp_path)["findings"]
+        if row["pattern"] == "OPT110"
+    ]
+    assert len(findings) == 1
+
+
+def test_opt110_dynamic_download_selector_holds_back_the_finding(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-bundle, path: dist/runtime.tgz}
+  consume:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {name: '${{ inputs.artifact }}'}
+"""
+    assert "OPT110" not in _scan_one(tmp_path, workflow)
+
+
 def test_opt16_within_job_duplicate(tmp_path: Path):
     pos = """name: CI
 on: push

@@ -26,6 +26,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT14 — Repeated Checkout/Setup Without Artifact Handoff (MEDIUM, static) — every job rebuilds; no artifact handoff
 - OPT15 — Cross-Workflow Build Redundancy (HIGH, static) — same build in several PR workflows
 - OPT16 — Within-Job Duplicate Commands (LOW, static) — same command twice in one job
+- OPT110 — Uploaded Artifact Has No Repository Consumer (MEDIUM, static) — upload name is never downloaded or consumed by release/deploy
 - OPT77 — Repeated Fixed Setup Across Independent Small Jobs (MEDIUM, data-driven) — small checks each pay full setup
 ## Category 3 — Docker
 - OPT17 — Sleep-Based Container Readiness (MEDIUM, static) — sleep instead of healthchecks
