@@ -4559,6 +4559,12 @@ _COMMENT_EARLY_RETURN_RE = re.compile(
     r"(?:\breturn\b|\bexit\s+0\b|\bprocess\.exit\s*\(\s*0\s*\))",
     re.I,
 )
+_COMMENT_HANDLER_SETUP_USES_RE = re.compile(
+    r"^(?:actions/(?:checkout|setup-(?:node|python|java|go))|"
+    r"pnpm/action-setup|oven-sh/setup-bun|ruby/setup-ruby|"
+    r"dtolnay/rust-toolchain)@",
+    re.I,
+)
 
 
 def _comment_guard_dimensions(text: str) -> set[str]:
@@ -4593,7 +4599,15 @@ def _detect_opt108(doc: dict, raw: str) -> list[Hit]:
             script = "\n".join((_run(step), str(with_values.get("script") or "")))
             if _COMMENT_EARLY_RETURN_RE.search(script):
                 dimensions.update(_comment_guard_dimensions(script))
-            if _run(step) or _uses(step):
+            uses = _uses(step)
+            # A checkout/toolchain action is preparation for the filtered
+            # handler, not independent comment work.  Keep it out of the
+            # whole-job intersection; an unguarded command still proves that
+            # the job has work which must run for every comment.
+            setup_only = bool(
+                not _run(step) and _COMMENT_HANDLER_SETUP_USES_RE.search(uses)
+            )
+            if (_run(step) or uses) and not setup_only:
                 step_dimensions.append(dimensions)
         # Moving a step condition to the job boundary is safe only when the
         # same input governs every executable step.  An optional reaction does
