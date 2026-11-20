@@ -29353,6 +29353,12 @@ def _opt13_call_loads_compiled_output(text: str) -> bool:
                 continue
             if char in ("'", '"', "`"):
                 quote = char
+            elif char == "/" and index + 1 < len(text) \
+                    and text[index + 1] in ("/", "*"):
+                # Comments need a JavaScript parser to distinguish their
+                # punctuation from the argument grammar.  Withhold rather than
+                # risk a `)` in prose hiding a later compiled-output path.
+                return True
             elif char == "(":
                 depth += 1
             elif char == ")":
