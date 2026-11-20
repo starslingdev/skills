@@ -606,6 +606,33 @@ CI_SPEEDUP_RUNTIME_TS_PROFILE_V1 loader=jiti self_ms=400000 profile=CPU.20260128
     assert bp._parse_log(impossible, job_duration_s=200.0) is None
 
 
+def test_runtime_typescript_loader_states_signed_or_unsized_runner_minute_effect():
+    """The card words a saving as a saving, or says why it is unsized."""
+    fact = {"fix_key": "runtime-ts-transpilation", "loader": "jiti",
+            "profile_s": 120.0, "profile_artifact": "CPU.cpuprofile",
+            "profile_sha256": "a" * 64}
+    entry = {"workflow_file": ".github/workflows/ci.yml", "job": "snapshots",
+             "duration_s": 300.0, "runtime_ts_loader": fact,
+             "html_url": "https://example.invalid/job/1"}
+    sized = cr._detect_runtime_ts_transpilation(
+        [entry], {".github/workflows/ci.yml": 40}, 0)[0]
+    assert sized["runner_min_saving"] == 80.0
+    assert ("runner-minute saving: at most 80.0/month (profiled loader ceiling "
+            "from 1 representative run x 40 workflow runs in 30 days)"
+            in sized["size_note"])
+    unknown = cr._detect_runtime_ts_transpilation([entry], {}, 0)[0]
+    assert unknown["runner_min_saving"] is None
+    assert ("runner-minute saving: unsized (30-day run volume for this workflow "
+            "is unavailable)" in unknown["size_note"])
+    empty = cr._detect_runtime_ts_transpilation(
+        [entry], {".github/workflows/ci.yml": 0}, 0)[0]
+    assert ("runner-minute saving: unsized (the 30-day volume window holds no "
+            "runs of this workflow)" in empty["size_note"])
+    for finding in (sized, unknown, empty):
+        assert "+" not in finding["size_note"]
+        assert "not sized because" not in finding["size_note"]
+
+
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
     prose = """\
 2026-01-28T00:00:00Z ##[group]Run pnpm test

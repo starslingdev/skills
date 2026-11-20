@@ -29551,11 +29551,17 @@ def _detect_runtime_ts_transpilation(
         runner_min = (round(float(seconds) * runs / 60.0, 1)
                       if isinstance(runs, int) and runs > 0 else None)
         url = str(entry.get("html_url") or "")
-        runner_effect = (
-            f"runner-minute saving: at most {runner_min:.1f}/month from the profiled "
-            "loader ceiling; confirm the realized saving after the replacement"
-            if runner_min is not None else
-            "runner-minute saving not sized because monthly run volume is unavailable")
+        if runner_min is not None:
+            runner_effect = (
+                f"runner-minute saving: at most {runner_min:.1f}/month (profiled "
+                f"loader ceiling from 1 representative run x {runs} workflow runs "
+                "in 30 days); confirm the realized saving after the replacement")
+        elif isinstance(runs, int) and not isinstance(runs, bool) and runs <= 0:
+            runner_effect = ("runner-minute saving: unsized (the 30-day volume "
+                             "window holds no runs of this workflow)")
+        else:
+            runner_effect = ("runner-minute saving: unsized (30-day run volume for "
+                             "this workflow is unavailable)")
         evidence = (
             f"The representative `{job}` log profiles {float(seconds):.1f}s of runtime "
             f"TypeScript loader self time inside a {float(job_seconds):.1f}s long-pole job."
