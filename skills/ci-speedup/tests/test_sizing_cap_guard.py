@@ -476,7 +476,7 @@ def test_opt21_edge_sizing_ignores_an_unmeasured_unrelated_job():
 _RUNTIME_MEASURED_COVERED = {
     "OPT19", "OPT21", "OPT24", "OPT25", "OPT49", "OPT50", "OPT51", "OPT100",
 }
-# OPT46/OPT47/OPT64 are run-elimination bill levers, OPT65 is exact billing
+# OPT46/OPT47/OPT64/OPT107 are run-elimination bill levers, OPT65 is exact billing
 # rounding waste below the cluster floor, OPT77 credits removed setup
 # payments for a consolidation that must project below the tallest job that
 # REMAINS after it (not the cluster floor, which the group's own members help
@@ -495,6 +495,7 @@ _RUNTIME_MEASURED_COVERED = {
 # independently re-derived by verify_report's OPT80 certificate arm.
 _MEASURED_EXEMPT = {
     "OPT43", "OPT97", "OPT48", "OPT46", "OPT47", "OPT64", "OPT65", "OPT77", "OPT79", "OPT80",
+    "OPT107",
 }  # queue/advisory/bill-only
 
 

@@ -12745,13 +12745,15 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     # `_group_by_pattern_ranked`, so they survive this slice (they'd only be cut if there
     # were >_ALSO_NOTICED_CAP of them — not a case that arises today; see that docstring).
     shown, rest = ranked[:_ALSO_NOTICED_CAP], ranked[_ALSO_NOTICED_CAP:]
-    # OPT82 and unmeasured OPT32 are exempt from the cap. OPT82 carries no bill saving
-    # BY DESIGN, while an unmeasured OPT32 has no number because GitHub did not return
-    # enough evidence to calculate one. In both cases the card is the only place the
-    # reader sees the substance that a numeric ranking cannot represent.
+    # OPT82, unmeasured OPT32, and non-PR-only groups are exempt from the cap.
+    # OPT82 carries no bill saving BY DESIGN, while an unmeasured OPT32 has no
+    # number because GitHub did not return enough evidence to calculate one.
+    # A non-PR group must retain its lane tag: dropping that disclosure can make
+    # the remaining report surface look like merge-gate work. In all three cases
+    # the card carries substance that a numeric ranking cannot represent.
     def _uncapped_group(group: tuple[str, list[dict[str, Any]]]) -> bool:
         pat, members = group
-        return pat == "OPT82" or (
+        return any(m.get("non_pr_lane") is True for m in members) or pat == "OPT82" or (
             pat == "OPT32" and any(
                 isinstance(m.get("path_filter_measurement"), dict)
                 and m["path_filter_measurement"].get("status") == "unmeasured"
@@ -12800,7 +12802,11 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     for pat, ms in shown:
         title = _flatten_cell(ms[0].get("title") or pat)
         rmin = _rmin_of(ms)
-        bill = _fmt_runner_min(rmin) if rmin else "no bill saving"
+        unsized = next((str(m.get("runner_min_unsized_reason")) for m in ms
+                        if m.get("runner_min_unsized_reason")), "")
+        bill = (_fmt_runner_min(rmin) if rmin
+                else f"runner-minute saving: unsized ({_flatten_cell(unsized)})"
+                if unsized else "no bill saving")
         n = len(ms)
         wfs = len({m.get("workflow_file", "") for m in ms if m.get("workflow_file")})
         occ = f"{n} across {wfs} wf" if wfs else f"{n} occurrence"
