@@ -24,9 +24,12 @@ category: 2
 ```
 
 With `--with-logs`, ci-speedup also recognizes the narrow measured case where a
-lint, test, check, or type-check package script logs a declaration emit, bundle,
-or full build before its quality command. It credits only the build interval
-printed by the tool. A plain build job, an untimed build, JavaScript/TypeScript
+step whose own `run:` starts with a lint, test, check, or type-check package
+script echoes a declaration emit, bundle, or full build before its quality
+command, inside that same step. It measures only the build interval printed by
+the tool. A separate build step, a build written into the step's `run:` line, a
+script named for a build (`test-build`), `tsc --noEmit` or `--declaration
+false`, a plain build job, an untimed build, JavaScript/TypeScript
 source that may load Node compiled output, or a quality job without a separate
 full-build validation job does not qualify. This is evidence of work placement,
 not proof that a production build may be deleted.

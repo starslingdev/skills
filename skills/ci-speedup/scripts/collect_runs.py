@@ -23911,8 +23911,12 @@ _OPT13_QUALITY_COMMAND_RE = _re.compile(
 )
 _OPT13_BUILD_COMMAND_RE = _re.compile(
     r"(?:^|\s)(?:vite|next|nuxt|remix|astro|gatsby|ng|nest)\s+build\b|"
-    r"(?:^|\s)(?:webpack|rollup|rspack|turbopack|tsup|esbuild)\b|"
-    r"(?:^|\s)tsc\b[^\n]*(?:--emitDeclarationOnly|--declaration(?:\s+true)?\b)|"
+    # A bundler as the command word, never a config-file argument
+    # (`--config webpack.config.test.js`).
+    r"(?:^|\s)(?:webpack|rollup|rspack|turbopack|tsup|esbuild)(?=\s|$)|"
+    # A declaration emit; `--noEmit` and `--declaration false` emit nothing.
+    r"(?:^|\s)tsc\b(?![^\n]*--noEmit\b)[^\n]*"
+    r"(?:--emitDeclarationOnly|--declaration(?!\s+false\b)(?:\s+true)?\b)|"
     r"(?:^|\s)(?:mvn|mvnw)\s+(?:[^\n]*\s)?package\b|"
     r"(?:^|\s)(?:gradle|gradlew)\s+(?:[^\n]*\s)?assemble\b",
     _re.IGNORECASE,
@@ -23956,22 +23960,56 @@ def _opt13_build_label(command: str) -> str:
     return "build"
 
 
+# A GitHub step header, and the `run:` of a step whose FIRST command invokes a
+# quality package script (`pnpm test`, `npm run lint:ci`, `yarn typecheck`).
+# A script whose own name says it builds (`test-build`, `lint:build`) hides
+# nothing, and neither does a build written into the step's `run:` line.
+_OPT13_STEP_RE = _re.compile(r"^##\[group\]Run\s+(.*)$")
+_OPT13_QUALITY_STEP_RE = _re.compile(
+    r"^(?:pnpm|npm|yarn|bun)(?:\s+(?:run|-{1,2}[\w-]+(?:=\S+)?))*\s+"
+    r"(?:lint|test|check|typecheck|type-check)\b(?![\w:-]*build)",
+    _re.IGNORECASE,
+)
+
+
 def _opt13_build_in_quality_log(log: str) -> dict[str, Any] | None:
     """A measured build hidden inside a lint/test wrapper, or ``None``.
 
-    Fail closed when the same log shows a command loading compiled output.  A
-    framework build can validate more than the quality command, so the emitted
-    recipe shrinks it to a runtime-only target and keeps one full validation
-    build; it never recommends deleting the only production-build gate.
+    The job log is split at GitHub step headers (``##[group]Run ...``) and
+    only a step whose own ``run:`` starts with a quality package script is
+    read, so a build step beside a test step never pairs with that test step's
+    commands.  Fail closed when any command in the log loads compiled output.
+    A framework build can validate more than the quality command, so the
+    emitted recipe shrinks it to a runtime-only target and keeps one full
+    validation build; it never recommends deleting the only production-build
+    gate.
     """
+    lines = log.splitlines()
+    if any(_OPT13_LOADS_BUILD_OUTPUT_RE.search(command)
+           for command in (_opt13_command_text(line) for line in lines)
+           if command is not None):
+        return None
+    steps: list[tuple[str, list[str]]] = []
+    for line in lines:
+        header = _OPT13_STEP_RE.match(_OPT24_LOG_TS_RE.sub("", line).strip())
+        if header:
+            steps.append((header.group(1).strip(), []))
+        elif steps:
+            steps[-1][1].append(line)
+    for run, step_lines in steps:
+        if not _OPT13_QUALITY_STEP_RE.search(run):
+            continue
+        fact = _opt13_build_in_quality_step(step_lines)
+        if fact is not None:
+            return fact
+    return None
+
+
+def _opt13_build_in_quality_step(lines: list[str]) -> dict[str, Any] | None:
+    """The build-then-quality proof inside one quality-script step's lines."""
     records = [(_opt24_log_timestamp(line), _opt13_command_text(line),
                 _OPT24_LOG_TS_RE.sub("", line).strip())
-               for line in log.splitlines()]
-    commands = [command for _stamp, command, _text in records if command is not None]
-    if not any(_OPT13_QUALITY_COMMAND_RE.search(text) for text in commands):
-        return None
-    if any(_OPT13_LOADS_BUILD_OUTPUT_RE.search(text) for text in commands):
-        return None
+               for line in lines]
     build_at = next((index for index, (_stamp, command, _text) in enumerate(records)
                      if command is not None and _OPT13_BUILD_COMMAND_RE.search(command)), None)
     if build_at is None:
@@ -29214,7 +29252,8 @@ _OPT13_VALIDATION_BUILD_LINE_RE = _re.compile(
     r"(?:vite|next|nuxt|remix|astro|gatsby|ng|nest)\s+build"
     r"(?:\s+--[\w-]+(?:=\S+)?)*|"
     r"(?:webpack|rollup|rspack|turbopack|tsup|esbuild)(?:\s+--[\w-]+(?:=\S+)?)*|"
-    r"tsc\b[^\n]*(?:--emitDeclarationOnly|--declaration(?:\s+true)?\b)|"
+    r"tsc\b(?![^\n]*--noEmit\b)[^\n]*"
+    r"(?:--emitDeclarationOnly|--declaration(?!\s+false\b)(?:\s+true)?\b)|"
     r"(?:mvn|mvnw)\s+(?:[^\n]*\s)?package|"
     r"(?:gradle|gradlew)\s+(?:[^\n]*\s)?assemble)\s*$",
     _re.IGNORECASE,

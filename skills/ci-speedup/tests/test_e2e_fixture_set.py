@@ -448,7 +448,8 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
     responses_path = positive / "responses.json"
     recorded = json.loads(responses_path.read_text(encoding="utf-8"))
     recorded["logs"]["1103"] = """\
-2026-01-28T00:00:00.0000000Z > pnpm test
+2026-01-28T00:00:00.0000000Z ##[group]Run pnpm test
+2026-01-28T00:00:00.0000000Z ##[endgroup]
 2026-01-28T00:00:01.0000000Z > project@test
 2026-01-28T00:00:02.0000000Z > vite build
 2026-01-28T00:02:02.0000000Z ✓ built in 120.00s
@@ -489,7 +490,8 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
     negative_responses = negative / "responses.json"
     recorded = json.loads(negative_responses.read_text(encoding="utf-8"))
     recorded["logs"]["1103"] = """\
-2026-01-28T00:00:00.0000000Z > pnpm test
+2026-01-28T00:00:00.0000000Z ##[group]Run pnpm test
+2026-01-28T00:00:00.0000000Z ##[endgroup]
 2026-01-28T00:00:01.0000000Z > project@test
 2026-01-28T00:00:02.0000000Z > vitest run
 2026-01-28T00:12:00.0000000Z Tests 48 passed
@@ -508,6 +510,7 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
 
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
     prose = """\
+2026-01-28T00:00:00Z ##[group]Run pnpm test
 2026-01-28T00:00:00Z vite build
 2026-01-28T00:02:00Z built in 120s
 2026-01-28T00:02:01Z Documentation: run vitest separately
@@ -515,6 +518,7 @@ def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consum
     assert cr._opt13_build_in_quality_log(prose) is None
 
     post_quality = """\
+2026-01-28T00:00:00Z ##[group]Run pnpm test
 2026-01-28T00:00:00Z > vitest run
 2026-01-28T00:10:00Z > vite build
 2026-01-28T00:12:00Z built in 120s
@@ -522,14 +526,14 @@ def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consum
     assert cr._opt13_build_in_quality_log(post_quality) is None
 
     build_only_wrapper = """\
-2026-01-28T00:00:00Z > pnpm test
+2026-01-28T00:00:00Z ##[group]Run pnpm test
 2026-01-28T00:00:01Z > vite build
 2026-01-28T00:02:01Z built in 120s
 """
     assert cr._opt13_build_in_quality_log(build_only_wrapper) is None
 
     loads_output = """\
-2026-01-28T00:00:00Z > pnpm test
+2026-01-28T00:00:00Z ##[group]Run pnpm test
 2026-01-28T00:00:01Z > vite build
 2026-01-28T00:02:01Z built in 120s
 2026-01-28T00:02:02Z > node --enable-source-maps ../dist/index.js
