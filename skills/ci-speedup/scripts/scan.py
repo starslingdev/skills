@@ -9300,6 +9300,9 @@ def _detect_opt113(root: Path) -> tuple[list[tuple[str, str, Hit]], list[dict]]:
                     "size_note": (
                         "runner-minute saving: unsized (source identifies oversized "
                         "fixture work but not its measured duration or monthly run count)"),
+                    "runner_min_unsized_reason": (
+                        "source identifies oversized fixture work but not its measured "
+                        "duration or monthly run count"),
                     "oversized_fixture_static": True,
                 },
             )

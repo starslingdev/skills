@@ -615,6 +615,12 @@ func TestArchive(t *testing.T) {
     assert "runner-minute saving: unsized" in finding.get("size_note", ""), finding
     assert "small shared byte fixture" in finding.get("fix_strategy", "").lower()
     assert "OPT113" in report
+    # The saving is real but unsized: the group heading names it as an unsized
+    # runner-minute saving with its reason, never "no bill saving".
+    heading = next(line for line in report.splitlines()
+                   if "<summary>" in line and "OPT113" in line)
+    assert "runner-minute saving: unsized (" in heading, heading
+    assert "no bill saving" not in heading, heading
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
 

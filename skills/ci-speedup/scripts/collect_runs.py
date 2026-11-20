@@ -7051,6 +7051,12 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             "runner-minute saving: unsized (affected test duration and monthly "
             "run count were not measured)",
         )
+        # The report's group heading reads this reason; without it the heading
+        # falls back to "no bill saving", which misstates a real, unsized saving.
+        f.setdefault(
+            "runner_min_unsized_reason",
+            "affected test duration and monthly run count were not measured",
+        )
         return
     cache_confirmation = f.get("cache_log_confirmation")
     confirmed_miss_majority = (
