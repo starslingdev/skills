@@ -6255,7 +6255,7 @@ def _size_opt108_comment_runs(
     finding: dict[str, Any],
     all_runs: list[dict[str, Any]],
     short_jobs: list[list[dict[str, Any]]],
-    workflow_jobs: list[list[dict[str, Any]]],
+    affected_jobs_per_run: list[list[dict[str, Any]]],
     monthly_volume: int | None,
 ) -> None:
     """Size OPT108 from the workflow's own run history (pure).
@@ -6263,8 +6263,8 @@ def _size_opt108_comment_runs(
     The saving is the measured compute of rejected comments: the share of the
     sampled all-status runs that are short successful comment runs, times the
     30-day run volume, times those runs' mean billed minutes (each job rounded
-    up to the minute). It is capped at the workflow's measured billed compute
-    over the same volume. Wall-clock is not
+    up to the minute). It is capped at the affected jobs' measured billed
+    compute over the same volume. Wall-clock is not
     affected: comment runs do not gate a merge."""
     sampled = len(all_runs)
     comment_runs = sum(str(r.get("event") or "") in _OPT108_COMMENT_EVENTS
@@ -6293,17 +6293,18 @@ def _size_opt108_comment_runs(
             f"only {priced} short successful run(s) could be priced; at least "
             f"{_OPT108_MIN_PRICED_RUNS} are needed", priced_runs=priced, **counts)
         return
-    mean_wf, wf_priced = _opt108_mean_billable_min(list(workflow_jobs) + list(short_jobs))
+    mean_affected, affected_priced = _opt108_mean_billable_min(
+        list(affected_jobs_per_run) + list(short_jobs))
     raw = monthly_volume * len(short) / sampled * mean_short
-    cap = round(monthly_volume * mean_wf, 1)
+    cap = round(monthly_volume * mean_affected, 1)
     saving = round(min(raw, cap), 1)
     finding["comment_runner_measurement"] = {
         "status": "measured", **counts, "priced_runs": priced,
         "mean_short_billable_min": round(mean_short, 4),
         "workflow_runs_30d": monthly_volume,
-        "workflow_priced_runs": wf_priced,
-        "workflow_mean_billable_min": round(mean_wf, 4),
-        "workflow_compute_min_30d": cap,
+        "affected_priced_runs": affected_priced,
+        "affected_mean_billable_min": round(mean_affected, 4),
+        "affected_compute_min_30d": cap,
         "capped": raw > cap,
     }
     finding["wall_clock_p50_s"] = 0.0
@@ -6316,7 +6317,7 @@ def _size_opt108_comment_runs(
         f"comment-triggered runs under {_OPT108_SHORT_RUN_S:.0f}s; at {mean_short:.2f} "
         f"billed minutes each over {priced} priced runs and {monthly_volume} runs per "
         f"30 days, about {saving:.1f} runner-minutes per 30 days, capped at the "
-        f"workflow's measured {cap:.1f}.")
+        f"affected jobs' measured {cap:.1f}.")
     evidence = str(finding.get("evidence") or "")
     if _OPT108_UNSIZED_PLACEHOLDER in evidence:
         evidence = evidence.replace(_OPT108_UNSIZED_PLACEHOLDER, measured)
@@ -6339,10 +6340,25 @@ def _measure_opt108_comment_runs(
     Comment workflows are usually triaged (no job fetch), so the short runs'
     jobs are fetched here. Returns the count of failed job fetches."""
     failures = 0
+    credited_jobs_by_workflow: dict[str, set[str]] = {}
     for finding in findings:
         if finding.get("pattern") != "OPT108":
             continue
         wf_path = str(finding.get("workflow_file") or "")
+        requested_jobs = {
+            str(name) for name in (finding.get("affected_jobs") or [])
+            if str(name).strip()
+        }
+        credited_jobs = credited_jobs_by_workflow.setdefault(wf_path, set())
+        sized_jobs = requested_jobs - credited_jobs
+        if not sized_jobs:
+            _opt108_unmeasured(
+                finding,
+                "the finding's affected jobs were already credited by another "
+                "OPT108 finding in this workflow",
+                sized_affected_jobs=[],
+            )
+            continue
         wf_id = (wf_by_path.get(wf_path) or {}).get("id")
         all_runs = all_status_page(wf_path, wf_id) if wf_id is not None else None
         if all_runs is None:
@@ -6355,12 +6371,40 @@ def _measure_opt108_comment_runs(
         kept, failed = (_gather_run_jobs(client, repo, all_runs, memo=job_memo)
                         if short_ids else ([], 0))
         failures += failed
+
+        matched_jobs: set[str] = set()
+
+        def affected_only(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            selected = []
+            for job in jobs:
+                name = str(job.get("name") or "").strip()
+                base = _matrix_base_name(name)
+                matched = None
+                if name in sized_jobs:
+                    matched = name
+                elif base in sized_jobs:
+                    matched = base
+                if matched is not None:
+                    matched_jobs.add(matched)
+                    selected.append(job)
+            return selected
+
+        short_jobs = [
+            affected_only(jobs) for run, jobs in kept if run.get("id") in short_ids]
+        workflow_jobs = [
+            affected_only(jobs) for run, jobs in kept if run.get("id") not in short_ids]
+        if not workflow_jobs:
+            workflow_jobs = [
+                affected_only(jobs)
+                for jobs in (jobs_per_run_by_wf.get(wf_path) or [])
+            ]
         _size_opt108_comment_runs(
-            finding, all_runs,
-            [jobs for run, jobs in kept if run.get("id") in short_ids],
-            ([jobs for run, jobs in kept if run.get("id") not in short_ids]
-             or jobs_per_run_by_wf.get(wf_path) or []),
-            vol_by_wf.get(wf_path))
+            finding, all_runs, short_jobs, workflow_jobs, vol_by_wf.get(wf_path))
+        measurement = finding.get("comment_runner_measurement")
+        if isinstance(measurement, dict):
+            measurement["sized_affected_jobs"] = sorted(matched_jobs)
+            if measurement.get("status") == "measured":
+                credited_jobs.update(matched_jobs)
     return failures
 
 

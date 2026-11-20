@@ -6391,8 +6391,8 @@ def _vr_opt108_problems(f: dict) -> list[str]:
     short = _num(m.get("short_success_runs")) or 0
     monthly = _num(m.get("workflow_runs_30d")) or 0
     mean_short = _num(m.get("mean_short_billable_min")) or 0
-    mean_wf = _num(m.get("workflow_mean_billable_min")) or 0
-    cap = _num(m.get("workflow_compute_min_30d"))
+    mean_affected = _num(m.get("affected_mean_billable_min")) or 0
+    cap = _num(m.get("affected_compute_min_30d"))
     bad = []
     if _num(m.get("short_floor_s")) != _VR_OPT108_SHORT_RUN_S:
         bad.append(f"{fid}: short_floor_s={m.get('short_floor_s')}, expected "
@@ -6400,25 +6400,36 @@ def _vr_opt108_problems(f: dict) -> list[str]:
     if (_num(m.get("priced_runs")) or 0) < _VR_OPT108_MIN_PRICED_RUNS:
         bad.append(f"{fid}: priced_runs={m.get('priced_runs')} is below "
                    f"{_VR_OPT108_MIN_PRICED_RUNS}")
+    affected = {
+        str(name) for name in _as_list(f.get("affected_jobs")) if str(name).strip()
+    }
+    sized = {
+        str(name) for name in _as_list(m.get("sized_affected_jobs"))
+        if str(name).strip()
+    }
+    if not sized or not sized.issubset(affected):
+        bad.append(
+            f"{fid}: sized_affected_jobs={sorted(sized)} is not a non-empty "
+            f"subset of affected_jobs={sorted(affected)}")
     if not (0 < short <= comment <= sampled):
         bad.append(f"{fid}: short={short}, comment={comment}, sampled={sampled} "
                    "is not 0 < short <= comment <= sampled")
         return bad
-    want_cap = round(monthly * mean_wf, 1)
+    want_cap = round(monthly * mean_affected, 1)
     if cap is None or abs(cap - want_cap) > max(0.11, 0.001 * want_cap):
-        bad.append(f"{fid}: workflow_compute_min_30d={cap}, re-derived {want_cap}")
+        bad.append(f"{fid}: affected_compute_min_30d={cap}, re-derived {want_cap}")
     want = round(min(monthly * short / sampled * mean_short, want_cap), 1)
     if saving is None or abs(saving - want) > max(0.11, 0.001 * want):
         bad.append(f"{fid}: runner_min_saving={saving}, re-derived {want}")
     elif cap is not None and saving > cap + 0.11:
-        bad.append(f"{fid}: runner_min_saving={saving} exceeds the workflow's "
+        bad.append(f"{fid}: runner_min_saving={saving} exceeds the affected jobs' "
                    f"measured {cap} runner-min per 30 days")
     return bad
 
 
 def check_opt108_comment_saving_rederived(report: str, findings_path: Path | None) -> Check:
     """OPT108's runner-minute saving is re-derived from the stamped comment-run
-    sample, never exceeds the workflow's measured compute, carries no
+    sample, never exceeds the affected jobs' measured compute, carries no
     wall-clock credit, and is absent when the sample was not measured."""
     name = "OPT108 comment-run saving re-derives and stays within measured compute"
     data, err = _load_findings_doc(findings_path)

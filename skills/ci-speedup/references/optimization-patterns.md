@@ -3557,13 +3557,14 @@ with the share and compute of short successful runs before sizing it.
 3. Exercise accepted and rejected comments against the real job condition,
    including multiline input and automation-authored comments where relevant.
 
-**Sizing**: Runner-minute effect is a **saving**: the measured billed compute
-of the workflow's rejected comments. From the sampled run list, a successful
+**Sizing**: Runner-minute effect is a **saving**: the affected jobs' measured
+billed compute on rejected comments. From the sampled run list, a successful
 `issue_comment` or `pull_request_review_comment` run that finished in under 30
 seconds counts as a rejected comment. The saving is that share of the sampled
 runs, times the workflow's 30-day run volume, times those runs' mean billed
-minutes (each job rounded up to the minute), capped at the workflow's measured
-billed compute over the same volume. At least 3 short runs must be priced.
+minutes for the affected jobs (each job rounded up to the minute), capped at
+those jobs' measured billed compute over the same volume. A job's minutes are
+credited only once across findings. At least 3 short runs must be priced.
 When runs were not collected, the run list could not be read, or no successful
 comment run finished under 30 seconds, the finding stays unsized and says why.
 There is no wall-clock effect on the pull-request path: comment runs do not

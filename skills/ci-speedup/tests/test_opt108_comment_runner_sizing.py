@@ -43,8 +43,9 @@ class _CommentClient:
 
     gave_up = False
 
-    def __init__(self, plan, monthly=600):
+    def __init__(self, plan, monthly=600, recorder_s=0):
         self.plan, self.monthly = plan, monthly
+        self.recorder_s = recorder_s
         self.queries = self.errors = 0
 
     def available(self):
@@ -81,7 +82,17 @@ class _CommentClient:
         m = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
         if m:
             i = int(m.group(1)) - 100
-            return {"jobs": [self._job(i)] if 0 <= i < len(self.plan) else []}
+            jobs = [self._job(i)] if 0 <= i < len(self.plan) else []
+            if jobs and self.recorder_s:
+                t0 = i * 1000
+                jobs.append({
+                    "id": 6000 + i, "run_id": 100 + i, "name": "record",
+                    "status": "completed", "conclusion": "success",
+                    "started_at": _ts(t0),
+                    "completed_at": _ts(t0 + self.recorder_s),
+                    "labels": ["ubuntu-latest"], "runner_name": "ubuntu-latest",
+                })
+            return {"jobs": jobs}
         if endpoint.startswith(f"repos/o/r/contents/{_WF}"):
             return {"content": base64.b64encode(_YAML.encode()).decode()}
         if endpoint == "repos/o/r":
@@ -93,9 +104,9 @@ class _CommentClient:
         return ""
 
 
-def _collect(monkeypatch, client):
+def _collect(monkeypatch, client, *, duplicate=False):
     monkeypatch.setattr(cr, "GhClient", lambda *a, **k: client)
-    doc = {"repo": "o/r", "findings": [{
+    finding = {
         "id": "f1", "pattern": "OPT108", "pattern_class": "static",
         "workflow_file": _WF, "title": "Comment filter runs after the runner starts",
         "evidence": ("comment-triggered job `react` filters comment body or author only "
@@ -103,7 +114,11 @@ def _collect(monkeypatch, client):
                      "measured compute on rejected comments; not sized until matching "
                      "short successful runs confirm the rejected share."),
         "affected_jobs": ["react"], "fix_strategy": "comment-filter-before-runner-start",
-    }]}
+    }
+    findings = [finding]
+    if duplicate:
+        findings.append({**finding, "id": "f2"})
+    doc = {"repo": "o/r", "findings": findings}
     return cr.collect(doc, "o/r", max_runs=len(client.plan),
                       shallow_runs=len(client.plan))
 
@@ -140,7 +155,7 @@ def test_opt108_short_successful_comment_runs_are_sized_as_a_saving(monkeypatch,
     # 600 runs/30d x 15/20 short x 1 billed minute each (a 12s job rounds up)
     # = 450 runner-min/30d, within the workflow's 600 x (15x1 + 5x2)/20 = 750.
     assert f["runner_min_saving"] == 450.0
-    assert m["workflow_compute_min_30d"] == 750.0 and m["capped"] is False
+    assert m["affected_compute_min_30d"] == 750.0 and m["capped"] is False
     assert f["wall_clock_p50_s"] == 0.0
     assert f["sizing_basis"] == "measured"
     assert "no wall-clock effect on the pull-request path" in f["size_note"]
@@ -148,6 +163,28 @@ def test_opt108_short_successful_comment_runs_are_sized_as_a_saving(monkeypatch,
     assert "not sized until" not in f["evidence"]
     report = _verify(doc, tmp_path)
     assert "15 of 20 sampled runs" in report
+
+
+def test_opt108_prices_only_the_affected_job(monkeypatch, tmp_path):
+    client = _CommentClient(_ISSUE_SHAPE, monthly=600, recorder_s=61)
+    doc = _collect(monkeypatch, client)
+    finding = _opt108(doc)
+    measurement = finding["comment_runner_measurement"]
+    # The unconditional two-minute recorder is present in every run, but the
+    # job-level comment guard can skip only `react`.
+    assert finding["runner_min_saving"] == 450.0
+    assert measurement["affected_compute_min_30d"] == 750.0
+    assert measurement["sized_affected_jobs"] == ["react"]
+    _verify(doc, tmp_path)
+
+
+def test_opt108_does_not_credit_the_same_affected_job_twice(monkeypatch, tmp_path):
+    doc = _collect(
+        monkeypatch, _CommentClient(_ISSUE_SHAPE, monthly=600), duplicate=True)
+    rows = [f for f in doc["findings"] if f.get("pattern") == "OPT108"]
+    assert [f["runner_min_saving"] for f in rows] == [450.0, None]
+    assert "already credited" in rows[1]["comment_runner_measurement"]["reason"]
+    _verify(doc, tmp_path)
 
 
 @pytest.mark.parametrize("plan,reason", [
@@ -184,7 +221,7 @@ def test_opt108_saving_is_capped_at_the_workflow_measured_compute():
     workflow_jobs = [[{"started_at": _ts(0), "completed_at": _ts(6)}]] * 4
     cr._size_opt108_comment_runs(f, runs, short_jobs, workflow_jobs, 100)
     m = f["comment_runner_measurement"]
-    assert f["runner_min_saving"] == m["workflow_compute_min_30d"] == 150.0
+    assert f["runner_min_saving"] == m["affected_compute_min_30d"] == 150.0
     assert m["capped"] is True
 
 
@@ -199,14 +236,16 @@ def _load_verify_report():
 
 
 def _measured_row(**over):
-    row = {"id": "f1", "pattern": "OPT108", "wall_clock_p50_s": 0.0,
+    row = {"id": "f1", "pattern": "OPT108", "affected_jobs": ["react"],
+           "wall_clock_p50_s": 0.0,
            "runner_min_saving": 450.0,
            "comment_runner_measurement": {
                "status": "measured", "sampled_runs": 20, "comment_runs": 20,
                "short_success_runs": 15, "workflow_runs_30d": 600,
                "short_floor_s": 30.0, "priced_runs": 15,
-               "mean_short_billable_min": 1.0, "workflow_mean_billable_min": 1.25,
-               "workflow_compute_min_30d": 750.0}}
+               "sized_affected_jobs": ["react"],
+               "mean_short_billable_min": 1.0, "affected_mean_billable_min": 1.25,
+               "affected_compute_min_30d": 750.0}}
     row.update(over)
     return row
 
@@ -220,6 +259,9 @@ def test_verifier_accepts_a_rederived_opt108_saving():
     ({"wall_clock_p50_s": 12.0}, "do not gate a merge"),
     ({"comment_runner_measurement": {**_measured_row()["comment_runner_measurement"],
                                      "priced_runs": 2}}, "is below 3"),
+    ({"comment_runner_measurement": {**_measured_row()["comment_runner_measurement"],
+                                     "sized_affected_jobs": ["record"]}},
+     "not a non-empty subset"),
     ({"comment_runner_measurement": {"status": "unmeasured", "reason": "x"}},
      "without a measured comment-run sample"),
 ])
