@@ -255,6 +255,33 @@ def test_opt39_without_a_complete_input_map_stays_unsized(monkeypatch, tmp_path)
     _verify_full(doc, tmp_path)
 
 
+class _NoVolumeClient(_PathFilterClient):
+    """The workflow's 30-day run-count probe is unreadable."""
+
+    def json(self, endpoint, allow_missing=False):
+        if re.search(r"actions/workflows/\d+/runs\?.*per_page=1(?![0-9])", endpoint):
+            return None
+        return super().json(endpoint, allow_missing)
+
+
+def test_opt39_unknown_monthly_volume_is_disclosed_as_unsized(monkeypatch, tmp_path):
+    paths = {number: [f"docs/guide-{number}.md"] for number in range(1, 61)}
+    client = _NoVolumeClient(paths)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], **_OPT39_INPUT_FACTS,
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT39")
+    assert finding["runner_minute_effect"]["direction"] == "unsized"
+    assert "30-day run volume" in finding["runner_minute_effect"]["reason"]
+    assert finding["runner_min_saving"] is None
+    _verify_full(doc, tmp_path)
+
+
 @pytest.mark.parametrize("paths", [
     {number: [f"internal/check_{number}.go"] for number in range(1, 61)},
     {number: [f"test/fixtures/case-{number}.json"] for number in range(1, 61)},

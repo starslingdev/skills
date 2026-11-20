@@ -6715,7 +6715,7 @@ def _measure_opt39_language_jobs(
         if not isinstance(monthly_volume, int) or monthly_volume <= 0:
             _opt39_unsized(
                 finding, "the workflow's 30-day run volume is unknown or zero",
-                sampled_prs=len(classified), unknown_prs=unknown_prs,
+                sampled_prs=len(classified), unknown_prs=0,
                 missing_job_rows=missing_job_rows)
             continue
         irrelevant = [row for row in classified if row[1] == "irrelevant"]
