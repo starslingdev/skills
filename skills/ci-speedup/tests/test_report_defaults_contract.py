@@ -30,6 +30,7 @@ REQUIRED_DECISIONS = {
     "cache-partial-miss-floor",
     "default-branch-batching-window",
     "ceiling-minimum-gates", "partial-majority-rule", "go-fixed-wait-thresholds",
+    "account-weekly-paired-minimum",
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
@@ -95,6 +96,7 @@ REQUIRED_PROVISIONAL_SOURCES = {
 }
 
 REQUIRED_CURRENT_SOURCES = {
+    "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 2,
     "blocking_path.py:_AGG_GATE_TRIVIAL_S": 30.0,
     "blocking_path.py:_ALSO_NOTICED_CAP": 12,
     "blocking_path.py:_CHAIN_MAKESPAN_DIVERGENCE_PCT": 25.0,
