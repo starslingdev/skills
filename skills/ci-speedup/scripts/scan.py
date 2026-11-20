@@ -4154,7 +4154,190 @@ _MANIFEST_MUTATION_RE = re.compile(
     r"apply.*patch", re.I)
 
 
-def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
+# Knip computes one project graph, then filters that graph into issue groups or
+# renderings. Re-running the command only to change these selectors repeats the
+# expensive analysis. Keep scope-defining flags such as ``--config`` and
+# ``--production`` in the signature so distinct project scans stay separate.
+_OPT16_KNIP_VALUE_SELECTORS = {"--include", "--reporter", "--format", "--output"}
+_OPT16_KNIP_BOOLEAN_SELECTORS = {
+    "--binaries", "--class-members", "--dependencies", "--dev-dependencies",
+    "--duplicates", "--enum-members", "--exports", "--files",
+    "--include-entry-exports", "--namespace-members", "--ns-exports",
+    "--ns-types", "--optional-peer-dependencies", "--types", "--unlisted",
+    "--unresolved",
+}
+
+
+_OPT16_SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
+
+
+def _opt16_analysis_signature(command: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
+    """Return (scope, selectors) for a supported analysis invocation."""
+    try:
+        tokens = shlex.split(command, comments=True)
+    except ValueError:
+        return None
+    tool_index = next((index for index, token in enumerate(tokens)
+                       if re.fullmatch(r"knip(?:@[^\s]+)?", token)), None)
+    if tool_index is None:
+        return None
+
+    scope: list[str] = []
+    selectors: list[str] = []
+    index = 0
+    in_knip = False
+    while index < len(tokens):
+        token = tokens[index]
+        name, equals, value = token.partition("=")
+        if index == tool_index:
+            in_knip = True
+        elif token in _OPT16_SHELL_OPERATORS:
+            # Arguments after `&&`, `|` and so on belong to another command.
+            in_knip = False
+        if not in_knip or index == tool_index:
+            scope.append(token)
+            index += 1
+            continue
+        if name in {"--fix", "--fix-type", "--allow-remove-files"}:
+            return None  # Knip rewrites the tree; later runs see other files.
+        if token in {">", ">>"} and index + 1 < len(tokens):
+            selectors.append(f"{token}{tokens[index + 1]}")  # report destination
+            index += 2
+            continue
+        if name in _OPT16_KNIP_VALUE_SELECTORS:
+            if equals:
+                selectors.append(f"{name}={value}")
+                index += 1
+                continue
+            if index + 1 >= len(tokens) or tokens[index + 1].startswith("-"):
+                return None
+            selectors.append(f"{name}={tokens[index + 1]}")
+            index += 2
+            continue
+        if token in _OPT16_KNIP_BOOLEAN_SELECTORS:
+            selectors.append(token)
+            index += 1
+            continue
+        scope.append(token)
+        index += 1
+    if not selectors:
+        return None
+    return tuple(scope), tuple(selectors)
+
+
+_OPT16_CONDITIONAL_RE = re.compile(r"\|\||(?:^|[\s;(])(?:if|elif|else|case|until|while)\b")
+
+
+def _opt16_norm_dir(value: Any) -> str | None:
+    """A working directory as a repo-relative posix path ("" = root); None when
+    it is an expression or leaves the checkout."""
+    import posixpath
+    text = str(value or "").strip().replace("\\", "/")
+    if "${{" in text or text.startswith(("/", "~")):
+        return None
+    text = posixpath.normpath(text) if text else ""
+    if text == ".." or text.startswith("../"):
+        return None
+    return "" if text == "." else text
+
+
+def _opt16_analysis_repeat_hit(job_name: str, job: dict, doc: dict, raw: str,
+                               steps: list, mutation_idxs: set[int],
+                               package_scripts: dict[str, Any] | None) -> Hit | None:
+    """OPT16's repeated-analysis form: the same Knip analysis run more than once
+    in one job, over one scope, differing only in report or issue-selection
+    flags. Each step's command is read through the shared run-leaf resolver
+    (`collect_runs._resolve_run_leaves`), so package scripts (`pnpm knip:json`)
+    and `\\`-continued lines are followed. Anything the read cannot pin down (a
+    directory change, an expression working directory, a conditional chain
+    holding several runs) withholds that step's runs."""
+    import collect_runs as _cr  # lazy: the resolver lives with OPT82/OPT84
+
+    tal = package_scripts if isinstance(package_scripts, dict) else {}
+    scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
+                      if isinstance(v, dict)}
+    scripts_unreadable = frozenset(str(d) for d in
+                                   (tal.get("package_scripts_unreadable") or []))
+    walk_complete = tal.get("truncated") is False
+
+    def _defaults_wd(owner: Any) -> Any:
+        d = owner.get("defaults") if isinstance(owner, dict) else None
+        r = d.get("run") if isinstance(d, dict) else None
+        return r.get("working-directory") if isinstance(r, dict) else None
+
+    default_wd = _defaults_wd(job)
+    if default_wd is None:
+        default_wd = _defaults_wd(doc)
+    knip_in_scripts = any("knip" in str(body) for scripts in scripts_by_dir.values()
+                          for body in scripts.values())
+    groups: dict[tuple, list[tuple[int, str, tuple[str, ...]]]] = {}
+    for i, step in enumerate(steps):
+        if not isinstance(step, dict) or not isinstance(step.get("run"), str):
+            continue
+        run = re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", step["run"])
+        if "knip" not in run and not knip_in_scripts:
+            continue
+        wd = _opt16_norm_dir(step.get("working-directory", default_wd))
+        if wd is None:
+            continue
+        res = _cr._resolve_run_leaves(run, wd, scripts_by_dir, scripts_unreadable,
+                                      walk_complete=walk_complete)
+        if any(u.get("kind") == "cd" for u in res.unresolved):
+            continue  # the project scope after a directory change is unknown
+        runs = []
+        for leaf in res.leaves:
+            if leaf.get("wd") is None:
+                continue
+            sig = _opt16_analysis_signature(shlex.join(leaf.get("tokens") or []))
+            if sig is not None:
+                runs.append((leaf, sig))
+        if not runs:
+            continue
+        if len(runs) > 1:
+            # Several runs in one step are proven to repeat only when nothing in
+            # the command or the scripts it follows chooses between them.
+            bodies = [run]
+            for leaf, _sig in runs:
+                eff = _cr._rl_effective_scripts(str(leaf.get("wd") or ""), scripts_by_dir,
+                                                scripts_unreadable, walk_complete) or {}
+                for link in leaf.get("chain") or []:
+                    bodies.append(str(eff.get(str(link).split()[-1], "")))
+            if any(_OPT16_CONDITIONAL_RE.search(b) for b in bodies):
+                runs = runs[:1]
+        # A step `if:` is part of the key: runs under different conditions may
+        # never execute together (one per event).
+        step_if = str(step.get("if") or "")
+        first_line = next((ln.strip() for ln in step["run"].splitlines() if ln.strip()), "")
+        for leaf, (scope, selectors) in runs:
+            groups.setdefault((scope, str(leaf.get("wd") or ""), step_if), []).append(
+                (i, first_line, selectors))
+    for (_scope, wd, _if), invocations in groups.items():
+        selector_sets = {selectors for _i, _line, selectors in invocations}
+        if len(invocations) < 2 or len(selector_sets) < 2:
+            continue
+        idxs = sorted({i for i, _line, _sel in invocations})
+        if any(idxs[0] <= mi <= idxs[-1] for mi in mutation_idxs):
+            continue
+        where = (f"{len(idxs)} separate steps" if len(idxs) > 1
+                 else "one step")
+        wd_note = f" (working-directory `{wd}`)" if wd else ""
+        return Hit(
+            line=_line_of_in_job(raw, job_name, invocations[0][1]),
+            affected_jobs=[job_name],
+            evidence=(f"job `{job_name}` runs the same Knip analysis "
+                      f"{len(invocations)} times in {where} with only report/include "
+                      f"selectors changed{wd_note}; run it once and split or "
+                      "filter the combined report, keeping each selection's "
+                      "pass/fail policy"),
+            match_text=job_name,
+            facts={"opt16_analysis_repeat": {"tool": "knip", "runs": len(invocations),
+                                             "steps": len(idxs)}},
+        )
+    return None
+
+
+def _detect_opt16(doc: dict, raw: str,
+                  package_scripts: dict[str, Any] | None = None) -> list[Hit]:
     """The same EXPENSIVE `run:` command (build/install/test) appears in ≥2
     separate steps of one job — wasteful rebuild (catalog OPT16). Two
     suppressions avoid false positives: the dedup key includes the step's
@@ -4182,6 +4365,7 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
                     continue
                 seen_in_step.add(c)
                 key_to_steps.setdefault((c, wd), []).append(i)
+        found = False
         for (cmd, wd), idxs in key_to_steps.items():
             if len(idxs) < 2:
                 continue
@@ -4201,7 +4385,15 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
                           f"{len(idxs)} separate steps{wd_note}: `{cmd[:80]}`"),
                 match_text=job_name,
             ))
+            found = True
             break  # one finding per job is enough
+        if found:
+            continue
+
+        hit = _opt16_analysis_repeat_hit(
+            job_name, job, doc, raw, steps, mutation_idxs, package_scripts)
+        if hit is not None:
+            hits.append(hit)
     return hits
 
 
@@ -10651,6 +10843,10 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # A restore prefix can be seeded by a cache step in any workflow in the
     # repository, so OPT61 needs one repository-wide saved-key index.
     repo_cache_saved_keys = _cache_saved_keys(doc for _rel, doc, _raw in parsed)
+    # The package scripts a workflow command resolves through (OPT16's
+    # repeated-analysis form follows `pnpm knip:json` into them), read once and
+    # reused for the `type_aware_lint` block below.
+    type_aware_lint = _read_type_aware_lint(root)
 
     # --- Per-file pass ---
     for rel, doc, raw in parsed:
@@ -10664,6 +10860,8 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
             fn = _DETECTORS.get(entry.pattern)
             if entry.pattern == "OPT61":
                 hits = list(_detect_opt61(doc, raw, saved_keys=repo_cache_saved_keys))
+            elif entry.pattern == "OPT16":
+                hits = list(_detect_opt16(doc, raw, package_scripts=type_aware_lint))
             elif fn is not None:
                 hits = list(fn(doc, raw))
             elif entry.match or entry.yaml_path:
@@ -10832,7 +11030,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # which type-aware rules are on, plus the package scripts a workflow's
         # `npm run lint` resolves through. NOT a finding — the config fact the
         # data-pass OPT82 detector joins to a slow lint job.
-        "type_aware_lint": _read_type_aware_lint(root),
+        "type_aware_lint": type_aware_lint,
         "catalog_patterns_total": len(catalog),
         "catalog_patterns_with_detector": len(static_entries) - len(unmatched_patterns),
         "catalog_patterns_without_detector": sorted(unmatched_patterns),

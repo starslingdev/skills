@@ -7327,6 +7327,22 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
     floor = crit.get("floor_p50", 0.0)
     model = cfg["model"]
 
+    if isinstance(f.get("opt16_analysis_repeat"), dict):
+        # OPT16's repeated-analysis form (only scan.py stamps this fact; keyed on
+        # the fact, not the ID, so the sizing-class battery stays complete).
+        # Repeated analysis with only report/include selectors changed: the
+        # combined run still performs the analysis once, so the flat OPT16
+        # default (one whole duplicate command) is not this variant's saving.
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["size_note"] = (
+            "runner-minute saving: unsized (the combined run still performs the "
+            "analysis once; time the separate runs and the combined run on the "
+            "same commit before crediting minutes)")
+        return
+
     if _opt9_is_build_state(f):
         f["wall_clock_p50_s"] = None
         f["runner_min_saving"] = None

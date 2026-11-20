@@ -636,6 +636,189 @@ jobs:
     assert "OPT16" not in _scan_one(tmp_path, neg)
 
 
+def test_opt16_repeated_analysis_with_different_report_flags(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --config config/knip.config.ts --production --include dependencies
+      - run: pnpm exec knip --config config/knip.config.ts --production --include files,exports
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [finding for finding in _scan(tmp_path)["findings"]
+                if finding["pattern"] == "OPT16"]
+    assert len(findings) == 1
+    assert "run it once and split or filter the combined report" in findings[0]["evidence"]
+    assert findings[0]["opt16_analysis_repeat"] == {"tool": "knip", "runs": 2, "steps": 2}
+
+
+def _knip_scripts_repo(tmp_path: Path, json_script: str, md_script: str) -> str:
+    (tmp_path / "package.json").write_text(json.dumps({
+        "name": "fixture", "private": True,
+        "scripts": {"knip:json": json_script, "knip:md": md_script},
+    }), encoding="utf-8")
+    return """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm knip:json && pnpm knip:md
+"""
+
+
+def test_opt16_report_flag_variant_follows_package_scripts(tmp_path: Path):
+    workflow = _knip_scripts_repo(
+        tmp_path, "knip --reporter json > a.json", "knip --reporter markdown > b.md")
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [finding for finding in _scan(tmp_path)["findings"]
+                if finding["pattern"] == "OPT16"]
+    assert len(findings) == 1
+    assert findings[0]["opt16_analysis_repeat"] == {"tool": "knip", "runs": 2, "steps": 1}
+
+
+@pytest.mark.parametrize(
+    "json_script, md_script",
+    [
+        # Different workspaces are different analyses.
+        ("knip --workspace packages/api --reporter json > a.json",
+         "knip --workspace packages/web --reporter markdown > b.md"),
+        # The second report runs only when the first command fails.
+        ("knip --reporter json > a.json || knip --reporter markdown > b.md",
+         "echo done"),
+    ],
+)
+def test_opt16_report_flag_variant_package_scripts_over_other_scopes_stay_quiet(
+        tmp_path: Path, json_script: str, md_script: str):
+    workflow = _knip_scripts_repo(tmp_path, json_script, md_script)
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_report_flag_variant_reads_continued_lines(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          pnpm exec knip \\
+            --config knip.config.ts \\
+            --include dependencies
+      - run: |
+          pnpm exec knip \\
+            --config knip.config.ts \\
+            --include files,exports
+"""
+    assert "OPT16" in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_report_flag_variant_counts_report_redirection_as_output(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --reporter json > knip.json
+      - run: pnpm exec knip --reporter markdown > knip.md
+"""
+    assert "OPT16" in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        # Flags after `&&` belong to another command, not to Knip.
+        ("pnpm exec knip --include files && pnpm exec eslint . --format json",
+         "pnpm exec knip --include files && pnpm exec eslint . --format stylish"),
+        # `--fix` rewrites the tree, so the next run analyzes other files.
+        ("pnpm exec knip --fix --include exports",
+         "pnpm exec knip --fix --include files"),
+    ],
+)
+def test_opt16_report_flag_variant_ignores_other_commands_and_fixes(
+        tmp_path: Path, first: str, second: str):
+    workflow = ("name: CI\non: pull_request\njobs:\n  deadcode:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                f"      - run: {first}\n      - run: {second}\n")
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        # Mutually exclusive conditions: only one Knip run executes per event.
+        (
+            "      - if: github.event_name == 'pull_request'\n"
+            "        run: pnpm exec knip --reporter github-actions\n"
+            "      - if: github.event_name == 'push'\n"
+            "        run: pnpm exec knip --reporter json\n"
+        ),
+        # A `cd` earlier in the step changes the project scope.
+        (
+            "      - run: |\n"
+            "          cd packages/api\n"
+            "          pnpm exec knip --include dependencies\n"
+            "      - run: |\n"
+            "          cd packages/web\n"
+            "          pnpm exec knip --include files\n"
+        ),
+    ],
+)
+def test_opt16_report_flag_variant_withholds_unproven_shared_runs(
+        tmp_path: Path, steps: str):
+    workflow = ("name: CI\non: [push, pull_request]\njobs:\n  deadcode:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n" + steps)
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        (
+            "pnpm exec knip --config config/knip.config.ts --production --include dependencies",
+            "pnpm exec knip --config config/knip.scripts.config.ts --production --include exports",
+        ),
+        (
+            "pnpm exec knip --config config/knip.config.ts --production --include dependencies",
+            "pnpm exec knip --config config/knip.config.ts --include files",
+        ),
+        (
+            "pnpm exec eslint packages/api --format stylish",
+            "pnpm exec eslint packages/web --format json",
+        ),
+    ],
+)
+def test_opt16_report_flag_variant_keeps_distinct_analysis_scopes_quiet(
+        tmp_path: Path, commands: tuple[str, str]):
+    first, second = commands
+    workflow = f"""name: CI
+on: pull_request
+jobs:
+  analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - run: {first}
+      - run: {second}
+"""
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_one_combined_analysis_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --config config/knip.config.ts --production --include dependencies,files,exports
+"""
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
 def test_opt18_not_auto_emitted(tmp_path: Path):
     """OPT18 is NOT auto-emitted as a finding: which services a job needs can't
     be determined from the workflow YAML (it needs docker-compose.yml + the test
