@@ -5924,6 +5924,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     # detector's numbers instead of overwriting with a static hit_rate.
     "OPT46": {"model": "measured"},  # superseded runs — measured (was dead hit_rate 0.4)
     "OPT47": {"model": "measured"},  # push+PR double-trigger — measured
+    "OPT107": {"model": "measured"},  # dense default-branch validation — measured
     # Stack-Specific.
     "OPT52": {"model": "direct", "default_s": 30.0},  # turbo missing outputs
     "OPT53": {"model": "direct", "default_s": 30.0},  # turbo unstable env vars
@@ -11958,6 +11959,9 @@ _PUSH_LANE_RARE_PER_30D = 8
 _SUCCESS_ONLY_CAVEAT_MIN_RUNS = 10
 _SUCCESS_ONLY_CAVEAT_FAILURE_RATE = 0.20
 _MIN_TIMED_RUNS = 3  # a per-run compute mean needs ≥3 timed runs to be stable
+_OPT107_BATCH_WINDOW_S = 60.0 * 60.0
+_OPT107_MIN_BATCHABLE_RUNS = 2
+_OPT107_MIN_BATCHABLE_SHARE = 0.25
 # Deliberately BROAD: this is the safety carve-out for run-cancellation fixes,
 # so a false positive (skip a real finding) is acceptable but a false negative
 # (advise cancel-in-progress on a deploy → corrupt a partial deploy/tag/publish)
@@ -18031,6 +18035,271 @@ def _supersede_static_opt36(findings: list[dict[str, Any]],
     _supersede_static_pattern(
         findings, measured, "OPT36",
         "measured OPT36 schedule-burn finding for the same workflow")
+
+
+_OPT107_SIDE_EFFECT_STEP_RE = _re.compile(
+    r"(\b(npm|pnpm|yarn|cargo|twine|poetry|gem)\s+(publish|upload|push)\b|"
+    r"\bdocker\s+push\b|\bgit\s+push\b|\bgh\s+release\b|\bdeploy\b|"
+    r"\bterraform\s+apply\b|\bkubectl\s+apply\b|\bhelm\s+(upgrade|install)\b|"
+    r"\bmigrat)", _re.IGNORECASE)
+_OPT107_SIDE_EFFECT_USES_RE = _re.compile(
+    r"(deploy|release|publish|pages|docker/build-push|aws-actions/|azure/webapps)",
+    _re.IGNORECASE)
+
+
+def _opt107_side_effect_job_names(wf_doc: dict[str, Any]) -> set[str]:
+    """Lower-cased keys and display names of jobs with commit-specific side effects.
+
+    A job stays on its push event (and out of OPT107's priced validation work)
+    when its key or name reads as release/deploy work, when it targets a
+    deployment `environment`, or when a step runs a publish, push, deploy or
+    migration command or action.  Broad on purpose: an excluded job only lowers
+    the credited saving."""
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    if not isinstance(jobs, dict):
+        return set()
+    names: set[str] = set()
+    for key, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        labels = {str(key)}
+        if isinstance(job.get("name"), str):
+            labels.add(job["name"])
+        side_effect = (any(_RELEASE_LIKE_RE.search(label) for label in labels)
+                       or job.get("environment") not in (None, "", {}))
+        steps = job.get("steps") if isinstance(job.get("steps"), list) else []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            run, uses = step.get("run"), step.get("uses")
+            if ((isinstance(run, str) and _OPT107_SIDE_EFFECT_STEP_RE.search(run))
+                    or (isinstance(uses, str)
+                        and _OPT107_SIDE_EFFECT_USES_RE.search(uses))):
+                side_effect = True
+        if side_effect:
+            names.update(label.strip().lower() for label in labels if label.strip())
+    return names
+
+
+def _opt107_job_is_side_effect(job_name: str, side_effect_names: set[str]) -> bool:
+    """Match a runtime job name (matrix `name (a, b)` or reusable `caller / job`)."""
+    name = job_name.strip().lower()
+    return any(name == label or name.startswith(label + " (")
+               or name.startswith(label + " / ")
+               for label in side_effect_names)
+
+
+def _detect_opt107_default_branch_batching(
+    wf_path: str,
+    all_runs: list[dict[str, Any]],
+    push_jobs_by_run: dict[str, list[dict[str, Any]]],
+    wf_doc: dict[str, Any],
+    default_branch: str | None,
+    start_idx: int,
+    *,
+    monthly_push_volume: "int | None | Callable[[], int | None]" = None,
+) -> list[dict[str, Any]]:
+    """Find dense default-branch validation runs that an hourly tip run can batch.
+
+    `monthly_push_volume` is the workflow's 30-day default-branch push-run count
+    (an int, or a lazy probe paid only once a saving exists).  When it is known,
+    the sample saving scales to a monthly estimate (sample saving x runs_30d /
+    sampled runs), capped at the workflow's measured 30-day validation compute;
+    otherwise the monthly figure is reported unsized with its reason.
+
+    A run is batchable only when a later default-branch push starts before it
+    finishes or within one hour after it finishes.  The hourly replacement is
+    charged before any saving: within each dense cluster, only runs beyond a
+    conservative count of hourly validation slots may be removed.  Credit then
+    uses those runs' own readable completed-job compute, never another run's
+    mean and never an unreadable run.
+    """
+    if (not default_branch or not _on_has_event(_wf_on(wf_doc), "push")
+            or _wf_is_release_like(wf_path, wf_doc)):
+        return []
+
+    spans: list[tuple[_dt.datetime, _dt.datetime, dict[str, Any]]] = []
+    for run in all_runs:
+        conclusion = str(run.get("conclusion") or "").lower()
+        if (str(run.get("event") or "") != "push"
+                or str(run.get("head_branch") or "") != default_branch
+                or conclusion in {"", "cancelled", "skipped"}):
+            continue
+        start = _parse_dt(str(run.get("run_started_at") or run.get("created_at") or ""))
+        end = _parse_dt(str(run.get("updated_at") or ""))
+        if start is None or end is None or end < start:
+            continue
+        spans.append((start, end, run))
+    spans.sort(key=lambda item: (item[0], str(item[2].get("id") or "")))
+    if len(spans) < _OPT107_MIN_BATCHABLE_RUNS + 1:
+        return []
+
+    clusters: list[list[tuple[_dt.datetime, _dt.datetime, dict[str, Any]]]] = []
+    cluster = [spans[0]]
+    for span in spans[1:]:
+        if (span[0] - cluster[-1][1]).total_seconds() <= _OPT107_BATCH_WINDOW_S:
+            cluster.append(span)
+        else:
+            clusters.append(cluster)
+            cluster = [span]
+    clusters.append(cluster)
+
+    dense_clusters = [rows for rows in clusters if len(rows) > 1]
+    batchable = [run for rows in dense_clusters for _start, _end, run in rows[:-1]]
+    share = len(batchable) / len(spans)
+    if (len(batchable) < _OPT107_MIN_BATCHABLE_RUNS
+            or share < _OPT107_MIN_BATCHABLE_SHARE):
+        return []
+
+    eligible_run_ids = {str(run.get("id") or "") for _start, _end, run in spans}
+    # Deploy, release, publish and migration jobs stay on their push event, so a
+    # mixed workflow prices only its repeatable validation jobs.
+    side_effect_names = _opt107_side_effect_job_names(wf_doc)
+    excluded_jobs: set[str] = set()
+    validation_jobs_by_run: dict[str, list[dict[str, Any]]] = {}
+    for run_id, run_jobs in push_jobs_by_run.items():
+        kept_jobs = []
+        for job in run_jobs:
+            job_name = str(job.get("name") or "")
+            if _opt107_job_is_side_effect(job_name, side_effect_names):
+                excluded_jobs.add(job_name)
+            else:
+                kept_jobs.append(job)
+        validation_jobs_by_run[run_id] = kept_jobs
+    push_jobs_by_run = validation_jobs_by_run
+    compute_by_run: dict[str, float] = {}
+    for run_id, jobs in push_jobs_by_run.items():
+        if run_id not in eligible_run_ids:
+            continue
+        seconds = sum(
+            duration
+            for job in jobs
+            if (duration := _duration_s(job.get("started_at"), job.get("completed_at")))
+            is not None and duration > 0)
+        if seconds > 0:
+            compute_by_run[run_id] = seconds / 60.0
+    if len(compute_by_run) < _MIN_TIMED_RUNS:
+        return []
+
+    credited_runs: list[tuple[str, float]] = []
+    for rows in dense_clusters:
+        span_s = max((rows[-1][0] - rows[0][0]).total_seconds(), 0.0)
+        # Count the first scheduled validation plus every possible hourly tick
+        # across the cluster.  `ceil` deliberately assumes the least favourable
+        # schedule phase, so the saving cannot rely on a lucky cron alignment.
+        replacement_runs = min(
+            len(rows), math.ceil(span_s / _OPT107_BATCH_WINDOW_S) + 1)
+        removable_count = max(len(rows) - replacement_runs, 0)
+        candidates = sorted(
+            ((str(run.get("id") or ""), compute_by_run[str(run.get("id") or "")])
+             for _start, _end, run in rows[:-1]
+             if str(run.get("id") or "") in compute_by_run),
+            key=lambda item: (item[1], item[0]))
+        # Retain the most expensive observations and credit the cheapest
+        # removable ones: the replacement run's cost is never understated.
+        credited_runs.extend(candidates[:removable_count])
+    credited = round(sum(minutes for _run_id_value, minutes in credited_runs), 1)
+    if credited <= 0:
+        return []
+
+    timed_n = len(compute_by_run)
+    credited_n = len(credited_runs)
+    mean_credited_min = credited / credited_n
+
+    sampled_runs = sum(
+        1 for run in all_runs
+        if (str(run.get("event") or "") == "push"
+            and str(run.get("head_branch") or "") == default_branch))
+    volume = (monthly_push_volume() if callable(monthly_push_volume)
+              else monthly_push_volume)
+    monthly: float | None = None
+    monthly_cap: float | None = None
+    unsized_reason = ""
+    if (isinstance(volume, int) and not isinstance(volume, bool) and volume > 0
+            and sampled_runs > 0):
+        mean_validation_min = sum(compute_by_run.values()) / len(compute_by_run)
+        monthly_cap = round(mean_validation_min * volume, 1)
+        monthly = round(min(credited * volume / sampled_runs, monthly_cap), 1)
+        if monthly <= 0:
+            monthly = None
+            unsized_reason = "monthly estimate rounds to zero runner-minutes"
+    if monthly is None and not unsized_reason:
+        unsized_reason = "30-day default-branch push count unknown"
+    monthly_text = (
+        f"~−{monthly:g} runner-min/mo (estimate from {sampled_runs} sampled runs, "
+        f"x{volume}/{sampled_runs} to the 30-day push volume)" if monthly is not None
+        else f"runner-minute saving: unsized ({unsized_reason})")
+
+    title = "Default-Branch Full CI Runs Too Often to Stay Current"
+    evidence = (
+        f"{len(batchable)} of {len(spans)} completed default-branch push runs "
+        f"(of {sampled_runs} sampled) ({share * 100:.0f}%) were replaced by another push before or within one hour "
+        f"of finishing. After reserving conservative hourly replacement slots, "
+        f"{credited_n} run(s) have their own readable compute "
+        f"({mean_credited_min:.1f} runner-min/run; {timed_n} timed run(s) total); "
+        f"runner-minute effect: −{credited:g} runner-min in the sampled window "
+        f"(saving); monthly: {monthly_text}." + (
+            f" {len(excluded_jobs)} side-effect job(s) "
+            f"({', '.join(sorted(excluded_jobs))}) stay on the push event and are "
+            "not priced." if excluded_jobs else ""))
+    measured = _measured_evidence(
+        ["Workflow", "Batchable pushes", "Measured compute/run",
+         "Credited removals", "Runner-minute effect"],
+        [[f"`{wf_path}`",
+          f"{len(batchable)} of {len(spans)} completed, of {sampled_runs} sampled "
+          f"({share * 100:.0f}%)",
+          f"{mean_credited_min:.1f} runner-min over {timed_n} timed run(s)",
+          str(credited_n),
+          f"−{credited:g} runner-min in the sample (saving); {monthly_text}"]],
+        summary=evidence,
+        note=("Safest-first fix: keep the pull-request gate unchanged; run the full "
+              "default-branch suite hourly against the current tip, retain "
+              "workflow_dispatch, and use a repository variable to switch back to "
+              "per-push validation. Do not batch release, deploy, or migration work. "
+              "The estimate reserves a conservative number of hourly replacement "
+              "runs, then credits only removable runs with their own readable "
+              "completed-job compute; it never extrapolates onto an unreadable run. "
+              "The monthly figure scales the sample saving by the workflow's 30-day "
+              "default-branch push-run count over the sampled runs, capped at the "
+              "measured 30-day validation compute, and is an estimate."))
+    finding = _new_finding(
+        "OPT107", "HIGH", title, wf_path, "", evidence,
+        "batch-default-branch-full-ci", _catalog_anchor("OPT107", title),
+        start_idx + 1, wc_p50=0.0, rm=monthly,
+        size_note=(f"runner-minute effect: saving (negative) — {monthly_text}; "
+                   f"sampled-window effect −{credited:g} runner-min after reserving "
+                   "hourly replacement validations; pull-request wait unchanged"),
+        realization="none", measured_evidence=measured)
+    finding["sample_runner_min_effect"] = -credited
+    finding["sample_runner_min_saving"] = credited
+    if monthly is not None:
+        finding["monthly_estimate_basis"] = {
+            "runs_30d": volume, "sampled_runs": sampled_runs,
+            "sample_saving_min": credited, "cap_min": monthly_cap,
+        }
+    else:
+        finding["runner_min_unsized_reason"] = unsized_reason
+    finding["batchable_run_count"] = len(batchable)
+    finding["credited_run_count"] = credited_n
+    finding["credited_run_ids"] = [run_id for run_id, _minutes in credited_runs]
+    finding["batchable_sample_count"] = len(spans)
+    finding["batchable_run_share"] = round(share, 4)
+    finding["batch_window_s"] = _OPT107_BATCH_WINDOW_S
+    finding["excluded_side_effect_jobs"] = sorted(excluded_jobs)
+    finding["measured_signal"] = (
+        "default-branch pushes replaced before or within one hour of completion, "
+        "less conservative hourly replacements, x each credited run's own completed "
+        "job compute")
+    finding["affected_jobs"] = sorted({
+        str(job.get("name") or "")
+        for run_id, _minutes in credited_runs
+        for job in push_jobs_by_run.get(run_id, [])
+        if str(job.get("name") or "")
+    })
+    run_ids = [run_id for run_id, _minutes in credited_runs]
+    if run_ids:
+        finding["tier2_sample_run_ids"] = run_ids
+    return [finding]
 
 
 def _detect_opt46_superseded_runs(
@@ -32426,6 +32695,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # commits' job lists are the lane's only new API reads: at most the runs of
     # `_DEFAULT_BRANCH_PUSH_SAMPLE_MAX` commits, memoised with every other job read.
     _push_lane = findings_doc.get("default_branch_push_lane") or {}
+    _push_jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
     if _push_shas and _push_lane.get("status") == "complete":
         _push_rows_by_sha = {
             _sha: [(_push_run_wf.get(str(_run.get("id") or id(_run)), ""), _run)
@@ -32682,6 +32952,26 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _push_lane["drill"]["finding_id"] = (
                     _push_lane["drill"]["finding_ids"][0]
                     if _push_lane["drill"]["finding_ids"] else None)
+    # OPT107 needs only a bounded set of per-run compute, not a proven monthly
+    # push count.  Keep that timing sample available when the cached run page is
+    # truncated, without turning on the full push-lane projection/drill (whose
+    # monthly frequency is intentionally withheld in that state).
+    _opt107_jobs_by_run = dict(_push_jobs_by_run)
+    if (_push_shas and _push_lane.get("status") == "frequency_incomplete"):
+        _opt107_rows = list(_push_run_rows)
+        _prefetch_json(client, [
+            _run_jobs_endpoint(repo, run.get("id"))
+            for run in _opt107_rows
+            if not job_memo.contains(_fetch_run_jobs, repo, run.get("id"))
+        ])
+        _opt107_kept, _opt107_failures = _gather_run_jobs(
+            client, repo, _opt107_rows, keep_empty=True, memo=job_memo)
+        jobs_fetch_failures += _opt107_failures
+        for _run, _jobs in _opt107_kept:
+            _rid = str(_run.get("id") or "")
+            _opt107_jobs_by_run[(_push_run_wf.get(_rid, ""), _rid)] = list(_jobs)
+        _push_lane["opt107_job_fetch_count"] = len(_opt107_rows)
+        _push_lane["opt107_job_fetch_failures"] = int(_opt107_failures)
     _chain_facts = _stamp_chain_facts(
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
@@ -33684,7 +33974,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 # YAML (which we DO have), so a workflow with no shard/timeout job specs
                 # was never going to run them and must not be reported as missing them.
                 # (OPT57's own skip, incl. its event-scoped page, is recorded below.)
-                _skipped = ["OPT46", "OPT47", "OPT64"]
+                _skipped = ["OPT46", "OPT47", "OPT64", "OPT107"]
                 if _opt35_shard_job_specs(wf_doc):
                     _skipped.insert(0, "OPT35")
                 _skip_detectors(wf_path, _skipped,
@@ -33883,6 +34173,35 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     findings.extend(new)
 
             if all_runs is not None:
+                _opt107_run_ids = {
+                    str(run.get("id") or "")
+                    for run in all_runs
+                    if (str(run.get("event") or "") == "push"
+                        and str(run.get("head_branch") or "") == str(default_branch or ""))
+                }
+                _opt107_push_jobs = {
+                    run_id_value: list(jobs)
+                    for (run_wf, run_id_value), jobs in _opt107_jobs_by_run.items()
+                    if run_wf == wf_path and run_id_value in _opt107_run_ids
+                }
+                def _opt107_volume(_wf_id: Any = wf_id) -> int | None:
+                    # One count probe, paid only once the sample shows a saving.
+                    if _wf_id is None or not default_branch:
+                        return None
+                    _doc = client.json(_push_volume_endpoint(
+                        repo, _wf_id, default_branch, created_before))
+                    _total = _doc.get("total_count") if isinstance(_doc, dict) else None
+                    return (_total if isinstance(_total, int)
+                            and not isinstance(_total, bool) else None)
+
+                new = _detect_opt107_default_branch_batching(
+                    wf_path, all_runs, _opt107_push_jobs, wf_doc, default_branch,
+                    next_id, monthly_push_volume=_opt107_volume)
+                next_id = max(
+                    next_id,
+                    max((int(f["id"][1:]) for f in new), default=next_id))
+                findings.extend(new)
+
                 new = _detect_opt46_superseded_runs(
                     wf_path, all_runs, jobs_per_run, wf_doc, monthly, next_id)
                 next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))

@@ -524,6 +524,30 @@ relanded by #333, remains awaiting owner approval.
 
 ## Finding thresholds and caps
 
+### `default-branch-batching-window`
+
+**Current value:** one hour
+(`collect_runs.py:_OPT107_BATCH_WINDOW_S`), with at least two batchable runs
+(`_OPT107_MIN_BATCHABLE_RUNS`) comprising at least 25% of the readable
+default-branch push sample (`_OPT107_MIN_BATCHABLE_SHARE`).
+
+**Report statements:** whether dense post-merge validation is a measured
+runner-minute opportunity, which observed runs contribute to its signed
+sample-window saving, and its monthly estimate (the sample saving scaled by the
+workflow's 30-day default-branch push-run count over the sampled runs, capped at
+its measured 30-day validation compute) or, when that count is unreadable, that
+the monthly saving is unsized and why.
+
+**Reason:** the proposed replacement is an hourly current-tip validation, so a
+successor inside that interval is evidence that a schedule can coalesce work.
+The count/share gates keep isolated busy periods quiet; the detector also
+requires three completed timed push runs, reserves conservative hourly
+replacement slots, and credits only removable runs with their own readable
+completed-job compute.
+
+**Proposed decision:** **Keep one hour, two runs, and 25%.** This remains
+awaiting owner approval.
+
 ### `magnitude-noise-band`
 
 **Current value:** a magnitude range wider than 25% of its median triggers a
@@ -705,6 +729,14 @@ implementation lands.
       "verify_report.py:_VR_CACHE_FLOOR_BY_FIX_KEY": {
         "dependency-cache": 50.0
       }
+    }
+  },
+  "default-branch-batching-window": {
+    "decision": "default-branch-batching-window",
+    "sources": {
+      "collect_runs.py:_OPT107_BATCH_WINDOW_S": 3600,
+      "collect_runs.py:_OPT107_MIN_BATCHABLE_RUNS": 2,
+      "collect_runs.py:_OPT107_MIN_BATCHABLE_SHARE": 0.25
     }
   },
   "gate-frequency-interval": {

@@ -63,6 +63,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT40 — Monorepo Job Runs Regardless of Affected App (MEDIUM, static) — app job runs when another app changed
 - OPT108 — Comment Filter Runs After the Runner Starts (HIGH, static) — comment body or author is filtered only after runner allocation
 - OPT90 — Every Pull Request Pays for Coverage That Could Run After Merge (HIGH, data-driven) — full matrix on PRs, subset would do
+- OPT107 — Default-Branch Full CI Runs Too Often to Stay Current (HIGH, data-driven) — dense post-merge validation can batch against the current tip
 ## Category 8 — Release Workflow
 - OPT41 — `TURBO_FORCE: true` Disabling All Caching (HIGH, static) — TURBO_FORCE in release
 - OPT42 — `TURBO_CACHE: remote:rw` in Release (HIGH, static) — TURBO_CACHE remote:rw in release
