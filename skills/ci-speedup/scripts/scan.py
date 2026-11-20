@@ -1680,6 +1680,110 @@ def _detect_opt45(doc: dict, raw: str) -> list[Hit]:
     )]
 
 
+# ---- OPT46 extension — always() aggregate after cancellation ----------------
+
+_OPT46_ALWAYS_RE = re.compile(r"\balways\s*\(\s*\)", re.I)
+_OPT46_CANCELLED_RE = re.compile(r"\bcancelled\s*\(\s*\)", re.I)
+_OPT46_NEEDS_RESULT_RE = re.compile(
+    r"needs(?:\.\*|\.[A-Za-z_][\w-]*|\[['\"][^'\"]+['\"]\])?\.result|"
+    r"(?:to|from)JSON\s*\(\s*needs\s*\)",
+    re.I,
+)
+_OPT46_RESULT_SHELL_RE = re.compile(
+    r"(?:set\b|echo\b|printf\b|test\b|\[\[?|if\b|then\b|elif\b|else\b|fi\b|"
+    r"case\b|esac\b|for\b|do\b|done\b|exit\b|[A-Za-z_][A-Za-z0-9_]*=|"
+    r"[\"']?\$\{)",
+    re.I,
+)
+_OPT46_REAL_WORK_RE = re.compile(
+    r"(?:^|[;&|()]\s*)(?:npm|pnpm|yarn|bun|node|python\d*|pytest|cargo|go|make|"
+    r"mvn|gradle|docker|podman|git|gh|curl|wget|terraform|kubectl|helm|dotnet|"
+    r"ruby|bundle|\.?(?:\./)+|[\w./-]+\.sh)\b",
+    re.I,
+)
+
+
+def _opt46_cancellation_enabled(doc: dict) -> bool:
+    concurrency = doc.get("concurrency")
+    if not isinstance(concurrency, dict):
+        return False
+    value = concurrency.get("cancel-in-progress")
+    if value is True:
+        return True
+    if not isinstance(value, str):
+        return False
+    compact = re.sub(r"\s+", "", value).lower()
+    return compact not in {"", "false", "${{false}}"}
+
+
+def _opt46_result_only_step(step: dict) -> bool:
+    """A step whose only executable work evaluates dependency results.
+
+    Fail closed on arbitrary commands and actions.  The explicit shell
+    allow-list covers the small verdict scripts GitHub workflows conventionally
+    use; an opaque helper may do real work and therefore is not an aggregate.
+    """
+    uses, run = _uses(step), _run(step)
+    try:
+        step_text = yaml.safe_dump(step)
+    except yaml.YAMLError:
+        return False
+    if uses:
+        return "alls-green" in uses and bool(_OPT46_NEEDS_RESULT_RE.search(step_text))
+    if not run or not _OPT46_NEEDS_RESULT_RE.search(step_text):
+        return False
+    for raw_line in run.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "$(" in line or _OPT46_REAL_WORK_RE.search(line):
+            return False
+        if re.match(r"(?:if|elif)\b", line, re.I) and not re.match(
+                r"(?:if|elif)\s+(?:test\b|\[\[?)", line, re.I):
+            return False
+        if re.match(r"(?:then|else|fi|do|done|esac)\b", line, re.I) and not re.fullmatch(
+                r"(?:then|else|fi|do|done|esac)\s*;?", line, re.I):
+            return False
+        if not _OPT46_RESULT_SHELL_RE.match(line):
+            return False
+    return True
+
+
+def _detect_opt46_cancelled_aggregate(doc: dict, raw: str) -> list[Hit]:
+    """An ``always()`` result-only aggregate still acquires a runner after a
+    top-level concurrency group cancels the superseded run."""
+    if not _opt46_cancellation_enabled(doc):
+        return []
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict) or not job.get("needs"):
+            continue
+        condition = str(job.get("if") or "")
+        if (not _OPT46_ALWAYS_RE.search(condition)
+                or _OPT46_CANCELLED_RE.search(condition)):
+            continue
+        executable = [step for step in _steps(job) if _run(step) or _uses(step)]
+        if not executable or not all(_opt46_result_only_step(step) for step in executable):
+            continue
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"aggregate job `{job_name}` uses `if: always()` only to evaluate "
+                "dependency results while the workflow cancels superseded runs, so it "
+                "can still acquire a runner after cancellation. Use `if: ${{ "
+                "!cancelled() }}` and keep the step-level result check fail-closed for "
+                "failed, cancelled or skipped dependencies. Runner-minute effect: "
+                "saving this aggregate job's compute on cancelled runs; not sized "
+                "until matched cancelled runs measure its runner allocation and compute."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+        ))
+    return hits
+
+
 # ---- OPT32 — Missing paths/paths-ignore on Expensive Workflows (P7.1) --------
 
 _ON_LINE_RE = re.compile(r"^(['\"]?on['\"]?\s*:.*)$", re.M)
@@ -6130,7 +6234,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT76", "OPT108"})
+    "OPT39", "OPT46", "OPT76", "OPT108"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -9951,6 +10055,34 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
                 # workflow text, not prose in a yaml fence. Prefer a snippet the
                 # detector set explicitly (e.g. an `on:` block for an absence
                 # finding); otherwise the matched line at hit.line.
+                snippet = hit.snippet or _raw_line(raw, hit.line)
+                if snippet:
+                    f["evidence_snippet"] = snippet
+                findings.append(f)
+
+        # OPT46's primary detector remains run-history based, but its
+        # cancellation-enabled aggregate flavor is fully provable from YAML.
+        # Dispatch that narrow extension here without reclassifying the whole
+        # catalog pattern as static or weakening the measured supersession
+        # detector in collect_runs.py.
+        opt46_entry = catalog_by_id.get("OPT46")
+        if opt46_entry is not None:
+            opt46_hits = _detect_opt46_cancelled_aggregate(doc, raw)
+            if unreadable_jobs:
+                opt46_hits = _hold_back_unreadable(
+                    "OPT46", opt46_hits, rel, unreadable_jobs)
+            for hit in opt46_hits:
+                finding_idx += 1
+                f = _emit(opt46_entry, hit, rel, finding_idx)
+                # OPT46's catalog class remains data-driven for its primary
+                # superseded-run overlap detector. This narrow YAML flavor is
+                # static and deliberately uncredited until run evidence sizes
+                # it, so do not mislabel it as a measured finding.
+                f["pattern_class"] = "static"
+                f.update(hit.facts)
+                f["workflow_lanes"] = workflow_lanes.get(rel, [])
+                if workflow_push_scopes.get(rel):
+                    f["workflow_push_scopes"] = workflow_push_scopes[rel]
                 snippet = hit.snippet or _raw_line(raw, hit.line)
                 if snippet:
                     f["evidence_snippet"] = snippet

@@ -2590,6 +2590,156 @@ jobs:
     assert "OPT45" in _scan_one(tmp_path, pos)
 
 
+def test_opt46_always_aggregate_starts_after_superseded_run_is_cancelled(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  verdict:
+    needs: [lint, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful checks
+        env:
+          LINT_RESULT: ${{ needs['lint'].result }}
+          TEST_RESULT: ${{ needs['test'].result }}
+        run: |
+          printf 'lint=%s test=%s\\n' \\
+            "${LINT_RESULT:-missing}" "${TEST_RESULT:-missing}"
+          [[ "$LINT_RESULT" == success && "$TEST_RESULT" == success ]]
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    scanned = _scan(tmp_path)
+    findings = [
+        row for row in scanned["findings"]
+        if row["pattern"] == "OPT46" and row["affected_jobs"] == ["verdict"]
+    ]
+    assert len(findings) == 1
+    assert findings[0]["pattern_class"] == "static"
+    assert "if: ${{ !cancelled() }}" in findings[0]["evidence"]
+    assert "Runner-minute effect: saving" in findings[0]["evidence"]
+
+
+def test_opt46_cancel_aware_aggregate_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  verdict:
+    needs: [lint, test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful checks
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$LINT_RESULT" = success -a "$TEST_RESULT" = success
+"""
+    assert "OPT46" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt46_always_job_with_real_work_is_not_an_aggregate(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    needs: lint
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+"""
+    assert "OPT46" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt46_result_guard_cannot_hide_real_work_in_shell_control_flow(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  verdict-and-test:
+    needs: lint
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect lint result, then test
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+        run: |
+          if npm test; then
+            test "$LINT_RESULT" = success
+          fi
+"""
+    assert "OPT46" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt46_aggregate_without_cancellation_stays_with_measured_detector(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  verdict:
+    needs: [lint, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful checks
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: test "$RESULTS" != '{}'
+"""
+    assert "OPT46" not in _scan_one(tmp_path, workflow)
+
+
 def test_opt5_suppressed_when_pnpm_action_setup_caches(tmp_path: Path):
     neg = """name: CI
 on: push
