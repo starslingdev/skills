@@ -49,7 +49,8 @@ logger = logging.getLogger("scan")
 SCAN_INCOMPLETE_KINDS = frozenset({
     "workflow-unreadable", "workflow-unparseable", "workflow-not-mapping",
     "parallel-group-unread", "symlink-out-of-tree", "no-workflows-dir",
-    "opt19-file-cap", "opt19-source-unreadable", "turbo-unreadable",
+    "opt19-file-cap", "opt19-source-unreadable", "opt113-file-cap",
+    "opt113-source-unreadable", "turbo-unreadable",
 })
 
 # Detectors proven by cardinality tests to emit one finding per physical
@@ -1678,6 +1679,133 @@ def _detect_opt45(doc: dict, raw: str) -> list[Hit]:
         match_text="(workflow)",
         snippet=block,
     )]
+
+
+# ---- OPT46 extension — always() aggregate after cancellation ----------------
+
+_OPT46_ALWAYS_RE = re.compile(r"\balways\s*\(\s*\)", re.I)
+_OPT46_CANCELLED_RE = re.compile(r"\bcancelled\s*\(\s*\)", re.I)
+_OPT46_NEEDS_RESULT_RE = re.compile(
+    r"needs(?:\.\*|\.[A-Za-z_][\w-]*|\[['\"][^'\"]+['\"]\])?\.result|"
+    r"(?:to|from)JSON\s*\(\s*needs\s*\)",
+    re.I,
+)
+# Every simple command in a verdict script must start with one of these words
+# (after shell keywords and `VAR=value` assignments are stripped). Anything
+# else, including a command chained after a result check, is possible real work.
+_OPT46_RESULT_COMMANDS = frozenset({
+    "echo", "printf", "test", "[", "[[", "exit", "set", "true", "false", ":",
+    "jq", "case", "esac", "for", "done", "fi"})
+_OPT46_SHELL_KEYWORDS = frozenset({"if", "elif", "then", "else", "do", "!"})
+_OPT46_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*")
+
+
+def _opt46_result_only_script(run: str) -> bool:
+    """True when every simple command in ``run`` only inspects or reports."""
+    script = run.replace("\\\n", " ")
+    if "$(" in script or "`" in script:
+        return False
+    for raw_line in script.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Neutralise quoted text and test brackets so their `&&`, `|` or `;`
+        # are not read as command separators.
+        line = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "''", line)
+        line = re.sub(r"\[\[.*?\]\]", "[[ ]]", line)
+        for command in re.split(r"&&|\|\||;;|[;|]", line):
+            words = command.split()
+            while words and (words[0] in _OPT46_SHELL_KEYWORDS
+                             or _OPT46_ASSIGNMENT_RE.fullmatch(words[0])):
+                words.pop(0)
+            if words and words[0] not in _OPT46_RESULT_COMMANDS:
+                return False
+    return True
+
+
+def _opt46_cancellation_enabled(doc: dict) -> bool:
+    concurrency = doc.get("concurrency")
+    if not isinstance(concurrency, dict):
+        return False
+    value = concurrency.get("cancel-in-progress")
+    if value is True:
+        return True
+    if not isinstance(value, str):
+        return False
+    compact = re.sub(r"\s+", "", value).lower()
+    return compact not in {"", "false", "${{false}}"}
+
+
+def _opt46_result_only_step(step: dict) -> bool:
+    """A step whose only executable work evaluates dependency results.
+
+    Fail closed on arbitrary commands and actions.  The explicit shell
+    allow-list covers the small verdict scripts GitHub workflows conventionally
+    use; an opaque helper may do real work and therefore is not an aggregate.
+    """
+    uses, run = _uses(step), _run(step)
+    try:
+        step_text = yaml.safe_dump(step)
+    except yaml.YAMLError:
+        return False
+    if uses:
+        return "alls-green" in uses and bool(_OPT46_NEEDS_RESULT_RE.search(step_text))
+    if not run or not _OPT46_NEEDS_RESULT_RE.search(step_text):
+        return False
+    return _opt46_result_only_script(run)
+
+
+def _opt46_check_context(job_name: str, job: dict) -> str | None:
+    """The status-check name this job publishes, or None when it cannot be
+    read from YAML (a templated name or a matrix suffix)."""
+    if isinstance(job.get("strategy"), dict) and job["strategy"].get("matrix"):
+        return None
+    name = job.get("name", job_name)
+    if not isinstance(name, str) or not name.strip() or "${{" in name:
+        return None
+    return name.strip()
+
+
+def _detect_opt46_cancelled_aggregate(doc: dict, raw: str) -> list[Hit]:
+    """An ``always()`` result-only aggregate still acquires a runner after a
+    top-level concurrency group cancels the superseded run.
+
+    These hits are CANDIDATES, not findings: ``!cancelled()`` is safe advice
+    only for an aggregate that is not a required status check, which the YAML
+    cannot show. ``collect_runs`` promotes a candidate only after a complete
+    required-check read proves its check is not required."""
+    if not _opt46_cancellation_enabled(doc):
+        return []
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict) or not job.get("needs"):
+            continue
+        condition = str(job.get("if") or "")
+        if (not _OPT46_ALWAYS_RE.search(condition)
+                or _OPT46_CANCELLED_RE.search(condition)):
+            continue
+        executable = [step for step in _steps(job) if _run(step) or _uses(step)]
+        if not executable or not all(_opt46_result_only_step(step) for step in executable):
+            continue
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"aggregate job `{job_name}` uses `if: always()` only to evaluate "
+                "dependency results while the workflow cancels superseded runs, so it "
+                "can still acquire a runner after cancellation."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+            facts={
+                "opt46_check_context": _opt46_check_context(job_name, job),
+                "runner_min_unsized_reason": (
+                    "the aggregate's compute on cancelled runs is not measured from "
+                    "the workflow file"),
+            },
+        ))
+    return hits
 
 
 # ---- OPT32 — Missing paths/paths-ignore on Expensive Workflows (P7.1) --------
@@ -7490,7 +7618,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT76", "OPT108", "OPT109"})
+    "OPT39", "OPT46", "OPT76", "OPT108", "OPT109"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -10483,6 +10611,204 @@ def _detect_opt19(root: Path):
     return [("OPT19", top[0][0], hit, total_s, me)], incomplete
 
 
+# OPT113 — a linked Go test executable (or an output explicitly built by the
+# test) is used as byte payload for an archive, compressor or hash. Source alone
+# cannot price the repeated bytes, so this detector reports the shape but never
+# invents a duration or run frequency.
+_OPT113_FILE_CAP = 8000
+_OPT113_MAX_BYTES = 1_000_000
+_OPT113_TRANSFORM_RE = re.compile(
+    r"\b(?:zip|tar|gzip|zlib|flate|bzip2|lz4|zstd)\."
+    r"(?:NewWriter(?:Level|Size)?|New)\s*\("
+    r"|\b(?:sha1|sha256|sha512|md5|crc32|crc64|fnv)\."
+    r"(?:New|Sum(?:224|256|384|512)?)\s*\(")
+_OPT113_GO_BUILD_RE = re.compile(
+    r"exec\.Command(?:Context)?\([^\n)]{0,500}?['\"]go['\"]\s*,"
+    r"[^\n)]{0,500}?['\"]build['\"][^\n)]{0,500}?['\"]-o['\"]\s*,\s*"
+    r"(?P<output>[A-Za-z_]\w*)(?=\s*[,)])")
+_OPT113_EXECUTABLE_ASSIGN_RE = re.compile(
+    r"(?P<input>[A-Za-z_]\w*)\s*,\s*[A-Za-z_]\w*\s*:?=\s*"
+    r"os\.Executable\s*\(\s*\)")
+_OPT113_FUNC_RE = re.compile(
+    r"(?m)^func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(")
+_OPT113_ASSIGN_RE = re.compile(
+    r"(?m)^[ \t]*(?P<names>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:?=\s*"
+    r"(?P<rhs>[^\n]*)")
+# The real binary is itself the contract: its format headers, a signature over
+# it, or running it. A byte fixture cannot stand in, so such a file withholds.
+_OPT113_METADATA_RE = re.compile(
+    r"['\"]debug/(?:elf|macho|pe|buildinfo|plan9obj)['\"]"
+    r"|\b(?:elf|macho|pe|buildinfo)\.(?:Open|NewFile|Read\w*)\s*\("
+    r"|\bVerify\w*\s*\(|\b(?:codesign|signtool|notarytool|cosign|sigstore)\b"
+    r"|\bexec\.Command\s*\(\s*(?![\"`])"
+    r"|\bexec\.CommandContext\s*\([^,\n]*,\s*(?![\"`])"
+    r"|\b(?:os\.StartProcess|syscall\.Exec)\s*\(")
+_OPT113_MODE_ASSERT_RE = re.compile(
+    r"\b(?:Mode|Perm)\s*\(\s*\)[^\n]*(?:&|==|!=)")
+_OPT113_DIRECT_SUM_RE = (
+    r"\b(?:sha1|sha256|sha512|md5|crc32|crc64|fnv)\."
+    r"(?:Sum(?:224|256|384|512)?|Checksum\w*)\s*\(\s*{src}\b")
+
+
+def _opt113_without_comments(text: str) -> str:
+    # Preserve newlines and offsets so the finding's line/snippet still points
+    # at the real source after comments are ignored.
+    def blank(match: re.Match[str]) -> str:
+        return re.sub(r"[^\n]", " ", match.group(0))
+
+    text = re.sub(r"/\*.*?\*/", blank, text, flags=re.S)
+    return re.sub(r"(?m)//.*$", blank, text)
+
+
+def _opt113_functions(text: str) -> list[tuple[str, int, str]]:
+    starts = list(_OPT113_FUNC_RE.finditer(text))
+    return [(m.group("name"), m.start(),
+             text[m.start():starts[i + 1].start() if i + 1 < len(starts) else len(text)])
+            for i, m in enumerate(starts)]
+
+
+def _opt113_flow(text: str) -> tuple[str, int] | None:
+    """Trace the oversized bytes into an archive, compressor or hash.
+
+    A finding needs one function that (1) opens or reads the linked test
+    executable — directly, via a helper that returns it, or a `go build -o`
+    output built in that function — and (2) passes those exact bytes into a
+    writer created by an archive/compression/hash constructor (or a direct
+    digest call). Anything the read cannot tie together withholds. A file that
+    inspects format headers, verifies a signature, executes a binary, or
+    asserts a file mode withholds too: there the real binary is the contract.
+    """
+    if _OPT113_METADATA_RE.search(text):
+        return None
+    functions = _opt113_functions(text)
+    helpers: set[str] = set()
+    for name, _start, body in functions:
+        for exe in _OPT113_EXECUTABLE_ASSIGN_RE.finditer(body):
+            if re.search(rf"\breturn\s+{re.escape(exe.group('input'))}\s*(?:,|$)",
+                         body, re.M):
+                helpers.add(name)
+    for _name, start, body in functions:
+        origins: list[tuple[str, str]] = []
+        # The whole argument must be the origin: `exe + ".sha256"` or
+        # `filepath.Join(filepath.Dir(exe), ...)` names a different file.
+        origins += [(re.escape(m.group("input")) + r"\s*\)", "the linked Go test executable")
+                    for m in _OPT113_EXECUTABLE_ASSIGN_RE.finditer(body)]
+        origins += [(re.escape(h) + r"\s*\([^()\n]*\)\s*\)", "the linked Go test executable")
+                    for h in sorted(helpers)]
+        origins += [(re.escape(m.group("output")) + r"\s*\)", "a binary built by the test")
+                    for m in _OPT113_GO_BUILD_RE.finditer(body)]
+        if not origins:
+            continue
+        sources: list[tuple[str, int, str]] = []
+        sinks: set[str] = set()
+        for assign in _OPT113_ASSIGN_RE.finditer(body):
+            first = assign.group("names").split(",")[0].strip()
+            rhs = assign.group("rhs")
+            for expr, label in origins:
+                if re.match(rf"os\.(?:Open|ReadFile)\s*\(\s*{expr}", rhs):
+                    sources.append((first, assign.start("names"), label))
+                    break
+            if (_OPT113_TRANSFORM_RE.match(rhs)
+                    or any(re.match(rf"{re.escape(k)}\.(?:Create\w*|NewWriter\w*)\s*\(", rhs)
+                           for k in sinks)
+                    or (_OPT113_TRANSFORM_RE.search(rhs)
+                        and any(re.search(rf"\b{re.escape(k)}\b", rhs) for k in sinks))):
+                sinks.add(first)
+        if not sources or _OPT113_MODE_ASSERT_RE.search(body):
+            continue
+        for src, offset, label in sources:
+            s = re.escape(src)
+            sink_alt = "|".join(re.escape(k) for k in sorted(sinks)) or r"(?!x)x"
+            flows = (
+                rf"\bio\.Copy(?:N|Buffer)?\s*\([^,\n]*\b(?:{sink_alt})\b[^,\n]*,[^\n]*\b{s}\b",
+                rf"\b(?:{sink_alt})\.Write\w*\s*\([^\n]*\b{s}\b",
+                _OPT113_DIRECT_SUM_RE.format(src=s),
+            )
+            if any(re.search(f, body) for f in flows):
+                return label, start + offset
+    return None
+
+
+def _detect_opt113(root: Path) -> tuple[list[tuple[str, str, Hit]], list[dict]]:
+    hits: list[tuple[str, str, Hit]] = []
+    incomplete: list[dict] = []
+    scanned = 0
+    capped = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in _OPT19_SKIP_DIRS and not d.startswith(".")]
+        for filename in filenames:
+            if not filename.endswith("_test.go"):
+                continue
+            if scanned >= _OPT113_FILE_CAP:
+                capped = True
+                break
+            scanned += 1
+            path = Path(dirpath, filename)
+            rel = path.relative_to(root).as_posix()
+            try:
+                if not _inside_scan_root(path):
+                    continue
+                if path.stat().st_size > _OPT113_MAX_BYTES:
+                    incomplete.append({
+                        "path": rel,
+                        "kind": "opt113-source-unreadable",
+                        "reason": (f"OPT113 source exceeds the {_OPT113_MAX_BYTES}-byte "
+                                   "read bound; fixture input was not classified"),
+                    })
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                incomplete.append({"path": rel, "kind": "opt113-source-unreadable",
+                                   "reason": f"OPT113 source read failed: {exc}"})
+                continue
+            code = _opt113_without_comments(text)
+            origin = _opt113_flow(code)
+            if origin is None:
+                continue
+            origin_label, origin_at = origin
+            line = code.count("\n", 0, origin_at) + 1
+            hit = Hit(
+                line=line,
+                affected_jobs=[],
+                evidence=(f"{rel}: {origin_label} is read and its bytes are passed "
+                          "into an archive, compressor or hash; runner-minute saving: "
+                          "unsized because source does not reveal the affected test's "
+                          "measured duration or monthly run count"),
+                match_text=origin_label,
+                snippet=text.splitlines()[line - 1].rstrip(),
+                facts={
+                    "fix_strategy": (
+                        "Use a small shared byte fixture for byte/archive/hash contract "
+                        "tests; retain a real executable only where executable metadata "
+                        "is the behavior under test."),
+                    "wall_clock_p50_s": None,
+                    "runner_min_saving": None,
+                    "tier": 2,
+                    "realization": "none",
+                    "size_note": (
+                        "runner-minute saving: unsized (source identifies oversized "
+                        "fixture work but not its measured duration or monthly run count)"),
+                    "runner_min_unsized_reason": (
+                        "source identifies oversized fixture work but not its measured "
+                        "duration or monthly run count"),
+                    "oversized_fixture_static": True,
+                },
+            )
+            hits.append(("OPT113", rel, hit))
+        if capped:
+            break
+    if capped:
+        incomplete.append({
+            "path": "<source tree>",
+            "kind": "opt113-file-cap",
+            "reason": (f"OPT113 source scan hit the {_OPT113_FILE_CAP}-file cap after "
+                       f"scanning {scanned} Go test files; remaining fixture inputs "
+                       "were not classified"),
+        })
+    return hits, incomplete
+
+
 # =============================================================================
 # Workflow walk + emit
 # =============================================================================
@@ -11238,6 +11564,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         unreadable_jobs[(mj["path"], mj["job"])] = rec
 
     findings: list[dict[str, Any]] = []
+    opt46_aggregate_candidates: list[dict[str, Any]] = []
     finding_idx = 0
 
     # Index local composite actions that run git-history ops, so OPT28 can see a
@@ -11324,6 +11651,34 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
                     f["evidence_snippet"] = snippet
                 findings.append(f)
 
+        # OPT46's primary detector remains run-history based. Its
+        # cancellation-enabled aggregate flavor is provable from YAML, but its
+        # advice is safe only for a check that is not required, so the hits are
+        # recorded as candidates for collect_runs to promote after the
+        # required-check read. A static-only run never reports them.
+        opt46_entry = catalog_by_id.get("OPT46")
+        if opt46_entry is not None:
+            opt46_hits = _detect_opt46_cancelled_aggregate(doc, raw)
+            if unreadable_jobs:
+                opt46_hits = _hold_back_unreadable(
+                    "OPT46", opt46_hits, rel, unreadable_jobs)
+            for hit in opt46_hits:
+                finding_idx += 1
+                f = _emit(opt46_entry, hit, rel, finding_idx)
+                # OPT46's catalog class remains data-driven for its primary
+                # superseded-run overlap detector. This narrow YAML flavor is
+                # static and deliberately uncredited until run evidence sizes
+                # it, so do not mislabel it as a measured finding.
+                f["pattern_class"] = "static"
+                f.update(hit.facts)
+                f["workflow_lanes"] = workflow_lanes.get(rel, [])
+                if workflow_push_scopes.get(rel):
+                    f["workflow_push_scopes"] = workflow_push_scopes[rel]
+                snippet = hit.snippet or _raw_line(raw, hit.line)
+                if snippet:
+                    f["evidence_snippet"] = snippet
+                opt46_aggregate_candidates.append(f)
+
     # --- Cross-workflow / repo-context pass ---
     opt96_held: list[dict] = []
     cross_hits, cross_incomplete = _cross_workflow_hits(
@@ -11371,6 +11726,21 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         f["realization"] = "direct"
         f["measured_signal"] = hit.evidence
         f["measured_evidence"] = me
+        findings.append(f)
+
+    # --- Go test source pass (OPT113) — categorical until run timings reveal
+    # how much of the affected test is spent moving the oversized bytes. ---
+    opt113_hits, opt113_incomplete = _detect_opt113(root)
+    scan_incomplete.extend(opt113_incomplete)
+    for pat, source_file, hit in opt113_hits:
+        entry = catalog_by_id.get(pat)
+        if entry is None:
+            continue
+        finding_idx += 1
+        f = _emit(entry, hit, source_file, finding_idx)
+        f.update(hit.facts)
+        if hit.snippet:
+            f["evidence_snippet"] = hit.snippet
         findings.append(f)
 
     # Reconcile mutually-exclusive remedies that fired on the SAME physical step
@@ -11467,6 +11837,10 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # catalogued-but-undetected structural pattern is
         # honest about its coverage instead of silently never appearing.
         "catalog_structural_patterns_without_detector": structural_without_detector,
+        # OPT46 cancelled-run aggregate candidates. NOT findings: collect_runs
+        # promotes one only when a complete required-check read shows its check
+        # is not required (a skipped required check counts as passing).
+        "opt46_aggregate_candidates": opt46_aggregate_candidates,
     }
 # =============================================================================
 # CLI
