@@ -5891,6 +5891,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     # OPT108: measured from the comment workflow's short successful runs
     # (`_size_opt108_comment_runs`); unsized with its reason otherwise.
     "OPT108": {"model": "measured"},
+    "OPT112": {"model": "measured"},
     "OPT29": {"model": "runner-min-only", "hit_rate": 0.1, "cost_basis": "affected_jobs",
               "cost_basis_rate_label": "the merge_group-run share",
               "cost_basis_label": "the merge_group-run share of the job's compute reclaimed by "
@@ -8002,6 +8003,9 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
               "the affected jobs' measured cost-spine billable"),
     "OPT106": (_RM_DOOR_CLAMP,
                "profiled runtime TypeScript loader self time — measured per-run "
+               "credit clamped to the affected job's measured cost-spine billable"),
+    "OPT112": (_RM_DOOR_CLAMP,
+               "measured broad Go recompilation span after an old exact cache hit — "
                "credit clamped to the affected job's measured cost-spine billable"),
     # DERIVE — whole-run cancel re-derives hit_rate x the affected jobs' measured
     # billable (implemented by `_reground_whole_run_cancel_saving`, run first).
@@ -29416,6 +29420,121 @@ def _cache_path_sample(client, repo: str, jobs: list, facts: list,
                          for fact, s in zip(facts, state) if s["valid"] and s["runs"]]}
 
 
+_GO_CACHE_RESTORE_RE = _re.compile(
+    r"^Cache restored from key:\s*(?P<key>setup-go-[A-Za-z0-9_.-]+)\s*$",
+    _re.IGNORECASE,
+)
+_GO_CACHE_COMMAND_RE = _re.compile(
+    r"^##\[group\]Run\s+(?:env\s+[^\n]*?\s+)?go\s+"
+    r"(?P<verb>build|test|vet)\b(?P<args>[^\n]*)$",
+    _re.IGNORECASE,
+)
+_GO_COMPILE_PACKAGE_RE = _re.compile(
+    r"(?:^|\s)(?:\S*/)?compile(?:\.exe)?\s+[^\n]*?\s-p\s+"
+    r"(?P<package>[^\s]+)",
+    _re.IGNORECASE,
+)
+_OPT112_MIN_RECOMPILED_PACKAGES = 50
+_OPT112_MIN_RECOMPILE_S = 30.0
+_OPT112_MIN_ARCHIVE_AGE_DAYS = 5.0
+
+
+def _go_cache_trim_candidate(log: str) -> dict[str, Any] | None:
+    """Return a measured old-cache-trim candidate from ordinary Go ``-x`` output.
+
+    Archive age is deliberately not inferred here.  The caller confirms the
+    exact restored key through GitHub's cache inventory before admission.
+    """
+    records, untimestamped, total = _opt80_log_records(log)
+    if not records or (total and untimestamped / total > _OPT80_MAX_UNTIMESTAMPED_FRACTION):
+        return None
+    restore: tuple[int, str] | None = None
+    for index, (_stamp, text) in enumerate(records):
+        match = _GO_CACHE_RESTORE_RE.match(text)
+        if match:
+            restore = (index, match.group("key"))
+            break
+    if restore is None:
+        return None
+
+    commands: list[tuple[int, _dt.datetime, str, str]] = []
+    for index, (stamp, text) in enumerate(records):
+        match = _GO_CACHE_COMMAND_RE.match(text)
+        if match and index > restore[0]:
+            commands.append((index, stamp, match.group("verb").lower(),
+                             match.group("args").strip()))
+    if len(commands) < 2:
+        return None
+
+    for command_index in range(1, len(commands)):
+        row_index, started, verb, args = commands[command_index]
+        prior = commands[command_index - 1]
+        # The trim trap needs two incompatible build populations.  ``-race`` is
+        # the observable distinction in the public reproducer; without that
+        # distinction, broad compilation can simply be an ordinary cold build.
+        if ("-race" in prior[3].split()) == ("-race" in args.split()):
+            continue
+        end_index = (commands[command_index + 1][0]
+                     if command_index + 1 < len(commands) else len(records))
+        rows = records[row_index:end_index]
+        packages = {
+            match.group("package")
+            for _stamp, text in rows
+            for match in [_GO_COMPILE_PACKAGE_RE.search(text)]
+            if match is not None and match.group("package") != "command-line-arguments"
+        }
+        if len(packages) < _OPT112_MIN_RECOMPILED_PACKAGES:
+            continue
+        ended = rows[-1][0]
+        seconds = max(0.0, (ended - started).total_seconds())
+        if seconds < _OPT112_MIN_RECOMPILE_S:
+            continue
+        return {
+            "cache_key": restore[1],
+            "first_command": f"go {prior[2]} {prior[3]}".strip(),
+            "recompile_command": f"go {verb} {args}".strip(),
+            "recompiled_packages": len(packages),
+            "recompile_s": round(seconds, 1),
+        }
+    return None
+
+
+def _go_cache_archive_fact(
+    client: "GhClient", repo: str, candidate: dict[str, Any],
+    observed_at: _dt.datetime | None,
+) -> dict[str, Any] | None:
+    """Confirm the exact restored cache archive predates cmd/go's trim window."""
+    key = str(candidate.get("cache_key") or "")
+    if not key or observed_at is None:
+        return None
+    payload = client.json(
+        f"repos/{repo}/actions/caches?key={quote(key, safe='')}&per_page=10",
+        allow_missing=True,
+    )
+    rows = payload.get("actions_caches") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    exact = [row for row in rows if isinstance(row, dict)
+             and str(row.get("key") or "") == key]
+    if len(exact) != 1:
+        return None
+    created = _parse_dt(str(exact[0].get("created_at") or ""))
+    if created is None:
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=_dt.timezone.utc)
+    if observed_at.tzinfo is None:
+        observed_at = observed_at.replace(tzinfo=_dt.timezone.utc)
+    age_days = (observed_at - created).total_seconds() / 86400.0
+    if age_days < _OPT112_MIN_ARCHIVE_AGE_DAYS:
+        return None
+    return {
+        **candidate,
+        "archive_created_at": created.isoformat().replace("+00:00", "Z"),
+        "archive_age_days": round(age_days, 1),
+    }
+
+
 def _persist_pole_logs(
     client: "GhClient", repo: str, poles: list[dict[str, Any]],
     jobs_per_run_by_wf: dict[str, list], data_dir: "Path", mag_runs: int = 3,
@@ -29667,6 +29786,11 @@ def _persist_pole_logs(
         opt13_fact = _opt13_build_in_quality_log(log)
         runtime_ts_loader = (leaf0 if leaf0.get("fix_key") == "runtime-ts-transpilation"
                              else None)
+        go_cache_trim = _go_cache_trim_candidate(log)
+        if go_cache_trim is not None:
+            observed_at = _parse_dt(str(repr_job.get("started_at") or ""))
+            go_cache_trim = _go_cache_archive_fact(
+                client, repo, go_cache_trim, observed_at)
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
             "leaf_fix_key": leaf0.get("fix_key"),
@@ -29678,6 +29802,7 @@ def _persist_pole_logs(
             **({"opt13_build_in_script": opt13_fact} if opt13_fact else {}),
             **({"runtime_ts_loader": runtime_ts_loader}
                if runtime_ts_loader else {}),
+            **({"go_cache_trim": go_cache_trim} if go_cache_trim else {}),
         })
         logger.debug("saved pole log for %s -> %s (closest to P50 of %d qualifying "
                      "runs)", job, fn, len(qual))
@@ -29826,6 +29951,91 @@ def _detect_runtime_ts_transpilation(
         finding["runtime_loader_job_s"] = float(job_seconds)
         finding["runtime_loader"] = str(fact.get("loader") or "runtime TypeScript loader")
         if isinstance(runs, int):
+            finding["workflow_runs_30d"] = runs
+        out.append(finding)
+    return out
+
+
+def _detect_go_cache_trim(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Turn an old exact Go-cache restore plus broad recompilation into OPT112."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    for entry in pole_logs:
+        fact = entry.get("go_cache_trim")
+        if not isinstance(fact, dict):
+            continue
+        seconds = fact.get("recompile_s")
+        packages = fact.get("recompiled_packages")
+        age_days = fact.get("archive_age_days")
+        job_seconds = entry.get("duration_s")
+        if (not isinstance(seconds, (int, float))
+                or seconds < _OPT112_MIN_RECOMPILE_S
+                or not isinstance(job_seconds, (int, float))
+                or job_seconds <= 0 or seconds > job_seconds
+                or not isinstance(packages, int)
+                or packages < _OPT112_MIN_RECOMPILED_PACKAGES
+                or not isinstance(age_days, (int, float))
+                or age_days < _OPT112_MIN_ARCHIVE_AGE_DAYS):
+            continue
+        workflow = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        runs = volume_by_workflow.get(workflow)
+        runner_min = (round(float(seconds) * runs / 60.0, 1)
+                      if isinstance(runs, int) and not isinstance(runs, bool)
+                      and runs > 0 else None)
+        if runner_min is not None:
+            runner_effect = (
+                f"runner-minute saving: at most {runner_min:.1f}/month (measured "
+                f"recompile ceiling from 1 representative run x {runs} workflow "
+                "runs in 30 days); confirm the realized saving after retaining the cache")
+        elif isinstance(runs, int) and not isinstance(runs, bool) and runs <= 0:
+            runner_effect = (
+                "runner-minute saving: unsized (the 30-day volume window holds no "
+                "runs of this workflow)")
+        else:
+            runner_effect = (
+                "runner-minute saving: unsized (30-day run volume for this workflow "
+                "is unavailable)")
+        url = str(entry.get("html_url") or "")
+        evidence = (
+            f"The representative `{job}` run restores an exact Go build-cache archive "
+            f"that is {float(age_days):.1f} days old, then recompiles {packages} "
+            f"packages for {_link(float(seconds), url)} after an incompatible Go "
+            "command used the cache first."
+        )
+        measured = _measured_evidence(
+            ["Job", "Archive age", "Recompiled packages", "Measured span",
+             "Representative run"],
+            [[f"`{job}`", f"{float(age_days):.1f} days", str(packages),
+              f"{float(seconds):.1f}s",
+              f"[job log]({url})" if url else "captured job log"]],
+            (f"An exact restored cache older than Go's five-day trim window is "
+             f"followed by {packages} compiler invocations spanning "
+             f"{float(seconds):.1f}s."),
+            "The measured recompilation span is a ceiling; compare the same job before and after retaining the restored entries.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT112", "HIGH", "Restored Go Build Cache Trimmed Before Reuse",
+            workflow, job, evidence,
+            "Touch every restored `GOCACHE` file immediately after setup and before "
+            "the first Go command. Do not add a warm-up build: it can trim the other "
+            "flag population instead. Preserve the cache key and test flags, then "
+            "compare the same job before and after.",
+            "opt112--restored-go-build-cache-trimmed-before-reuse", idx,
+            wc_p50=float(seconds), rm=runner_min,
+            size_note=f"measured recompile ceiling {float(seconds):.1f}s; {runner_effect}",
+            realization="tail", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        finding["go_cache_archive_age_days"] = float(age_days)
+        finding["go_cache_recompiled_packages"] = packages
+        finding["go_cache_recompile_s"] = float(seconds)
+        finding["go_cache_key"] = str(fact.get("cache_key") or "")
+        if isinstance(runs, int) and not isinstance(runs, bool):
             finding["workflow_runs_30d"] = runs
         out.append(finding)
     return out
@@ -34344,6 +34554,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         new = _detect_runtime_ts_transpilation(pole_logs, vol_by_wf, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        new = _detect_go_cache_trim(pole_logs, vol_by_wf, next_id)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         findings_doc["findings"] = findings

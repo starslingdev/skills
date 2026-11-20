@@ -89,6 +89,14 @@ class FixtureClient:
             return ({"active_caches_size_in_bytes": value}
                     if isinstance(value, int) else None)
         match = re.match(
+            rf"repos/{re.escape(repo)}/actions/caches\?(.*)", endpoint)
+        if match:
+            query = parse_qs(match.group(1), keep_blank_values=True)
+            wanted = (query.get("key") or [""])[0]
+            rows = [row for row in self.recorded.get("action_caches", [])
+                    if str(row.get("key") or "") == wanted]
+            return {"actions_caches": rows, "total_count": len(rows)}
+        match = re.match(
             rf"repos/{re.escape(repo)}/pulls/(\d+)/files\?", endpoint)
         if match:
             rows = self.recorded.get("changed_files", {}).get(match.group(1))
@@ -643,6 +651,102 @@ def test_runtime_typescript_loader_states_signed_or_unsized_runner_minute_effect
     for finding in (sized, unknown, empty):
         assert "+" not in finding["size_note"]
         assert "not sized because" not in finding["size_note"]
+
+
+def test_old_restored_go_cache_trim_is_measured_through_collect(monkeypatch, tmp_path):
+    """An old exact cache hit plus broad later recompilation produces OPT112."""
+    cache_key = "setup-go-Linux-x64-go-1.26.0-deadbeef"
+    compile_lines = "\n".join(
+        f"2026-01-28T00:01:10.0000000Z /opt/go/pkg/tool/linux_amd64/compile "
+        f"-o $WORK/b{i}/_pkg_.a -p example.org/project/pkg{i}"
+        for i in range(60))
+    costly_log = f"""\
+2026-01-28T00:00:00.0000000Z Cache restored from key: {cache_key}
+2026-01-28T00:00:02.0000000Z ##[group]Run go test -race ./... -list .
+2026-01-28T00:01:00.0000000Z ##[endgroup]
+2026-01-28T00:01:01.0000000Z ##[group]Run go build -x ./cmd/tool
+{compile_lines}
+2026-01-28T00:03:01.0000000Z ##[endgroup]
+"""
+
+    positive = tmp_path / "old-restored-go-cache"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    responses = positive / "responses.json"
+    recorded = json.loads(responses.read_text(encoding="utf-8"))
+    recorded["logs"]["1103"] = costly_log
+    recorded["action_caches"] = [{
+        "id": 71,
+        "key": cache_key,
+        "created_at": "2026-01-10T00:00:00Z",
+        "last_accessed_at": "2026-01-28T00:00:00Z",
+    }]
+    responses.write_text(json.dumps(recorded), encoding="utf-8")
+
+    positive_root = tmp_path / "run-old-restored-go-cache"
+    positive_root.mkdir()
+    doc, report, checks = run_fixture(
+        positive, monkeypatch, positive_root, max_runs=20)
+
+    findings = [row for row in doc["findings"] if row.get("pattern") == "OPT112"]
+    assert findings, "expected old restored Go cache trim finding"
+    finding = findings[0]
+    assert finding["go_cache_archive_age_days"] >= 5
+    assert finding["go_cache_recompiled_packages"] == 60
+    assert finding["go_cache_recompile_s"] == 120.0
+    assert finding["runner_min_saving"] > 0
+    assert "Touch every restored" in finding["fix_strategy"]
+    assert "runner-minute saving" in finding["size_note"]
+    assert "Restored Go Build Cache" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    negative = tmp_path / "fresh-restored-go-cache"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", negative)
+    negative_responses = negative / "responses.json"
+    recorded = json.loads(negative_responses.read_text(encoding="utf-8"))
+    recorded["logs"]["1103"] = costly_log
+    recorded["action_caches"] = [{
+        "id": 72,
+        "key": cache_key,
+        "created_at": "2026-01-27T00:00:00Z",
+        "last_accessed_at": "2026-01-28T00:00:00Z",
+    }]
+    negative_responses.write_text(json.dumps(recorded), encoding="utf-8")
+
+    negative_root = tmp_path / "run-fresh-restored-go-cache"
+    negative_root.mkdir()
+    negative_doc, negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT112"]
+    assert "Restored Go build cache" not in negative_report
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
+def test_go_cache_trim_candidate_withholds_legitimate_near_misses():
+    """A normal warm build or a small incompatible rebuild is not OPT112."""
+    def log(*, race_first: bool, race_later: bool, packages: int) -> str:
+        first_race = " -race" if race_first else ""
+        later_race = " -race" if race_later else ""
+        compile_lines = "\n".join(
+            f"2026-01-28T00:01:20Z /opt/go/pkg/tool/linux_amd64/compile "
+            f"-o $WORK/b{i}/_pkg_.a -p example.org/pkg{i}"
+            for i in range(packages))
+        return f"""\
+2026-01-28T00:00:00Z Cache restored from key: setup-go-Linux-x64-key
+2026-01-28T00:00:02Z ##[group]Run go test{first_race} ./... -list .
+2026-01-28T00:01:00Z ##[group]Run go build -x{later_race} ./cmd/tool
+{compile_lines}
+2026-01-28T00:03:00Z build complete
+"""
+
+    assert cr._go_cache_trim_candidate(
+        log(race_first=True, race_later=False, packages=10)) is None
+    assert cr._go_cache_trim_candidate(
+        log(race_first=False, race_later=False, packages=60)) is None
+    assert cr._go_cache_trim_candidate(
+        log(race_first=True, race_later=False, packages=60).replace(
+            "Cache restored from key:", "Documentation: cache key:")) is None
 
 
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():

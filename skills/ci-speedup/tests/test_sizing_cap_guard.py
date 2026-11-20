@@ -326,6 +326,27 @@ def test_opt24_inline_sizing_respects_physical_bound():
         assert (f.get("wall_clock_p50_s") or 0) > 0  # non-vacuous: it credited a saving
 
 
+def test_opt112_inline_sizing_respects_physical_bound():
+    """OPT112 credits only the measured recompilation span inside its pole job."""
+    entries = [{
+        "workflow_file": "ci.yml",
+        "job": "go tests",
+        "duration_s": 400.0,
+        "go_cache_trim": {
+            "cache_key": "setup-go-Linux-x64-key",
+            "archive_age_days": 18.0,
+            "recompiled_packages": 60,
+            "recompile_s": 120.0,
+        },
+    }]
+    findings = cr._detect_go_cache_trim(entries, {"ci.yml": 20}, 0)
+    assert findings, "fixture should produce an OPT112 finding"
+    crit = {"long_pole_job": "go tests", "long_pole_p50": 400.0,
+            "floor_p50": 90.0, "job_p50": {"go tests": 400.0}}
+    assert _physical_bound_violation(findings[0], crit) is None
+    assert findings[0]["wall_clock_p50_s"] == 120.0
+
+
 def test_opt25_inline_sizing_respects_physical_bound():
     """OPT25 (matrix/shard imbalance) sizes a rebalance/split saving and routes it
     through `_cap_wall_clock(crit)`. With a slow leg beside a slower non-matrix
@@ -475,6 +496,7 @@ def test_opt21_edge_sizing_ignores_an_unmeasured_unrelated_job():
 # class-wide guard can't go blind to a detector added later.
 _RUNTIME_MEASURED_COVERED = {
     "OPT19", "OPT21", "OPT24", "OPT25", "OPT49", "OPT50", "OPT51", "OPT100",
+    "OPT112",
 }
 # OPT46/OPT47/OPT64/OPT107 are run-elimination bill levers, OPT65 is exact billing
 # rounding waste below the cluster floor, OPT77 credits removed setup
