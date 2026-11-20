@@ -592,6 +592,162 @@ def test_runtime_typescript_loader_is_sized_from_profiled_long_pole_only(
             if not check.skipped and not check.ok] == []
 
 
+def _runtime_loader_fixture(tmp_path: Path, name: str, run: str,
+                            scripts: dict[str, str]) -> Path:
+    fixture = tmp_path / name
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", fixture)
+    wf = fixture / "workflows" / "ci.yml"
+    text = wf.read_text(encoding="utf-8")
+    assert "      - run: make test-32\n" in text
+    wf.write_text(text.replace("      - run: make test-32\n",
+                               f"      - name: Test\n        run: {run}\n"),
+                  encoding="utf-8")
+    (fixture / "package.json").write_text(
+        json.dumps({"name": "fixture", "scripts": scripts}), encoding="utf-8")
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    for page in recorded["jobs"].values():
+        for row in page:
+            if str(row.get("name")) == "t32":
+                row["steps"][0]["name"] = "Test"
+    recorded["logs"]["1103"] = (
+        "2026-01-28T00:00:00.0000000Z ##[group]Run " + run + "\n"
+        "2026-01-28T00:06:39.0000000Z # pass 412\n")
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    return fixture
+
+
+def test_runtime_typescript_loader_without_profile_fires_unsized(
+        monkeypatch, tmp_path):
+    """Issue #397's default: a long-pole `pnpm test` resolving to `tsx --test`."""
+    fixture = _runtime_loader_fixture(
+        tmp_path, "runtime-loader-unprofiled", "pnpm test",
+        {"test": "tsx --test src/*.test.ts"})
+    root = tmp_path / "run-runtime-loader-unprofiled"
+    root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, root, max_runs=20)
+    findings = [f for f in doc["findings"] if f.get("pattern") == "OPT106"]
+    assert len(findings) == 1, [f.get("pattern") for f in doc["findings"]]
+    finding = findings[0]
+    assert finding["wall_clock_p50_s"] is None
+    assert finding["runner_min_saving"] is None
+    assert finding["runtime_loader"] == "tsx"
+    assert finding["runtime_loader_command"].startswith("tsx --test")
+    p50 = finding["runtime_loader_step_p50_s"]
+    reason = (f"loader share not measured; the step's measured p50 of "
+              f"{p50:.1f}s is an upper bound")
+    assert f"runner-minute saving: unsized ({reason})" in finding["size_note"]
+    assert f"wall-clock saving: unsized ({reason})" in finding["size_note"]
+    assert finding["fix_strategy"].startswith("Measure first")
+    assert "--cpu-prof" in finding["fix_strategy"]
+    assert "fails if any exercised path falls back" in finding["fix_strategy"]
+    assert "Runtime TypeScript Transpilation" in report
+    assert [(c.name, c.detail) for c in checks if not c.skipped and not c.ok] == []
+
+    findings_path = root / fixture.name / "findings.json"
+    for field, value in (("runner_min_saving", 5.0), ("wall_clock_p50_s", 60.0),
+                         ("runtime_loader_step_p50_s", 10.0),
+                         ("fix_strategy", "Precompile the surfaces.")):
+        tampered = json.loads(findings_path.read_text(encoding="utf-8"))
+        next(f for f in tampered["findings"]
+             if f.get("pattern") == "OPT106")[field] = value
+        tampered_path = root / f"tampered-{field}.json"
+        tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+        assert not vr.check_opt106_runtime_loader_provenance(tampered_path).ok, field
+
+    precompiled = _runtime_loader_fixture(
+        tmp_path, "runtime-loader-precompiled", "pnpm test",
+        {"test": "node --test dist/*.test.js"})
+    root = tmp_path / "run-runtime-loader-precompiled"
+    root.mkdir()
+    doc, _report, checks = run_fixture(precompiled, monkeypatch, root, max_runs=20)
+    assert not [f for f in doc["findings"] if f.get("pattern") == "OPT106"]
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+
+
+def _loader_pole(run: str, *, p50: float = 300.0, job_p50: float = 400.0,
+                 env: dict | None = None, wf_env: dict | None = None):
+    step = {"name": "Test", "run": run}
+    if env is not None:
+        step["env"] = env
+    doc = {"jobs": {"unit": {"runs-on": "ubuntu-latest", "steps": [step]}}}
+    if wf_env is not None:
+        doc["env"] = wf_env
+    pole = {"workflow_file": ".github/workflows/ci.yml", "job": "unit",
+            "job_p50_s": job_p50,
+            "steps": [{"step": "Test", "category": "test", "p50_s": p50}]}
+    return [pole], {".github/workflows/ci.yml": doc}
+
+
+@pytest.mark.parametrize("run,scripts,env,wf_env,expected", [
+    ("pnpm test", {"test": "tsx --test src/*.test.ts"}, None, None, "tsx"),
+    ("npx tsx scripts/gen.ts", {}, None, None, "tsx"),
+    ("ts-node-esm scripts/gen.ts", {}, None, None, "ts-node-esm"),
+    ("node -r ts-node/register scripts/gen.ts", {}, None, None,
+     "node -r ts-node/register"),
+    ("node --require=ts-node/register scripts/gen.ts", {}, None, None,
+     "node --require ts-node/register"),
+    ("node --loader ts-node/esm scripts/gen.ts", {}, None, None,
+     "node --loader ts-node/esm"),
+    ("node --import tsx scripts/gen.ts", {}, None, None, "node --import tsx"),
+    ("NODE_OPTIONS='--import tsx' node scripts/gen.ts", {}, None, None,
+     "NODE_OPTIONS=--import tsx"),
+    ("node scripts/gen.ts", {}, {"NODE_OPTIONS": "--import tsx"}, None,
+     "NODE_OPTIONS=--import tsx"),
+    ("pnpm test", {"test": "node --test test/"}, None,
+     {"NODE_OPTIONS": "--require ts-node/register"},
+     "NODE_OPTIONS=--require ts-node/register"),
+    ("yarn gen", {"gen": "cross-env NODE_OPTIONS=--import=tsx node gen.ts"},
+     None, None, "NODE_OPTIONS=--import tsx"),
+    # An inline NODE_OPTIONS on a package-script call reaches the script body.
+    ("NODE_OPTIONS='--import tsx' pnpm gen", {"gen": "node gen.ts"}, None, None,
+     "NODE_OPTIONS=--import tsx"),
+    # ... and after a shell separator.
+    ("true && NODE_OPTIONS='--import tsx' node scripts/gen.ts", {}, None, None,
+     "NODE_OPTIONS=--import tsx"),
+    # node options with a separate value do not end the option scan.
+    ("node --require ./setup.cjs --import tsx scripts/gen.ts", {}, None, None,
+     "node --import tsx"),
+])
+def test_runtime_typescript_loader_step_forms_fire(run, scripts, env, wf_env,
+                                                   expected):
+    poles, wf_docs = _loader_pole(run, env=env, wf_env=wf_env)
+    block = {"package_scripts": {"": scripts}, "truncated": False}
+    found = cr._detect_runtime_ts_loader_steps(poles, wf_docs, block, 0)
+    assert len(found) == 1 and found[0]["runtime_loader"] == expected
+    assert found[0]["runner_min_saving"] is None
+    assert found[0]["wall_clock_p50_s"] is None
+
+
+@pytest.mark.parametrize("run,scripts,p50", [
+    ("pnpm test", {"test": "tsx --test src/*.test.ts"}, 15.0),     # quick step
+    ("pnpm test", {"test": "tsx --test src/*.test.ts"}, 40.0),     # < 15% of 400s
+    ('echo "run tsx --test to reproduce"', {}, 300.0),
+    ("# tsx --test src\nnode --test dist/", {}, 300.0),
+    ("node dist/generate.js", {}, 300.0),
+    ("pnpm test", {"test": "node --test dist/*.test.js"}, 300.0),
+    ("yarn tsx-lint", {"tsx-lint": "eslint ."}, 300.0),
+    ("node --import ./setup.js dist/a.js", {}, 300.0),
+    ("pnpm test", {}, 300.0),                                  # unreadable script
+])
+def test_runtime_typescript_loader_step_near_misses_stay_quiet(run, scripts, p50):
+    poles, wf_docs = _loader_pole(run.replace("\\n", "\n"), p50=p50)
+    block = {"package_scripts": {"": scripts}, "truncated": False}
+    assert cr._detect_runtime_ts_loader_steps(poles, wf_docs, block, 0) == []
+
+
+@pytest.mark.parametrize("run", [
+    "env NODE_OPTIONS='' node dist/a.js",
+    "NODE_OPTIONS='--max-old-space-size=4096' node dist/a.js",
+])
+def test_runtime_typescript_loader_inline_override_replaces_inherited_loader(run):
+    """A step that overrides NODE_OPTIONS (empty, or without a loader) is not
+    reported for the workflow-level loader it already replaced."""
+    poles, wf_docs = _loader_pole(run, wf_env={"NODE_OPTIONS": "--import tsx"})
+    block = {"package_scripts": {"": {}}, "truncated": False}
+    assert cr._detect_runtime_ts_loader_steps(poles, wf_docs, block, 0) == []
+
+
 def test_runtime_typescript_loader_rejects_unscoped_or_impossible_profile_text():
     """Only a same-step structured profile below job wall is evidence."""
     forged = """\
