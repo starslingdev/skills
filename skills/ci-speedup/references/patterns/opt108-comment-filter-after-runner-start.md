@@ -41,7 +41,9 @@ minutes for the affected jobs (each job rounded up to the minute), capped at
 those jobs' measured billed compute over the same volume. A job's minutes are
 credited only once across findings. YAML job ids resolve through the workflow
 job graph to API display names; a known skip contributes zero to the mean, while
-an unreadable affected-job timing is excluded. At least 3 short runs must be priced.
+an unreadable affected-job timing is excluded. If no affected job identity can
+be resolved in the sampled job lists, the finding stays unsized rather than
+treating the unresolved job as a known skip. At least 3 short runs must be priced.
 When runs were not collected, the run list could not be read, or no successful
 comment run finished under 30 seconds, the finding stays unsized and says why.
 There is no wall-clock effect on the pull-request path: comment runs do not

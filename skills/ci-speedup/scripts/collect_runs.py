@@ -6402,6 +6402,21 @@ def _measure_opt108_comment_runs(
                 affected_only(jobs)
                 for jobs in (jobs_per_run_by_wf.get(wf_path) or [])
             ]
+        if short_ids and not matched_jobs:
+            _opt108_unmeasured(
+                finding,
+                "the affected job identities could not be resolved in the "
+                "sampled job lists",
+                sized_affected_jobs=[],
+                sampled_runs=len(all_runs),
+                comment_runs=sum(
+                    str(run.get("event") or "") in _OPT108_COMMENT_EVENTS
+                    for run in all_runs
+                ),
+                short_success_runs=len(_opt108_short_comment_runs(all_runs)),
+                short_floor_s=_OPT108_SHORT_RUN_S,
+            )
+            continue
         _size_opt108_comment_runs(
             finding, all_runs, short_jobs, workflow_jobs, vol_by_wf.get(wf_path))
         measurement = finding.get("comment_runner_measurement")

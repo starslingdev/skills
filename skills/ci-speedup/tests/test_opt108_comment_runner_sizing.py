@@ -223,6 +223,21 @@ def test_opt108_known_skips_contribute_zero_to_the_affected_job_mean(
     _verify(doc, tmp_path)
 
 
+def test_opt108_unresolved_templated_job_name_stays_unsized(monkeypatch, tmp_path):
+    doc = _collect(
+        monkeypatch,
+        _CommentClient(
+            [(12, "success")] * 3, monthly=90,
+            react_name="ubuntu-latest react"),
+        job_graph={_WF: {"react": {"name": "${{ matrix.os }} react"}}},
+    )
+    finding = _opt108(doc)
+    assert finding["runner_min_saving"] is None
+    assert "could not be resolved" in finding["comment_runner_measurement"]["reason"]
+    doc["data_sources"]["detectors_skipped"] = []
+    _verify(doc, tmp_path)
+
+
 @pytest.mark.parametrize("plan,reason", [
     ([(70, "success")] * 20, "no successful comment-triggered run finished under 30s"),
     ([(12, "failure")] * 20, "no successful comment-triggered run finished under 30s"),
