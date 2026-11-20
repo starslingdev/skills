@@ -651,6 +651,67 @@ jobs:
                 if finding["pattern"] == "OPT16"]
     assert len(findings) == 1
     assert "run it once and split or filter the combined report" in findings[0]["evidence"]
+    assert findings[0]["opt16_analysis_repeat"] == {"tool": "knip", "steps": 2}
+
+
+def test_opt16_report_flag_variant_counts_report_redirection_as_output(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --reporter json > knip.json
+      - run: pnpm exec knip --reporter markdown > knip.md
+"""
+    assert "OPT16" in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        # Flags after `&&` belong to another command, not to Knip.
+        ("pnpm exec knip --include files && pnpm exec eslint . --format json",
+         "pnpm exec knip --include files && pnpm exec eslint . --format stylish"),
+        # `--fix` rewrites the tree, so the next run analyzes other files.
+        ("pnpm exec knip --fix --include exports",
+         "pnpm exec knip --fix --include files"),
+    ],
+)
+def test_opt16_report_flag_variant_ignores_other_commands_and_fixes(
+        tmp_path: Path, first: str, second: str):
+    workflow = ("name: CI\non: pull_request\njobs:\n  deadcode:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                f"      - run: {first}\n      - run: {second}\n")
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        # Mutually exclusive conditions: only one Knip run executes per event.
+        (
+            "      - if: github.event_name == 'pull_request'\n"
+            "        run: pnpm exec knip --reporter github-actions\n"
+            "      - if: github.event_name == 'push'\n"
+            "        run: pnpm exec knip --reporter json\n"
+        ),
+        # A `cd` earlier in the step changes the project scope.
+        (
+            "      - run: |\n"
+            "          cd packages/api\n"
+            "          pnpm exec knip --include dependencies\n"
+            "      - run: |\n"
+            "          cd packages/web\n"
+            "          pnpm exec knip --include files\n"
+        ),
+    ],
+)
+def test_opt16_report_flag_variant_withholds_unproven_shared_runs(
+        tmp_path: Path, steps: str):
+    workflow = ("name: CI\non: [push, pull_request]\njobs:\n  deadcode:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n" + steps)
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
 
 
 @pytest.mark.parametrize(

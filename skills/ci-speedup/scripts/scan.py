@@ -4168,6 +4168,10 @@ _OPT16_KNIP_BOOLEAN_SELECTORS = {
 }
 
 
+_OPT16_SHELL_OPERATORS = {"&&", "||", ";", "|", "&"}
+_OPT16_DIR_CHANGE_RE = re.compile(r"(?:^|[;&|(]\s*)(?:cd|pushd|popd)\b")
+
+
 def _opt16_analysis_signature(command: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
     """Return (scope, selectors) for a supported analysis invocation."""
     try:
@@ -4182,9 +4186,25 @@ def _opt16_analysis_signature(command: str) -> tuple[tuple[str, ...], tuple[str,
     scope: list[str] = []
     selectors: list[str] = []
     index = 0
+    in_knip = False
     while index < len(tokens):
         token = tokens[index]
         name, equals, value = token.partition("=")
+        if index == tool_index:
+            in_knip = True
+        elif token in _OPT16_SHELL_OPERATORS:
+            # Arguments after `&&`, `|` and so on belong to another command.
+            in_knip = False
+        if not in_knip or index == tool_index:
+            scope.append(token)
+            index += 1
+            continue
+        if name in {"--fix", "--fix-type", "--allow-remove-files"}:
+            return None  # Knip rewrites the tree; later runs see other files.
+        if token in {">", ">>"} and index + 1 < len(tokens):
+            selectors.append(f"{token}{tokens[index + 1]}")  # report destination
+            index += 2
+            continue
         if name in _OPT16_KNIP_VALUE_SELECTORS:
             if equals:
                 selectors.append(f"{name}={value}")
@@ -4228,14 +4248,23 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
         ] = {}
         for i, s in enumerate(steps):
             wd = str(s.get("working-directory") or "")
+            # A step `if:` is part of the analysis key: two runs under different
+            # conditions may never execute together (one per event), so they
+            # are not proven to repeat the analysis.
+            step_if = str(s.get("if") or "")
+            changed_dir = False
             seen_in_step: set[str] = set()
             for ln in _run(s).splitlines():
                 c = ln.strip()
                 analysis = _opt16_analysis_signature(c)
-                if analysis is not None:
+                # A directory change earlier in the step makes the project scope
+                # unknown from the Knip line alone, so withhold that invocation.
+                if analysis is not None and not changed_dir:
                     scope, selectors = analysis
-                    analysis_to_steps.setdefault((scope, wd), []).append(
+                    analysis_to_steps.setdefault((scope, f"{wd}\0{step_if}"), []).append(
                         (i, c, selectors))
+                if _OPT16_DIR_CHANGE_RE.search(c):
+                    changed_dir = True
                 if len(c) < 8 or not _OPT16_EXPENSIVE_RE.search(c):
                     continue
                 if c in seen_in_step:
@@ -4267,7 +4296,8 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
         if found:
             continue
 
-        for (_scope, wd), invocations in analysis_to_steps.items():
+        for (_scope, wd_if), invocations in analysis_to_steps.items():
+            wd = wd_if.split("\0", 1)[0]
             # A repeated line inside one wrapper step is outside this static
             # detector's step-level proof, just like the original OPT16 route.
             idxs = sorted({index for index, _command, _selectors in invocations})
@@ -4284,8 +4314,10 @@ def _detect_opt16(doc: dict, raw: str) -> list[Hit]:
                 evidence=(f"job `{job_name}` runs the same Knip analysis in "
                           f"{len(idxs)} separate steps with only report/include "
                           f"selectors changed{wd_note}; run it once and split or "
-                          "filter the combined report"),
+                          "filter the combined report, keeping each selection's "
+                          "pass/fail policy"),
                 match_text=job_name,
+                facts={"opt16_analysis_repeat": {"tool": "knip", "steps": len(idxs)}},
             ))
             break
     return hits
