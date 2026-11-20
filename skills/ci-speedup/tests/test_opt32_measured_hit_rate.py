@@ -17,30 +17,67 @@ import blocking_path as bp  # noqa: E402
 import collect_runs as cr  # noqa: E402
 from test_opt81_faster_runner import _CI, _COLLECT_YAML, _Opt81Client, _cts  # noqa: E402
 
+_OPT39_INPUT_FACTS = {
+    "opt39_languages": ["go"],
+    "opt39_job_kind": "per-language-toolchain",
+    "opt39_language_inputs": ["**/*.go", "go.mod"],
+    "opt39_workflow_inputs": ["**/*.go", "go.mod", "docs/**"],
+}
+
 
 class _PathFilterClient(_Opt81Client):
     def __init__(self, paths_by_pr: dict[int, list[str]], *, yaml: str = _COLLECT_YAML,
-                 missing_pr_numbers: set[int] | None = None):
+                 missing_pr_numbers: set[int] | None = None,
+                 push_run_numbers: set[int] | None = None,
+                 failed_file_prs: set[int] | None = None,
+                 unreadable_job_runs: set[int] | None = None):
         super().__init__([("ubuntu-latest", 197)] * 60, yaml)
         self.paths_by_pr = paths_by_pr
         self.missing_pr_numbers = missing_pr_numbers or set()
+        self.push_run_numbers = push_run_numbers or set()
+        self.failed_file_prs = failed_file_prs or set()
+        self.unreadable_job_runs = unreadable_job_runs or set()
         self.changed_file_calls = 0
+        self.exact_compare_calls = 0
 
     def json(self, endpoint, allow_missing=False):
         response = super().json(endpoint, allow_missing)
         if response is not None:
             if isinstance(response, dict) and "workflow_runs" in response:
                 for i, run in enumerate(response["workflow_runs"], 1):
+                    if i in self.push_run_numbers:
+                        run["event"] = "push"
                     run["pull_requests"] = (
-                        [] if i in self.missing_pr_numbers else [{"number": i}])
+                        [] if i in self.missing_pr_numbers or i in self.push_run_numbers
+                        else [{"number": i,
+                               "base": {"sha": "a" * 40},
+                               "head": {"sha": f"{i:040x}"}}])
+            if isinstance(response, dict) and "jobs" in response:
+                match = re.match(r"repos/o/r/actions/runs/(\d+)/jobs", endpoint)
+                run_number = int(match.group(1)) - 99 if match else -1
+                if run_number in self.unreadable_job_runs and response["jobs"]:
+                    response["jobs"][0]["completed_at"] = None
             return response
         match = re.fullmatch(r"repos/o/r/pulls/(\d+)/files\?per_page=100(?:&page=(\d+))?", endpoint)
         if match:
             self.changed_file_calls += 1
+            if int(match.group(1)) in self.failed_file_prs:
+                return None
             page = int(match.group(2) or 1)
             paths = self.paths_by_pr.get(int(match.group(1)), [])
             start = (page - 1) * 100
             return [{"filename": p} for p in paths[start:start + 100]]
+        match = re.fullmatch(
+            r"repos/o/r/compare/([0-9a-f]{40})\.\.\.([0-9a-f]{40})", endpoint)
+        if match:
+            self.exact_compare_calls += 1
+            number = int(match.group(2), 16)
+            if number in self.failed_file_prs:
+                return None
+            return {"files": [
+                {"filename": path, "status": "modified"}
+                for path in self.paths_by_pr.get(number, [])
+            ]}
         return None
 
 
@@ -94,6 +131,204 @@ def test_opt32_measures_three_of_sixty_through_collect_and_full_verifier(
     report = _verify_full(doc, tmp_path)
     assert "3 of 60 sampled PRs" in report
     assert "modeled upper bound" in report
+
+
+def test_opt39_measures_irrelevant_language_pr_compute_through_collect_and_verifier(
+        monkeypatch, tmp_path):
+    paths = {
+        number: ([f"docs/guide-{number}.md"] if number <= 30
+                 else [f"internal/check_{number}.go"])
+        for number in range(1, 61)
+    }
+    client = _PathFilterClient(paths)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1",
+        "pattern": "OPT39",
+        "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"],
+        **_OPT39_INPUT_FACTS,
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT39")
+    measurement = finding.get("language_path_measurement", {})
+    assert measurement.get("status") == "measured"
+    assert measurement.get("irrelevant_prs") == 30
+    assert measurement.get("sampled_prs") == 60
+    assert measurement.get("sample_runner_minutes_saved") == 120.0
+    assert finding.get("runner_min_saving") == 600.0
+    assert finding.get("runner_minute_effect", {}).get("direction") == "saving"
+    assert "30 of 60 sampled pull-request runs" in finding["evidence"]
+    assert "one 60-run workflow sample (60 pull-request runs; 60 priced)" in finding["evidence"]
+    assert client.exact_compare_calls == 60
+    assert client.changed_file_calls == 0
+    report = _verify_full(doc, tmp_path)
+    assert "30 of 60 sampled pull-request runs" in report
+    assert "600.0 runner-minutes per 30 days" in report
+    assert "Unknown or failed changed-path lookups must run every language job" in report
+
+
+def test_opt39_scales_only_the_pr_event_share_of_mixed_workflow_volume(
+        monkeypatch, tmp_path):
+    paths = {
+        number: ([f"docs/guide-{number}.md"] if number <= 15
+                 else [f"internal/check_{number}.go"])
+        for number in range(1, 31)
+    }
+    client = _PathFilterClient(paths, push_run_numbers=set(range(31, 61)))
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], **_OPT39_INPUT_FACTS,
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT39")
+    measurement = finding["language_path_measurement"]
+    assert measurement["workflow_runs_30d"] == 300
+    assert measurement["estimated_pr_runs_30d"] == 150.0
+    assert finding["runner_min_saving"] == 300.0
+    report = _verify_full(doc, tmp_path)
+    assert "30 of 60 pull-request event share" in report
+
+
+@pytest.mark.parametrize("client", [
+    _PathFilterClient(
+        {number: [f"docs/guide-{number}.md"] for number in range(1, 61)},
+        failed_file_prs={1}),
+    _PathFilterClient({
+        number: (["test/fixtures/shared.json"] if number == 1
+                 else [f"docs/guide-{number}.md"])
+        for number in range(1, 61)
+    }),
+])
+def test_opt39_withholds_the_whole_finding_when_any_input_is_unclassifiable(
+        monkeypatch, client):
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], **_OPT39_INPUT_FACTS,
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    assert not any(f.get("pattern") == "OPT39" for f in doc["findings"])
+
+
+def test_opt39_unreadable_affected_compute_is_disclosed_as_unsized(
+        monkeypatch, tmp_path):
+    paths = {number: [f"docs/guide-{number}.md"] for number in range(1, 61)}
+    client = _PathFilterClient(paths, unreadable_job_runs={1})
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], **_OPT39_INPUT_FACTS,
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT39")
+    assert finding["runner_minute_effect"]["direction"] == "unsized"
+    assert "missing or unreadable" in finding["runner_minute_effect"]["reason"]
+    _verify_full(doc, tmp_path)
+
+
+def test_opt39_without_a_complete_input_map_stays_unsized(monkeypatch, tmp_path):
+    paths = {number: [f"docs/guide-{number}.md"] for number in range(1, 61)}
+    client = _PathFilterClient(paths)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], "opt39_languages": ["go"],
+        "opt39_job_kind": "per-language-toolchain",
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT39")
+    assert finding["runner_minute_effect"]["direction"] == "unsized"
+    assert "complete language input map" in finding["runner_minute_effect"]["reason"]
+    assert client.exact_compare_calls == 0
+    _verify_full(doc, tmp_path)
+
+
+class _MovedHeadClient(_PathFilterClient):
+    """Each run's own commit differs from the pull request's recorded head."""
+
+    def json(self, endpoint, allow_missing=False):
+        response = super().json(endpoint, allow_missing)
+        if isinstance(response, dict) and "workflow_runs" in response:
+            for i, run in enumerate(response["workflow_runs"], 1):
+                run["head_sha"] = f"{i + 1000:040x}"
+        return response
+
+
+def test_opt39_compares_each_run_at_its_own_head_commit(monkeypatch):
+    # The pull request's later head touched only docs; the commit each run
+    # actually tested changed Go. Pricing the later diff would credit a saving.
+    paths = {number: [f"docs/guide-{number}.md"] for number in range(1, 61)}
+    paths.update({number + 1000: [f"internal/check_{number}.go"]
+                  for number in range(1, 61)})
+    client = _MovedHeadClient(paths)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], **_OPT39_INPUT_FACTS,
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    assert not any(f.get("pattern") == "OPT39" for f in doc["findings"]), (
+        "OPT39 priced a pull request's later diff instead of the run's own commit")
+
+
+class _NoVolumeClient(_PathFilterClient):
+    """The workflow's 30-day run-count probe is unreadable."""
+
+    def json(self, endpoint, allow_missing=False):
+        if re.search(r"actions/workflows/\d+/runs\?.*per_page=1(?![0-9])", endpoint):
+            return None
+        return super().json(endpoint, allow_missing)
+
+
+def test_opt39_unknown_monthly_volume_is_disclosed_as_unsized(monkeypatch, tmp_path):
+    paths = {number: [f"docs/guide-{number}.md"] for number in range(1, 61)}
+    client = _NoVolumeClient(paths)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], **_OPT39_INPUT_FACTS,
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT39")
+    assert finding["runner_minute_effect"]["direction"] == "unsized"
+    assert "30-day run volume" in finding["runner_minute_effect"]["reason"]
+    assert finding["runner_min_saving"] is None
+    _verify_full(doc, tmp_path)
+
+
+@pytest.mark.parametrize("paths", [
+    {number: [f"internal/check_{number}.go"] for number in range(1, 61)},
+    {number: [f"test/fixtures/case-{number}.json"] for number in range(1, 61)},
+])
+def test_opt39_with_no_proven_irrelevant_language_run_is_withheld(
+        monkeypatch, paths):
+    client = _PathFilterClient(paths)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect({"repo": "o/r", "findings": [{
+        "id": "f1", "pattern": "OPT39", "workflow_file": _CI,
+        "title": "Per-language pull-request job runs for unrelated changes",
+        "evidence": "The Go job has no changed-path gate.",
+        "affected_jobs": ["test"], **_OPT39_INPUT_FACTS,
+    }]}, "o/r", max_runs=60, shallow_runs=60)
+
+    assert not any(f.get("pattern") == "OPT39" for f in doc["findings"]), (
+        "OPT39 needs positive evidence of a classified irrelevant pull-request run")
 
 
 def test_opt32_zero_hit_is_also_noticed_and_csv_is_not_skipped(monkeypatch, tmp_path):
