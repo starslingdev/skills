@@ -582,7 +582,10 @@ gap, and at most 4 log probes;
 OPT81: 8 samples per label, a 30-second and 25% gap, 50% covered time, and a
 30-second cache-lever floor; OPT82: 60 seconds; OPT83: 15% and 20 seconds;
 OPT84: 0% minimum share and 20 seconds, and 15% of the pole for its
-install row (npm, pnpm or Yarn install to `bun install`).
+install row (npm, pnpm or Yarn install to `bun install`); OPT108: a successful
+comment-triggered run under 30 seconds counts as a rejected comment (the drill's
+self-skip floor, `_NOOP_FLOOR_S`), and at least 3 such runs must be priced
+before its runner-minute saving is credited.
 
 **Report statements:** whether each named pattern is promoted, withheld, or
 uncredited, plus its evidence and saving.
@@ -759,6 +762,15 @@ implementation lands.
       "blocking_path.py:_OPT64_MIN_RETRIED_RUNS": 3,
       "collect_runs.py:_OPT64_MIN_RETRIED_RUNS": 3,
       "verify_report.py:_VR_OPT64_MIN_RETRIED_RUNS": 3
+    }
+  },
+  "opt108-comment-runs": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT108_SHORT_RUN_S": 30.0,
+      "collect_runs.py:_OPT108_MIN_PRICED_RUNS": 3,
+      "verify_report.py:_VR_OPT108_SHORT_RUN_S": 30.0,
+      "verify_report.py:_VR_OPT108_MIN_PRICED_RUNS": 3
     }
   },
   "opt79-minimums": {
