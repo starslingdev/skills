@@ -29673,6 +29673,7 @@ def _persist_pole_logs(
         opt13_fact = _opt13_build_in_quality_log(log)
         runtime_ts_loader = (leaf0 if leaf0.get("fix_key") == "runtime-ts-transpilation"
                              else None)
+        go_slow_tests = _go_slow_test_results(log)
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
             "leaf_fix_key": leaf0.get("fix_key"),
@@ -29684,6 +29685,7 @@ def _persist_pole_logs(
             **({"opt13_build_in_script": opt13_fact} if opt13_fact else {}),
             **({"runtime_ts_loader": runtime_ts_loader}
                if runtime_ts_loader else {}),
+            **({"go_slow_tests": go_slow_tests} if go_slow_tests else {}),
         })
         logger.debug("saved pole log for %s -> %s (closest to P50 of %d qualifying "
                      "runs)", job, fn, len(qual))
@@ -29833,6 +29835,281 @@ def _detect_runtime_ts_transpilation(
         finding["runtime_loader"] = str(fact.get("loader") or "runtime TypeScript loader")
         if isinstance(runs, int):
             finding["workflow_runs_30d"] = runs
+        out.append(finding)
+    return out
+
+
+_GO_TEST_COMMAND_RE = re.compile(
+    r"^##\[group\]Run\s+(?:(?:env|sudo|time)\s+)?go\s+test(?:\s|$)",
+    re.IGNORECASE)
+_GO_TEST_RESULT_RE = re.compile(
+    r"^\s*---\s+(?:PASS|FAIL):\s+(?P<test>Test[A-Za-z0-9_]+)"
+    r"(?:/\S+)?\s+\((?P<seconds>\d+(?:\.\d+)?)s\)\s*$")
+_GO_TEST_FUNCTION_RE = re.compile(
+    r"\bfunc\s+(?P<test>Test[A-Za-z0-9_]+)\s*\(\s*"
+    r"(?P<arg>[A-Za-z_][A-Za-z0-9_]*)\s+\*testing\.T\s*\)")
+_GO_PARALLEL_MIN_TEST_S = 10.0
+_GO_PARALLEL_MAX_FILES = 200
+_GO_PARALLEL_MAX_FILE_BYTES = 512_000
+
+
+def _go_slow_test_results(log: str) -> list[dict[str, Any]]:
+    """Slow top-level Go tests from one verbose long-pole ``go test`` log."""
+    records, _untimestamped, _total = _opt80_log_records(log)
+    if not any(_GO_TEST_COMMAND_RE.search(text) for _stamp, text in records):
+        return []
+    found: dict[str, float] = {}
+    for _stamp, text in records:
+        match = _GO_TEST_RESULT_RE.match(text)
+        if not match:
+            continue
+        seconds = float(match.group("seconds"))
+        if seconds >= _GO_PARALLEL_MIN_TEST_S:
+            name = match.group("test")
+            found[name] = max(seconds, found.get(name, 0.0))
+    return [{"test": name, "duration_s": round(seconds, 2)}
+            for name, seconds in sorted(found.items())]
+
+
+def _go_code_mask(text: str) -> str:
+    """Blank Go comments and literals while preserving offsets and newlines."""
+    out = list(text)
+    i = 0
+    state = "code"
+    quote = ""
+    while i < len(text):
+        if state == "code":
+            if text.startswith("//", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "line"
+                continue
+            if text.startswith("/*", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "block"
+                continue
+            if text[i] in {'"', "'", "`"}:
+                quote = text[i]
+                out[i] = " "
+                i += 1
+                state = "raw" if quote == "`" else "quote"
+                continue
+        elif state == "line":
+            if text[i] == "\n":
+                state = "code"
+            else:
+                out[i] = " "
+            i += 1
+            continue
+        elif state == "block":
+            if text.startswith("*/", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "code"
+            else:
+                if text[i] != "\n":
+                    out[i] = " "
+                i += 1
+            continue
+        elif state == "raw":
+            if text[i] == "`":
+                state = "code"
+            if text[i] != "\n":
+                out[i] = " "
+            i += 1
+            continue
+        else:
+            if text[i] == "\\" and i + 1 < len(text):
+                out[i] = " "
+                if text[i + 1] != "\n":
+                    out[i + 1] = " "
+                i += 2
+                continue
+            if text[i] == quote:
+                state = "code"
+            if text[i] != "\n":
+                out[i] = " "
+            i += 1
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _go_function_end(masked: str, opening: int) -> int | None:
+    depth = 0
+    for index in range(opening, len(masked)):
+        if masked[index] == "{":
+            depth += 1
+        elif masked[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def _go_parallel_source_candidates(
+    root: "Path | None", wanted: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Conservative source proof that a measured Go test owns per-case state."""
+    if root is None or not wanted:
+        return {}
+    resolved = root.resolve()
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        paths = sorted(root.rglob("*_test.go"))
+    except OSError:
+        return {}
+    for path in paths[:_GO_PARALLEL_MAX_FILES]:
+        try:
+            target = path.resolve()
+            if (not target.is_relative_to(resolved) or path.is_symlink()
+                    or path.stat().st_size > _GO_PARALLEL_MAX_FILE_BYTES):
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError, ValueError):
+            continue
+        masked = _go_code_mask(text)
+        for match in _GO_TEST_FUNCTION_RE.finditer(masked):
+            name = match.group("test")
+            if name not in wanted or name in out:
+                continue
+            opening = masked.find("{", match.end())
+            end = _go_function_end(masked, opening) if opening >= 0 else None
+            if end is None:
+                continue
+            body = masked[opening:end]
+            arg = re.escape(match.group("arg"))
+            if re.search(r"\b[A-Za-z_][A-Za-z0-9_]*\.Parallel\s*\(", body):
+                continue
+            table = (re.search(r"\bfor\b[^{}\n]*\brange\b", body) is not None
+                     and re.search(rf"\b{arg}\.Run\s*\(", body) is not None)
+            if not table:
+                continue
+            subtests = re.compile(
+                rf"\b{arg}\.Run\s*\([^,]+,\s*func\s*\(\s*"
+                r"(?P<arg>[A-Za-z_][A-Za-z0-9_]*)\s+\*testing\.T\s*\)\s*\{",
+                re.DOTALL)
+            isolated: list[tuple[str, str]] = []
+            for sub in subtests.finditer(body):
+                sub_end = _go_function_end(body, sub.end() - 1)
+                if sub_end is None:
+                    continue
+                sub_body = body[sub.end() - 1:sub_end]
+                sub_arg = re.escape(sub.group("arg"))
+                temp_tree = re.search(
+                    rf"\b{sub_arg}\.TempDir\s*\(", sub_body) is not None
+                server = re.search(
+                    r"\bhttptest\.New(?:TLS)?Server\s*\(", sub_body) is not None
+                store = re.search(
+                    r"\b(?:new|open|make|create)[A-Za-z0-9_]*Store\s*\(|"
+                    r"\b[A-Za-z0-9_]*Store\s*\{", sub_body,
+                    re.IGNORECASE) is not None
+                setenv = re.search(
+                    rf"\b{sub_arg}\.Setenv\s*\(", sub_body) is not None
+                config = re.search(
+                    r"\b[A-Za-z0-9_]*Config\s*\{", sub_body) is not None
+                if ((temp_tree and server and store)
+                        or (setenv and config and server)):
+                    isolated.append((sub.group("arg"), sub_body))
+            if not isolated:
+                continue
+            # Process-global mutations other than t.Setenv are not safely
+            # classifiable as case-local from source text, so fail closed.
+            if any(re.search(
+                    r"\b(?:os\.(?:Setenv|Unsetenv|Chdir)|net\.Listen)\s*\(", sub_body)
+                   for _sub_arg, sub_body in isolated):
+                continue
+            line = text.count("\n", 0, match.start()) + 1
+            out[name] = {
+                "test": name,
+                "file": str(path.relative_to(root)),
+                "line": line,
+                "setenv_blocker": any(re.search(
+                    rf"\b{re.escape(sub_arg)}\.Setenv\s*\(", sub_body) is not None
+                    for sub_arg, sub_body in isolated),
+            }
+    return out
+
+
+def _detect_go_test_parallelism(
+    pole_logs: list[dict[str, Any]], root: "Path | None", start_idx: int,
+) -> list[dict[str, Any]]:
+    """Route measured isolated-but-serial Go tests to OPT88."""
+    wanted = {
+        str(row.get("test") or "")
+        for entry in pole_logs
+        for row in (entry.get("go_slow_tests") or [])
+        if isinstance(row, dict)
+    }
+    sources = _go_parallel_source_candidates(root, wanted)
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    for entry in pole_logs:
+        rows = [row for row in (entry.get("go_slow_tests") or [])
+                if isinstance(row, dict) and str(row.get("test") or "") in sources]
+        if not rows:
+            continue
+        job_s = entry.get("duration_s")
+        rows = [row for row in rows
+                if isinstance(row.get("duration_s"), (int, float))
+                and isinstance(job_s, (int, float))
+                and 0 < float(row["duration_s"]) <= float(job_s)]
+        if not rows:
+            continue
+        rows.sort(key=lambda row: (-float(row["duration_s"]), str(row["test"])))
+        lead = rows[0]
+        source = sources[str(lead["test"])]
+        job = str(entry.get("job") or "")
+        workflow = str(entry.get("workflow_file") or "")
+        url = str(entry.get("html_url") or "")
+        shown = _link(float(lead["duration_s"]), url)
+        setenv = any(sources[str(row["test"])]["setenv_blocker"] for row in rows)
+        names = ", ".join(f"`{row['test']}`" for row in rows[:4])
+        evidence = (
+            f"The representative `{job}` Go test log measures {names} running "
+            f"serially; the slowest takes {shown}. Their source gives each table "
+            "case its own temp tree, store and test server, but does not opt the "
+            "test into `t.Parallel()`."
+        )
+        if setenv:
+            evidence += " `t.Setenv` is the process-global blocker in at least one case."
+        fix = (
+            "Keep cases that share process-global state sequential. For the proven "
+            "isolated cases, pass the config explicitly instead of `t.Setenv`, then "
+            "call `t.Parallel()` at the start of each independent subtest. Run the "
+            "focused package with `go test -race`, confirm the same case count and "
+            "failures, and compare several before/after timings on the same runner."
+            if setenv else
+            "Keep cases that share process-global state sequential, and call "
+            "`t.Parallel()` at the start of each proven independent subtest. Run the "
+            "focused package with `go test -race`, confirm the same case count and "
+            "failures, and compare several before/after timings on the same runner."
+        )
+        measured = _measured_evidence(
+            ["Test", "Measured wall", "Source", "Representative run"],
+            [[f"`{row['test']}`", f"{float(row['duration_s']):.2f}s",
+              f"`{sources[str(row['test'])]['file']}:{sources[str(row['test'])]['line']}`",
+              f"[job log]({url})" if url else "captured job log"] for row in rows],
+            f"The slowest independent serial Go test takes {float(lead['duration_s']):.2f}s.",
+            "Source isolation is a safety gate, not proof of a saving; benchmark before and after.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT88", "MEDIUM", "Independent Go Tests Run Serially",
+            workflow, job, evidence, fix,
+            "opt88--test-concurrency-is-a-guess-not-a-measurement", idx,
+            wc_p50=0.0, rm=None,
+            size_note=(
+                f"measured serial test wall {float(lead['duration_s']):.2f}s; "
+                "runner-minute saving: unsized (no same-runner before/after timing "
+                "of the parallel form was collected)"),
+            realization="none", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        finding["go_parallel_candidate"] = {
+            **source, "duration_s": float(lead["duration_s"]),
+        }
         out.append(finding)
     return out
 
@@ -34353,6 +34630,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         new = _detect_runtime_ts_transpilation(pole_logs, vol_by_wf, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        new = _detect_go_test_parallelism(pole_logs, root, next_id)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         findings_doc["findings"] = findings

@@ -645,6 +645,133 @@ def test_runtime_typescript_loader_states_signed_or_unsized_runner_minute_effect
         assert "not sized because" not in finding["size_note"]
 
 
+def test_slow_isolated_go_cases_route_to_parallel_test_guidance(monkeypatch, tmp_path):
+    """A measured serial Go test with isolated cases extends OPT88 through collect."""
+    log = """\
+2026-01-28T00:00:00Z ##[group]Run go test ./internal/server -count=1 -v
+2026-01-28T00:00:01Z === RUN   TestHTTPGroups
+2026-01-28T00:01:29Z --- PASS: TestHTTPGroups (88.50s)
+2026-01-28T00:01:30Z PASS
+"""
+    serial_source = """\
+package server
+
+import (
+    "net/http/httptest"
+    "testing"
+)
+
+func TestHTTPGroups(t *testing.T) {
+    cases := []struct { name string }{{"first"}, {"second"}}
+    for _, tc := range cases {
+        tc := tc
+        t.Run(tc.name, func(t *testing.T) {
+            root := t.TempDir()
+            store := newStore(root)
+            srv := httptest.NewServer(newHandler(Config{Root: root, Store: store}))
+            defer srv.Close()
+            t.Setenv("APP_ENDPOINT", srv.URL)
+            exercise(t, srv.URL)
+        })
+    }
+}
+"""
+
+    def fixture(name: str, source: str) -> Path:
+        path = tmp_path / name
+        shutil.copytree(FIXTURE_ROOT / "serial-chain", path)
+        responses = path / "responses.json"
+        recorded = json.loads(responses.read_text(encoding="utf-8"))
+        recorded["logs"]["1103"] = log
+        responses.write_text(json.dumps(recorded), encoding="utf-8")
+        source_path = path / "internal/server/server_test.go"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text(source, encoding="utf-8")
+        return path
+
+    positive = fixture("serial-isolated-go-cases", serial_source)
+    positive_root = tmp_path / "run-serial-isolated-go-cases"
+    positive_root.mkdir()
+    doc, _report, checks = run_fixture(
+        positive, monkeypatch, positive_root, max_runs=20)
+    findings = [row for row in doc["findings"]
+                if row.get("pattern") == "OPT88"
+                and row.get("go_parallel_candidate")]
+    assert findings, "expected measured Go parallel-test guidance"
+    finding = findings[0]
+    assert finding["go_parallel_candidate"]["test"] == "TestHTTPGroups"
+    assert finding["go_parallel_candidate"]["duration_s"] == 88.5
+    assert "t.Parallel()" in finding["fix_strategy"]
+    assert "pass the config explicitly" in finding["fix_strategy"]
+    assert "runner-minute saving: unsized" in finding["size_note"]
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    parallel_source = serial_source.replace(
+        't.Setenv("APP_ENDPOINT", srv.URL)\n            exercise(t, srv.URL)',
+        'cfg := Config{Endpoint: srv.URL}\n            t.Parallel()\n'
+        '            exerciseWithConfig(t, cfg)')
+    negative = fixture("parallel-isolated-go-cases", parallel_source)
+    negative_root = tmp_path / "run-parallel-isolated-go-cases"
+    negative_root.mkdir()
+    negative_doc, _negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT88"
+                and row.get("go_parallel_candidate")]
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
+def test_go_parallel_source_proof_fails_closed_on_shared_or_outer_state(tmp_path):
+    source = """\
+package server
+import "testing"
+func TestIsolated(t *testing.T) {
+    for _, tc := range cases { t.Run(tc.name, func(t *testing.T) {
+        // t.Parallel() is documentation, not an opt-in.
+        _ = "t.Parallel()"
+        root := t.TempDir()
+        store := newStore(root)
+        srv := httptest.NewServer(newHandler(Config{Store: store}))
+        defer srv.Close()
+    }) }
+}
+func TestGlobalMutation(t *testing.T) {
+    for _, tc := range cases { t.Run(tc.name, func(t *testing.T) {
+        root := t.TempDir()
+        store := newStore(root)
+        srv := httptest.NewServer(newHandler(Config{Store: store}))
+        defer srv.Close()
+        os.Setenv("SHARED", srv.URL)
+    }) }
+}
+func TestOuterResources(t *testing.T) {
+    root := t.TempDir()
+    store := newStore(root)
+    srv := httptest.NewServer(newHandler(Config{Store: store}))
+    defer srv.Close()
+    for _, tc := range cases { t.Run(tc.name, func(t *testing.T) {
+        exercise(t, srv.URL)
+    }) }
+}
+func TestSetenvConfig(t *testing.T) {
+    for _, tc := range cases { t.Run(tc.name, func(t *testing.T) {
+        cfg := TestConfig{Name: tc.name}
+        srv := httptest.NewServer(newHandler(cfg))
+        defer srv.Close()
+        t.Setenv("ENDPOINT", srv.URL)
+    }) }
+}
+"""
+    path = tmp_path / "server_test.go"
+    path.write_text(source, encoding="utf-8")
+    found = cr._go_parallel_source_candidates(
+        tmp_path, {"TestIsolated", "TestGlobalMutation", "TestOuterResources",
+                   "TestSetenvConfig"})
+    assert set(found) == {"TestIsolated", "TestSetenvConfig"}
+    assert found["TestSetenvConfig"]["setenv_blocker"] is True
+
+
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
     prose = """\
 2026-01-28T00:00:00Z ##[group]Run pnpm test
