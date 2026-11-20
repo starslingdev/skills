@@ -557,6 +557,18 @@ def test_opt13_requires_a_separate_validation_build_and_clean_source_guard(tmp_p
     assert cr._opt13_validation_build_job(
         {"ci.yml": {"jobs": {"test": {"steps": [{"run": "pnpm test"}]}}}},
         "ci.yml", "test") is None
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {"jobs": {
+            "test": {"steps": [{"run": "pnpm test"}]},
+            "declarations": {"steps": [{"run": "tsc --emitDeclarationOnly"}]},
+        }}}, "ci.yml", "test") is None
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {"jobs": {
+            "test": {"steps": [{"run": "pnpm test",
+                                   "working-directory": "packages/app"}]},
+            "other-package": {"steps": [{"run": "vite build",
+                                            "working-directory": "packages/docs"}]},
+        }}}, "ci.yml", "test") is None
     for false_build in (
         "echo pnpm build", "pnpm build:docs", "pnpm build qaRuntime",
         "pnpm build-and-test",
@@ -585,6 +597,29 @@ def test_opt13_requires_a_separate_validation_build_and_clean_source_guard(tmp_p
     assert cr._opt13_source_output_guard(tmp_path)["safe"] is True
     source.write_text(
         "import { Worker } from 'node:worker_threads';\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+
+def test_opt13_source_guard_ignores_checkout_ancestor_names(tmp_path):
+    checkout = tmp_path / "build" / "project"
+    src = checkout / "src"
+    src.mkdir(parents=True)
+    source = src / "runtime.ts"
+    source.write_text("export const answer = 42;\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(checkout)["safe"] is True
+
+
+def test_opt13_source_guard_catches_static_and_multiline_imports(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    source = src / "runtime.ts"
+    source.write_text("import '../dist/register.js';\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+    source.write_text(
+        "const runtime = require(\n  '../dist/runtime.js'\n);\n",
+        encoding="utf-8",
+    )
     assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
 
 

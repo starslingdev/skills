@@ -1276,8 +1276,10 @@ the tool. A separate build step, a build written into the step's `run:` line, a
 script named for a build (`test-build`), `tsc --noEmit` or `--declaration
 false`, a plain build job, an untimed build, JavaScript/TypeScript
 source that may load Node compiled output, or a quality job without a separate
-full-build validation job does not qualify. This is evidence of work placement,
-not proof that a production build may be deleted.
+non-optional full-build validation job for the same package does not qualify.
+Static, dynamic, and multiline imports of `dist/`, `build/`, or `lib/` count as
+compiled-output consumers. This is evidence of work placement, not proof that a
+production build may be deleted.
 
 The catalog metadata stays static because the broad "does this job need its
 build?" judgment remains manual and is still disclosed as an uncovered scanner
@@ -1285,9 +1287,9 @@ pattern. Only the fully proven exception above becomes a data-driven finding
 during collection.
 
 **Fix**: Safest first, add a runtime-only build target for the lint/test job and
-keep one full build in the artifact or validation job. Compare the same workload
-before and after. Remove a build only after the guardrails below prove that no
-runtime consumer or validation surface depends on it. If using Turbo, ensure
+keep one full build for the same package in the artifact or validation job.
+Compare the same workload before and after. Remove a build only after the
+guardrails below prove that no runtime consumer or validation surface depends on it. If using Turbo, ensure
 `turbo.json` task graph is accurate so Turbo skips unneeded builds.
 
 **Sizing**: The log-backed finding reports the measured build interval as a
