@@ -24390,6 +24390,11 @@ _OPT24_CARGO_COMPILE_RE = _re.compile(
 _OPT24_LOG_TS_RE = _re.compile(
     r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)\s+"
 )
+_OPT24_GO_PACKAGE_RE = _re.compile(
+    r"^(?:ok|FAIL)\s+([A-Za-z0-9][A-Za-z0-9._~+/-]*)\s+"
+    r"(\d+(?:\.\d+)?)s(?:\s|$)"
+)
+_OPT24_GO_PACKAGE_DOMINANT_SHARE = 0.60
 
 
 def _opt24_duration_seconds(text: str) -> float | None:
@@ -24410,6 +24415,36 @@ def _opt24_log_timestamp(line: str) -> float | None:
         return parsed.timestamp() if parsed is not None else None
     except (AttributeError, TypeError, ValueError):
         return None
+
+
+def _opt24_go_package_fact(log: str) -> dict[str, Any] | None:
+    """Return the one package that measurably dominates a ``go test`` log.
+
+    Go's package summary is the timing boundary available without changing the
+    repository.  Fail closed when summaries are absent or their time is spread
+    across packages: list-then-run sharding is useful only when one package owns
+    enough of the serial wall to split internally.
+    """
+    elapsed: dict[str, float] = {}
+    for raw in log.splitlines():
+        line = _OPT24_LOG_TS_RE.sub("", raw).strip()
+        match = _OPT24_GO_PACKAGE_RE.match(line)
+        if match:
+            package = match.group(1)
+            elapsed[package] = elapsed.get(package, 0.0) + float(match.group(2))
+    total = sum(elapsed.values())
+    if total <= 0:
+        return None
+    package, seconds = max(elapsed.items(), key=lambda item: item[1])
+    share = seconds / total
+    if share < _OPT24_GO_PACKAGE_DOMINANT_SHARE:
+        return None
+    return {
+        "package": package,
+        "seconds": round(seconds, 1),
+        "total_s": round(total, 1),
+        "share": round(share, 3),
+    }
 
 
 # OPT13's narrow automatic path is deliberately log-backed.  The general
@@ -25001,7 +25036,6 @@ def _detect_opt24_long_test_no_sharding(
                                          "pattern": "OPT24",
                                          "gate": _DOMINANT_STEP_OVERLAP_GATE})
             continue
-        idx += 1
         # Wall-clock saving from sharding: split the job across N shards (assume
         # N=2 conservative). Sharding does not save runner-min (catalog body
         # is explicit on this), so leave rm=0.
@@ -25027,9 +25061,33 @@ def _detect_opt24_long_test_no_sharding(
         test_step_log = (_opt24_test_step_log(logged_job, base_log)
                          if logged_job is not None else "")
         pre_test_floor = _opt24_pre_test_floor(test_step_log, compiled_kind)
+        go_package = (_opt24_go_package_fact(test_step_log)
+                      if compiled_kind == "go" else None)
+        if (go_package is not None
+                and float(go_package["seconds"]) / p50
+                < _OPT24_GO_PACKAGE_DOMINANT_SHARE):
+            go_package = None
+        # Go has no native suite-shard flag. Recommend its list-then-run split
+        # only when the sampled log proves that one package dominates the long
+        # step; balanced packages and missing summaries fail closed.
+        if (compiled_kind == "go" and go_package is None
+                and logs_by_job_id is not None):
+            continue
         compile_note = ""
         measure_first = compiled_kind is not None and pre_test_floor is None
-        if pre_test_floor is not None:
+        if go_package is not None:
+            shardable = min(float(go_package["seconds"]), p50)
+            pre_test_floor = max(0.0, p50 - float(go_package["total_s"]))
+            wc = round(min(shardable / 2.0, p50 / 2.0), 1)
+            measure_first = False
+            compile_note = (
+                f"Go package `{go_package['package']}` accounts for "
+                f"{float(go_package['share']) * 100:.0f}% of the package time "
+                f"({shardable:.0f}s). With two shards, the measured repeated "
+                f"floor adds about {_opt24_floor_label(pre_test_floor)} of runner "
+                "time per run."
+            )
+        elif pre_test_floor is not None:
             pre_test_floor = min(pre_test_floor, shardable)
             shardable = max(0.0, shardable - pre_test_floor)
             wc = round(shardable / 2.0, 1)
@@ -25194,6 +25252,7 @@ def _detect_opt24_long_test_no_sharding(
         )
         if compile_note:
             evidence_text += f"; {compile_note}"
+        idx += 1
         finding = _new_finding(
             "OPT24", "HIGH", "Long Test Job Without Sharding", wf_path, base,
             evidence_text,
@@ -25210,6 +25269,10 @@ def _detect_opt24_long_test_no_sharding(
             finding["shardable_test_s"] = round(shardable, 1)
         elif measure_first:
             finding["pre_test_floor_unmeasured"] = True
+        if go_package is not None:
+            finding["go_dominant_package"] = go_package["package"]
+            finding["go_package_share"] = go_package["share"]
+            finding["go_shard_extra_runner_s"] = round(pre_test_floor or 0.0, 1)
         out.append(finding)
     return out
 

@@ -143,7 +143,7 @@ jobs:
                 "test result: ok. 42 passed; 0 failed; finished in 7.05s",
             ])
         if ordinal == 2:
-            return "$ go test ./...\nok example/project 2900.0s"
+            return "$ go test ./...\nok example/project 2000.0s"
         return "$ npx jest\nTests: 42 passed, 42 total"
 
 
@@ -218,6 +218,22 @@ class _SeparateBuildClient(_Client):
         ])
 
 
+class _BalancedGoPackagesClient(_Client):
+    """A long Go step whose time is spread across packages is not shard advice."""
+
+    def text(self, endpoint: str, allow_missing: bool = False):
+        job_id = int(endpoint.split("/")[-2])
+        if job_id % 10 != 2:
+            return super().text(endpoint, allow_missing)
+        self.queries += 1
+        return "\n".join([
+            "$ go test ./...",
+            "ok example/project/api 960.0s",
+            "ok example/project/store 950.0s",
+            "ok example/project/cli 940.0s",
+        ])
+
+
 def _finding(doc: dict, job: str) -> dict:
     return next(
         finding for finding in doc["findings"]
@@ -247,8 +263,9 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
     assert "49m 50s" in cargo["measured_evidence"]["note"]
 
     go = _finding(doc, "go tests")
-    assert go["wall_clock_p50_s"] == 0.0
-    assert "measure" in go["size_note"].lower()
+    assert go["go_dominant_package"] == "example/project"
+    assert go["wall_clock_p50_s"] == 1000.0
+    assert go["go_shard_extra_runner_s"] == 900.0
 
     jest = _finding(doc, "jest tests")
     assert jest["wall_clock_p50_s"] == 1400.0
@@ -266,6 +283,8 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+    assert "List the tests in `example/project` with `go test -list`" in report
+    assert "Runner-minute effect: added cost of ~15m 00s per run" in report
 
     missing_probe_row = report.replace(
         "| test compile log probe | 3 job log(s) read | "
@@ -319,6 +338,16 @@ def test_separate_build_compile_is_not_subtracted_from_test_payload_twice(
     cargo = _finding(doc, "cargo tests")
     assert cargo["wall_clock_p50_s"] == 0.0
     assert cargo["pre_test_floor_s"] == 1790.0
+
+
+def test_long_go_step_without_one_dominant_package_stays_quiet(
+        monkeypatch, tmp_path: Path) -> None:
+    doc = _collect_and_verify(monkeypatch, tmp_path, _BalancedGoPackagesClient)
+    assert not [
+        finding for finding in doc["findings"]
+        if finding.get("pattern") == "OPT24"
+        and "go tests" in finding.get("affected_jobs", [])
+    ]
 
 
 def test_shard_guidance_names_the_repeated_runner_minute_floor() -> None:

@@ -11530,7 +11530,33 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "crediting seconds."
         )
     if pat in {"OPT24", "OPT25"}:
-        body += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE]
+        body.append(_CONCURRENCY_ORDER_LINE)
+        go_member = next(
+            (member for member in members
+             if member.get("go_dominant_package")
+             and _num(member.get("go_shard_extra_runner_s")) is not None),
+            None,
+        )
+        if pat == "OPT24" and go_member is not None:
+            package = str(go_member["go_dominant_package"])
+            extra = _num(go_member.get("go_shard_extra_runner_s")) or 0.0
+            body.append(
+                f"Go list-then-run recipe: List the tests in `{package}` with "
+                "`go test -list`, partition every test exactly once, and run each "
+                "part with an anchored `-run` regex in two matrix legs. Keep the "
+                "required check name on an `always()` aggregate job that rejects "
+                "every non-success result. For coverage, write and upload one atomic "
+                "profile per shard, merge only after every shard succeeds, and apply "
+                "the unchanged threshold."
+            )
+            body.append(
+                f"Runner-minute effect: added cost of ~{_clock(extra)} per run for "
+                "the assumed two-shard split. Extra shard jobs repeat checkout and "
+                "setup and bill each job; here the second runner repeats the measured "
+                "pre-test floor."
+            )
+        else:
+            body.append(_SHARD_RUNNER_MINUTE_LINE)
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.

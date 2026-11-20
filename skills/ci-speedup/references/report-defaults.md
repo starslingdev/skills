@@ -622,6 +622,23 @@ pattern must add its own named minimum and contract entry rather than borrowing
 an unrelated global threshold.
 
 **Approval status:** awaiting owner approval.
+
+### `go-package-dominance`
+
+**Current value:** OPT24 classifies a long `go test` step for list-then-run
+sharding only when one package accounts for at least 60% of the package time
+printed by the sampled command (`_OPT24_GO_PACKAGE_DOMINANT_SHARE`).
+
+**Report statements:** that one Go package dominates the long test step and is
+therefore a concrete candidate for internal test-name partitioning.
+
+**Reason:** A majority substantially above one half distinguishes one package
+that can move the pole from an already distributed package set. Missing timing
+or a balanced package set stays unclassified.
+
+**Proposed decision:** **Keep 60%.**
+
+**Approval status:** awaiting owner approval.
 ### `saving-caps`
 
 **Current value:** modeled cache savings use at most 90% of the available cache
@@ -743,6 +760,12 @@ implementation lands.
     "decision": "gate-frequency-interval",
     "planned_sources": {
       "gate_frequency_contract.py:GATE_INTERVAL_Z": 1.96
+    }
+  },
+  "go-package-dominance": {
+    "decision": "go-package-dominance",
+    "sources": {
+      "collect_runs.py:_OPT24_GO_PACKAGE_DOMINANT_SHARE": 0.6
     }
   },
   "holds-up-threshold": {
