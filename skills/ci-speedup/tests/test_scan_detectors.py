@@ -34,11 +34,14 @@ def _have_yaml() -> bool:
     ).returncode == 0
 
 
-def _scan(root: Path) -> dict:
+def _scan(root: Path, default_branch: str | None = None) -> dict:
     if not _have_yaml():
         pytest.skip("PyYAML not installed in the test runner")
+    command = [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)]
+    if default_branch:
+        command.extend(["--default-branch", default_branch])
     result = subprocess.run(
-        [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)],
+        command,
         capture_output=True, text=True, check=True,
     )
     return json.loads(result.stdout)
@@ -3879,6 +3882,168 @@ jobs:
       - run: pnpm test
 """
     assert "OPT45" in _scan_one(tmp_path, pos)
+
+
+def test_opt32_deploy_positive_path_also_matches_test_directory(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+
+    findings = [
+        row for row in _scan(tmp_path, default_branch="main")["findings"]
+        if row["pattern"] == "OPT32" and row.get("opt32_deploy_test_paths")
+    ]
+    assert len(findings) == 1
+    assert "'!worker/test/**'" in findings[0]["evidence"]
+    assert "after" in findings[0]["evidence"]
+    assert "Runner-minute effect: saving" in findings[0]["evidence"]
+
+
+def test_opt32_deploy_test_exclusion_after_positive_stays_quiet(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '!worker/test/**'
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    assert "OPT32" not in {
+        row["pattern"] for row in _scan(tmp_path, default_branch="main")["findings"]
+    }
+
+
+def test_opt32_deploy_test_exclusion_before_positive_is_reincluded(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - '!worker/test/**'
+      - 'worker/**'
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    findings = _scan(tmp_path, default_branch="main")["findings"]
+    assert any(row.get("opt32_deploy_test_paths") for row in findings)
+
+
+def test_opt32_deploy_filter_on_non_default_branch_stays_quiet(tmp_path: Path):
+    workflow = """name: Deploy Preview
+on:
+  push:
+    branches: [staging]
+    paths: ['worker/**']
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    assert "OPT32" not in {
+        row["pattern"] for row in _scan(tmp_path, default_branch="main")["findings"]
+    }
+
+
+_OPT32_DEPLOY_WF = """name: Deploy
+on:
+  push:
+    branches: [main]
+    paths: [{paths}]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+
+
+def _opt32_deploy_hits(root: Path, paths: str, files: dict[str, str]) -> list[dict]:
+    _write_workflow(root, "deploy.yml", _OPT32_DEPLOY_WF.format(paths=paths))
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if text is not None:
+            target.write_text(text)
+    return [row for row in _scan(root, default_branch="main")["findings"]
+            if row.get("opt32_deploy_test_paths")]
+
+
+@pytest.mark.parametrize("paths,files", [
+    # GitHub `*` stays inside one segment: `worker/*` never selects worker/test/.
+    ("'worker/*'", {"worker/test/a.test.ts": "test('a', () => {})\n"}),
+    # An OpenAPI `spec/` the docs deploy ships holds no test-named file.
+    ("'spec/**', 'docs/**'", {"spec/openapi.yaml": "openapi: 3.0.0\n"}),
+    # A test-dir helper imported by production code is a deploy input.
+    ("'worker/**'", {
+        "worker/test/a.test.ts": "test('a', () => {})\n",
+        "worker/test/fixtures.ts": "export const seed = 1\n",
+        "worker/src/index.ts": "import { seed } from '../test/fixtures'\n",
+    }),
+    # A Python test package imported by the service.
+    ("'svc/**'", {
+        "svc/tests/test_api.py": "def test_api(): pass\n",
+        "svc/tests/helpers.py": "SEED = 1\n",
+        "svc/app.py": "from tests.helpers import SEED\n",
+    }),
+    # A test-named package with its own manifest can ship on its own.
+    ("'packages/**'", {
+        "packages/test/package.json": '{"name": "@x/test"}\n',
+        "packages/test/src/index.test.ts": "test('a', () => {})\n",
+        "packages/test/src/index.ts": "export const x = 1\n",
+    }),
+    # Unsupported glob syntax: what the filter selects is unknown.
+    ("'worker/[a-z]*/**'", {"worker/test/a.test.ts": "test('a', () => {})\n"}),
+], ids=["single-star", "openapi-spec", "helper-imported-js",
+        "helper-imported-py", "test-named-package", "unsupported-glob"])
+def test_opt32_deploy_test_path_near_misses_stay_quiet(tmp_path: Path, paths, files):
+    assert _opt32_deploy_hits(tmp_path, paths, files) == []
+
+
+def test_opt32_deploy_test_path_fires_beside_unrelated_production_source(tmp_path: Path):
+    hits = _opt32_deploy_hits(tmp_path, "'worker/**'", {
+        "worker/test/a.test.ts": "import { x } from '../src/index'\n",
+        "worker/src/index.ts": "import { y } from './util'\nexport const x = y\n",
+        "worker/src/util.ts": "export const y = 1\n",
+    })
+    assert len(hits) == 1
+    assert "'!worker/test/**'" in hits[0]["evidence"]
 
 
 def _opt46_candidate_jobs(tmp_path: Path, content: str) -> list[str]:

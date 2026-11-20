@@ -6438,7 +6438,9 @@ def _measure_opt32_path_filters(
     changed_files: dict[int, list[str] | None] | None = None,
 ) -> None:
     """Measure OPT32 only from PRs already selected by the normal run sample."""
-    targets = [f for f in findings if f.get("pattern") == "OPT32"]
+    targets = [f for f in findings
+               if f.get("pattern") == "OPT32"
+               and not f.get("opt32_deploy_test_paths")]
     if not targets:
         return
     repo_patterns, pattern_sources = _opt32_repository_paths_ignore(wf_docs)
@@ -7285,6 +7287,16 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
+    if f.get("opt32_deploy_test_paths"):
+        f["wall_clock_p50_s"] = 0.0
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["size_note"] = (
+            "runner-minute saving is not sized until test-only default-branch "
+            "merge frequency and the deploy jobs' measured compute are available"
+        )
+        return
     if f.get("oversized_fixture_static"):
         # Source proves that a very large artifact is used as byte payload, but
         # not how long that test spends on it or how often it runs. Preserve the
