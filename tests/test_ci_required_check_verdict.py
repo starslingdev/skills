@@ -207,3 +207,102 @@ def test_no_suite_part_may_fail_quietly(job_id):
         f"{job_id} must not set continue-on-error: a failed part would read as a pass")
     assert all("continue-on-error" not in step for step in job["steps"]), (
         f"{job_id}'s steps must not set continue-on-error")
+
+
+# --- merge queue -----------------------------------------------------------------------------
+# With a merge queue on main, GitHub builds each entry on a temporary
+# `gh-readonly-queue/main/...` branch and waits for the required checks there,
+# delivered as a `merge_group` event. A required check whose workflow does not
+# trigger on merge_group never reports, and the queue waits forever. A
+# merge_group event also carries no `github.event.pull_request`, so a suite
+# guard written only in terms of the PR head repo silently routes queue entries
+# to the wrong job. These tests EVALUATE the guards (tests/_gha_expr.py, fixture
+# tested in tests/test_gha_expr.py) instead of grepping them.
+
+import importlib.util as _ilu
+import sys as _sys
+
+_gx_spec = _ilu.spec_from_file_location("_gha_expr", Path(__file__).resolve().parent / "_gha_expr.py")
+gx = _ilu.module_from_spec(_gx_spec)
+_sys.modules[_gx_spec.name] = gx
+_gx_spec.loader.exec_module(gx)
+
+# Every check branch protection requires on main, and the workflow that produces it.
+_REQUIRED_CHECKS = {
+    "test": "ci.yml",
+    "ci-secure": "ci-secure-check.yml",
+    "python floor": "python-floor.yml",
+}
+
+
+def _triggers(doc):
+    return doc[True] if True in doc else doc["on"]
+
+
+def test_ci_triggers_include_the_merge_queue():
+    triggers = _triggers(yaml.safe_load(_CI.read_text()))
+    assert "pull_request" in triggers and "merge_group" in triggers, (
+        "ci.yml must trigger on merge_group, or the required `test` check never reports "
+        "for a merge-queue entry and the queue waits forever")
+    assert triggers["push"]["branches"] == ["main"]
+
+
+@pytest.mark.parametrize("route", sorted(gx.ROUTES))
+def test_exactly_the_expected_suite_runs_for_every_event(route):
+    """Self-hosted for pushes, same-repo PRs and merge-queue entries; hosted for
+    fork PRs (including a deleted fork's). Never both, never neither."""
+    name, kw, where = gx.ROUTES[route]
+    ctx = gx.event(name, **kw)
+    jobs = _jobs()
+    runs = {jid: gx.job_runs(jobs[jid], ctx) for jid in ("test-self", "test-fork")}
+    assert runs == {"test-self": where == "self", "test-fork": where == "fork"}, (
+        f"{route}: expected only the {where} suite to run, got {runs}")
+    assert gx.job_runs(_verdict(), ctx), f"{route}: the `test` verdict must always run"
+
+
+@pytest.mark.parametrize("route", sorted(gx.ROUTES))
+@pytest.mark.parametrize("suite_result", ["success", "failure", "cancelled"])
+def test_the_verdict_tracks_the_suite_that_actually_ran(route, suite_result):
+    """End to end per event: route the event through both guards, give the job
+    that runs `suite_result` and the other `skipped`, and run the real verdict
+    script. It passes only when the suite that ran passed — so a merge_group
+    run that skipped its suite cannot report a green `test`."""
+    bash = shutil.which("bash")
+    if not bash:
+        pytest.skip("bash unavailable; the verdict script is a bash script in CI")
+    name, kw, _ = gx.ROUTES[route]
+    ctx = gx.event(name, **kw)
+    jobs = _jobs()
+    result = {jid: (suite_result if gx.job_runs(jobs[jid], ctx) else "skipped")
+              for jid in ("test-self", "test-fork")}
+    proc = subprocess.run(
+        [bash, "-c", _verdict()["steps"][-1]["run"]],
+        env={"SELF_HOSTED": result["test-self"], "FORK": result["test-fork"],
+             "PATH": "/usr/bin:/bin"},
+        capture_output=True, text=True)
+    assert (proc.returncode == 0) is (suite_result == "success"), (
+        f"{route}: verdict exited {proc.returncode} for {result}\n{proc.stdout}{proc.stderr}")
+
+
+@pytest.mark.parametrize("check", sorted(_REQUIRED_CHECKS))
+def test_every_required_check_reports_on_a_merge_group(check):
+    """Each required check's workflow triggers on merge_group with no filter that
+    could keep it from firing, and the job carrying the check name is scheduled
+    on a merge_group event."""
+    doc = yaml.safe_load((_WORKFLOWS / _REQUIRED_CHECKS[check]).read_text())
+    triggers = _triggers(doc)
+    assert "merge_group" in triggers, (
+        f"{_REQUIRED_CHECKS[check]} produces the required `{check}` check but does not "
+        "trigger on merge_group: the merge queue would wait for it forever")
+    assert not (triggers["merge_group"] or {}).get("branches-ignore"), (
+        f"{_REQUIRED_CHECKS[check]}: a merge_group filter could drop main's queue")
+    branches = (triggers["merge_group"] or {}).get("branches")
+    assert branches in (None, ["main"]), branches
+    for key in ("paths", "paths-ignore"):
+        assert key not in (triggers.get("pull_request") or {}), (
+            f"{_REQUIRED_CHECKS[check]}: a path-filtered pull_request trigger makes "
+            f"`{check}` absent on some PRs, and an absent required check blocks the merge")
+    named = [j for jid, j in doc["jobs"].items() if _display_name(jid, j) == check]
+    assert len(named) == 1, f"exactly one job must carry `{check}`"
+    assert gx.job_runs(named[0], gx.event("merge_group")), (
+        f"the `{check}` job is not scheduled on merge_group")
