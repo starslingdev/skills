@@ -7285,6 +7285,26 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
+    if f.get("oversized_fixture_static"):
+        # Source proves that a very large artifact is used as byte payload, but
+        # not how long that test spends on it or how often it runs. Preserve the
+        # detector's explicit unsized result instead of applying a flat model.
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f.setdefault(
+            "size_note",
+            "runner-minute saving: unsized (affected test duration and monthly "
+            "run count were not measured)",
+        )
+        # The report's group heading reads this reason; without it the heading
+        # falls back to "no bill saving", which misstates a real, unsized saving.
+        f.setdefault(
+            "runner_min_unsized_reason",
+            "affected test duration and monthly run count were not measured",
+        )
+        return
     cache_confirmation = f.get("cache_log_confirmation")
     confirmed_miss_majority = (
         isinstance(cache_confirmation, dict)

@@ -49,7 +49,8 @@ logger = logging.getLogger("scan")
 SCAN_INCOMPLETE_KINDS = frozenset({
     "workflow-unreadable", "workflow-unparseable", "workflow-not-mapping",
     "parallel-group-unread", "symlink-out-of-tree", "no-workflows-dir",
-    "opt19-file-cap", "opt19-source-unreadable", "turbo-unreadable",
+    "opt19-file-cap", "opt19-source-unreadable", "opt113-file-cap",
+    "opt113-source-unreadable", "turbo-unreadable",
 })
 
 # Detectors proven by cardinality tests to emit one finding per physical
@@ -10056,6 +10057,204 @@ def _detect_opt19(root: Path):
     return [("OPT19", top[0][0], hit, total_s, me)], incomplete
 
 
+# OPT113 — a linked Go test executable (or an output explicitly built by the
+# test) is used as byte payload for an archive, compressor or hash. Source alone
+# cannot price the repeated bytes, so this detector reports the shape but never
+# invents a duration or run frequency.
+_OPT113_FILE_CAP = 8000
+_OPT113_MAX_BYTES = 1_000_000
+_OPT113_TRANSFORM_RE = re.compile(
+    r"\b(?:zip|tar|gzip|zlib|flate|bzip2|lz4|zstd)\."
+    r"(?:NewWriter(?:Level|Size)?|New)\s*\("
+    r"|\b(?:sha1|sha256|sha512|md5|crc32|crc64|fnv)\."
+    r"(?:New|Sum(?:224|256|384|512)?)\s*\(")
+_OPT113_GO_BUILD_RE = re.compile(
+    r"exec\.Command(?:Context)?\([^\n)]{0,500}?['\"]go['\"]\s*,"
+    r"[^\n)]{0,500}?['\"]build['\"][^\n)]{0,500}?['\"]-o['\"]\s*,\s*"
+    r"(?P<output>[A-Za-z_]\w*)(?=\s*[,)])")
+_OPT113_EXECUTABLE_ASSIGN_RE = re.compile(
+    r"(?P<input>[A-Za-z_]\w*)\s*,\s*[A-Za-z_]\w*\s*:?=\s*"
+    r"os\.Executable\s*\(\s*\)")
+_OPT113_FUNC_RE = re.compile(
+    r"(?m)^func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(")
+_OPT113_ASSIGN_RE = re.compile(
+    r"(?m)^[ \t]*(?P<names>[A-Za-z_]\w*(?:\s*,\s*[A-Za-z_]\w*)*)\s*:?=\s*"
+    r"(?P<rhs>[^\n]*)")
+# The real binary is itself the contract: its format headers, a signature over
+# it, or running it. A byte fixture cannot stand in, so such a file withholds.
+_OPT113_METADATA_RE = re.compile(
+    r"['\"]debug/(?:elf|macho|pe|buildinfo|plan9obj)['\"]"
+    r"|\b(?:elf|macho|pe|buildinfo)\.(?:Open|NewFile|Read\w*)\s*\("
+    r"|\bVerify\w*\s*\(|\b(?:codesign|signtool|notarytool|cosign|sigstore)\b"
+    r"|\bexec\.Command\s*\(\s*(?![\"`])"
+    r"|\bexec\.CommandContext\s*\([^,\n]*,\s*(?![\"`])"
+    r"|\b(?:os\.StartProcess|syscall\.Exec)\s*\(")
+_OPT113_MODE_ASSERT_RE = re.compile(
+    r"\b(?:Mode|Perm)\s*\(\s*\)[^\n]*(?:&|==|!=)")
+_OPT113_DIRECT_SUM_RE = (
+    r"\b(?:sha1|sha256|sha512|md5|crc32|crc64|fnv)\."
+    r"(?:Sum(?:224|256|384|512)?|Checksum\w*)\s*\(\s*{src}\b")
+
+
+def _opt113_without_comments(text: str) -> str:
+    # Preserve newlines and offsets so the finding's line/snippet still points
+    # at the real source after comments are ignored.
+    def blank(match: re.Match[str]) -> str:
+        return re.sub(r"[^\n]", " ", match.group(0))
+
+    text = re.sub(r"/\*.*?\*/", blank, text, flags=re.S)
+    return re.sub(r"(?m)//.*$", blank, text)
+
+
+def _opt113_functions(text: str) -> list[tuple[str, int, str]]:
+    starts = list(_OPT113_FUNC_RE.finditer(text))
+    return [(m.group("name"), m.start(),
+             text[m.start():starts[i + 1].start() if i + 1 < len(starts) else len(text)])
+            for i, m in enumerate(starts)]
+
+
+def _opt113_flow(text: str) -> tuple[str, int] | None:
+    """Trace the oversized bytes into an archive, compressor or hash.
+
+    A finding needs one function that (1) opens or reads the linked test
+    executable — directly, via a helper that returns it, or a `go build -o`
+    output built in that function — and (2) passes those exact bytes into a
+    writer created by an archive/compression/hash constructor (or a direct
+    digest call). Anything the read cannot tie together withholds. A file that
+    inspects format headers, verifies a signature, executes a binary, or
+    asserts a file mode withholds too: there the real binary is the contract.
+    """
+    if _OPT113_METADATA_RE.search(text):
+        return None
+    functions = _opt113_functions(text)
+    helpers: set[str] = set()
+    for name, _start, body in functions:
+        for exe in _OPT113_EXECUTABLE_ASSIGN_RE.finditer(body):
+            if re.search(rf"\breturn\s+{re.escape(exe.group('input'))}\s*(?:,|$)",
+                         body, re.M):
+                helpers.add(name)
+    for _name, start, body in functions:
+        origins: list[tuple[str, str]] = []
+        # The whole argument must be the origin: `exe + ".sha256"` or
+        # `filepath.Join(filepath.Dir(exe), ...)` names a different file.
+        origins += [(re.escape(m.group("input")) + r"\s*\)", "the linked Go test executable")
+                    for m in _OPT113_EXECUTABLE_ASSIGN_RE.finditer(body)]
+        origins += [(re.escape(h) + r"\s*\([^()\n]*\)\s*\)", "the linked Go test executable")
+                    for h in sorted(helpers)]
+        origins += [(re.escape(m.group("output")) + r"\s*\)", "a binary built by the test")
+                    for m in _OPT113_GO_BUILD_RE.finditer(body)]
+        if not origins:
+            continue
+        sources: list[tuple[str, int, str]] = []
+        sinks: set[str] = set()
+        for assign in _OPT113_ASSIGN_RE.finditer(body):
+            first = assign.group("names").split(",")[0].strip()
+            rhs = assign.group("rhs")
+            for expr, label in origins:
+                if re.match(rf"os\.(?:Open|ReadFile)\s*\(\s*{expr}", rhs):
+                    sources.append((first, assign.start("names"), label))
+                    break
+            if (_OPT113_TRANSFORM_RE.match(rhs)
+                    or any(re.match(rf"{re.escape(k)}\.(?:Create\w*|NewWriter\w*)\s*\(", rhs)
+                           for k in sinks)
+                    or (_OPT113_TRANSFORM_RE.search(rhs)
+                        and any(re.search(rf"\b{re.escape(k)}\b", rhs) for k in sinks))):
+                sinks.add(first)
+        if not sources or _OPT113_MODE_ASSERT_RE.search(body):
+            continue
+        for src, offset, label in sources:
+            s = re.escape(src)
+            sink_alt = "|".join(re.escape(k) for k in sorted(sinks)) or r"(?!x)x"
+            flows = (
+                rf"\bio\.Copy(?:N|Buffer)?\s*\([^,\n]*\b(?:{sink_alt})\b[^,\n]*,[^\n]*\b{s}\b",
+                rf"\b(?:{sink_alt})\.Write\w*\s*\([^\n]*\b{s}\b",
+                _OPT113_DIRECT_SUM_RE.format(src=s),
+            )
+            if any(re.search(f, body) for f in flows):
+                return label, start + offset
+    return None
+
+
+def _detect_opt113(root: Path) -> tuple[list[tuple[str, str, Hit]], list[dict]]:
+    hits: list[tuple[str, str, Hit]] = []
+    incomplete: list[dict] = []
+    scanned = 0
+    capped = False
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames
+                       if d not in _OPT19_SKIP_DIRS and not d.startswith(".")]
+        for filename in filenames:
+            if not filename.endswith("_test.go"):
+                continue
+            if scanned >= _OPT113_FILE_CAP:
+                capped = True
+                break
+            scanned += 1
+            path = Path(dirpath, filename)
+            rel = path.relative_to(root).as_posix()
+            try:
+                if not _inside_scan_root(path):
+                    continue
+                if path.stat().st_size > _OPT113_MAX_BYTES:
+                    incomplete.append({
+                        "path": rel,
+                        "kind": "opt113-source-unreadable",
+                        "reason": (f"OPT113 source exceeds the {_OPT113_MAX_BYTES}-byte "
+                                   "read bound; fixture input was not classified"),
+                    })
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                incomplete.append({"path": rel, "kind": "opt113-source-unreadable",
+                                   "reason": f"OPT113 source read failed: {exc}"})
+                continue
+            code = _opt113_without_comments(text)
+            origin = _opt113_flow(code)
+            if origin is None:
+                continue
+            origin_label, origin_at = origin
+            line = code.count("\n", 0, origin_at) + 1
+            hit = Hit(
+                line=line,
+                affected_jobs=[],
+                evidence=(f"{rel}: {origin_label} is read and its bytes are passed "
+                          "into an archive, compressor or hash; runner-minute saving: "
+                          "unsized because source does not reveal the affected test's "
+                          "measured duration or monthly run count"),
+                match_text=origin_label,
+                snippet=text.splitlines()[line - 1].rstrip(),
+                facts={
+                    "fix_strategy": (
+                        "Use a small shared byte fixture for byte/archive/hash contract "
+                        "tests; retain a real executable only where executable metadata "
+                        "is the behavior under test."),
+                    "wall_clock_p50_s": None,
+                    "runner_min_saving": None,
+                    "tier": 2,
+                    "realization": "none",
+                    "size_note": (
+                        "runner-minute saving: unsized (source identifies oversized "
+                        "fixture work but not its measured duration or monthly run count)"),
+                    "runner_min_unsized_reason": (
+                        "source identifies oversized fixture work but not its measured "
+                        "duration or monthly run count"),
+                    "oversized_fixture_static": True,
+                },
+            )
+            hits.append(("OPT113", rel, hit))
+        if capped:
+            break
+    if capped:
+        incomplete.append({
+            "path": "<source tree>",
+            "kind": "opt113-file-cap",
+            "reason": (f"OPT113 source scan hit the {_OPT113_FILE_CAP}-file cap after "
+                       f"scanning {scanned} Go test files; remaining fixture inputs "
+                       "were not classified"),
+        })
+    return hits, incomplete
+
+
 # =============================================================================
 # Workflow walk + emit
 # =============================================================================
@@ -10944,6 +11143,21 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         f["realization"] = "direct"
         f["measured_signal"] = hit.evidence
         f["measured_evidence"] = me
+        findings.append(f)
+
+    # --- Go test source pass (OPT113) — categorical until run timings reveal
+    # how much of the affected test is spent moving the oversized bytes. ---
+    opt113_hits, opt113_incomplete = _detect_opt113(root)
+    scan_incomplete.extend(opt113_incomplete)
+    for pat, source_file, hit in opt113_hits:
+        entry = catalog_by_id.get(pat)
+        if entry is None:
+            continue
+        finding_idx += 1
+        f = _emit(entry, hit, source_file, finding_idx)
+        f.update(hit.facts)
+        if hit.snippet:
+            f["evidence_snippet"] = hit.snippet
         findings.append(f)
 
     # Reconcile mutually-exclusive remedies that fired on the SAME physical step
