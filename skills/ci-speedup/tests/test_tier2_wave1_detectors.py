@@ -868,6 +868,47 @@ def test_opt36_schedule_burn_floors():
     assert _opt36(_SCHEDULE_WF, runs, jpr=_jobs_per_run(n_runs=2)) == []
 
 
+_SCHEDULE_SCANNER_WF = {
+    "on": {"schedule": [{"cron": "0 * * * *"}]},
+    "jobs": {"scan": {"steps": [
+        {"uses": "github/codeql-action/init@v4", "with": {"config": """
+paths-ignore:
+  - tests/**
+  - docs/**
+"""}},
+        {"uses": "github/codeql-action/analyze@v4"},
+    ]}},
+}
+
+
+def test_opt36_reports_consecutive_scans_whose_inputs_did_not_change():
+    runs = _schedule_runs("base", "head")
+    out = cr._detect_opt36_schedule_burn(
+        "codeql.yml", runs, _jobs_per_run(), _SCHEDULE_SCANNER_WF, 30, 0,
+        changed_paths_by_pair={("base", "head"): ["tests/a.test.ts", "docs/api.md"]})
+
+    assert len(out) == 1
+    finding = out[0]
+    assert finding["opt36_unchanged_inputs"]["excluded_only_pairs"] == 1
+    assert finding["runner_minute_effect"]["direction"] == "saving"
+    assert "runner-minute saving" in finding["evidence"]
+    assert "last successful scan" in finding["fix_strategy_detail"]
+    assert "comparison cannot complete" in finding["fix_strategy_detail"]
+
+
+def test_opt36_keeps_a_scan_when_a_relevant_input_changed_or_diff_is_unreadable():
+    runs = _schedule_runs("base", "head")
+    relevant = cr._detect_opt36_schedule_burn(
+        "codeql.yml", runs, _jobs_per_run(), _SCHEDULE_SCANNER_WF, 30, 0,
+        changed_paths_by_pair={("base", "head"): ["src/server.ts"]})
+    unreadable = cr._detect_opt36_schedule_burn(
+        "codeql.yml", runs, _jobs_per_run(), _SCHEDULE_SCANNER_WF, 30, 0,
+        changed_paths_by_pair={("base", "head"): None})
+
+    assert relevant == []
+    assert unreadable == []
+
+
 # ========================= OPT35 fail-fast waste =========================
 
 def _ff_job(name, start_min, end_min, conclusion="success", run_id="run-1"):

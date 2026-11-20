@@ -17906,18 +17906,107 @@ def _consecutive_same_sha_run_ids(runs: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+def _opt36_scanner_paths_ignore(wf_doc: dict[str, Any]) -> list[str]:
+    """Return explicit inline scanner exclusions that can be evaluated safely."""
+    try:
+        import yaml
+    except ImportError:
+        return []
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    if not isinstance(jobs, dict):
+        return []
+    patterns: list[str] = []
+    saw_scanner = False
+    for job in jobs.values():
+        if not isinstance(job, dict):
+            continue
+        for step in job.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            uses = str(step.get("uses") or "").lower()
+            if any(token in uses for token in ("codeql-action/", "semgrep", "scan")):
+                saw_scanner = True
+            with_ = step.get("with") if isinstance(step.get("with"), dict) else {}
+            raw = with_.get("config")
+            if not isinstance(raw, str) or not raw.strip():
+                continue
+            try:
+                config = yaml.safe_load(raw)
+            except yaml.YAMLError:
+                return []
+            values = config.get("paths-ignore") if isinstance(config, dict) else None
+            if isinstance(values, str):
+                values = [values]
+            if isinstance(values, list):
+                patterns.extend(str(value) for value in values
+                                if isinstance(value, str) and value.strip())
+    return list(dict.fromkeys(patterns)) if saw_scanner else []
+
+
+def _opt36_compare_paths(client: GhClient, repo: str,
+                         runs: list[dict[str, Any]],
+                         wf_doc: dict[str, Any]) -> dict[tuple[str, str], list[str] | None]:
+    """Read bounded compare results needed by the unchanged-input extension."""
+    if not _opt36_scanner_paths_ignore(wf_doc):
+        return {}
+    ordered = sorted(runs, key=_run_start_ts)
+    pairs = list(dict.fromkeys(
+        (str(before.get("head_sha") or ""), str(after.get("head_sha") or ""))
+        for before, after in zip(ordered, ordered[1:])
+        if before.get("head_sha") and after.get("head_sha")
+        and before.get("head_sha") != after.get("head_sha")))
+    out: dict[tuple[str, str], list[str] | None] = {}
+    for base, head in pairs:
+        endpoint = (f"repos/{repo}/compare/{quote(base, safe='')}..."
+                    f"{quote(head, safe='')}")
+        doc = client.json(endpoint, allow_missing=True)
+        files = doc.get("files") if isinstance(doc, dict) else None
+        if not isinstance(files, list) or len(files) >= 300:
+            out[(base, head)] = None
+            continue
+        names = [str(row.get("filename") or "") for row in files
+                 if isinstance(row, dict) and row.get("filename")]
+        out[(base, head)] = names if len(names) == len(files) else None
+    return out
+
+
+def _opt36_redundant_input_pairs(
+    runs: list[dict[str, Any]], patterns: list[str],
+    changed_paths_by_pair: dict[tuple[str, str], list[str] | None],
+) -> list[dict[str, Any]]:
+    ordered = sorted(runs, key=_run_start_ts)
+    pairs: list[dict[str, Any]] = []
+    for before, after in zip(ordered, ordered[1:]):
+        base = str(before.get("head_sha") or "")
+        head = str(after.get("head_sha") or "")
+        if not base or not head:
+            continue
+        if base == head:
+            kind, paths = "same_head", []
+        else:
+            paths = changed_paths_by_pair.get((base, head))
+            if paths is None or not patterns or not all(
+                    _opt32_ignored_by_patterns(path, patterns) for path in paths):
+                continue
+            kind = "excluded_only"
+        pairs.append({"base": base, "head": head, "run_id": _run_id(after),
+                      "kind": kind, "changed_paths": list(paths)})
+    return pairs
+
+
 def _detect_opt36_schedule_burn(
     wf_path: str, all_runs: list[dict[str, Any]],
     jobs_per_run: list[list[dict[str, Any]]], wf_doc: dict[str, Any],
-    monthly_schedule_volume: int | None, start_idx: int,
+    monthly_schedule_volume: int | None, start_idx: int, *,
+    changed_paths_by_pair: dict[tuple[str, str], list[str] | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Cron schedule burn (catalog OPT36) — measured upgrade.
 
     Static OPT36 already flags "too frequent cron". This measured promotion
     requires positive run-history evidence: consecutive scheduled runs on the
-    same head_sha, i.e. the workflow ran again without any code change. It sizes
-    only the schedule-event subset, using the event-filtered 30-day total count
-    and the workflow's measured mean job-minutes per run."""
+    same head_sha, or a complete compare whose files all match explicit scanner
+    exclusions. It sizes only the schedule-event subset, using the event-filtered
+    30-day total count and the workflow's measured mean job-minutes per run."""
     on = _wf_on(wf_doc)
     if not _on_has_event(on, "schedule"):
         return []
@@ -17926,8 +18015,13 @@ def _detect_opt36_schedule_burn(
     schedule_runs = [r for r in all_runs if str(r.get("event") or "") == "schedule"]
     if len(schedule_runs) < 2:
         return []
-    redundant, groups = _consecutive_same_sha_count(schedule_runs)
-    redundant_run_ids = _consecutive_same_sha_run_ids(schedule_runs)
+    patterns = _opt36_scanner_paths_ignore(wf_doc)
+    redundant_pairs = _opt36_redundant_input_pairs(
+        schedule_runs, patterns, changed_paths_by_pair or {})
+    redundant = len(redundant_pairs)
+    groups = redundant
+    redundant_run_ids = [str(row["run_id"]) for row in redundant_pairs
+                         if row.get("run_id")]
     if redundant <= 0:
         return []
 
@@ -17940,20 +18034,23 @@ def _detect_opt36_schedule_burn(
         return []
     repeated_pct = round(100 * redundant / max(len(schedule_runs), 1))
 
+    excluded_only = sum(row["kind"] == "excluded_only" for row in redundant_pairs)
+    same_head = redundant - excluded_only
     title = "Cron Schedule Too Frequent"
     evidence = (
-        f"{redundant} scheduled run(s) in {groups} consecutive same-head_sha group(s) "
-        f"re-ran without a code change in the sampled schedule slice "
+        f"{redundant} scheduled run(s) re-ran with unchanged scanner inputs in the "
+        f"sampled schedule slice ({same_head} same-head_sha; {excluded_only} diff(s) "
+        "touching only explicit scanner exclusions) "
         f"({repeated_pct}% of {len(schedule_runs)} schedule run(s)); "
-        f"~{credited:.0f} runner-min/mo of schedule-event compute ({basis}).")
+        f"runner-minute saving: ~{credited:.0f}/mo of schedule-event compute ({basis}).")
     me = _measured_evidence(
-        ["Workflow", "Consecutive same-head_sha schedule runs", "Mean compute/run", "Credited runner-min/mo"],
+        ["Workflow", "Consecutive unchanged-input schedule runs", "Mean compute/run", "Credited runner-min/mo"],
         [[f"`{wf_path}`", f"{redundant} redundant run(s) in {groups} group(s)",
           f"{per_run_min:.1f} job-min over {n_timed} timed run(s)", f"~{credited:.0f}"]],
         summary=evidence,
         note=("Schedule burn is counted only on event=schedule runs whose head_sha repeats "
-              "consecutively, so the detector proves the workflow ran again without a "
-              "code change. Basis: the count is from the all-status schedule slice; "
+              "or whose complete compare touches only explicit scanner exclusions. "
+              "Basis: the count is from the all-status schedule slice; "
               f"the per-run price is the mean of {n_timed} successful schedule-event "
               "timed run(s). "
               "GUARDRAIL: confirm the current cadence is not an operational SLA before "
@@ -17969,17 +18066,30 @@ def _detect_opt36_schedule_burn(
     f["sizing_basis"] = "measured"
     f["measured_signal"] = (
         f"event=schedule total_count x mean job-minutes "
-        f"({monthly_schedule_volume} schedule run(s)/30d; {redundant} same-head_sha "
-        f"redundant run(s); {n_timed} timed run(s); scale {scale:.3g})")
+        f"({monthly_schedule_volume} schedule run(s)/30d; {redundant} unchanged-input "
+        f"redundant run(s), including {same_head} same-head_sha; {n_timed} timed "
+        f"run(s); scale {scale:.3g})")
     f["tier2_neutrality"] = {
         "proof": "non_pr_event",
         "margin_s": None,
-        "ref": ("event=schedule subset only; consecutive same-head_sha schedule runs; "
+        "ref": ("event=schedule subset only; consecutive unchanged-input schedule runs; "
                 "schedule is not a developer PR/merge event"),
     }
     f["tier2_run_subset_events"] = ["schedule"]
     if redundant_run_ids:
         f["tier2_sample_run_ids"] = redundant_run_ids
+    f["runner_minute_effect"] = {"direction": "saving",
+                                 "runner_min_per_month": credited}
+    f["opt36_unchanged_inputs"] = {
+        "same_head_pairs": same_head,
+        "excluded_only_pairs": excluded_only,
+        "paths_ignore": patterns,
+        "pairs": redundant_pairs,
+    }
+    f["fix_strategy_detail"] = (
+        "Compare the current commit with each scanner category's last successful scan; "
+        "skip only categories with no relevant change, and run the scan whenever the "
+        "comparison cannot complete.")
     f["guardrail"] = ("Confirm the cron cadence is not an operational SLA; prefer widening "
                       "the interval only for cleanup/triage/build jobs where delayed execution "
                       "is acceptable.")
@@ -34254,9 +34364,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                                                          memo=job_memo)
                     jobs_fetch_failures += wf_failures
                     _accumulate_jobs(kept, schedule_jobs, {})
+                    opt36_changed_paths = _opt36_compare_paths(
+                        client, repo, schedule_runs, wf_doc)
                     new = _detect_opt36_schedule_burn(
                         wf_path, schedule_runs, schedule_jobs, wf_doc, schedule_monthly,
-                        next_id)
+                        next_id, changed_paths_by_pair=opt36_changed_paths)
                     next_id = max(next_id, max((int(f["id"][1:]) for f in new),
                                                default=next_id))
                     _supersede_static_opt36(findings, new)
