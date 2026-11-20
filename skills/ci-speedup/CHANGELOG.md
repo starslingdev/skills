@@ -37,6 +37,8 @@ unversioned and updates by reinstall from `main`.
 
 ### Fixed
 
+- **2026-11-20** — The report verifier's default-branch push-lane check no longer demands a lane tag from a non-pull-request hygiene group ranked below the rendered-group cap; the report already discloses such groups in its `+N more hygiene pattern(s) not shown` line. A busy repository whose OPT107 findings outrank a `workflow_dispatch`-only group no longer fails verification (#406).
+
 - **2026-11-18** — Stop static cache-family inference at the first key expression, prefer a known cache tool over runner/platform words and unrelated key labels, and use a compiler-cache action's identity when sizing its configured limit, so an unrelated cache miss cannot confirm the finding (#360).
 - **2026-11-18** — Withhold per-commit typical-wait percentiles and queue/work projections when fewer than half of sampled commits have complete workflow job data, while retaining and disclosing every partial observation (#384).
 - **2026-11-18** — Keep equal-duration co-occurrence floors in canonical `checks[]` order so report verification breaks ties the same way as the renderer, independent of Python's hash seed and individual PR timing order (#383).
