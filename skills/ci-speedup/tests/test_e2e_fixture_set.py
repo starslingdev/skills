@@ -653,120 +653,150 @@ def test_runtime_typescript_loader_states_signed_or_unsized_runner_minute_effect
         assert "not sized because" not in finding["size_note"]
 
 
-def test_old_restored_go_cache_trim_is_measured_through_collect(monkeypatch, tmp_path):
-    """An old exact cache hit plus broad later recompilation produces OPT112."""
-    cache_key = "setup-go-Linux-x64-go-1.26.0-deadbeef"
-    compile_lines = "\n".join(
-        f"2026-01-28T00:{(70 + i * 2) // 60:02d}:{(70 + i * 2) % 60:02d}.0000000Z "
-        f"/opt/go/pkg/tool/linux_amd64/compile "
-        f"-o $WORK/b{i}/_pkg_.a -p example.org/project/pkg{i}"
-        for i in range(60))
-    costly_log = f"""\
-2026-01-28T00:00:00.0000000Z Cache restored from key: {cache_key}
-2026-01-28T00:00:02.0000000Z ##[group]Run go test -race ./... -list .
-2026-01-28T00:01:00.0000000Z ##[endgroup]
-2026-01-28T00:01:01.0000000Z ##[group]Run go build -x ./cmd/tool
-{compile_lines}
-2026-01-28T00:03:01.0000000Z ##[endgroup]
-"""
+_GO_CACHE_KEY = "setup-go-Linux-x64-ubuntu24-go-1.26.0-deadbeef"
 
-    positive = tmp_path / "old-restored-go-cache"
-    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
-    responses = positive / "responses.json"
+
+def _go_job_log(start: str, *, key: str = _GO_CACHE_KEY, retain: bool = False,
+                body: str = "") -> str:
+    """An ordinary setup-go job log: no `-x`, no ci-speedup marker."""
+    retention = (
+        f"{start} ##[group]Run cache=\"$(go env GOCACHE)\"\n"
+        f"{start} cache=\"$(go env GOCACHE)\"\n"
+        f"{start} find \"$cache\" -type f -exec touch -c {{}} +\n"
+        f"{start} ##[endgroup]\n") if retain else ""
+    return (
+        f"{start} ##[group]Run actions/setup-go@v5\n"
+        f"{start} with:\n"
+        f"{start}   go-version-file: go.mod\n"
+        f"{start}   cache: true\n"
+        f"{start} ##[endgroup]\n"
+        f"{start} Cache restored successfully\n"
+        f"{start} Cache restored from key: {key}\n"
+        f"{retention}"
+        f"{start} ##[group]Run python3 scripts/test-go-shard.py 0 4\n"
+        f"{start} python3 scripts/test-go-shard.py 0 4\n"
+        f"{start} ##[endgroup]\n"
+        f"{body}")
+
+
+def _go_cache_fixture(tmp_path: Path, name: str, *, fresh_s: float, old_s: float,
+                      retain_old: bool = False) -> Path:
+    """serial-chain with t32 restoring one setup-go archive created 2026-01-20:
+    two runs inside its first five days and three after Go's trim limit."""
+    root = tmp_path / name
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", root)
+    responses = root / "responses.json"
     recorded = json.loads(responses.read_text(encoding="utf-8"))
-    recorded["logs"]["1103"] = costly_log
+    workflow = recorded["workflows"][0]
+    template_run = next(row for row in workflow["runs"] if row["id"] == 1001)
+    template_jobs = recorded["jobs"]["1001"]
+    for run_id, day in ((1005, 21), (1006, 22)):
+        run = dict(template_run, id=run_id, head_sha=f"sha-{run_id}",
+                   head_branch=f"feature-{run_id}",
+                   created_at=f"2026-01-{day}T00:00:00Z",
+                   run_started_at=f"2026-01-{day}T00:00:00Z",
+                   updated_at=f"2026-01-{day}T00:22:00Z")
+        workflow["runs"].append(run)
+        jobs = []
+        for offset, job in enumerate(template_jobs):
+            clone = json.loads(json.dumps(job).replace(
+                "2026-01-28", f"2026-01-{day}"))
+            clone["id"] = run_id * 10 + offset
+            jobs.append(clone)
+        recorded["jobs"][str(run_id)] = jobs
+        recorded["checks"][f"sha-{run_id}"] = [
+            {"name": "t32", "started_at": f"2026-01-{day}T00:15:20Z",
+             "completed_at": f"2026-01-{day}T00:22:00Z"}]
+    workflow["runs_30d"] = len(workflow["runs"])
+    base_log = recorded["logs"]["1103"]
+    for run_id, jobs in recorded["jobs"].items():
+        for job in jobs:
+            if job["name"] != "t32" or job.get("conclusion") != "success":
+                continue
+            started = datetime.fromisoformat(job["started_at"].replace("Z", "+00:00"))
+            old = started >= datetime(2026, 1, 25, 1, tzinfo=timezone.utc)
+            duration = old_s if old else fresh_s
+            done = (started + timedelta(seconds=duration)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            job["completed_at"] = done
+            job["steps"][0]["completed_at"] = done
+            stamp = started.strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+            recorded["logs"][str(job["id"])] = _go_job_log(
+                stamp, retain=retain_old and old, body=base_log)
     recorded["action_caches"] = [{
-        "id": 71,
-        "key": cache_key,
-        "created_at": "2026-01-10T00:00:00Z",
+        "id": 71, "key": _GO_CACHE_KEY,
+        "created_at": "2026-01-20T00:00:00Z",
         "last_accessed_at": "2026-01-28T00:00:00Z",
     }]
     responses.write_text(json.dumps(recorded), encoding="utf-8")
+    return root
 
-    positive_root = tmp_path / "run-old-restored-go-cache"
-    positive_root.mkdir()
-    doc, report, checks = run_fixture(
-        positive, monkeypatch, positive_root, max_runs=20)
+
+def test_old_restored_go_cache_trim_is_measured_through_collect(monkeypatch, tmp_path):
+    """Ordinary setup-go logs: the same exact archive restored past Go's
+    five-day trim limit makes the job slower than while it was fresh."""
+    positive = _go_cache_fixture(tmp_path, "old-restored-go-cache",
+                                 fresh_s=300.0, old_s=400.0)
+    run_root = tmp_path / "run-old-restored-go-cache"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(positive, monkeypatch, run_root, max_runs=20)
 
     findings = [row for row in doc["findings"] if row.get("pattern") == "OPT112"]
     assert findings, "expected old restored Go cache trim finding"
     finding = findings[0]
-    assert finding["go_cache_archive_age_days"] >= 5
-    assert finding["go_cache_recompiled_packages"] == 60
-    assert finding["go_cache_recompile_s"] == 118.0
-    assert finding.get("runner_min_saving") is None
+    assert finding["go_cache_key"] == _GO_CACHE_KEY
+    assert finding["go_cache_slowdown_s"] == 100.0
+    assert finding["go_cache_fresh_runs"] == 2
+    assert finding["go_cache_old_runs"] >= 2
+    assert finding["wall_clock_p50_s"] == 100.0
     assert "Touch every restored" in finding["fix_strategy"]
-    assert "runner-minute saving" in finding["size_note"]
-    assert "opaque contents" in finding["size_note"]
+    assert "runner-minute saving: at most" in finding["size_note"]
+    assert "+" not in finding["size_note"].split("runner-minute saving")[1][:20]
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
-    negative = tmp_path / "fresh-restored-go-cache"
-    shutil.copytree(FIXTURE_ROOT / "serial-chain", negative)
-    negative_responses = negative / "responses.json"
-    recorded = json.loads(negative_responses.read_text(encoding="utf-8"))
-    recorded["logs"]["1103"] = costly_log
-    recorded["action_caches"] = [{
-        "id": 72,
-        "key": cache_key,
-        "created_at": "2026-01-27T00:00:00Z",
-        "last_accessed_at": "2026-01-28T00:00:00Z",
-    }]
-    negative_responses.write_text(json.dumps(recorded), encoding="utf-8")
 
-    negative_root = tmp_path / "run-fresh-restored-go-cache"
-    negative_root.mkdir()
-    negative_doc, negative_report, negative_checks = run_fixture(
-        negative, monkeypatch, negative_root, max_runs=20)
-    assert not [row for row in negative_doc["findings"]
-                if row.get("pattern") == "OPT112"]
-    assert "Restored Go build cache" not in negative_report
-    assert [check for check in negative_checks
-            if not check.skipped and not check.ok] == []
+def test_go_cache_trim_quiet_when_old_archive_runs_are_not_slower(monkeypatch, tmp_path):
+    """Same shape, no trim loss: old-archive runs take as long as fresh ones."""
+    negative = _go_cache_fixture(tmp_path, "no-loss-go-cache",
+                                 fresh_s=400.0, old_s=400.0)
+    run_root = tmp_path / "run-no-loss-go-cache"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(negative, monkeypatch, run_root, max_runs=20)
+    assert not [row for row in doc["findings"] if row.get("pattern") == "OPT112"]
+    assert "Restored Go Build Cache Trimmed" not in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
-def test_go_cache_trim_candidate_withholds_legitimate_near_misses():
-    """A normal warm build or a small incompatible rebuild is not OPT112."""
-    def log(*, race_first: bool, race_later: bool, packages: int) -> str:
-        first_race = " -race" if race_first else ""
-        later_race = " -race" if race_later else ""
-        compile_lines = "\n".join(
-            f"2026-01-28T00:01:20Z /opt/go/pkg/tool/linux_amd64/compile "
-            f"-o $WORK/b{i}/_pkg_.a -p example.org/pkg{i}"
-            for i in range(packages))
-        return f"""\
-2026-01-28T00:00:00Z Cache restored from key: setup-go-Linux-x64-key
-2026-01-28T00:00:02Z ##[group]Run go test{first_race} ./... -list .
-2026-01-28T00:01:00Z ##[group]Run go build -x{later_race} ./cmd/tool
-{compile_lines}
-2026-01-28T00:03:00Z build complete
-"""
-
-    assert cr._go_cache_trim_candidate(
-        log(race_first=True, race_later=False, packages=10)) is None
-    assert cr._go_cache_trim_candidate(
-        log(race_first=False, race_later=False, packages=60)) is None
-    assert cr._go_cache_trim_candidate(
-        log(race_first=True, race_later=False, packages=60).replace(
-            "Cache restored from key:", "Documentation: cache key:")) is None
+def test_go_cache_trim_quiet_when_retention_step_is_present(monkeypatch, tmp_path):
+    """A job that already touches GOCACHE after restore is not re-flagged."""
+    fixed = _go_cache_fixture(tmp_path, "retained-go-cache",
+                              fresh_s=300.0, old_s=400.0, retain_old=True)
+    run_root = tmp_path / "run-retained-go-cache"
+    run_root.mkdir()
+    doc, _report, _checks = run_fixture(fixed, monkeypatch, run_root, max_runs=20)
+    assert not [row for row in doc["findings"] if row.get("pattern") == "OPT112"]
 
 
-def test_go_cache_trim_candidate_excludes_unrelated_tail_work():
-    """A quick compile followed by slow tests or uploads does not clear the gate."""
-    compile_lines = "\n".join(
-        f"2026-01-28T00:01:{10 + i // 6:02d}Z "
-        f"/opt/go/pkg/tool/linux_amd64/compile -o $WORK/b{i}/_pkg_.a "
-        f"-p example.org/pkg{i}"
-        for i in range(60))
-    log = f"""\
-2026-01-28T00:00:00Z Cache restored from key: setup-go-Linux-x64-key
-2026-01-28T00:00:02Z ##[group]Run go test -race ./... -list .
-2026-01-28T00:01:00Z ##[group]Run go build -x ./cmd/tool
-{compile_lines}
-2026-01-28T00:01:20Z ##[group]Run npm test
-2026-01-28T00:04:20Z tests complete
-2026-01-28T00:06:20Z upload complete
-"""
-    assert cr._go_cache_trim_candidate(log) is None
+def test_go_cache_restore_fact_reads_only_go_build_cache_restores():
+    stamp = "2026-01-28T00:00:00Z"
+    assert cr._go_cache_restore_fact(_go_job_log(stamp)) == {
+        "cache_key": _GO_CACHE_KEY, "retained": False}
+    assert cr._go_cache_restore_fact(_go_job_log(stamp, retain=True))["retained"]
+    actions_cache = (
+        f"{stamp} ##[group]Run actions/cache@v4\n"
+        f"{stamp} with:\n"
+        f"{stamp}   path: ~/.cache/go-build\n"
+        f"{stamp}   key: Linux-go-abc\n"
+        f"{stamp} ##[endgroup]\n"
+        f"{stamp} Cache restored from key: Linux-go-abc\n")
+    assert cr._go_cache_restore_fact(actions_cache)["cache_key"] == "Linux-go-abc"
+    node_cache = actions_cache.replace("~/.cache/go-build", "node_modules")
+    assert cr._go_cache_restore_fact(node_cache) is None
+    prose = _go_job_log(stamp).replace(
+        "Cache restored from key:", "Documentation: cache key:")
+    assert cr._go_cache_restore_fact(prose) is None
+    two_keys = _go_job_log(stamp) + _go_job_log(stamp, key="setup-go-other")
+    assert cr._go_cache_restore_fact(two_keys) is None
 
 
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():

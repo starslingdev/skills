@@ -1134,34 +1134,40 @@ runner, so no warning was emitted.
 pattern: OPT112
 impact: HIGH
 class: data-driven
-detector: old-go-cache-broad-recompile
+detector: same-key-go-cache-age-slowdown
 risk: LOW
 affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,**/*.go,go.mod,go.sum"
 fix_strategy: restored-go-build-cache-trimmed-before-reuse
 title_template: "Restored Go Build Cache Trimmed Before Reuse"
 -->
 
-**TL;DR**: A job restores an exact `setup-go` build-cache archive older than
-Go's five-day trim window. One Go command refreshes only its own flag-specific
-entries, then a later incompatible command recompiles a broad package set that
-the restored archive should have supplied. Mark the restored files as recently
-used before the first Go command so `cmd/go` keeps both populations.
+**TL;DR**: `actions/setup-go` and `actions/cache` restore Go build-cache
+entries with their saved modification times. `cmd/go` trims entries unused for
+five days (plus a one-hour mtime granularity), at most once a day, when a Go
+command finishes. Once the restored archive is past that limit, the job's first
+Go command deletes every entry it did not itself use, and a later command with
+different flags (for example a plain build after `-race` tests) recompiles what
+the archive held. Mark the restored files as recently used before the first Go
+command so `cmd/go` keeps both populations.
 
-**Detection heuristic** (every gate required):
+**Detection heuristic** (every gate required; reads only what an ordinary job
+prints, no extra flags or markers):
 
-1. A captured long-pole job log contains the standard `Cache restored from key:`
-   line for an exact `setup-go-*` key.
-2. GitHub's cache inventory returns exactly one archive for that key, and its
-   creation time is at least five days before the measured job.
-3. Two successive `go build`, `go test`, or `go vet` command boundaries use
-   incompatible race modes: one includes `-race` and the other does not.
-4. The later command's ordinary `go -x` compiler output shows at least 50
-   distinct packages whose first-to-last invocation spans at least 30 measured
-   seconds. Work after the last compiler invocation is excluded. A cache hit,
-   old archive, command shape, or compiler output by itself is not enough.
-5. Missing or ambiguous cache metadata withholds the finding. A fresh archive,
-   fewer compiler invocations, or the same race mode on both commands stays
-   quiet.
+1. A captured long-pole job log restores a Go build cache: setup-go's standard
+   `Cache restored from key: setup-go-*` line, or an `actions/cache` step whose
+   logged `path:` input names `go-build` or `GOCACHE`. Two different Go keys in
+   one log, or a later step that touches the Go build cache (the fix already in
+   place), withhold the finding.
+2. GitHub's cache inventory returns exactly one archive for that key; its
+   `created_at` splits the job's sampled successful runs into runs that
+   restored it while it was younger than five days (fresh) and runs that
+   restored it at least five days and one hour after creation (old).
+3. At least two fresh and two old runs are confirmed from their own logs to
+   restore that same exact key without a retention step.
+4. The old runs' median job duration exceeds the fresh runs' median by at least
+   30 seconds, and every old run is slower than the fresh median.
+5. Missing or ambiguous cache metadata, too few runs in either window, or no
+   slowdown keeps the finding quiet.
 
 **Fix recipe**, safest first:
 
@@ -1180,12 +1186,13 @@ not turn an untrusted cache into executable input, weaken the cache key, skip a
 race or non-race build, or hide a failed restore. On a cache miss, the retention
 step is a no-op. Preserve Go's own cache validation and every existing test flag.
 
-**Sizing**: the timestamped first-to-last compiler-invocation span measures the
-broad recompilation, excluding later tests and uploads. It is not credited as a
-saving because GitHub's cache API does not expose the archive inventory: an
-exact hit cannot prove that the later command's entries existed before the
-trim. Runner-minute saving is therefore unsized until the same-job before/after
-shows what retention removed; the report never credits the entire Go test step.
+**Sizing**: the wall-clock saving is the measured median slowdown of old-archive
+runs over fresh-archive runs of the same cache key, the same job and the same
+dependency set. The runner-minute saving is stated as a ceiling: that slowdown
+times the workflow's 30-day run count, because runs that restore an archive
+younger than five days save nothing. The comparison is between sampled runs,
+not a before/after of the fix, so confirm it on the same job after adding the
+retention step.
 
 **Real-world example (OpenClaw)**, their numbers, not a forecast for another
 repository: openclaw/crabbox [#2833](https://github.com/openclaw/crabbox/pull/2833)

@@ -19,7 +19,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT93 — NuGet Restores to a Slower Disk on Windows Runners (MEDIUM, data-driven) — measured cache placement on Windows
 - OPT96 — Cache Never Saved on the Default Branch (MEDIUM, static) — PR caches lack a reachable default-branch save
 - OPT101 — Cache and Build Use Different Directories (MEDIUM, data-driven) — missing cache path on every successful save attempt
-- OPT112 — Restored Go Build Cache Trimmed Before Reuse (HIGH, data-driven) — an old exact Go cache hit is broadly recompiled after an incompatible first command
+- OPT112 — Restored Go Build Cache Trimmed Before Reuse (HIGH, data-driven) — the same exact Go cache archive makes the job measurably slower once it is past cmd/go's five-day trim limit
 ## Category 2 — Redundancy
 - OPT11 — Redundant Environment Variables (LOW, static) — same env var at two levels
 - OPT12 — Duplicated Setup Across Jobs (MEDIUM, static) — copy-pasted setup steps

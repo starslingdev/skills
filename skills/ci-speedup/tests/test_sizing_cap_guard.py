@@ -326,17 +326,20 @@ def test_opt24_inline_sizing_respects_physical_bound():
         assert (f.get("wall_clock_p50_s") or 0) > 0  # non-vacuous: it credited a saving
 
 
-def test_opt112_inline_sizing_withholds_opaque_archive_credit():
-    """OPT112 does not price contents that GitHub's cache API cannot inventory."""
+def test_opt112_inline_sizing_respects_physical_bound():
+    """OPT112 credits the measured same-key slowdown and stays within the pole."""
+    runs = [{"age_days": 1.0, "duration_s": 300.0, "url": ""},
+            {"age_days": 2.0, "duration_s": 310.0, "url": ""}]
+    old = [{"age_days": 6.0, "duration_s": 400.0, "url": ""},
+           {"age_days": 7.0, "duration_s": 410.0, "url": ""}]
     entries = [{
         "workflow_file": "ci.yml",
         "job": "go tests",
         "duration_s": 400.0,
         "go_cache_trim": {
             "cache_key": "setup-go-Linux-x64-key",
-            "archive_age_days": 18.0,
-            "recompiled_packages": 60,
-            "recompile_s": 120.0,
+            "fresh_runs": runs, "old_runs": old,
+            "fresh_median_s": 305.0, "old_median_s": 405.0, "slowdown_s": 100.0,
         },
     }]
     findings = cr._detect_go_cache_trim(entries, {"ci.yml": 20}, 0)
@@ -344,9 +347,12 @@ def test_opt112_inline_sizing_withholds_opaque_archive_credit():
     crit = {"long_pole_job": "go tests", "long_pole_p50": 400.0,
             "floor_p50": 90.0, "job_p50": {"go tests": 400.0}}
     assert _physical_bound_violation(findings[0], crit) is None
-    assert findings[0]["wall_clock_p50_s"] == 0.0
-    assert findings[0].get("runner_min_saving") is None
-    assert "opaque contents" in findings[0]["size_note"]
+    assert findings[0]["wall_clock_p50_s"] == 100.0
+    assert findings[0]["runner_min_saving"] == round(100.0 * 20 / 60.0, 1)
+    assert "runner-minute saving: at most" in findings[0]["size_note"]
+    # A slowdown longer than the job itself cannot be trim loss.
+    entries[0]["duration_s"] = 90.0
+    assert cr._detect_go_cache_trim(entries, {"ci.yml": 20}, 0) == []
 
 
 def test_opt25_inline_sizing_respects_physical_bound():
