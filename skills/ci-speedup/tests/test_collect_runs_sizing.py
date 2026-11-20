@@ -306,6 +306,26 @@ def test_below_floor_job_saves_bill_not_wall_clock():
     assert "below the cluster floor" in f["size_note"]
 
 
+def test_opt16_repeated_analysis_variant_is_unsized_with_its_reason():
+    # The combined analysis still runs once, so the flat OPT16 default (one
+    # whole duplicate command) is not a saving this variant has measured.
+    f = {"pattern": "OPT16", "affected_jobs": ["test"],
+         "opt16_analysis_repeat": {"tool": "knip", "steps": 2}}
+    _size_finding(f, _CRIT, monthly_volume=1000)
+    assert f["wall_clock_p50_s"] is None
+    assert f["runner_min_saving"] is None
+    assert f["tier"] == 2
+    assert f["realization"] == "none"
+    assert f["size_note"].startswith("runner-minute saving: unsized (")
+    assert "combined" in f["size_note"]
+
+
+def test_opt16_identical_duplicate_keeps_its_modeled_saving():
+    f = {"pattern": "OPT16", "affected_jobs": ["test"]}
+    _size_finding(f, _CRIT, monthly_volume=1000)
+    assert f["runner_min_saving"] and f["runner_min_saving"] > 0
+
+
 def test_long_pole_job_keeps_wall_clock_credit():
     # `test` IS the long pole (400s > 100s floor) → wall-clock credited.
     f = {"pattern": "OPT61", "affected_jobs": ["test"]}
