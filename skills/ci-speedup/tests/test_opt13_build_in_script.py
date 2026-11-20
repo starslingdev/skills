@@ -27,7 +27,7 @@ def _quality_step(run: str, *commands: str) -> str:
 
 
 def test_build_echoed_inside_the_quality_step_fires():
-    log = _quality_step("pnpm test", "> project@1.0.0 test /home/runner/work/app",
+    log = _quality_step("pnpm test", "> project@1.0.0 test",
                         "> vite build", "✓ built in 120.00s", "> vitest run",
                         "Tests 48 passed")
     assert cr._opt13_build_in_quality_log(log) == {
