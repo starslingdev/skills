@@ -2254,6 +2254,31 @@ def test_opt107_uses_only_each_credited_runs_own_compute():
     assert findings[0]["sample_runner_min_effect"] == -12.0
 
 
+def test_opt107_does_not_price_side_effect_jobs_in_a_mixed_workflow():
+    # A test-and-deploy workflow: the deploy job stays on its push event, so
+    # only the validation job's compute may become a batching saving.
+    runs = _default_push_runs(gap_minutes=20)
+    doc = {"on": {"push": {"branches": ["main"]}}, "jobs": {
+        "test": {"runs-on": "ubuntu-latest", "steps": [{"run": "make test"}]},
+        "ship": {"runs-on": "ubuntu-latest", "environment": "production",
+                 "steps": [{"run": "./ship.sh"}]},
+        "bundle": {"runs-on": "ubuntu-latest",
+                   "steps": [{"run": "npm publish --provenance"}]},
+    }}
+    jobs_by_run = {
+        str(run["id"]): [_span_job("test", 600), _span_job("ship", 1800),
+                         _span_job("bundle", 300)]
+        for run in runs
+    }
+    findings = cr._detect_opt107_default_branch_batching(
+        ".github/workflows/ci.yml", runs, jobs_by_run, doc, "main", 0)
+
+    assert findings
+    assert findings[0]["sample_runner_min_effect"] == -20.0  # `test` alone
+    assert findings[0]["excluded_side_effect_jobs"] == ["bundle", "ship"]
+    assert findings[0]["affected_jobs"] == ["test"]
+
+
 def test_opt107_never_batches_release_or_deploy_workflows():
     runs = _default_push_runs(gap_minutes=20)
     jobs_by_run = {
