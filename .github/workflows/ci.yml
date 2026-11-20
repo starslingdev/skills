@@ -1,14 +1,15 @@
 name: CI
 
-# Runs the full test suite on every push to main and every pull request. The suite is split
+# Runs the full test suite on every push to main, every pull request, and every merge-queue
+# entry (`merge_group`). The suite is split
 # into two parts (`--shard K/2`, whole test files balanced by tests/shard_weights.json) that run
 # on two runners at once, each with four pytest workers; every test runs in exactly one part and
 # any failure fails the suite. A matrix job's result is `success` only when every part succeeded,
 # so the verdict below reads both parts through one `needs.<job>.result`.
 # Locally, `pytest -v` runs the same suite sequentially for easier debugging.
 #
-# The suite runs as two mutually exclusive jobs: self-hosted for pushes and same-repo PRs
-# (this repo dogfoods StarSling runners), GitHub-hosted for fork PRs (untrusted code never
+# The suite runs as two mutually exclusive jobs: self-hosted for pushes, same-repo PRs and
+# merge-queue entries (this repo dogfoods StarSling runners), GitHub-hosted for fork PRs (untrusted code never
 # executes on the self-hosted pool). The required branch-protection check is `test` — the
 # always-running verdict job at the bottom — NOT either suite job. GitHub counts a skipped
 # required check as passing, so requiring a job that skips itself on fork PRs meant a fork PR
@@ -22,12 +23,17 @@ name: CI
 # maintainer, but the gate is not self-enforcing against a hostile PR — reviewing `.github/**`
 # and `tests/` changes on fork PRs is the actual control.
 on:
-  # No merge_group trigger: this repo has no merge queue. If one is ever enabled, the trigger
-  # list and BOTH suite `if:` guards must change together — on a merge_group event there is no
-  # github.event.pull_request, so test-self would skip and test-fork would fire.
   push:
     branches: [main]
   pull_request:
+  # The merge queue builds each entry on a temporary `gh-readonly-queue/main/...` branch of
+  # THIS repository and waits for the required checks on it, so `test` must be produced here
+  # too or the queue waits forever. A merge_group event carries no github.event.pull_request,
+  # which is why each suite guard names the event explicitly: on merge_group test-self runs
+  # (queue commits are same-repo code that already passed review) and test-fork does not.
+  # tests/test_ci_required_check_verdict.py evaluates both guards for every event, including
+  # this one, and fails unless exactly the expected suite runs.
+  merge_group:
 
 # One in-flight run per ref — a new push cancels the previous, still-running CI for that branch.
 concurrency:
@@ -41,8 +47,8 @@ permissions:
 jobs:
   test-self:
     name: test (self-hosted ${{ matrix.shard }}/2)
-    # Never execute untrusted fork-PR code on the self-hosted runner: run only for pushes and
-    # pull requests whose head is this same repository. Fork PRs get the identical suite on
+    # Never execute untrusted fork-PR code on the self-hosted runner: run only for pushes,
+    # merge-queue entries, and pull requests whose head is this same repository. Fork PRs get the identical suite on
     # GitHub-hosted runners via test-fork below.
     runs-on: starsling-ubuntu-26.04
     # Without this, a dead runner pool leaves the job queued (self-hosted jobs wait up to 24h)
@@ -53,6 +59,7 @@ jobs:
         shard: [1, 2]
     if: >-
       github.event_name == 'push' ||
+      github.event_name == 'merge_group' ||
       github.event.pull_request.head.repo.full_name == github.repository
     steps:
       # Third-party actions are pinned to a commit SHA (the tag comment is for humans only) so a
@@ -81,7 +88,8 @@ jobs:
       # Public-output privacy gate (AGENTS.md): blocks other repositories' identifiers in the
       # PR title/body and every outgoing commit. Inside the suite job so it gates `test`. PR text
       # reaches the shell only via env (never `run:`); the read-only token verifies PUBLIC.
-      # A title/body edit is re-checked on the next push.
+      # A title/body edit is re-checked on the next push. Skipped on merge_group: a queue entry
+      # carries no PR text, and its commits are the ones this step already passed on the PR.
       - name: Public-output privacy gate
         if: github.event_name == 'pull_request'
         env:
@@ -90,6 +98,14 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: bash .github/scripts/run_public_output_gate.sh
+
+      # Changelog fragments (skills/<skill>/changelog.d/README.md): validates every pending
+      # fragment and refuses a hand edit of any skill's CHANGELOG.md. HEAD^1 is the tree this
+      # change lands on for every event (the PR test merge, a merge-queue commit, a push to
+      # main), and fetch-depth: 0 above guarantees it is present. Stdlib only, so it runs
+      # before the dependency install.
+      - name: Changelog fragments gate
+        run: python3 maintainers/scripts/assemble_changelog.py --check --diff-base HEAD^1
 
       - name: Install test dependencies
         run: pip install -e ".[dev]"
@@ -142,6 +158,14 @@ jobs:
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: bash .github/scripts/run_public_output_gate.sh
+
+      # Changelog fragments (skills/<skill>/changelog.d/README.md): validates every pending
+      # fragment and refuses a hand edit of any skill's CHANGELOG.md. HEAD^1 is the tree this
+      # change lands on for every event (the PR test merge, a merge-queue commit, a push to
+      # main), and fetch-depth: 0 above guarantees it is present. Stdlib only, so it runs
+      # before the dependency install.
+      - name: Changelog fragments gate
+        run: python3 maintainers/scripts/assemble_changelog.py --check --diff-base HEAD^1
 
       - name: Install test dependencies
         run: pip install -e ".[dev]"

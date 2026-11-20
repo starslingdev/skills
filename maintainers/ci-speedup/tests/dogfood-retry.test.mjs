@@ -129,7 +129,8 @@ const ALLOWED = [
   'skills/ci-speedup/scripts/x.py',
   'skills/ci-speedup/tests/test_x.py',
   'skills/ci-speedup/tests/sub/test_nested.py',            // tests/** allows nesting
-  'skills/ci-speedup/CHANGELOG.md',
+  'skills/ci-speedup/changelog.d/opt82-resolver.fixed.md', // the changelog entry is a fragment
+  'skills/ci-speedup/changelog.d/x_1.added.md',
   // Stream 2 (S2b): ARCHITECTURE.md is now allowlisted. The allowlist is PATH-only — it has no
   // class-vs-instance notion — so `isAllowedFixPath` accepts it on EVERY fix (moved here from
   // REJECTED below). It is NOT unguarded: the LONE-doc-edit case is caught by the co-occurrence
@@ -155,6 +156,11 @@ const REJECTED = [
   'skills/ci-speedup/tests/../SKILL.md',                    // `..` must not escape the tests/ prefix
   'skills/ci-speedup/scripts/../../evil.py',                // `..` must not escape the scripts/ prefix
   '/etc/passwd',                                            // a leading `/` (absolute path) is never allowed
+  'skills/ci-speedup/CHANGELOG.md',                         // only the assembler writes it; CI refuses hand edits
+  'skills/ci-speedup/changelog.d/README.md',                // the format notes, not a fragment
+  'skills/ci-speedup/changelog.d/x.bugfix.md',              // unknown fragment kind
+  'skills/ci-speedup/changelog.d/sub/x.fixed.md',           // fragments are flat
+  'skills/ci-secure/changelog.d/x.fixed.md',                // a different skill's fragment
 ]
 for (const p of REJECTED)
   assert(!isAllowedFixPath(p), `allowlist should REJECT ${p}`)
@@ -173,7 +179,7 @@ assert.deepEqual(
 // (no sibling `scripts/*.py` engine change) is a stray edit and `fixWriteViolations` MUST flag it.
 const ARCH = 'skills/ci-speedup/ARCHITECTURE.md'
 const ENGINE = 'skills/ci-speedup/scripts/blocking_path.py'
-const CHANGELOG = 'skills/ci-speedup/CHANGELOG.md'
+const CHANGELOG = 'skills/ci-speedup/changelog.d/blocking-path.fixed.md'
 const TEST = 'skills/ci-speedup/tests/test_x.py'
 // LONE ARCHITECTURE.md (with only changelog/test, no engine script) → flagged, even though allowlisted.
 assert.deepEqual(fixWriteViolations([ARCH, CHANGELOG, TEST]), [ARCH],
@@ -416,16 +422,16 @@ const overlappingScriptGroups = new Function('SCRIPT_PATH_RE', `return (${om[0]}
 
 // Two fixes touching the SAME engine script → one group flagged for the integrator to reconcile.
 const dupGroups = overlappingScriptGroups([
-  { signature: 'a', changed_files: ['skills/ci-speedup/scripts/collect_runs.py', 'skills/ci-speedup/tests/test_a.py', 'skills/ci-speedup/CHANGELOG.md'] },
-  { signature: 'b', changed_files: ['skills/ci-speedup/scripts/collect_runs.py', 'skills/ci-speedup/tests/test_b.py', 'skills/ci-speedup/CHANGELOG.md'] },
+  { signature: 'a', changed_files: ['skills/ci-speedup/scripts/collect_runs.py', 'skills/ci-speedup/tests/test_a.py', 'skills/ci-speedup/changelog.d/fix-a.fixed.md'] },
+  { signature: 'b', changed_files: ['skills/ci-speedup/scripts/collect_runs.py', 'skills/ci-speedup/tests/test_b.py', 'skills/ci-speedup/changelog.d/fix-b.fixed.md'] },
 ])
 assert.equal(dupGroups.length, 1, 'two fixes on the same script must form one overlap group')
 assert.equal(dupGroups[0].file, 'skills/ci-speedup/scripts/collect_runs.py')
 assert.deepEqual(dupGroups[0].signatures, ['a', 'b'])
 // Different scripts + the shared changelog/tests every fix touches is NOT an overlap.
 assert.equal(overlappingScriptGroups([
-  { signature: 'a', changed_files: ['skills/ci-speedup/scripts/collect_runs.py', 'skills/ci-speedup/CHANGELOG.md', 'skills/ci-speedup/tests/test_a.py'] },
-  { signature: 'b', changed_files: ['skills/ci-speedup/scripts/blocking_path.py', 'skills/ci-speedup/CHANGELOG.md', 'skills/ci-speedup/tests/test_b.py'] },
+  { signature: 'a', changed_files: ['skills/ci-speedup/scripts/collect_runs.py', 'skills/ci-speedup/changelog.d/fix-a.fixed.md', 'skills/ci-speedup/tests/test_a.py'] },
+  { signature: 'b', changed_files: ['skills/ci-speedup/scripts/blocking_path.py', 'skills/ci-speedup/changelog.d/fix-b.fixed.md', 'skills/ci-speedup/tests/test_b.py'] },
 ]).length, 0, 'different scripts + shared changelog/tests is not an overlap')
 // Defensive: empty input, missing changed_files, and missing signatures must not throw.
 assert.deepEqual(overlappingScriptGroups([]), [])

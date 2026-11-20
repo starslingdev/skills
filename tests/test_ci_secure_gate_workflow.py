@@ -102,6 +102,28 @@ def test_the_gate_still_fires_on_pull_requests(workflow: dict) -> None:
     )
 
 
+def test_the_gate_fires_on_merge_queue_entries(workflow: dict) -> None:
+    """`ci-secure` is required on main, so a merge-queue entry must produce it.
+
+    Without a `merge_group` trigger the check never reports for a queue entry
+    and the queue waits forever. With it, the entry must take the self-hosted
+    scan: a merge_group event has no `github.event.pull_request`, and the route
+    is decided by evaluating both guards, not by reading them.
+    """
+    import importlib.util
+    import sys
+    spec = importlib.util.spec_from_file_location(
+        "_gha_expr", Path(__file__).resolve().parent / "_gha_expr.py")
+    gx = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = gx
+    spec.loader.exec_module(gx)
+    assert "merge_group" in workflow[True], "no merge_group trigger: the queue waits forever"
+    for route, (name, kw, where) in gx.ROUTES.items():
+        ctx = gx.event(name, **kw)
+        runs = {jid: gx.job_runs(workflow["jobs"][jid], ctx) for jid in ("scan", "scan-fork")}
+        assert runs == {"scan": where == "self", "scan-fork": where == "fork"}, (route, runs)
+
+
 def test_the_verdict_job_has_no_event_narrowing_condition(verdict: dict) -> None:
     """`if: always()` and nothing else.
 
