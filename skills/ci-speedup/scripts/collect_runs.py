@@ -9690,6 +9690,63 @@ class RequiredChecks:
         return self.complete and self.classic_read and self.rulesets_read
 
 
+_OPT46_AGGREGATE_ADVICE = (
+    " The complete required-check read shows check `{check}` is not required, so "
+    "`if: ${{{{ !cancelled() }}}}` is safe here. Leave the step-level result check "
+    "unchanged: the job still runs when a dependency ends failure, cancelled or "
+    "skipped, so the check still rejects every result it rejects today. A "
+    "required aggregate keeps `always()`: a job skipped by its `if:` "
+    "reports success, so a head run cancelled without a replacement would pass "
+    "with nothing validated. Runner-minute effect: saving this aggregate job's "
+    "compute on cancelled runs; not sized until matched cancelled runs measure "
+    "its runner allocation and compute.")
+
+
+def _opt46_check_may_be_required(check: str, required: "frozenset[str] | set[str]"
+                                 ) -> bool:
+    """Could ``check`` be one of the required contexts? Matches the bare check
+    name, a ``caller / check`` reusable-workflow context and a matrix suffix.
+    Erring toward a match keeps the aggregate on ``always()``."""
+    for name in required:
+        if (name == check or name.split(" / ")[-1] == check
+                or name.startswith(f"{check} (")):
+            return True
+    return False
+
+
+def _promote_opt46_aggregates(candidates: object,
+                              required_checks: "RequiredChecks | None"
+                              ) -> list[dict[str, Any]]:
+    """The OPT46 cancelled-run aggregate candidates safe to report.
+
+    ``!cancelled()`` on a REQUIRED aggregate lets a head run cancelled without a
+    replacement (a manual cancel, or a concurrency group shared with another
+    event) skip the aggregate, and a skipped required check reads as passing.
+    So a candidate is promoted only when the required-check read is complete
+    enough to authorize advice (``advice_complete``) and its check name is
+    readable and not required. Every other candidate stays quiet: the saving is
+    a seconds-long aggregate on cancelled runs, too small to justify advice
+    that could let a cancelled head run pass."""
+    if (not isinstance(candidates, list) or required_checks is None
+            or not required_checks.advice_complete):
+        return []
+    promoted: list[dict[str, Any]] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        check = cand.get("opt46_check_context")
+        if not isinstance(check, str) or not check:
+            continue
+        if _opt46_check_may_be_required(check, required_checks.names):
+            continue
+        f = dict(cand)
+        f["evidence"] = (str(f.get("evidence") or "")
+                         + _OPT46_AGGREGATE_ADVICE.format(check=check))
+        f["opt46_required_check_status"] = "not_required"
+        promoted.append(f)
+    return promoted
+
+
 def _ruleset_ref_in_scope(detail: dict[str, Any], branch: str | None) -> bool:
     """Does this ruleset actually govern the branch we're scoring?
 
@@ -33139,6 +33196,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         required_checks.rulesets_read if required_checks is not None else False)
     findings_doc["required_checks_advice_complete"] = (
         required_checks.advice_complete if required_checks is not None else False)
+    # OPT46's cancelled-run aggregate flavor needs this read: promote only the
+    # candidates whose check is provably not required (see the helper).
+    findings.extend(_promote_opt46_aggregates(
+        findings_doc.pop("opt46_aggregate_candidates", None), required_checks))
 
     import pr_lifecycle
     findings_doc["pr_lifecycle"] = pr_lifecycle.collect(

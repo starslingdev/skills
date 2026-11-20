@@ -3363,7 +3363,7 @@ title_template: "Missing `paths`/`paths-ignore` on Expensive Workflows"
 
 **Fix**: Add `paths-ignore` for documentation, markdown files, and other non-code changes. Or use `paths` to restrict to relevant source directories.
 
-**Fail closed:** when a scoped workflow or job is a required check, a job-level `if:` alone is not safe: a failed detector skips the suite, and a skipped required check reads green. Add an always-running verdict job (`if: always()`) that `needs:` the detector, every intermediate job whose failure can suppress a suite, and the suites, and make that verdict the required check. Listing jobs in `needs:` is not an assertion: the verdict must fail unless the detector succeeded AND each suite either succeeded or was skipped because the detector validly reported unchanged (its output exactly `'false'`). Reject failures and cancellations, including an unchanged output written before failure. A strict "every suite succeeded" assertion is right only when a suite is never skipped on purpose; with intentional skips it turns every unchanged PR red. ci-secure's required-checks-skippable fact lists the assertion forms it can verify.
+**Fail closed:** when a scoped workflow or job is a required check, a job-level `if:` alone is not safe: a failed detector skips the suite, and a skipped required check reads green. Add an always-running verdict job (`if: always()`) that `needs:` the detector, every intermediate job whose failure can suppress a suite, and the suites, and make that verdict the required check. Listing jobs in `needs:` is not an assertion: the verdict's step must inspect every dependency result and fail unless the detector succeeded AND each suite either succeeded or was skipped because the detector validly reported unchanged (its output exactly `'false'`). Reject `failure` and `cancelled` dependency results, and a `skipped` suite unless the detector validly reported unchanged, including an unchanged output written before failure. Keep `if: always()` rather than OPT46's `!cancelled()` here, because the verdict is the required check: a job skipped by its `if:` reports success, and a skipped required check does not block merging, so a head run cancelled without a replacement would pass with nothing validated. A strict "every suite succeeded" assertion is right only when a suite is never skipped on purpose; with intentional skips it turns every unchanged PR red. ci-secure's required-checks-skippable fact lists the assertion forms it can verify.
 
 **Required-status-check caveat (the "Pending" landmine)**: if any check this workflow produces is a required status check, do NOT skip it with `paths`/`paths-ignore` (or `branches:` filters / `[skip ci]`) — a workflow skipped by filtering leaves its required check "Pending" and the PR can never merge; official guidance says not to use path or branch filtering on required workflows. GitHub documents a job-level `if:` restating the filter (a skipped job reports Success and satisfies the gate), but on its own it shares the skipped-reads-green hole above; the safe shape is that `if:` plus the fail-closed verdict job as the required check. The no-op twin-workflow (same workflow AND job name, inverse filter) is a community-known workaround, NOT in any current GitHub docs edition. Treat required-status UNKNOWN as required: when branch protection/rulesets are unreadable (the common case on repos you don't admin), assume every check this workflow produces may be required.
 
@@ -4304,10 +4304,14 @@ title_template: "Superseded Runs Not Cancelled (Missing Concurrency or `cancel-i
 
 **Anti-pattern**: A workflow that triggers on `push` (or `pull_request`) for branches where developers commonly push multiple times in quick succession, but the workflow either (a) has **no top-level `concurrency:` block at all**, or (b) has a concurrency group with `cancel-in-progress: false`. In either case, every superseded push run continues to occupy a runner — wasting the entire wall-clock duration of the run for the obsolete commit.
 
-This pattern has two flavors that share the same fix mechanism:
+This pattern has three flavors around the same supersession mechanism:
 
 - **Flavor A — no concurrency block**: workflow triggers on `push` (often with `branches-ignore: [main]` or similar) but has no `concurrency:` block. Common because authors use `concurrency:` for `pull_request` workflows but forget that `push` workflows on branches need it just as much.
 - **Flavor B — `cancel-in-progress: false`**: concurrency group is set but explicitly does not cancel. Stale runs aren't cancelled when a new push arrives.
+- **Flavor C — aggregate runs after cancellation**: cancellation is already on,
+  but an aggregate job uses `if: always()` only to evaluate dependency results.
+  The superseded run still allocates a runner for that aggregate after its useful
+  jobs have been cancelled.
 
 **Detection heuristic**:
 
@@ -4325,6 +4329,15 @@ This pattern has two flavors that share the same fix mechanism:
    grep -rn 'cancel-in-progress: *false' .github/workflows/
    ```
 
+   When cancellation is enabled, also find `if: always()` jobs that `needs:`
+   other checks and whose executable steps do nothing except inspect
+   `needs.<job>.result`, `needs.*.result` or `toJSON(needs)`. Fail closed on an
+   opaque helper, ordinary action, or any build, test, cleanup or deployment
+   command: it is not proven to be an aggregate. Report it only when a complete
+   required-check read shows the aggregate is not a required status check; stay
+   quiet when it is required, when its check name is templated or carries a
+   matrix suffix, or when the read is partial or unreadable.
+
 2. **Quantify wasted compute** — a structural match alone is not enough, and neither is "a branch had ≥2 runs" (sequential commits on a long-lived / default branch each test a distinct commit and were never superseded — cancelling them saves nothing). Measure the runs that ACTUALLY RACED:
    - List runs (all statuses) via `gh api repos/{owner}/{repo}/actions/workflows/{wf}/runs?created=<30d-window>`; group by `head_branch`; within each branch, count a run as **superseded** iff a later-created run **started before it finished** (timestamp overlap of `run_started_at`…`updated_at`). Sequential, non-overlapping runs count 0.
 
@@ -4334,6 +4347,25 @@ This pattern has two flavors that share the same fix mechanism:
    Per-run compute is the **mean** job-minutes of the sampled successful runs (needs ≥3 timed runs to be stable). Extrapolate the sampled count to the 30-day volume by `monthly_volume / sampled_n` in **both** directions (a low-frequency workflow's recent slice spans >30 days and must scale down); compute the remainder ratio on the sampled window and apply it before scaling. Skip dormant workflows (`monthly_volume` 0); a run missing either timestamp contributes nothing and is disclosed as a skip. Report as a range; the superseded attribution is **inference** (the API marks no run "cancelled-by-concurrency").
 
 **Fix**: Add a top-level concurrency block, and make the *cancellation* conditional — **never** a bare `cancel-in-progress: true`. This pattern fires on workflows that trigger on `push`, and a bare `true` cancels the in-flight run on `main` or on a release tag the moment the next commit lands — a deploy, a publish, or a migration killed halfway. `cancel-in-progress` accepts an expression ([workflow syntax: `concurrency`](https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#concurrency)), so scope it to the events where a superseded run is genuinely worthless.
+
+**Flavor C fix — cancellation-aware aggregate (non-required checks only)**:
+when the aggregate is not a required status check, use
+`if: ${{ !cancelled() }}` on it and leave its step-level result check
+unchanged: the job still runs when a dependency ends `failure`, `cancelled` or
+`skipped`, so the check still rejects every result it rejects today. Test both
+halves independently: an
+ordinary failed dependency still makes the aggregate fail, while cancellation
+of the whole superseded run leaves the aggregate without a runner. A required
+aggregate, or one whose required status cannot be read, keeps `if: always()`.
+A job skipped by its `if:` reports success, and a skipped required check does
+not block merging, so on a required aggregate `!cancelled()` would let a head
+run cancelled without a replacement (a manual cancel, or a concurrency group
+shared with another event) pass with nothing validated. The runner time of a
+seconds-long aggregate on cancelled runs is the price of a cancelled head run
+never passing. Runner-minute effect is a **saving**: that aggregate job's
+compute on cancelled runs. Leave it unsized until matched cancelled runs show
+that the runner was allocated and measure its compute; do not infer a number
+from the YAML.
 
 **Default (PR-scoped)** — correct whenever the racing runs are PR runs:
 
@@ -4401,9 +4433,12 @@ Keep the continuation lines at the **same indent** as `${{` (as above). YAML fol
 **Public evidence**: [OpenClaw Crabbox pull request #2286](https://github.com/openclaw/crabbox/pull/2286)
 groups by event and pull-request number, with the run ID as the fallback for
 non-PR events, so default-branch and manual validations cannot replace one
-another in the pending slot.
+another in the pending slot. [OpenClaw Crabbox pull request #2868](https://github.com/openclaw/crabbox/pull/2868)
+replaced `if: always()` on result-aggregating jobs with `if: !cancelled()`; on a
+superseded run, all old work was cancelled and the aggregate jobs acquired no
+runner.
 
-**Tier-2 render note**: When the detector can prove overlap from real run timestamps, OPT46 is eligible for the first-class runner-minute section only if the finding is stamped `sizing_basis=measured` and carries a `tier2_neutrality` certificate. Modeled or uncertified instances stay in the residual "Also noticed" appendix.
+**Tier-2 render note**: When the detector can prove overlap from real run timestamps, OPT46 is eligible for the first-class runner-minute section only if the finding is stamped `sizing_basis=measured` and carries a `tier2_neutrality` certificate. Modeled or uncertified instances, including the static Flavor C candidate before matched cancelled-run measurement, stay in the residual "Also noticed" appendix.
 
 ---
 

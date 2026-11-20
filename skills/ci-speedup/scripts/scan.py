@@ -1681,6 +1681,133 @@ def _detect_opt45(doc: dict, raw: str) -> list[Hit]:
     )]
 
 
+# ---- OPT46 extension — always() aggregate after cancellation ----------------
+
+_OPT46_ALWAYS_RE = re.compile(r"\balways\s*\(\s*\)", re.I)
+_OPT46_CANCELLED_RE = re.compile(r"\bcancelled\s*\(\s*\)", re.I)
+_OPT46_NEEDS_RESULT_RE = re.compile(
+    r"needs(?:\.\*|\.[A-Za-z_][\w-]*|\[['\"][^'\"]+['\"]\])?\.result|"
+    r"(?:to|from)JSON\s*\(\s*needs\s*\)",
+    re.I,
+)
+# Every simple command in a verdict script must start with one of these words
+# (after shell keywords and `VAR=value` assignments are stripped). Anything
+# else, including a command chained after a result check, is possible real work.
+_OPT46_RESULT_COMMANDS = frozenset({
+    "echo", "printf", "test", "[", "[[", "exit", "set", "true", "false", ":",
+    "jq", "case", "esac", "for", "done", "fi"})
+_OPT46_SHELL_KEYWORDS = frozenset({"if", "elif", "then", "else", "do", "!"})
+_OPT46_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\S*")
+
+
+def _opt46_result_only_script(run: str) -> bool:
+    """True when every simple command in ``run`` only inspects or reports."""
+    script = run.replace("\\\n", " ")
+    if "$(" in script or "`" in script:
+        return False
+    for raw_line in script.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        # Neutralise quoted text and test brackets so their `&&`, `|` or `;`
+        # are not read as command separators.
+        line = re.sub(r"'[^']*'|\"(?:[^\"\\]|\\.)*\"", "''", line)
+        line = re.sub(r"\[\[.*?\]\]", "[[ ]]", line)
+        for command in re.split(r"&&|\|\||;;|[;|]", line):
+            words = command.split()
+            while words and (words[0] in _OPT46_SHELL_KEYWORDS
+                             or _OPT46_ASSIGNMENT_RE.fullmatch(words[0])):
+                words.pop(0)
+            if words and words[0] not in _OPT46_RESULT_COMMANDS:
+                return False
+    return True
+
+
+def _opt46_cancellation_enabled(doc: dict) -> bool:
+    concurrency = doc.get("concurrency")
+    if not isinstance(concurrency, dict):
+        return False
+    value = concurrency.get("cancel-in-progress")
+    if value is True:
+        return True
+    if not isinstance(value, str):
+        return False
+    compact = re.sub(r"\s+", "", value).lower()
+    return compact not in {"", "false", "${{false}}"}
+
+
+def _opt46_result_only_step(step: dict) -> bool:
+    """A step whose only executable work evaluates dependency results.
+
+    Fail closed on arbitrary commands and actions.  The explicit shell
+    allow-list covers the small verdict scripts GitHub workflows conventionally
+    use; an opaque helper may do real work and therefore is not an aggregate.
+    """
+    uses, run = _uses(step), _run(step)
+    try:
+        step_text = yaml.safe_dump(step)
+    except yaml.YAMLError:
+        return False
+    if uses:
+        return "alls-green" in uses and bool(_OPT46_NEEDS_RESULT_RE.search(step_text))
+    if not run or not _OPT46_NEEDS_RESULT_RE.search(step_text):
+        return False
+    return _opt46_result_only_script(run)
+
+
+def _opt46_check_context(job_name: str, job: dict) -> str | None:
+    """The status-check name this job publishes, or None when it cannot be
+    read from YAML (a templated name or a matrix suffix)."""
+    if isinstance(job.get("strategy"), dict) and job["strategy"].get("matrix"):
+        return None
+    name = job.get("name", job_name)
+    if not isinstance(name, str) or not name.strip() or "${{" in name:
+        return None
+    return name.strip()
+
+
+def _detect_opt46_cancelled_aggregate(doc: dict, raw: str) -> list[Hit]:
+    """An ``always()`` result-only aggregate still acquires a runner after a
+    top-level concurrency group cancels the superseded run.
+
+    These hits are CANDIDATES, not findings: ``!cancelled()`` is safe advice
+    only for an aggregate that is not a required status check, which the YAML
+    cannot show. ``collect_runs`` promotes a candidate only after a complete
+    required-check read proves its check is not required."""
+    if not _opt46_cancellation_enabled(doc):
+        return []
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict) or not job.get("needs"):
+            continue
+        condition = str(job.get("if") or "")
+        if (not _OPT46_ALWAYS_RE.search(condition)
+                or _OPT46_CANCELLED_RE.search(condition)):
+            continue
+        executable = [step for step in _steps(job) if _run(step) or _uses(step)]
+        if not executable or not all(_opt46_result_only_step(step) for step in executable):
+            continue
+        line = _line_of_in_job(raw, job_name, f"{job_name}:")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"aggregate job `{job_name}` uses `if: always()` only to evaluate "
+                "dependency results while the workflow cancels superseded runs, so it "
+                "can still acquire a runner after cancellation."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+            facts={
+                "opt46_check_context": _opt46_check_context(job_name, job),
+                "runner_min_unsized_reason": (
+                    "the aggregate's compute on cancelled runs is not measured from "
+                    "the workflow file"),
+            },
+        ))
+    return hits
+
+
 # ---- OPT32 — Missing paths/paths-ignore on Expensive Workflows (P7.1) --------
 
 _ON_LINE_RE = re.compile(r"^(['\"]?on['\"]?\s*:.*)$", re.M)
@@ -7065,7 +7192,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT76", "OPT108", "OPT109"})
+    "OPT39", "OPT46", "OPT76", "OPT108", "OPT109"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -11010,6 +11137,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         unreadable_jobs[(mj["path"], mj["job"])] = rec
 
     findings: list[dict[str, Any]] = []
+    opt46_aggregate_candidates: list[dict[str, Any]] = []
     finding_idx = 0
 
     # Index local composite actions that run git-history ops, so OPT28 can see a
@@ -11095,6 +11223,34 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
                 if snippet:
                     f["evidence_snippet"] = snippet
                 findings.append(f)
+
+        # OPT46's primary detector remains run-history based. Its
+        # cancellation-enabled aggregate flavor is provable from YAML, but its
+        # advice is safe only for a check that is not required, so the hits are
+        # recorded as candidates for collect_runs to promote after the
+        # required-check read. A static-only run never reports them.
+        opt46_entry = catalog_by_id.get("OPT46")
+        if opt46_entry is not None:
+            opt46_hits = _detect_opt46_cancelled_aggregate(doc, raw)
+            if unreadable_jobs:
+                opt46_hits = _hold_back_unreadable(
+                    "OPT46", opt46_hits, rel, unreadable_jobs)
+            for hit in opt46_hits:
+                finding_idx += 1
+                f = _emit(opt46_entry, hit, rel, finding_idx)
+                # OPT46's catalog class remains data-driven for its primary
+                # superseded-run overlap detector. This narrow YAML flavor is
+                # static and deliberately uncredited until run evidence sizes
+                # it, so do not mislabel it as a measured finding.
+                f["pattern_class"] = "static"
+                f.update(hit.facts)
+                f["workflow_lanes"] = workflow_lanes.get(rel, [])
+                if workflow_push_scopes.get(rel):
+                    f["workflow_push_scopes"] = workflow_push_scopes[rel]
+                snippet = hit.snippet or _raw_line(raw, hit.line)
+                if snippet:
+                    f["evidence_snippet"] = snippet
+                opt46_aggregate_candidates.append(f)
 
     # --- Cross-workflow / repo-context pass ---
     opt96_held: list[dict] = []
@@ -11254,6 +11410,10 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         # catalogued-but-undetected structural pattern is
         # honest about its coverage instead of silently never appearing.
         "catalog_structural_patterns_without_detector": structural_without_detector,
+        # OPT46 cancelled-run aggregate candidates. NOT findings: collect_runs
+        # promotes one only when a complete required-check read shows its check
+        # is not required (a skipped required check counts as passing).
+        "opt46_aggregate_candidates": opt46_aggregate_candidates,
     }
 # =============================================================================
 # CLI
