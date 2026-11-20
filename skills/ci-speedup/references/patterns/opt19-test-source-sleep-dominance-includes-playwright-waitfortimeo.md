@@ -21,6 +21,7 @@ category: 3
 - **Cypress** — `cy.wait(N)` (note: `cy.wait('@alias')` waiting on a network intercept is OK; numeric ms is the anti-pattern).
 - **Node/Jest/Vitest** — `await new Promise(r => setTimeout(r, N))`, `await sleep(N)`, `await delay(N)` in `*.test.ts` / `*.spec.ts`.
 - **Integration-test fixtures** — `sleep N` in shell wrappers, `time.sleep(N)` in Python tests, fixed waits before assertion retries.
+- **Go tests** — repeated, equally spaced wait/poll/retry messages in `go test -json` whose measured gaps dominate one long-pole test; or a race-mode test job that synchronously re-executes race-built test helpers and therefore pays the race runtime's exit sleep per child.
 
 **Detection heuristic (run ALL greps; aggregate matches; sum `sleep_ms` across every file)**:
 
@@ -46,6 +47,12 @@ grep -rn 'time\.sleep([0-9]' tests/ --include='*.py' 2>/dev/null
 **Aggregation**: Sum `sleep_ms` across EVERY matched file. Compute total sleep per full test run (if test is a single script, sum is the per-run cost; if test is sharded, divide by shard count only if each shard runs a non-overlapping subset). Report the per-run total and the source-of-truth file list in `evidence`.
 
 **Fix**: Replace with event-driven waits. For Playwright: `page.waitForSelector`, `page.waitForLoadState`, `expect(locator).toBeVisible({ timeout })`. For Cypress: `cy.wait('@alias')` on route aliases. For DB/service readiness: ping the service in a bounded retry loop (e.g. `@testcontainers` readiness probes).
+
+For a Go test that reaches production poll intervals or grace periods, run the waiting test on `testing/synctest`'s virtual clock. If that dependency cannot use the virtual clock, expose only the interval as a package variable that the test shortens and restores with `t.Cleanup`; keep the production default and timeout assertions unchanged. For synchronous race-built helper children, preserve every inherited `GORACE` option and append `atexit_sleep_ms=0` only to the child environment. Do not apply that override to the parent race job or asynchronous children.
+
+The Go timing route fails closed: it needs a representative long-pole log with structured `go test -json` test elapsed time and at least two consistent fixed intervals whose total is at least half of that test and one fifth of the job. Slow tests with irregular progress stay quiet. A race-helper route needs the `-race` command and at least three logged synchronous test-binary re-execs, and stays quiet when `atexit_sleep_ms=0` is already present. The report sizes only the measured fixed-wait ceiling and states its runner-minute saving from one representative run and the workflow's 30-day run count.
+
+Public examples shorten a detached-seed fixture's production poll and grace waits in [openclaw/crabbox#2969](https://github.com/openclaw/crabbox/pull/2969), move fixture waits to virtual time in [openclaw/crabbox#2455](https://github.com/openclaw/crabbox/pull/2455), and remove the race exit sleep only for synchronous helper children in [openclaw/crabbox#1761](https://github.com/openclaw/crabbox/pull/1761).
 
 **Real-world example (mastra golden 2026-04-09)**: 37 `page.waitForTimeout()` calls across `packages/playground/e2e/tests/` totaling 65,500ms per full run. On E2E kitchen-sink (2,368 runs/mo × 65.5s/run) this is 2,585 min/mo. Initial detection required grepping `page.waitForTimeout` in the `packages/playground/e2e/` scope — looking only at `stores/*.test.ts` misses it entirely.
 

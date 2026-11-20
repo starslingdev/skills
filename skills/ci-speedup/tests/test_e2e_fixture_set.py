@@ -645,6 +645,72 @@ def test_runtime_typescript_loader_states_signed_or_unsized_runner_minute_effect
         assert "not sized because" not in finding["size_note"]
 
 
+def test_go_json_fixed_waits_on_the_long_pole_produce_opt19_but_irregular_work_stays_quiet(
+        monkeypatch, tmp_path):
+    """A repeated production poll interval, not merely a slow Go test, is OPT19."""
+    positive = tmp_path / "go-fixed-wait"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    responses_path = positive / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    base = datetime(2026, 1, 28, tzinfo=timezone.utc)
+    rows = [{"Time": (base + timedelta(seconds=offset)).isoformat(),
+             "Action": "output", "Package": "example/project/cli",
+             "Test": "TestHydrationWait", "Output": "waiting for hydration marker\n"}
+            for offset in (0, 60, 120, 180, 240, 300)]
+    rows.append({"Time": (base + timedelta(seconds=360)).isoformat(),
+                 "Action": "pass", "Package": "example/project/cli",
+                 "Test": "TestHydrationWait", "Elapsed": 360.0})
+    recorded["logs"]["1103"] = "\n".join([
+        "go test -json ./internal/cli", *(json.dumps(row) for row in rows)])
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+
+    run_root = tmp_path / "run-go-fixed-wait"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(positive, monkeypatch, run_root, max_runs=20)
+    findings = [row for row in doc["findings"] if row.get("pattern") == "OPT19"]
+    assert findings, "expected measured Go fixed-wait guidance"
+    finding = findings[0]
+    assert finding.get("go_wait_kind") == "poll-interval", finding
+    assert finding.get("go_fixed_wait_s") == 300.0, finding
+    assert "testing/synctest" in finding.get("fix_strategy", ""), finding
+    assert "runner-minute saving:" in finding.get("size_note", ""), finding
+    assert "Go Test Fixed Wait Dominance" in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    negative = tmp_path / "go-irregular-work"
+    shutil.copytree(positive, negative)
+    negative_responses = negative / "responses.json"
+    recorded = json.loads(negative_responses.read_text(encoding="utf-8"))
+    for index, line in enumerate(recorded["logs"]["1103"].splitlines()):
+        if '"Action": "output"' in line:
+            row = json.loads(line)
+            row["Output"] = f"processed fixture batch {index}\n"
+            recorded["logs"]["1103"] = recorded["logs"]["1103"].replace(
+                line, json.dumps(row))
+    negative_responses.write_text(json.dumps(recorded), encoding="utf-8")
+    negative_root = tmp_path / "run-go-irregular-work"
+    negative_root.mkdir()
+    negative_doc, _negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT19"]
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
+def test_go_race_helper_exit_wait_requires_reexec_and_no_existing_override():
+    parser = getattr(cr, "_opt19_go_wait_fact", lambda *_args, **_kwargs: None)
+    helper = {"Action": "output", "Package": "example/project/cli",
+              "Test": "TestHelper", "Output": "exec test helper -test.run=TestChild\n"}
+    log = "\n".join(["go test -race -json ./internal/cli"]
+                    + [json.dumps(helper) for _ in range(4)])
+    fact = parser(log, 300.0)
+    assert fact is not None, "expected race-helper exit-wait evidence"
+    assert fact.get("kind") == "race-helper-exit", fact
+    assert fact.get("fixed_wait_s") == 4.0, fact
+    assert parser("GORACE='history_size=2 atexit_sleep_ms=0' " + log, 300.0) is None
+
+
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
     prose = """\
 2026-01-28T00:00:00Z ##[group]Run pnpm test

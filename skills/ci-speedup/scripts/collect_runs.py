@@ -29673,6 +29673,7 @@ def _persist_pole_logs(
         opt13_fact = _opt13_build_in_quality_log(log)
         runtime_ts_loader = (leaf0 if leaf0.get("fix_key") == "runtime-ts-transpilation"
                              else None)
+        go_fixed_wait = _opt19_go_wait_fact(log, repr_dur)
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
             "leaf_fix_key": leaf0.get("fix_key"),
@@ -29684,6 +29685,7 @@ def _persist_pole_logs(
             **({"opt13_build_in_script": opt13_fact} if opt13_fact else {}),
             **({"runtime_ts_loader": runtime_ts_loader}
                if runtime_ts_loader else {}),
+            **({"go_fixed_wait": go_fixed_wait} if go_fixed_wait else {}),
         })
         logger.debug("saved pole log for %s -> %s (closest to P50 of %d qualifying "
                      "runs)", job, fn, len(qual))
@@ -29831,6 +29833,180 @@ def _detect_runtime_ts_transpilation(
         finding["runtime_loader_profile_s"] = float(seconds)
         finding["runtime_loader_job_s"] = float(job_seconds)
         finding["runtime_loader"] = str(fact.get("loader") or "runtime TypeScript loader")
+        if isinstance(runs, int):
+            finding["workflow_runs_30d"] = runs
+        out.append(finding)
+    return out
+
+
+_OPT19_GO_MIN_INTERVALS = 2
+_OPT19_GO_MIN_TEST_SHARE = 0.50
+_OPT19_GO_MIN_JOB_SHARE = 0.20
+_OPT19_GO_RACE_HELPER_MIN_SPAWNS = 3
+_OPT19_GO_WAIT_OUTPUT_RE = _re.compile(
+    r"\b(?:wait(?:ing)?|poll(?:ing)?|retry(?:ing)?|grace|settling)\b",
+    _re.IGNORECASE,
+)
+_OPT19_GO_RACE_COMMAND_RE = _re.compile(
+    r"\bgo\s+test\b[^\n]*?(?:^|\s)-race(?:\s|$)", _re.IGNORECASE)
+_OPT19_GO_HELPER_RE = _re.compile(
+    r"\b(?:exec|spawn(?:ed|ing)?|helper)\b[^\n]*?-test\.run=", _re.IGNORECASE)
+
+
+def _opt19_go_json_rows(log: str) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for raw in log.splitlines():
+        start = raw.find("{")
+        if start < 0:
+            continue
+        try:
+            row = json.loads(raw[start:])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def _opt19_go_wait_fact(log: str, job_duration_s: float | None) -> dict[str, Any] | None:
+    """Measured fixed waits in ``go test -json`` output, or race helper exits.
+
+    Poll waits require repeated, equally spaced wait messages inside one test,
+    plus the test's own elapsed record. Merely slow or irregular tests fail
+    closed. Race-helper exits use Go's documented one-second default only when
+    the race command and synchronous test-binary re-execs are both visible.
+    """
+    if not isinstance(job_duration_s, (int, float)) or job_duration_s <= 0:
+        return None
+    rows = _opt19_go_json_rows(log)
+    elapsed: dict[tuple[str, str], float] = {}
+    messages: dict[tuple[str, str, str], list[float]] = {}
+    helper_spawns = 0
+    for row in rows:
+        package = str(row.get("Package") or "")
+        test = str(row.get("Test") or "")
+        action = str(row.get("Action") or "")
+        output = str(row.get("Output") or "").strip()
+        key = (package, test)
+        if action in {"pass", "fail"} and test:
+            value = row.get("Elapsed")
+            if isinstance(value, (int, float)) and value > 0:
+                elapsed[key] = float(value)
+        if action == "output" and test and _OPT19_GO_WAIT_OUTPUT_RE.search(output):
+            stamp = _parse_dt(row.get("Time"))
+            if stamp is not None:
+                messages.setdefault((package, test, output), []).append(stamp.timestamp())
+        if action == "output" and _OPT19_GO_HELPER_RE.search(output):
+            helper_spawns += 1
+
+    candidates: list[dict[str, Any]] = []
+    for (package, test, message), stamps in messages.items():
+        ordered = sorted(set(stamps))
+        gaps = [later - earlier for earlier, later in zip(ordered, ordered[1:])
+                if later > earlier]
+        if len(gaps) < _OPT19_GO_MIN_INTERVALS:
+            continue
+        interval = statistics.median(gaps)
+        if max(gaps) - min(gaps) > max(0.25, interval * 0.10):
+            continue
+        fixed_s = sum(gaps)
+        test_s = elapsed.get((package, test))
+        if (not isinstance(test_s, (int, float)) or fixed_s > test_s
+                or fixed_s / test_s < _OPT19_GO_MIN_TEST_SHARE
+                or fixed_s / float(job_duration_s) < _OPT19_GO_MIN_JOB_SHARE):
+            continue
+        candidates.append({
+            "kind": "poll-interval", "package": package, "test": test,
+            "fixed_wait_s": round(fixed_s, 2),
+            "interval_s": round(interval, 2), "wait_count": len(gaps),
+            "test_elapsed_s": round(test_s, 2), "message": message,
+        })
+    if candidates:
+        return max(candidates, key=lambda row: float(row["fixed_wait_s"]))
+
+    if (_OPT19_GO_RACE_COMMAND_RE.search(log)
+            and not _re.search(r"\batexit_sleep_ms\s*=\s*0\b", log)
+            and helper_spawns >= _OPT19_GO_RACE_HELPER_MIN_SPAWNS):
+        return {
+            "kind": "race-helper-exit", "fixed_wait_s": float(helper_spawns),
+            "helper_spawns": helper_spawns,
+        }
+    return None
+
+
+def _detect_opt19_go_waits(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Turn measured Go wait facts on drilled long poles into OPT19 findings."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    for entry in pole_logs:
+        fact = entry.get("go_fixed_wait")
+        if not isinstance(fact, dict):
+            continue
+        seconds = fact.get("fixed_wait_s")
+        if not isinstance(seconds, (int, float)) or seconds <= 0:
+            continue
+        wf = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        runs = volume_by_workflow.get(wf)
+        runner_min = (round(float(seconds) * runs / 60.0, 1)
+                      if isinstance(runs, int) and runs > 0 else None)
+        if fact.get("kind") == "poll-interval":
+            test = str(fact.get("test") or "Go test")
+            evidence = (
+                f"`{test}` spends {float(seconds):.1f}s in "
+                f"{int(fact.get('wait_count') or 0)} measured "
+                f"{float(fact.get('interval_s') or 0):.1f}s fixed poll intervals "
+                "in the representative long-pole log."
+            )
+            fix = (
+                "Run the waiting test on `testing/synctest`'s virtual clock. If the "
+                "dependency cannot use that clock, expose only the interval as a "
+                "package variable that this test shortens and restores with "
+                "`t.Cleanup`; retain the production value and timeout assertions."
+            )
+        else:
+            evidence = (
+                f"The representative race-mode long-pole log shows "
+                f"{int(fact.get('helper_spawns') or 0)} synchronous test-helper "
+                "re-execs without an `atexit_sleep_ms=0` child override."
+            )
+            fix = (
+                "Preserve every existing `GORACE` option and append "
+                "`atexit_sleep_ms=0` only in synchronous helper-child environments; "
+                "keep the parent job and asynchronous children unchanged."
+            )
+        if runner_min is not None:
+            size_note = (
+                f"runner-minute saving: at most {runner_min:.1f}/month (measured "
+                f"fixed-wait ceiling from 1 representative run x {runs} workflow "
+                "runs in 30 days)"
+            )
+        elif runs == 0:
+            size_note = ("runner-minute saving: unsized (the 30-day volume window "
+                         "holds no runs of this workflow)")
+        else:
+            size_note = ("runner-minute saving: unsized (30-day run volume for this "
+                         "workflow is unavailable)")
+        idx += 1
+        finding = _new_finding(
+            "OPT19", "HIGH", "Go Test Fixed Wait Dominance", wf, job, evidence,
+            fix, "opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout",
+            idx, wc_p50=round(float(seconds), 1), rm=runner_min,
+            size_note=size_note, realization="direct",
+            measured_evidence=_measured_evidence(
+                ["Job", "Measured fixed wait", "Representative run"],
+                [[f"`{job}`", f"{float(seconds):.1f}s",
+                  f"[job log]({entry.get('html_url')})" if entry.get("html_url")
+                  else "captured job log"]],
+                evidence,
+                "The fixed wait is a measured ceiling; re-measure the same test after the change."),
+        )
+        finding["sizing_basis"] = "measured"
+        finding["go_wait_kind"] = fact.get("kind")
+        finding["go_fixed_wait_s"] = round(float(seconds), 1)
         if isinstance(runs, int):
             finding["workflow_runs_30d"] = runs
         out.append(finding)
@@ -34353,6 +34529,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         new = _detect_runtime_ts_transpilation(pole_logs, vol_by_wf, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        new = _detect_opt19_go_waits(pole_logs, vol_by_wf, next_id)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         findings_doc["findings"] = findings
