@@ -726,6 +726,7 @@ def test_go_parallel_source_proof_fails_closed_on_shared_or_outer_state(tmp_path
     source = """\
 package server
 import "testing"
+var cases = []struct{ name string }{{"a"}, {"b"}}
 func TestIsolated(t *testing.T) {
     for _, tc := range cases { t.Run(tc.name, func(t *testing.T) {
         // t.Parallel() is documentation, not an opt-in.
@@ -770,6 +771,179 @@ func TestSetenvConfig(t *testing.T) {
                    "TestSetenvConfig"})
     assert set(found) == {"TestIsolated", "TestSetenvConfig"}
     assert found["TestSetenvConfig"]["setenv_blocker"] is True
+
+
+_GO_ISOLATED_CASE = """\
+        root := t.TempDir()
+        store := newStore(root)
+        srv := httptest.NewServer(newHandler(Config{Store: store}))
+        defer srv.Close()
+        exercise(t, srv.URL)
+"""
+
+
+def _go_test_func(name: str, before: str = "", inside: str = _GO_ISOLATED_CASE) -> str:
+    return (f"func {name}(t *testing.T) {{\n{before}"
+            "    cases := []struct{ name string }{{\"a\"}, {\"b\"}}\n"
+            "    for _, tc := range cases {\n"
+            "        tc := tc\n"
+            "        t.Run(tc.name, func(t *testing.T) {\n"
+            f"{inside}"
+            "        })\n    }\n}\n")
+
+
+def _go_entry(rows: list[dict]) -> dict:
+    return {"job": "test", "workflow_file": ".github/workflows/ci.yml",
+            "html_url": "https://example.invalid/run/1", "duration_s": 300.0,
+            "go_slow_tests": rows}
+
+
+def test_go_slow_test_results_keep_the_reported_package():
+    log = """\
+2026-01-28T00:00:00Z ##[group]Run go test -v ./...
+2026-01-28T00:00:01Z === RUN   TestHTTPGroups
+2026-01-28T00:00:20Z --- PASS: TestHTTPGroups (19.00s)
+2026-01-28T00:00:20Z PASS
+2026-01-28T00:00:20Z ok  \texample.invalid/m/a\t19.10s
+2026-01-28T00:00:21Z === RUN   TestHTTPGroups
+2026-01-28T00:00:45Z --- PASS: TestHTTPGroups (24.00s)
+2026-01-28T00:00:45Z PASS
+2026-01-28T00:00:45Z ok  \texample.invalid/m/b\t24.10s
+"""
+    assert cr._go_slow_test_results(log) == [
+        {"test": "TestHTTPGroups", "duration_s": 19.0, "package": "example.invalid/m/a"},
+        {"test": "TestHTTPGroups", "duration_s": 24.0, "package": "example.invalid/m/b"},
+    ]
+
+
+def test_go_parallel_source_proof_matches_the_measured_package(tmp_path):
+    """Greptile P1: a same-named test in another package must not supply the proof."""
+    (tmp_path / "go.mod").write_text("module example.invalid/m\n\ngo 1.22\n")
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "a_test.go").write_text(
+        "package a\n" + _go_test_func("TestHTTPGroups"))
+    (tmp_path / "b" / "b_test.go").write_text(
+        "package b\n" + _go_test_func(
+            "TestHTTPGroups", before="    shared := openSharedDB()\n",
+            inside="        exercise(t, shared)\n"))
+    measured_b = _go_entry([{"test": "TestHTTPGroups", "duration_s": 24.0,
+                             "package": "example.invalid/m/b"}])
+    assert cr._detect_go_test_parallelism([measured_b], tmp_path, 0) == []
+    unknown = _go_entry([{"test": "TestHTTPGroups", "duration_s": 24.0}])
+    assert cr._detect_go_test_parallelism([unknown], tmp_path, 0) == []
+    measured_a = _go_entry([{"test": "TestHTTPGroups", "duration_s": 19.0,
+                             "package": "example.invalid/m/a"}])
+    found = cr._detect_go_test_parallelism([measured_a], tmp_path, 0)
+    assert [f["go_parallel_candidate"]["file"] for f in found] == ["a/a_test.go"]
+
+
+@pytest.mark.parametrize("before, inside", [
+    # Greptile P1: case-local constructors bound to a shared root.
+    ("", _GO_ISOLATED_CASE.replace("newStore(root)", "newStore(sharedRoot)")),
+    # A parent-scope resource captured by the case is shared across cases.
+    ("    db := openSharedDB()\n",
+     _GO_ISOLATED_CASE.replace("exercise(t, srv.URL)", "exercise(t, srv.URL, db)")),
+    # Greptile P1: t.Chdir panics in a parallel test.
+    ("", _GO_ISOLATED_CASE + "        t.Chdir(root)\n"),
+    # t.Setenv on the parent forbids t.Parallel() in every subtest.
+    ('    t.Setenv("MODE", "test")\n', _GO_ISOLATED_CASE),
+    # A parent defer runs before paused parallel subtests resume.
+    ("    defer cleanupAll()\n", _GO_ISOLATED_CASE),
+    # Registering on the global mux is process-global.
+    ("", _GO_ISOLATED_CASE + '        http.HandleFunc("/x", nil)\n'),
+])
+def test_go_parallel_source_proof_withholds_shared_or_global_cases(
+        tmp_path, before, inside):
+    (tmp_path / "s_test.go").write_text(
+        "package s\n" + _go_test_func("TestCase", before=before, inside=inside))
+    assert cr._go_parallel_source_candidates(tmp_path, {"TestCase"}) == {}
+
+
+def test_go_parallel_source_proof_withholds_package_level_state(tmp_path):
+    (tmp_path / "vars.go").write_text("package s\n\nvar sharedRoot = \"/tmp/x\"\n")
+    (tmp_path / "s_test.go").write_text("package s\n" + _go_test_func(
+        "TestCase", inside=_GO_ISOLATED_CASE + "        use(sharedRoot)\n"))
+    assert cr._go_parallel_source_candidates(tmp_path, {"TestCase"}) == {}
+
+
+_GO_TABLE_CASE = """\
+        root := t.TempDir()
+        store := newStore(root)
+        srv := httptest.NewServer(newHandler(Config{Store: store, DB: tc.db}))
+        defer srv.Close()
+"""
+
+
+@pytest.mark.parametrize("package_src, test_src", [
+    # A parent resource placed in every table row is shared across cases.
+    ("", "func TestCase(t *testing.T) {\n"
+         "    shared := openSharedDB()\n"
+         "    cases := []struct{ name string; db *DB }{{\"a\", shared}, {\"b\", shared}}\n"
+         "    for _, tc := range cases {\n"
+         "        t.Run(tc.name, func(t *testing.T) {\n" + _GO_TABLE_CASE +
+         "        })\n    }\n}\n"),
+    # A package-level table built from a package-level resource.
+    ("var globalDB = open()\n"
+     "var pkgCases = []struct{ name string; db *DB }{{\"a\", globalDB}}\n",
+     "func TestCase(t *testing.T) {\n"
+     "    for _, tc := range pkgCases {\n"
+     "        t.Run(tc.name, func(t *testing.T) {\n" + _GO_TABLE_CASE +
+     "        })\n    }\n}\n"),
+    # A table row whose resource is opened once, when the table is built.
+    ("", "func TestCase(t *testing.T) {\n"
+         "    cases := []struct{ name string; db *DB }{{\"a\", openDB()}}\n"
+         "    for _, tc := range cases {\n"
+         "        t.Run(tc.name, func(t *testing.T) {\n" + _GO_TABLE_CASE +
+         "        })\n    }\n}\n"),
+    # A table returned by a helper cannot be read.
+    ("", "func TestCase(t *testing.T) {\n"
+         "    for _, tc := range makeCases() {\n"
+         "        t.Run(tc.name, func(t *testing.T) {\n" + _GO_TABLE_CASE +
+         "        })\n    }\n}\n"),
+])
+def test_go_parallel_source_proof_withholds_shared_table_rows(
+        tmp_path, package_src, test_src):
+    (tmp_path / "g.go").write_text("package s\n" + package_src)
+    (tmp_path / "s_test.go").write_text("package s\n" + test_src)
+    assert cr._go_parallel_source_candidates(tmp_path, {"TestCase"}) == {}
+
+
+def test_go_parallel_source_proof_accepts_plain_literal_tables(tmp_path):
+    (tmp_path / "g.go").write_text(
+        "package s\nvar pkgCases = []struct{ name string; wait time.Duration }"
+        "{{\"a\", time.Second}, {\"b\", 2 * time.Second}}\n")
+    (tmp_path / "s_test.go").write_text(
+        "package s\nfunc TestCase(t *testing.T) {\n"
+        "    for _, tc := range pkgCases {\n"
+        "        t.Run(tc.name, func(t *testing.T) {\n" + _GO_ISOLATED_CASE +
+        "        })\n    }\n}\n")
+    assert set(cr._go_parallel_source_candidates(tmp_path, {"TestCase"})) == {"TestCase"}
+
+def test_go_parallel_isolated_control_still_qualifies(tmp_path):
+    (tmp_path / "s_test.go").write_text("package s\n" + _go_test_func("TestCase"))
+    assert set(cr._go_parallel_source_candidates(tmp_path, {"TestCase"})) == {"TestCase"}
+
+
+def test_go_parallel_setenv_branch_states_only_what_the_source_proves(tmp_path):
+    inside = """\
+        cfg := TestConfig{Name: tc.name}
+        srv := httptest.NewServer(newHandler(cfg))
+        defer srv.Close()
+        t.Setenv("ENDPOINT", srv.URL)
+"""
+    (tmp_path / "s_test.go").write_text(
+        "package s\n" + _go_test_func("TestCase", inside=inside))
+    found = cr._detect_go_test_parallelism(
+        [_go_entry([{"test": "TestCase", "duration_s": 30.0}])], tmp_path, 0)
+    assert len(found) == 1
+    finding = found[0]
+    assert "temp tree, store" not in finding["evidence"]
+    assert "config and test server" in finding["evidence"]
+    # Removing t.Setenv is only safe when the code under test takes the value
+    # from the config; otherwise the case must stay sequential.
+    assert "still reads" in finding["fix_strategy"]
+    assert "loop variable" in finding["fix_strategy"]
 
 
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
