@@ -2792,6 +2792,23 @@ def test_opt46_result_only_verdict_shapes_still_fire(
     assert "OPT46" in _scan_one(tmp_path, _opt46_aggregate_workflow(run_block))
 
 
+def test_opt46_aggregate_heading_states_an_unsized_saving(tmp_path: Path):
+    """The saving is real but unsized: the group heading must say so with its
+    reason, never `no bill saving`."""
+    import blocking_path as bp
+
+    _write_workflow(tmp_path, "ci.yml", _opt46_aggregate_workflow(
+        'test "$LINT_RESULT" = success'))
+    scanned = _scan(tmp_path)
+    finding = next(f for f in scanned["findings"] if f["pattern"] == "OPT46")
+    assert finding["runner_min_unsized_reason"]
+    heading = next(
+        line for line in bp.render(scanned).splitlines()
+        if line.startswith("<summary><strong>OPT46 - "))
+    assert "no bill saving" not in heading
+    assert "runner-minute saving: unsized (" in heading
+
+
 def test_opt5_suppressed_when_pnpm_action_setup_caches(tmp_path: Path):
     neg = """name: CI
 on: push

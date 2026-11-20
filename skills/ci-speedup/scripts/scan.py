@@ -1785,6 +1785,9 @@ def _detect_opt46_cancelled_aggregate(doc: dict, raw: str) -> list[Hit]:
             ),
             match_text=job_name,
             snippet=_block_lines(raw, line),
+            facts={"runner_min_unsized_reason": (
+                "the aggregate's compute on cancelled runs is not measured from "
+                "the workflow file")},
         ))
     return hits
 
