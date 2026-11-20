@@ -563,6 +563,16 @@ def test_opt13_requires_a_separate_validation_build_and_clean_source_guard(tmp_p
             "declarations": {"steps": [{"run": "tsc --emitDeclarationOnly"}]},
         }}}, "ci.yml", "test") is None
     assert cr._opt13_validation_build_job(
+        {"ci.yml": {
+            "defaults": {"run": {"working-directory": "packages/app"}},
+            "jobs": {
+                "test": {"steps": [{"run": "pnpm test"}]},
+                "artifacts": {"steps": [{"run": "vite build",
+                                            "working-directory": "packages/app"}]},
+            },
+        }}, "ci.yml", "test") == {
+            "workflow_file": "ci.yml", "job": "artifacts"}
+    assert cr._opt13_validation_build_job(
         {"ci.yml": {"jobs": {
             "test": {"steps": [{"run": "pnpm test",
                                    "working-directory": "packages/app"}]},
@@ -620,6 +630,40 @@ def test_opt13_source_guard_catches_static_and_multiline_imports(tmp_path):
         "const runtime = require(\n  '../dist/runtime.js'\n);\n",
         encoding="utf-8",
     )
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+
+def test_opt13_source_guard_catches_computed_and_template_imports(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    source = src / "runtime.ts"
+    source.write_text(
+        "const runtime = require(path.resolve('dist/runtime.js'));\n",
+        encoding="utf-8",
+    )
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+    source.write_text(
+        "const runtime = await import(`../dist/runtime.js`);\n",
+        encoding="utf-8",
+    )
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
+
+
+def test_opt13_source_guard_withholds_an_unclassified_output_dir_literal(tmp_path):
+    """The call balancer does not read past `require('node:path')`, but a bare
+    `'dist/'` literal is still an output-path mention the guard cannot
+    classify (it may feed a later load), so the finding is withheld: a false
+    "safe" is worse than a withheld finding."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "runtime.ts").write_text(
+        "const path = require('node:path')\n"
+        "const outputDir = 'dist/'\n",
+        encoding="utf-8",
+    )
+    assert not cr._opt13_call_loads_compiled_output(
+        (src / "runtime.ts").read_text(encoding="utf-8"))
     assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
 
 
