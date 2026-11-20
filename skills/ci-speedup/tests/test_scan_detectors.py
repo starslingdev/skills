@@ -1436,8 +1436,8 @@ jobs:
     finding = findings[0]
     assert finding["affected_jobs"] == ["failure-report"]
     assert "failure() || cancelled()" in finding["evidence"]
-    assert "skipped reporter as success" in finding["evidence"]
-    assert "Runner-minute effect: saving" in finding["evidence"]
+    assert "`needs.failure-report.result` of `success` or `skipped`" in finding["evidence"]
+    assert "runner-minute saving: unsized (it saves the reporter's compute" in finding["evidence"]
 
 
 def test_opt109_failure_only_reporter_stays_quiet(tmp_path: Path):
@@ -1509,6 +1509,211 @@ jobs:
       - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
 """
     assert "OPT109" not in _scan_one(tmp_path, workflow)
+
+
+_OPT109_CHECKS = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+"""
+
+
+def _opt109_findings(tmp_path: Path, workflow: str) -> list[dict]:
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    data = _scan(tmp_path)
+    # A quiet negative must be quiet because the waste is absent, never because
+    # the fixture failed to parse.
+    assert data["scan_incomplete"] == []
+    return [row for row in data["findings"] if row["pattern"] == "OPT109"]
+
+
+def test_opt109_mixed_run_block_with_real_work_is_not_a_reporter(tmp_path: Path):
+    # One `run:` block that cleans up and then appends a summary does real work.
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          npm run cleanup-resources
+          echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_results_reporter_without_failure_scope_stays_quiet(tmp_path: Path):
+    # A job that posts every run's results is wanted on green runs too.
+    workflow = _OPT109_CHECKS + """  results-comment:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr comment "$PR" --body "lint ${{ needs.lint.result }}, test ${{ needs.test.result }}"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_failure_gated_steps_identify_a_reporter(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  notify:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure')
+        run: gh pr comment "$PR" --body "A required check failed"
+"""
+    findings = _opt109_findings(tmp_path, workflow)
+    assert [row["affected_jobs"] for row in findings] == [["notify"]]
+
+
+def test_opt109_direct_result_comparison_guard_stays_quiet(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always() && (needs.lint.result == 'failure' || needs.test.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_reporter_clearing_stale_failure_comment_stays_quiet(tmp_path: Path):
+    # On a green rerun this job edits the earlier failure comment; skipping it
+    # would leave a stale failure report behind.
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr comment "$PR" --edit-last --body "Checks ${{ needs.test.result }}"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_shared_setup_upstream_is_covered_transitively(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci
+  lint:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    findings = _opt109_findings(tmp_path, workflow)
+    assert [row["affected_jobs"] for row in findings] == [["failure-report"]]
+
+
+def test_opt109_reporter_missing_an_independent_check_stays_quiet(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run docs
+  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_evidence_says_how_the_downstream_gate_accepts_the_skip(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+  gate:
+    needs: [lint, test, failure-report]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.failure-report.result }}" = success
+"""
+    [finding] = _opt109_findings(tmp_path, workflow)
+    evidence = finding["evidence"]
+    # The gate is named, keeps a status function, and accepts `skipped` from the
+    # reporter only while every workload check must still succeed.
+    assert "`gate`" in evidence
+    assert "keep `if: always()`" in evidence
+    assert "`needs.failure-report.result` of `success` or `skipped`" in evidence
+    assert "every workload check to be `success`" in evidence
+    assert "a skipped job reports success" in evidence
+    # Its current success-only comparison is called out as the line to change.
+    assert "currently compares a result against `success`" in evidence
+    # The gate waits on the reporter, so the skip also shortens the healthy path.
+    assert "healthy path to `gate`" in evidence
+    assert "runner-minute saving: unsized (" in evidence
+
+
+def test_opt109_gate_without_status_function_is_told_to_add_one(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+  gate:
+    needs: [lint, test, failure-report]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+"""
+    [finding] = _opt109_findings(tmp_path, workflow)
+    assert "`gate` needs this reporter: add `if: always()`" in finding["evidence"]
+
+
+def test_opt109_aggregate_gate_that_fails_the_run_is_not_a_reporter(tmp_path: Path):
+    # A gate that exits non-zero is the required check itself, not a reporter.
+    workflow = _OPT109_CHECKS + """  fail-if-any-check-failed:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "A required check failed"
+            exit 1
+          fi
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_cancelled_exclusion_is_preserved_in_the_recommendation(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    [finding] = _opt109_findings(tmp_path, workflow)
+    assert "use `if: failure()`" in finding["evidence"]
 
 
 def test_opt108_unrelated_job_author_guard_does_not_cover_body_filter(tmp_path: Path):
