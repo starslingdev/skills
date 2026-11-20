@@ -659,7 +659,7 @@ or a balanced package set stays unclassified.
 
 **Proposed decision:** **Keep 60%.**
 
-**Approval status:** awaiting owner approval.
+**Approval status:** owner-approved 2026-11-20 (60%).
 
 ### `go-fixed-wait-thresholds`
 
@@ -1161,6 +1161,7 @@ implementation lands.
 - [ ] Approve 100 completed PR commits over at least 5 days.
 - [ ] Approve the 12-page cap with early stopping and the 1,200 job-list read cap.
 - [ ] Approve the conditional 60-second bookkeeping rule.
+- [x] Approve the 60% `go-package-dominance` share (owner-approved 2026-11-20).
 - [ ] Approve 5 last-finisher observations for supported ranking/grouping.
 - [ ] Approve two-sided 95% Wilson intervals and overlap as unsupported order.
 - [ ] Confirm #305, #306, and #311 may merge after their implementations match
