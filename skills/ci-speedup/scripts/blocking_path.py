@@ -4740,6 +4740,13 @@ _VERIFICATION_BAR_LINES = [
 
 
 _FIX_META: dict[str, dict[str, Any]] = {
+    "review-once-after-quiet-window": {
+        "cause": "An automated reviewer runs on every pull-request head update, so nearby fix-up pushes repeat the whole review.",
+        "look": "Inspect the workflow's pull-request activity types, the review job, and any explicit re-review command or external quiet-window admission before changing when reviews run.",
+        "constraints": "Preserve the repository's review policy and required status. Do not hold a hosted runner merely to debounce. A manual re-review route must retain its current authorization and exact-head checks.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request"],
+        "deliver": "Review once when a pull request opens or becomes ready, debounce later head updates before runner allocation, or require an authorized explicit re-review command. Exercise open, ready, synchronize and explicit re-review paths, then measure the avoided review-job compute before claiming a numeric saving.",
+    },
     "failure-reporter-on-failure": {
         "cause": "A failure-only report job uses `if: always()`, so healthy runs allocate a runner even though there is no failure to report.",
         "look": "Inspect the reporter's `needs`, job condition and reporting steps (including any script it runs, for a healthy-run path such as clearing a stale failure comment), then trace how its result feeds every final required aggregate gate.",
