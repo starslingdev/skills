@@ -3049,7 +3049,7 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
 
 _RUNTIME_TS_LOADER_COMMAND_RE = re.compile(
     r"^(?:##\[group\]Run\s+|##\[command\]|[>$+]\s+)?(?:"
-    r"(?:npx\s+|pnpm\s+(?:exec\s+)?|yarn\s+|bunx\s+)?(?:tsx|ts-node)\b|"
+    r"(?:npx\s+|pnpm\s+(?:exec\s+)?|yarn\s+|bunx\s+)?(?:tsx|ts-node(?:-esm)?)(?=\s|$)|"
     r"node\b[^\n]*(?:--loader(?:=|\s+)|--import(?:=|\s+))"
     r"(?:tsx|ts-node(?:/esm)?|jiti)\b)",
     re.IGNORECASE,

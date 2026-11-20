@@ -605,6 +605,18 @@ CI_SPEEDUP_RUNTIME_TS_PROFILE_V1 loader=jiti self_ms=400000 profile=CPU.20260128
 """
     assert bp._parse_log(impossible, job_duration_s=200.0) is None
 
+    # A package script whose NAME starts with a loader name is not a direct
+    # loader invocation; the loader binary itself (and ts-node-esm) still is.
+    profile = ("CI_SPEEDUP_RUNTIME_TS_PROFILE_V1 loader=tsx self_ms=90000 "
+               "profile=CPU.cpuprofile sha256=" + "a" * 64)
+    for script in ("yarn tsx-lint", "pnpm ts-node-report", "npx tsx:check"):
+        log = f"##[group]Run {script}\n{profile}\n"
+        assert bp._parse_log(log, job_duration_s=300.0) is None, script
+    for direct in ("npx tsx scripts/a.ts", "ts-node-esm scripts/a.ts", "tsx"):
+        log = f"##[group]Run {direct}\n{profile}\n"
+        leaf = bp._parse_log(log, job_duration_s=300.0)
+        assert leaf and leaf["fix_key"] == "runtime-ts-transpilation", direct
+
 
 def test_runtime_typescript_loader_states_signed_or_unsized_runner_minute_effect():
     """The card words a saving as a saving, or says why it is unsized."""
