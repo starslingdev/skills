@@ -2646,6 +2646,156 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
     return hits
 
 
+# ---- OPT114 — duplicate npm advisory lookups inside CI image builds ---------
+
+_OPT114_NPM_COMMAND_RE = re.compile(
+    r"^(?:--mount=\S+\s+)*(?:(?:NPM_CONFIG_AUDIT|npm_config_audit)=\S+\s+)*"
+    r"npm\s+(?P<verb>ci|install|prune)\b(?P<args>.*)$",
+    re.IGNORECASE,
+)
+
+
+def _opt114_npm_commands(text: str) -> list[tuple[str, str, bool]]:
+    """Return direct npm install/prune shell commands and their audit state."""
+    commands: list[tuple[str, str, bool]] = []
+    text = re.sub(r"\\\s*\n\s*", " ", text)
+    for raw_segment in re.split(r"&&|\|\||;|\n", text):
+        segment = raw_segment.strip()
+        match = _OPT114_NPM_COMMAND_RE.match(segment)
+        if not match:
+            continue
+        prefix = re.match(
+            r"^(?:(?:NPM_CONFIG_AUDIT|npm_config_audit)=(\S+)\s+)+",
+            segment, re.IGNORECASE)
+        audit_arg = re.search(
+            r"(?:^|\s)--audit(?:=|\s+)(\S+)(?:\s|$)",
+            match.group("args"), re.IGNORECASE)
+        disabled = bool(
+            re.search(r"(?:^|\s)--no-audit(?:\s|$)", match.group("args"), re.I)
+            or (prefix and prefix.group(1).lower() not in {"1", "true", "yes", "on"})
+            or (audit_arg
+                and audit_arg.group(1).lower() not in {"1", "true", "yes", "on"})
+        )
+        commands.append((match.group("verb").lower(), segment, not disabled))
+    return commands
+
+
+def _opt114_env_disables_audit(env: Any) -> bool:
+    if not isinstance(env, dict):
+        return False
+    value = next((value for key, value in env.items()
+                  if str(key).lower() == "npm_config_audit"), None)
+    if value is None:
+        return False
+    return str(value).strip().lower() not in {"1", "true", "yes", "on"}
+
+
+def _opt114_npmrc_disables_audit(root: Path, directory: Path) -> bool:
+    """Whether a repository npmrc visible from ``directory`` disables audit."""
+    try:
+        relative = directory.resolve().relative_to(root.resolve())
+    except (OSError, ValueError):
+        return True
+    candidates = [root / Path(*relative.parts[:index]) / ".npmrc"
+                  for index in range(len(relative.parts) + 1)]
+    for candidate in candidates:
+        try:
+            text = candidate.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return True
+        if re.search(r"(?im)^\s*audit\s*=\s*(?:false|0|no|off)\s*(?:[#;].*)?$", text):
+            return True
+    return False
+
+
+def _opt114_docker_audit_commands(candidate: Path, context: Path,
+                                  root: Path) -> list[tuple[str, str]] | None:
+    try:
+        text = candidate.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if (re.search(r"(?im)^\s*ENV\s+NPM_CONFIG_AUDIT(?:=|\s+)"
+                  r"(?:false|0|no|off)(?:\s|$)", text)
+            or _opt114_npmrc_disables_audit(root, context)):
+        return []
+    repeated: list[tuple[str, str]] = []
+    for keyword, body in _opt102_dockerfile_instructions("\n" + text):
+        if keyword != "RUN":
+            continue
+        repeated.extend((verb, command) for verb, command, audit_enabled
+                        in _opt114_npm_commands(body) if audit_enabled)
+    return repeated
+
+
+def _detect_opt114(doc: dict, raw: str) -> list[Hit]:
+    """Docker layers repeat npm's advisory request after an audited host install."""
+    if _OPT102_ROOT is None:
+        return []
+    root = _OPT102_ROOT.resolve()
+    workflow_env = doc.get("env") if isinstance(doc.get("env"), dict) else {}
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        job_env = job.get("env") if isinstance(job.get("env"), dict) else {}
+        if (_opt114_env_disables_audit(workflow_env)
+                or _opt114_env_disables_audit(job_env)):
+            continue
+        host_audit = False
+        for step in _steps(job):
+            if _opt102_step_build_config(step, job, doc) is not None:
+                continue
+            if _opt114_env_disables_audit(step.get("env")):
+                continue
+            workdir = str(step.get("working-directory") or ".")
+            if "${{" in workdir or _opt114_npmrc_disables_audit(root, root / workdir):
+                continue
+            host_audit = any(
+                verb == "ci" and audit_enabled
+                for verb, _command, audit_enabled in _opt114_npm_commands(_run(step))
+            )
+            if host_audit:
+                break
+        if not host_audit:
+            continue
+
+        for step in _steps(job):
+            build = _opt102_step_build_config(step, job, doc)
+            if build is None:
+                continue
+            config, marker = build
+            paths = _opt102_resolved_dockerfile(
+                root, config, env={}, matrix={}, inputs={}, outputs={})
+            if paths is None:
+                continue
+            candidate, context = paths
+            repeated = _opt114_docker_audit_commands(candidate, context, root)
+            if not repeated:
+                continue
+            verbs = sorted({verb for verb, _command in repeated})
+            line = _line_of_in_job(raw, str(job_name), marker)
+            rel = candidate.relative_to(root)
+            hits.append(Hit(
+                line=line,
+                affected_jobs=[str(job_name)],
+                evidence=(
+                    f"job `{job_name}` keeps host `npm ci` audit reporting, but "
+                    f"`{rel}` repeats default advisory lookups in "
+                    f"{', '.join(f'`npm {verb}`' for verb in verbs)}; add "
+                    "`--no-audit` to those image-layer install/prune commands only. "
+                    "Runner-minute effect: saving — removes repeated advisory wait "
+                    "from the same image-build runner; unsized because this static "
+                    "scan has no measured Docker-layer duration or 30-day job count."
+                ),
+                match_text=str(rel),
+                snippet=_raw_line(raw, line),
+            ))
+            break
+    return hits
+
+
 _OPT89_COMPILE_RE = re.compile(
     r"(?:^|&&|\|\||[;|]|\bthen\b|\bdo\b)\s*"
     + SHELL_PREFIX_SRC +  # `KEY=value` / env / sudo / time prefixes, see shell_prefix.py
@@ -6180,6 +6330,7 @@ _DETECTORS: dict[str, Any] = {
     "OPT76": _detect_opt76,
     "OPT29": _detect_opt29,
     "OPT108": _detect_opt108,
+    "OPT114": _detect_opt114,
     "OPT31": _detect_opt31,
     "OPT32": _detect_opt32,
     "OPT33": _detect_opt33,

@@ -1398,6 +1398,63 @@ jobs:
     assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
 
 
+def _write_opt114_fixture(tmp_path: Path, docker_commands: str, *, host: str = "npm ci") -> None:
+    (tmp_path / "worker").mkdir(parents=True)
+    (tmp_path / "worker" / "Dockerfile").write_text(
+        "FROM node:22\n" + docker_commands,
+        encoding="utf-8",
+    )
+    _write_workflow(tmp_path, "worker.yml", f"""name: Worker CI
+on: pull_request
+jobs:
+  worker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: {host}
+      - uses: docker/build-push-action@v6
+        with:
+          context: worker
+          file: worker/Dockerfile
+""")
+
+
+def test_opt114_docker_npm_audit_repeats_host_advisory_lookup(tmp_path: Path):
+    _write_opt114_fixture(
+        tmp_path,
+        "RUN npm ci\nRUN npm run build && npm prune --omit=dev\n",
+    )
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT114"
+    ]
+    assert len(findings) == 1, findings
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["worker"]
+    assert "npm ci" in finding["evidence"]
+    assert "npm prune" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+    assert "unsized" in finding["evidence"]
+
+
+@pytest.mark.parametrize(
+    ("docker_commands", "host"),
+    [
+        ("RUN npm ci --no-audit\nRUN npm prune --omit=dev --no-audit\n", "npm ci"),
+        ("RUN npm ci\nRUN npm prune --omit=dev\n", "npm ci --no-audit"),
+        ("RUN npm ci\nRUN npm prune --omit=dev\n", "pnpm install"),
+        ("RUN NPM_CONFIG_AUDIT=$AUDIT npm ci\n", "npm ci"),
+        ("RUN npm ci\n", "NPM_CONFIG_AUDIT=$NPM_AUDIT npm ci"),
+    ],
+)
+def test_opt114_stays_silent_without_duplicate_audit_reporting(
+    tmp_path: Path, docker_commands: str, host: str,
+):
+    _write_opt114_fixture(tmp_path, docker_commands, host=host)
+
+    assert "OPT114" not in _patterns(_scan(tmp_path))
+
+
 def test_opt108_unrelated_job_author_guard_does_not_cover_body_filter(tmp_path: Path):
     workflow = """name: Comment command
 on: pull_request_review_comment
