@@ -55,6 +55,18 @@ def _startup_log(
                 "running 1 test",
                 "test result: ok. 1 passed; 0 failed",
             )
+        elif shape == "tool-loop":
+            messages = (
+                f"Tool process started: plugin-builder item=plugin-{i}",
+                f"Tool ready: plugin-builder item=plugin-{i}",
+                f"Tool process finished: plugin-builder item=plugin-{i}",
+            )
+        elif shape == "worker-pool":
+            messages = (
+                f"Worker pool started: integration-workers case=case-{i}",
+                f"Worker pool ready: integration-workers case=case-{i}",
+                f"Worker pool stopped: integration-workers case=case-{i}",
+            )
         else:
             messages = (
                 f"Process started: verification case-{i}",
@@ -153,6 +165,54 @@ def test_opt85_requires_verification_markers_for_the_same_process():
     leaf = bp._parse_log(text)
 
     assert leaf is None or leaf["fix_key"] != "per-invocation-startup"
+
+
+@pytest.mark.parametrize(
+    ("shape", "kind"),
+    [("tool-loop", "tool process"), ("worker-pool", "worker pool")],
+)
+def test_opt85_measures_non_test_process_and_pool_startup(shape, kind):
+    leaf = bp._parse_log(_startup_log(shape))
+
+    assert leaf is not None
+    assert leaf["fix_key"] == "per-invocation-startup"
+    assert leaf["process_kind"] == kind
+    assert leaf["iteration_count"] == 10
+    assert leaf["modeled_saving_s"] == pytest.approx(27.0)
+
+
+def test_opt85_non_test_loop_requires_one_repeated_tool():
+    text = _startup_log("tool-loop").replace(
+        "plugin-builder item=plugin-9", "other-builder item=plugin-9")
+
+    leaf = bp._parse_log(text)
+
+    assert leaf is None or leaf["fix_key"] != "per-invocation-startup"
+
+
+def test_opt85_stays_silent_when_one_process_batches_the_items():
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = [_stamp(base, "Tool process started: plugin-builder batch=all")]
+    rows.extend(
+        _stamp(base + timedelta(seconds=i + 1), f"Built item plugin-{i}")
+        for i in range(10)
+    )
+    rows.append(_stamp(
+        base + timedelta(seconds=12),
+        "Tool process finished: plugin-builder batch=all",
+    ))
+
+    leaf = bp._parse_log("\n".join(rows))
+
+    assert leaf is None or leaf["fix_key"] != "per-invocation-startup"
+
+
+def test_opt85_process_batching_recipe_is_bounded_and_states_cost_direction():
+    meta = bp._FIX_META["per-invocation-startup"]
+
+    assert "bounded worker pool" in meta["deliver"]
+    assert "measured memory cap" in meta["deliver"]
+    assert "Runner-minute effect: saving" in meta["constraints"]
 
 
 @pytest.mark.parametrize("text", [
