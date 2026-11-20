@@ -88,6 +88,9 @@ def test_the_plugin_copy_withholds_the_answer_key_but_keeps_verify_report(tmp_pa
                                 ignore=runner.plugin_ignore))
     assert (dest / "SKILL.md").is_file() and (dest / "tests" / "verify_report.py").is_file()
     assert not (dest / "evals").exists() and not (dest / "CHANGELOG.md").exists()
+    # Pending changelog fragments narrate the checks exactly as CHANGELOG.md does.
+    assert (_REPO / "skills" / "ci-speedup" / "changelog.d").is_dir()
+    assert not (dest / "changelog.d").exists()
     assert not (dest / "tests" / "fixtures").exists()
     assert not list((dest / "tests").glob("test_*.py"))
 

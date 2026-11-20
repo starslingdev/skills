@@ -89,6 +89,14 @@ class FixtureClient:
             return ({"active_caches_size_in_bytes": value}
                     if isinstance(value, int) else None)
         match = re.match(
+            rf"repos/{re.escape(repo)}/actions/caches\?(.*)", endpoint)
+        if match:
+            query = parse_qs(match.group(1), keep_blank_values=True)
+            wanted = (query.get("key") or [""])[0]
+            rows = [row for row in self.recorded.get("action_caches", [])
+                    if str(row.get("key") or "") == wanted]
+            return {"actions_caches": rows, "total_count": len(rows)}
+        match = re.match(
             rf"repos/{re.escape(repo)}/pulls/(\d+)/files\?", endpoint)
         if match:
             rows = self.recorded.get("changed_files", {}).get(match.group(1))
@@ -584,6 +592,162 @@ def test_runtime_typescript_loader_is_sized_from_profiled_long_pole_only(
             if not check.skipped and not check.ok] == []
 
 
+def _runtime_loader_fixture(tmp_path: Path, name: str, run: str,
+                            scripts: dict[str, str]) -> Path:
+    fixture = tmp_path / name
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", fixture)
+    wf = fixture / "workflows" / "ci.yml"
+    text = wf.read_text(encoding="utf-8")
+    assert "      - run: make test-32\n" in text
+    wf.write_text(text.replace("      - run: make test-32\n",
+                               f"      - name: Test\n        run: {run}\n"),
+                  encoding="utf-8")
+    (fixture / "package.json").write_text(
+        json.dumps({"name": "fixture", "scripts": scripts}), encoding="utf-8")
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    for page in recorded["jobs"].values():
+        for row in page:
+            if str(row.get("name")) == "t32":
+                row["steps"][0]["name"] = "Test"
+    recorded["logs"]["1103"] = (
+        "2026-01-28T00:00:00.0000000Z ##[group]Run " + run + "\n"
+        "2026-01-28T00:06:39.0000000Z # pass 412\n")
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    return fixture
+
+
+def test_runtime_typescript_loader_without_profile_fires_unsized(
+        monkeypatch, tmp_path):
+    """Issue #397's default: a long-pole `pnpm test` resolving to `tsx --test`."""
+    fixture = _runtime_loader_fixture(
+        tmp_path, "runtime-loader-unprofiled", "pnpm test",
+        {"test": "tsx --test src/*.test.ts"})
+    root = tmp_path / "run-runtime-loader-unprofiled"
+    root.mkdir()
+    doc, report, checks = run_fixture(fixture, monkeypatch, root, max_runs=20)
+    findings = [f for f in doc["findings"] if f.get("pattern") == "OPT106"]
+    assert len(findings) == 1, [f.get("pattern") for f in doc["findings"]]
+    finding = findings[0]
+    assert finding["wall_clock_p50_s"] is None
+    assert finding["runner_min_saving"] is None
+    assert finding["runtime_loader"] == "tsx"
+    assert finding["runtime_loader_command"].startswith("tsx --test")
+    p50 = finding["runtime_loader_step_p50_s"]
+    reason = (f"loader share not measured; the step's measured p50 of "
+              f"{p50:.1f}s is an upper bound")
+    assert f"runner-minute saving: unsized ({reason})" in finding["size_note"]
+    assert f"wall-clock saving: unsized ({reason})" in finding["size_note"]
+    assert finding["fix_strategy"].startswith("Measure first")
+    assert "--cpu-prof" in finding["fix_strategy"]
+    assert "fails if any exercised path falls back" in finding["fix_strategy"]
+    assert "Runtime TypeScript Transpilation" in report
+    assert [(c.name, c.detail) for c in checks if not c.skipped and not c.ok] == []
+
+    findings_path = root / fixture.name / "findings.json"
+    for field, value in (("runner_min_saving", 5.0), ("wall_clock_p50_s", 60.0),
+                         ("runtime_loader_step_p50_s", 10.0),
+                         ("fix_strategy", "Precompile the surfaces.")):
+        tampered = json.loads(findings_path.read_text(encoding="utf-8"))
+        next(f for f in tampered["findings"]
+             if f.get("pattern") == "OPT106")[field] = value
+        tampered_path = root / f"tampered-{field}.json"
+        tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+        assert not vr.check_opt106_runtime_loader_provenance(tampered_path).ok, field
+
+    precompiled = _runtime_loader_fixture(
+        tmp_path, "runtime-loader-precompiled", "pnpm test",
+        {"test": "node --test dist/*.test.js"})
+    root = tmp_path / "run-runtime-loader-precompiled"
+    root.mkdir()
+    doc, _report, checks = run_fixture(precompiled, monkeypatch, root, max_runs=20)
+    assert not [f for f in doc["findings"] if f.get("pattern") == "OPT106"]
+    assert [c for c in checks if not c.skipped and not c.ok] == []
+
+
+def _loader_pole(run: str, *, p50: float = 300.0, job_p50: float = 400.0,
+                 env: dict | None = None, wf_env: dict | None = None):
+    step = {"name": "Test", "run": run}
+    if env is not None:
+        step["env"] = env
+    doc = {"jobs": {"unit": {"runs-on": "ubuntu-latest", "steps": [step]}}}
+    if wf_env is not None:
+        doc["env"] = wf_env
+    pole = {"workflow_file": ".github/workflows/ci.yml", "job": "unit",
+            "job_p50_s": job_p50,
+            "steps": [{"step": "Test", "category": "test", "p50_s": p50}]}
+    return [pole], {".github/workflows/ci.yml": doc}
+
+
+@pytest.mark.parametrize("run,scripts,env,wf_env,expected", [
+    ("pnpm test", {"test": "tsx --test src/*.test.ts"}, None, None, "tsx"),
+    ("npx tsx scripts/gen.ts", {}, None, None, "tsx"),
+    ("ts-node-esm scripts/gen.ts", {}, None, None, "ts-node-esm"),
+    ("node -r ts-node/register scripts/gen.ts", {}, None, None,
+     "node -r ts-node/register"),
+    ("node --require=ts-node/register scripts/gen.ts", {}, None, None,
+     "node --require ts-node/register"),
+    ("node --loader ts-node/esm scripts/gen.ts", {}, None, None,
+     "node --loader ts-node/esm"),
+    ("node --import tsx scripts/gen.ts", {}, None, None, "node --import tsx"),
+    ("NODE_OPTIONS='--import tsx' node scripts/gen.ts", {}, None, None,
+     "NODE_OPTIONS=--import tsx"),
+    ("node scripts/gen.ts", {}, {"NODE_OPTIONS": "--import tsx"}, None,
+     "NODE_OPTIONS=--import tsx"),
+    ("pnpm test", {"test": "node --test test/"}, None,
+     {"NODE_OPTIONS": "--require ts-node/register"},
+     "NODE_OPTIONS=--require ts-node/register"),
+    ("yarn gen", {"gen": "cross-env NODE_OPTIONS=--import=tsx node gen.ts"},
+     None, None, "NODE_OPTIONS=--import tsx"),
+    # An inline NODE_OPTIONS on a package-script call reaches the script body.
+    ("NODE_OPTIONS='--import tsx' pnpm gen", {"gen": "node gen.ts"}, None, None,
+     "NODE_OPTIONS=--import tsx"),
+    # ... and after a shell separator.
+    ("true && NODE_OPTIONS='--import tsx' node scripts/gen.ts", {}, None, None,
+     "NODE_OPTIONS=--import tsx"),
+    # node options with a separate value do not end the option scan.
+    ("node --require ./setup.cjs --import tsx scripts/gen.ts", {}, None, None,
+     "node --import tsx"),
+])
+def test_runtime_typescript_loader_step_forms_fire(run, scripts, env, wf_env,
+                                                   expected):
+    poles, wf_docs = _loader_pole(run, env=env, wf_env=wf_env)
+    block = {"package_scripts": {"": scripts}, "truncated": False}
+    found = cr._detect_runtime_ts_loader_steps(poles, wf_docs, block, 0)
+    assert len(found) == 1 and found[0]["runtime_loader"] == expected
+    assert found[0]["runner_min_saving"] is None
+    assert found[0]["wall_clock_p50_s"] is None
+
+
+@pytest.mark.parametrize("run,scripts,p50", [
+    ("pnpm test", {"test": "tsx --test src/*.test.ts"}, 15.0),     # quick step
+    ("pnpm test", {"test": "tsx --test src/*.test.ts"}, 40.0),     # < 15% of 400s
+    ('echo "run tsx --test to reproduce"', {}, 300.0),
+    ("# tsx --test src\nnode --test dist/", {}, 300.0),
+    ("node dist/generate.js", {}, 300.0),
+    ("pnpm test", {"test": "node --test dist/*.test.js"}, 300.0),
+    ("yarn tsx-lint", {"tsx-lint": "eslint ."}, 300.0),
+    ("node --import ./setup.js dist/a.js", {}, 300.0),
+    ("pnpm test", {}, 300.0),                                  # unreadable script
+])
+def test_runtime_typescript_loader_step_near_misses_stay_quiet(run, scripts, p50):
+    poles, wf_docs = _loader_pole(run.replace("\\n", "\n"), p50=p50)
+    block = {"package_scripts": {"": scripts}, "truncated": False}
+    assert cr._detect_runtime_ts_loader_steps(poles, wf_docs, block, 0) == []
+
+
+@pytest.mark.parametrize("run", [
+    "env NODE_OPTIONS='' node dist/a.js",
+    "NODE_OPTIONS='--max-old-space-size=4096' node dist/a.js",
+])
+def test_runtime_typescript_loader_inline_override_replaces_inherited_loader(run):
+    """A step that overrides NODE_OPTIONS (empty, or without a loader) is not
+    reported for the workflow-level loader it already replaced."""
+    poles, wf_docs = _loader_pole(run, wf_env={"NODE_OPTIONS": "--import tsx"})
+    block = {"package_scripts": {"": {}}, "truncated": False}
+    assert cr._detect_runtime_ts_loader_steps(poles, wf_docs, block, 0) == []
+
+
 def test_runtime_typescript_loader_rejects_unscoped_or_impossible_profile_text():
     """Only a same-step structured profile below job wall is evidence."""
     forged = """\
@@ -643,6 +807,628 @@ def test_runtime_typescript_loader_states_signed_or_unsized_runner_minute_effect
     for finding in (sized, unknown, empty):
         assert "+" not in finding["size_note"]
         assert "not sized because" not in finding["size_note"]
+
+
+def test_slow_isolated_go_cases_route_to_parallel_test_guidance(monkeypatch, tmp_path):
+    """A measured serial Go test with isolated cases extends OPT88 through collect."""
+    log = """\
+2026-01-28T00:00:00Z ##[group]Run go test ./internal/server -count=1 -v
+2026-01-28T00:00:01Z === RUN   TestHTTPGroups
+2026-01-28T00:01:29Z --- PASS: TestHTTPGroups (88.50s)
+2026-01-28T00:01:30Z PASS
+"""
+    serial_source = """\
+package server
+
+import (
+    "net/http/httptest"
+    "testing"
+)
+
+func TestHTTPGroups(t *testing.T) {
+    cases := []struct { name string }{{"first"}, {"second"}}
+    for _, tc := range cases {
+        tc := tc
+        t.Run(tc.name, func(t *testing.T) {
+            root := t.TempDir()
+            store := newStore(root)
+            srv := httptest.NewServer(newHandler(Config{Root: root, Store: store}))
+            defer srv.Close()
+            t.Setenv("APP_ENDPOINT", srv.URL)
+            exercise(t, srv.URL)
+        })
+    }
+}
+"""
+
+    def fixture(name: str, source: str) -> Path:
+        path = tmp_path / name
+        shutil.copytree(FIXTURE_ROOT / "serial-chain", path)
+        responses = path / "responses.json"
+        recorded = json.loads(responses.read_text(encoding="utf-8"))
+        recorded["logs"]["1103"] = log
+        responses.write_text(json.dumps(recorded), encoding="utf-8")
+        source_path = path / "internal/server/server_test.go"
+        source_path.parent.mkdir(parents=True)
+        source_path.write_text(source, encoding="utf-8")
+        return path
+
+    positive = fixture("serial-isolated-go-cases", serial_source)
+    positive_root = tmp_path / "run-serial-isolated-go-cases"
+    positive_root.mkdir()
+    doc, _report, checks = run_fixture(
+        positive, monkeypatch, positive_root, max_runs=20)
+    findings = [row for row in doc["findings"]
+                if row.get("pattern") == "OPT88"
+                and row.get("go_parallel_candidate")]
+    assert findings, "expected measured Go parallel-test guidance"
+    finding = findings[0]
+    assert finding["go_parallel_candidate"]["test"] == "TestHTTPGroups"
+    assert finding["go_parallel_candidate"]["duration_s"] == 88.5
+    assert "t.Parallel()" in finding["fix_strategy"]
+    assert "pass the config explicitly" in finding["fix_strategy"]
+    assert "runner-minute saving: unsized" in finding["size_note"]
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    parallel_source = serial_source.replace(
+        't.Setenv("APP_ENDPOINT", srv.URL)\n            exercise(t, srv.URL)',
+        'cfg := Config{Endpoint: srv.URL}\n            t.Parallel()\n'
+        '            exerciseWithConfig(t, cfg)')
+    negative = fixture("parallel-isolated-go-cases", parallel_source)
+    negative_root = tmp_path / "run-parallel-isolated-go-cases"
+    negative_root.mkdir()
+    negative_doc, _negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT88"
+                and row.get("go_parallel_candidate")]
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
+def test_go_parallel_source_proof_fails_closed_on_shared_or_outer_state(tmp_path):
+    source = """\
+package server
+import "testing"
+var cases = []struct{ name string }{{"a"}, {"b"}}
+func TestIsolated(t *testing.T) {
+    for _, tc := range cases { t.Run(tc.name, func(t *testing.T) {
+        // t.Parallel() is documentation, not an opt-in.
+        _ = "t.Parallel()"
+        root := t.TempDir()
+        store := newStore(root)
+        srv := httptest.NewServer(newHandler(Config{Store: store}))
+        defer srv.Close()
+    }) }
+}
+func TestGlobalMutation(t *testing.T) {
+    for _, tc := range cases { t.Run(tc.name, func(t *testing.T) {
+        root := t.TempDir()
+        store := newStore(root)
+        srv := httptest.NewServer(newHandler(Config{Store: store}))
+        defer srv.Close()
+        os.Setenv("SHARED", srv.URL)
+    }) }
+}
+func TestOuterResources(t *testing.T) {
+    root := t.TempDir()
+    store := newStore(root)
+    srv := httptest.NewServer(newHandler(Config{Store: store}))
+    defer srv.Close()
+    for _, tc := range cases { t.Run(tc.name, func(t *testing.T) {
+        exercise(t, srv.URL)
+    }) }
+}
+func TestSetenvConfig(t *testing.T) {
+    for _, tc := range cases { t.Run(tc.name, func(t *testing.T) {
+        cfg := TestConfig{Name: tc.name}
+        srv := httptest.NewServer(newHandler(cfg))
+        defer srv.Close()
+        t.Setenv("ENDPOINT", srv.URL)
+    }) }
+}
+"""
+    path = tmp_path / "server_test.go"
+    path.write_text(source, encoding="utf-8")
+    found = cr._go_parallel_source_candidates(
+        tmp_path, {"TestIsolated", "TestGlobalMutation", "TestOuterResources",
+                   "TestSetenvConfig"})
+    assert set(found) == {"TestIsolated", "TestSetenvConfig"}
+    assert found["TestSetenvConfig"]["setenv_blocker"] is True
+
+
+_GO_ISOLATED_CASE = """\
+        root := t.TempDir()
+        store := newStore(root)
+        srv := httptest.NewServer(newHandler(Config{Store: store}))
+        defer srv.Close()
+        exercise(t, srv.URL)
+"""
+
+
+def _go_test_func(name: str, before: str = "", inside: str = _GO_ISOLATED_CASE) -> str:
+    return (f"func {name}(t *testing.T) {{\n{before}"
+            "    cases := []struct{ name string }{{\"a\"}, {\"b\"}}\n"
+            "    for _, tc := range cases {\n"
+            "        tc := tc\n"
+            "        t.Run(tc.name, func(t *testing.T) {\n"
+            f"{inside}"
+            "        })\n    }\n}\n")
+
+
+def _go_entry(rows: list[dict]) -> dict:
+    return {"job": "test", "workflow_file": ".github/workflows/ci.yml",
+            "html_url": "https://example.invalid/run/1", "duration_s": 300.0,
+            "go_slow_tests": rows}
+
+
+def test_go_slow_test_results_keep_the_reported_package():
+    log = """\
+2026-01-28T00:00:00Z ##[group]Run go test -v ./...
+2026-01-28T00:00:01Z === RUN   TestHTTPGroups
+2026-01-28T00:00:20Z --- PASS: TestHTTPGroups (19.00s)
+2026-01-28T00:00:20Z PASS
+2026-01-28T00:00:20Z ok  \texample.invalid/m/a\t19.10s
+2026-01-28T00:00:21Z === RUN   TestHTTPGroups
+2026-01-28T00:00:45Z --- PASS: TestHTTPGroups (24.00s)
+2026-01-28T00:00:45Z PASS
+2026-01-28T00:00:45Z ok  \texample.invalid/m/b\t24.10s
+"""
+    assert cr._go_slow_test_results(log) == [
+        {"test": "TestHTTPGroups", "duration_s": 19.0, "package": "example.invalid/m/a"},
+        {"test": "TestHTTPGroups", "duration_s": 24.0, "package": "example.invalid/m/b"},
+    ]
+
+
+def test_go_parallel_source_proof_matches_the_measured_package(tmp_path):
+    """Greptile P1: a same-named test in another package must not supply the proof."""
+    (tmp_path / "go.mod").write_text("module example.invalid/m\n\ngo 1.22\n")
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    (tmp_path / "a" / "a_test.go").write_text(
+        "package a\n" + _go_test_func("TestHTTPGroups"))
+    (tmp_path / "b" / "b_test.go").write_text(
+        "package b\n" + _go_test_func(
+            "TestHTTPGroups", before="    shared := openSharedDB()\n",
+            inside="        exercise(t, shared)\n"))
+    measured_b = _go_entry([{"test": "TestHTTPGroups", "duration_s": 24.0,
+                             "package": "example.invalid/m/b"}])
+    assert cr._detect_go_test_parallelism([measured_b], tmp_path, 0) == []
+    unknown = _go_entry([{"test": "TestHTTPGroups", "duration_s": 24.0}])
+    assert cr._detect_go_test_parallelism([unknown], tmp_path, 0) == []
+    measured_a = _go_entry([{"test": "TestHTTPGroups", "duration_s": 19.0,
+                             "package": "example.invalid/m/a"}])
+    found = cr._detect_go_test_parallelism([measured_a], tmp_path, 0)
+    assert [f["go_parallel_candidate"]["file"] for f in found] == ["a/a_test.go"]
+
+
+@pytest.mark.parametrize("before, inside", [
+    # Greptile P1: case-local constructors bound to a shared root.
+    ("", _GO_ISOLATED_CASE.replace("newStore(root)", "newStore(sharedRoot)")),
+    # A parent-scope resource captured by the case is shared across cases.
+    ("    db := openSharedDB()\n",
+     _GO_ISOLATED_CASE.replace("exercise(t, srv.URL)", "exercise(t, srv.URL, db)")),
+    # Greptile P1: t.Chdir panics in a parallel test.
+    ("", _GO_ISOLATED_CASE + "        t.Chdir(root)\n"),
+    # t.Setenv on the parent forbids t.Parallel() in every subtest.
+    ('    t.Setenv("MODE", "test")\n', _GO_ISOLATED_CASE),
+    # A parent defer runs before paused parallel subtests resume.
+    ("    defer cleanupAll()\n", _GO_ISOLATED_CASE),
+    # Registering on the global mux is process-global.
+    ("", _GO_ISOLATED_CASE + '        http.HandleFunc("/x", nil)\n'),
+])
+def test_go_parallel_source_proof_withholds_shared_or_global_cases(
+        tmp_path, before, inside):
+    (tmp_path / "s_test.go").write_text(
+        "package s\n" + _go_test_func("TestCase", before=before, inside=inside))
+    assert cr._go_parallel_source_candidates(tmp_path, {"TestCase"}) == {}
+
+
+def test_go_parallel_source_proof_withholds_package_level_state(tmp_path):
+    (tmp_path / "vars.go").write_text("package s\n\nvar sharedRoot = \"/tmp/x\"\n")
+    (tmp_path / "s_test.go").write_text("package s\n" + _go_test_func(
+        "TestCase", inside=_GO_ISOLATED_CASE + "        use(sharedRoot)\n"))
+    assert cr._go_parallel_source_candidates(tmp_path, {"TestCase"}) == {}
+
+
+_GO_TABLE_CASE = """\
+        root := t.TempDir()
+        store := newStore(root)
+        srv := httptest.NewServer(newHandler(Config{Store: store, DB: tc.db}))
+        defer srv.Close()
+"""
+
+
+@pytest.mark.parametrize("package_src, test_src", [
+    # A parent resource placed in every table row is shared across cases.
+    ("", "func TestCase(t *testing.T) {\n"
+         "    shared := openSharedDB()\n"
+         "    cases := []struct{ name string; db *DB }{{\"a\", shared}, {\"b\", shared}}\n"
+         "    for _, tc := range cases {\n"
+         "        t.Run(tc.name, func(t *testing.T) {\n" + _GO_TABLE_CASE +
+         "        })\n    }\n}\n"),
+    # A package-level table built from a package-level resource.
+    ("var globalDB = open()\n"
+     "var pkgCases = []struct{ name string; db *DB }{{\"a\", globalDB}}\n",
+     "func TestCase(t *testing.T) {\n"
+     "    for _, tc := range pkgCases {\n"
+     "        t.Run(tc.name, func(t *testing.T) {\n" + _GO_TABLE_CASE +
+     "        })\n    }\n}\n"),
+    # A table row whose resource is opened once, when the table is built.
+    ("", "func TestCase(t *testing.T) {\n"
+         "    cases := []struct{ name string; db *DB }{{\"a\", openDB()}}\n"
+         "    for _, tc := range cases {\n"
+         "        t.Run(tc.name, func(t *testing.T) {\n" + _GO_TABLE_CASE +
+         "        })\n    }\n}\n"),
+    # A table returned by a helper cannot be read.
+    ("", "func TestCase(t *testing.T) {\n"
+         "    for _, tc := range makeCases() {\n"
+         "        t.Run(tc.name, func(t *testing.T) {\n" + _GO_TABLE_CASE +
+         "        })\n    }\n}\n"),
+])
+def test_go_parallel_source_proof_withholds_shared_table_rows(
+        tmp_path, package_src, test_src):
+    (tmp_path / "g.go").write_text("package s\n" + package_src)
+    (tmp_path / "s_test.go").write_text("package s\n" + test_src)
+    assert cr._go_parallel_source_candidates(tmp_path, {"TestCase"}) == {}
+
+
+def test_go_parallel_source_proof_accepts_plain_literal_tables(tmp_path):
+    (tmp_path / "g.go").write_text(
+        "package s\nvar pkgCases = []struct{ name string; wait time.Duration }"
+        "{{\"a\", time.Second}, {\"b\", 2 * time.Second}}\n")
+    (tmp_path / "s_test.go").write_text(
+        "package s\nfunc TestCase(t *testing.T) {\n"
+        "    for _, tc := range pkgCases {\n"
+        "        t.Run(tc.name, func(t *testing.T) {\n" + _GO_ISOLATED_CASE +
+        "        })\n    }\n}\n")
+    assert set(cr._go_parallel_source_candidates(tmp_path, {"TestCase"})) == {"TestCase"}
+
+def test_go_parallel_isolated_control_still_qualifies(tmp_path):
+    (tmp_path / "s_test.go").write_text("package s\n" + _go_test_func("TestCase"))
+    assert set(cr._go_parallel_source_candidates(tmp_path, {"TestCase"})) == {"TestCase"}
+
+
+def test_go_parallel_setenv_branch_states_only_what_the_source_proves(tmp_path):
+    inside = """\
+        cfg := TestConfig{Name: tc.name}
+        srv := httptest.NewServer(newHandler(cfg))
+        defer srv.Close()
+        t.Setenv("ENDPOINT", srv.URL)
+"""
+    (tmp_path / "s_test.go").write_text(
+        "package s\n" + _go_test_func("TestCase", inside=inside))
+    found = cr._detect_go_test_parallelism(
+        [_go_entry([{"test": "TestCase", "duration_s": 30.0}])], tmp_path, 0)
+    assert len(found) == 1
+    finding = found[0]
+    assert "temp tree, store" not in finding["evidence"]
+    assert "config and test server" in finding["evidence"]
+    # Removing t.Setenv is only safe when the code under test takes the value
+    # from the config; otherwise the case must stay sequential.
+    assert "still reads" in finding["fix_strategy"]
+    assert "loop variable" in finding["fix_strategy"]
+
+
+def _go_module(tmp_path: Path, test_src: str) -> Path:
+    (tmp_path / "go.mod").write_text("module example.invalid/m\n\ngo 1.22\n")
+    (tmp_path / "srv").mkdir()
+    (tmp_path / "srv" / "srv_test.go").write_text("package srv\n" + test_src)
+    return tmp_path
+
+
+_GO_PLAIN_LOG = """\
+2026-01-28T00:00:00Z ##[group]Run {command}
+2026-01-28T00:01:30Z ok  \texample.invalid/m/srv\t88.50s
+2026-01-28T00:01:31Z ok  \texample.invalid/m/fast\t0.40s
+"""
+
+
+def test_go_slow_results_read_plain_package_lines():
+    rows = cr._go_slow_test_results(_GO_PLAIN_LOG.format(command="go test ./..."))
+    assert rows == [{"package": "example.invalid/m/srv", "duration_s": 88.5,
+                     "level": "package"}]
+
+
+def test_go_slow_results_read_go_test_json():
+    log = (
+        "2026-01-28T00:00:00Z ##[group]Run gotestsum --jsonfile out.json -- ./...\n"
+        '2026-01-28T00:01:29Z {"Action":"pass","Package":"example.invalid/m/srv",'
+        '"Test":"TestCase","Elapsed":88.5}\n'
+        '2026-01-28T00:01:29Z {"Action":"pass","Package":"example.invalid/m/srv",'
+        '"Test":"TestCase/a","Elapsed":44.0}\n'
+        '2026-01-28T00:01:30Z {"Action":"pass","Package":"example.invalid/m/srv",'
+        '"Elapsed":88.6}\n')
+    assert cr._go_slow_test_results(log) == [
+        {"test": "TestCase", "duration_s": 88.5, "package": "example.invalid/m/srv"}]
+
+
+def test_go_slow_results_read_gotestsum_package_lines():
+    log = ("2026-01-28T00:00:00Z ##[group]Run gotestsum ./...\n"
+           "2026-01-28T00:01:30Z ✓  example.invalid/m/srv (1m28.5s)\n"
+           "2026-01-28T00:01:30Z ✓  example.invalid/m/fast (400ms)\n")
+    assert cr._go_slow_test_results(log) == [
+        {"package": "example.invalid/m/srv", "duration_s": 88.5, "level": "package"}]
+
+
+def test_plain_go_test_package_routes_to_unsized_parallel_guidance(tmp_path):
+    """Non-verbose `go test ./...` output plus a static read of the package."""
+    root = _go_module(tmp_path, _go_test_func("TestCase"))
+    rows = cr._go_slow_test_results(_GO_PLAIN_LOG.format(command="go test ./..."))
+    found = cr._detect_go_test_parallelism([_go_entry(rows)], root, 0)
+    assert len(found) == 1
+    finding = found[0]
+    assert finding["go_parallel_candidate"]["file"] == "srv/srv_test.go"
+    assert finding["go_parallel_candidate"]["test"] == "TestCase"
+    assert ("per-test times not in the log; the package's measured 88.50s is an "
+            "upper bound") in finding["size_note"]
+    assert "runner-minute saving: unsized" in finding["size_note"]
+    assert "t.Parallel()" in finding["fix_strategy"]
+
+
+def test_plain_go_test_package_already_parallel_stays_quiet(tmp_path):
+    inside = "        t.Parallel()\n" + _GO_ISOLATED_CASE
+    root = _go_module(tmp_path, _go_test_func("TestCase", inside=inside))
+    rows = cr._go_slow_test_results(_GO_PLAIN_LOG.format(command="go test ./..."))
+    assert cr._detect_go_test_parallelism([_go_entry(rows)], root, 0) == []
+
+
+@pytest.mark.parametrize("makefile, fires", [
+    ("test:\n\tgo test -race ./...\n", True),
+    ("test: lint\n\t@go test ./...\n", True),
+    ("test:\n\t$(MAKE) unit\nunit:\n\tgo test ./...\n", False),
+    ("test:\n\t./scripts/run-tests.sh\n", False),
+    (None, False),
+])
+def test_make_target_resolves_only_a_plain_go_test_recipe(tmp_path, makefile, fires):
+    root = _go_module(tmp_path, _go_test_func("TestCase"))
+    if makefile is not None:
+        (root / "Makefile").write_text(makefile)
+    rows = cr._go_slow_test_results(_GO_PLAIN_LOG.format(command="make test"))
+    assert rows and all(row.get("via") == "make test" for row in rows)
+    found = cr._detect_go_test_parallelism([_go_entry(rows)], root, 0)
+    assert bool(found) is fires
+
+
+@pytest.mark.parametrize("script, fires", [
+    ("#!/bin/sh\nset -e\ngo test -race ./...\n", True),
+    ("#!/bin/sh\nexec ./other.sh\n", False),
+])
+def test_script_step_resolves_only_a_plain_go_test_line(tmp_path, script, fires):
+    root = _go_module(tmp_path, _go_test_func("TestCase"))
+    (root / "scripts").mkdir()
+    (root / "scripts" / "test.sh").write_text(script)
+    rows = cr._go_slow_test_results(
+        _GO_PLAIN_LOG.format(command="./scripts/test.sh"))
+    assert rows and all(row.get("via") == "./scripts/test.sh" for row in rows)
+    found = cr._detect_go_test_parallelism([_go_entry(rows)], root, 0)
+    assert bool(found) is fires
+
+
+def test_unrelated_step_with_package_lines_stays_quiet():
+    assert cr._go_slow_test_results(
+        _GO_PLAIN_LOG.format(command="python -m pytest")) == []
+
+
+def test_plain_go_test_output_routes_through_collect_with_passing_checks(
+        monkeypatch, tmp_path):
+    """Ordinary `go test ./...` output (no -v) reaches OPT88 end to end."""
+    log = """\
+2026-01-28T00:00:00Z ##[group]Run go test -race ./...
+2026-01-28T00:01:29Z ok  \texample.invalid/m/internal/server\t88.50s
+2026-01-28T00:01:30Z ok  \texample.invalid/m/internal/util\t0.31s
+"""
+
+    def fixture(name: str, inside: str) -> Path:
+        path = tmp_path / name
+        shutil.copytree(FIXTURE_ROOT / "serial-chain", path)
+        responses = path / "responses.json"
+        recorded = json.loads(responses.read_text(encoding="utf-8"))
+        recorded["logs"]["1103"] = log
+        responses.write_text(json.dumps(recorded), encoding="utf-8")
+        (path / "go.mod").write_text("module example.invalid/m\n\ngo 1.22\n")
+        source = path / "internal/server/server_test.go"
+        source.parent.mkdir(parents=True)
+        source.write_text("package server\n" + _go_test_func("TestHTTPGroups", inside=inside))
+        return path
+
+    for name, inside, fires in (
+            ("plain-serial", _GO_ISOLATED_CASE, True),
+            ("plain-parallel", "        t.Parallel()\n" + _GO_ISOLATED_CASE, False)):
+        run_root = tmp_path / f"run-{name}"
+        run_root.mkdir()
+        doc, _report, checks = run_fixture(
+            fixture(name, inside), monkeypatch, run_root, max_runs=20)
+        found = [row for row in doc["findings"]
+                 if row.get("pattern") == "OPT88" and row.get("go_parallel_candidate")]
+        assert bool(found) is fires, name
+        if fires:
+            assert found[0]["go_parallel_candidate"]["package"] == (
+                "example.invalid/m/internal/server")
+            assert "is an upper bound" in found[0]["size_note"]
+        assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+_GO_CACHE_KEY = "setup-go-Linux-x64-ubuntu24-go-1.26.0-deadbeef"
+
+
+def _go_job_log(start: str, *, key: str = _GO_CACHE_KEY, retain: bool = False,
+                body: str = "") -> str:
+    """An ordinary setup-go job log: no `-x`, no ci-speedup marker."""
+    retention = (
+        f"{start} ##[group]Run cache=\"$(go env GOCACHE)\"\n"
+        f"{start} cache=\"$(go env GOCACHE)\"\n"
+        f"{start} find \"$cache\" -type f -exec touch -c {{}} +\n"
+        f"{start} ##[endgroup]\n") if retain else ""
+    return (
+        f"{start} ##[group]Run actions/setup-go@v5\n"
+        f"{start} with:\n"
+        f"{start}   go-version-file: go.mod\n"
+        f"{start}   cache: true\n"
+        f"{start} ##[endgroup]\n"
+        f"{start} Cache restored successfully\n"
+        f"{start} Cache restored from key: {key}\n"
+        f"{retention}"
+        f"{start} ##[group]Run python3 scripts/test-go-shard.py 0 4\n"
+        f"{start} python3 scripts/test-go-shard.py 0 4\n"
+        f"{start} ##[endgroup]\n"
+        f"{body}")
+
+
+def _go_cache_fixture(tmp_path: Path, name: str, *, fresh_s: float, old_s: float,
+                      retain_old: bool = False) -> Path:
+    """serial-chain with t32 restoring one setup-go archive created 2026-01-20:
+    two runs inside its first five days and three after Go's trim limit."""
+    root = tmp_path / name
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", root)
+    responses = root / "responses.json"
+    recorded = json.loads(responses.read_text(encoding="utf-8"))
+    workflow = recorded["workflows"][0]
+    template_run = next(row for row in workflow["runs"] if row["id"] == 1001)
+    template_jobs = recorded["jobs"]["1001"]
+    for run_id, day in ((1005, 21), (1006, 22)):
+        run = dict(template_run, id=run_id, head_sha=f"sha-{run_id}",
+                   head_branch=f"feature-{run_id}",
+                   created_at=f"2026-01-{day}T00:00:00Z",
+                   run_started_at=f"2026-01-{day}T00:00:00Z",
+                   updated_at=f"2026-01-{day}T00:22:00Z")
+        workflow["runs"].append(run)
+        jobs = []
+        for offset, job in enumerate(template_jobs):
+            clone = json.loads(json.dumps(job).replace(
+                "2026-01-28", f"2026-01-{day}"))
+            clone["id"] = run_id * 10 + offset
+            jobs.append(clone)
+        recorded["jobs"][str(run_id)] = jobs
+        recorded["checks"][f"sha-{run_id}"] = [
+            {"name": "t32", "started_at": f"2026-01-{day}T00:15:20Z",
+             "completed_at": f"2026-01-{day}T00:22:00Z"}]
+    workflow["runs_30d"] = len(workflow["runs"])
+    base_log = recorded["logs"]["1103"]
+    for run_id, jobs in recorded["jobs"].items():
+        for job in jobs:
+            if job["name"] != "t32" or job.get("conclusion") != "success":
+                continue
+            started = datetime.fromisoformat(job["started_at"].replace("Z", "+00:00"))
+            old = started >= datetime(2026, 1, 25, 1, tzinfo=timezone.utc)
+            duration = old_s if old else fresh_s
+            done = (started + timedelta(seconds=duration)).strftime(
+                "%Y-%m-%dT%H:%M:%SZ")
+            job["completed_at"] = done
+            job["steps"][0]["completed_at"] = done
+            stamp = started.strftime("%Y-%m-%dT%H:%M:%S.0000000Z")
+            recorded["logs"][str(job["id"])] = _go_job_log(
+                stamp, retain=retain_old and old, body=base_log)
+    recorded["action_caches"] = [{
+        "id": 71, "key": _GO_CACHE_KEY,
+        "created_at": "2026-01-20T00:00:00Z",
+        "last_accessed_at": "2026-01-28T00:00:00Z",
+    }]
+    responses.write_text(json.dumps(recorded), encoding="utf-8")
+    return root
+
+
+def test_old_restored_go_cache_trim_is_measured_through_collect(monkeypatch, tmp_path):
+    """Ordinary setup-go logs: the same exact archive restored past Go's
+    five-day trim limit makes the job slower than while it was fresh."""
+    positive = _go_cache_fixture(tmp_path, "old-restored-go-cache",
+                                 fresh_s=300.0, old_s=400.0)
+    run_root = tmp_path / "run-old-restored-go-cache"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(positive, monkeypatch, run_root, max_runs=20)
+
+    findings = [row for row in doc["findings"] if row.get("pattern") == "OPT112"]
+    assert findings, "expected old restored Go cache trim finding"
+    finding = findings[0]
+    assert finding["go_cache_key"] == _GO_CACHE_KEY
+    assert finding["go_cache_slowdown_s"] == 100.0
+    assert finding["go_cache_fresh_runs"] == 2
+    assert finding["go_cache_old_runs"] >= 2
+    assert finding["wall_clock_p50_s"] == 100.0
+    assert "Touch every restored" in finding["fix_strategy"]
+    assert "runner-minute saving: at most" in finding["size_note"]
+    assert "+" not in finding["size_note"].split("runner-minute saving")[1][:20]
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_go_cache_trim_quiet_when_old_archive_runs_are_not_slower(monkeypatch, tmp_path):
+    """Same shape, no trim loss: old-archive runs take as long as fresh ones."""
+    negative = _go_cache_fixture(tmp_path, "no-loss-go-cache",
+                                 fresh_s=400.0, old_s=400.0)
+    run_root = tmp_path / "run-no-loss-go-cache"
+    run_root.mkdir()
+    doc, report, checks = run_fixture(negative, monkeypatch, run_root, max_runs=20)
+    assert not [row for row in doc["findings"] if row.get("pattern") == "OPT112"]
+    assert "Restored Go Build Cache Trimmed" not in report
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+
+def test_go_cache_trim_quiet_when_retention_step_is_present(monkeypatch, tmp_path):
+    """A job that already touches GOCACHE after restore is not re-flagged."""
+    fixed = _go_cache_fixture(tmp_path, "retained-go-cache",
+                              fresh_s=300.0, old_s=400.0, retain_old=True)
+    run_root = tmp_path / "run-retained-go-cache"
+    run_root.mkdir()
+    doc, _report, _checks = run_fixture(fixed, monkeypatch, run_root, max_runs=20)
+    assert not [row for row in doc["findings"] if row.get("pattern") == "OPT112"]
+
+
+def test_go_cache_restore_fact_reads_only_go_build_cache_restores():
+    stamp = "2026-01-28T00:00:00Z"
+    assert cr._go_cache_restore_fact(_go_job_log(stamp)) == {
+        "cache_key": _GO_CACHE_KEY, "retained": False}
+    assert cr._go_cache_restore_fact(_go_job_log(stamp, retain=True))["retained"]
+    actions_cache = (
+        f"{stamp} ##[group]Run actions/cache@v4\n"
+        f"{stamp} with:\n"
+        f"{stamp}   path: ~/.cache/go-build\n"
+        f"{stamp}   key: Linux-go-abc\n"
+        f"{stamp} ##[endgroup]\n"
+        f"{stamp} Cache restored from key: Linux-go-abc\n")
+    assert cr._go_cache_restore_fact(actions_cache)["cache_key"] == "Linux-go-abc"
+    node_cache = actions_cache.replace("~/.cache/go-build", "node_modules")
+    assert cr._go_cache_restore_fact(node_cache) is None
+    prose = _go_job_log(stamp).replace(
+        "Cache restored from key:", "Documentation: cache key:")
+    assert cr._go_cache_restore_fact(prose) is None
+    two_keys = _go_job_log(stamp) + _go_job_log(stamp, key="setup-go-other")
+    assert cr._go_cache_restore_fact(two_keys) is None
+
+
+def test_go_cache_restore_fact_ignores_job_env_naming_gocache():
+    """GitHub echoes job-level `env:` into every step group, so a node cache in a
+    job that sets GOCACHE must not count as a Go build-cache restore."""
+    stamp = "2026-01-28T00:00:00Z"
+    node_cache = (
+        f"{stamp} ##[group]Run actions/cache@v4\n"
+        f"{stamp} with:\n"
+        f"{stamp}   path: node_modules\n"
+        f"{stamp}   key: Linux-node-abc\n"
+        f"{stamp} env:\n"
+        f"{stamp}   GOCACHE: /tmp/go-build\n"
+        f"{stamp} ##[endgroup]\n"
+        f"{stamp} Cache restored from key: Linux-node-abc\n")
+    assert cr._go_cache_restore_fact(node_cache) is None
+    # A multi-line `path:` input still counts when a later line names the cache.
+    multi_path = (
+        f"{stamp} ##[group]Run actions/cache@v4\n"
+        f"{stamp} with:\n"
+        f"{stamp}   path: ~/go/pkg/mod\n"
+        f"{stamp} ~/.cache/go-build\n"
+        f"{stamp}   key: Linux-go-abc\n"
+        f"{stamp} ##[endgroup]\n"
+        f"{stamp} Cache restored from key: Linux-go-abc\n")
+    assert cr._go_cache_restore_fact(multi_path)["cache_key"] == "Linux-go-abc"
+
+
+def test_go_cache_restore_fact_only_admits_closed_charset_keys():
+    """The key is quoted into the report, so log text outside a cache key's
+    ordinary characters (a backtick run, markup) never reaches it."""
+    stamp = "2026-01-28T00:00:00Z"
+    hostile = _go_job_log(stamp, key="setup-go-Linux-```ignore-previous```")
+    assert cr._go_cache_restore_fact(hostile) is None
+    long_key = _go_job_log(stamp, key="setup-go-" + "a" * 600)
+    assert cr._go_cache_restore_fact(long_key) is None
 
 
 def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():

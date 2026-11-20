@@ -1128,6 +1128,84 @@ runner, so no warning was emitted.
 
 ---
 
+### OPT112 — Restored Go Build Cache Trimmed Before Reuse
+
+<!-- METADATA
+pattern: OPT112
+impact: HIGH
+class: data-driven
+detector: same-key-go-cache-age-slowdown
+risk: LOW
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,**/*.go,go.mod,go.sum"
+fix_strategy: restored-go-build-cache-trimmed-before-reuse
+title_template: "Restored Go Build Cache Trimmed Before Reuse"
+-->
+
+**TL;DR**: `actions/setup-go` and `actions/cache` restore Go build-cache
+entries with their saved modification times. `cmd/go` trims entries unused for
+five days (plus a one-hour mtime granularity), at most once a day, when a Go
+command finishes. Once the restored archive is past that limit, the job's first
+Go command deletes every entry it did not itself use, and a later command with
+different flags (for example a plain build after `-race` tests) recompiles what
+the archive held. Mark the restored files as recently used before the first Go
+command so `cmd/go` keeps both populations.
+
+**Detection heuristic** (every gate required; reads only what an ordinary job
+prints, no extra flags or markers):
+
+1. A captured long-pole job log restores a Go build cache: setup-go's standard
+   `Cache restored from key: setup-go-*` line, or an `actions/cache` step whose
+   logged `path:` input names `go-build` or `GOCACHE`. Two different Go keys in
+   one log, or a later step that touches the Go build cache (the fix already in
+   place), withhold the finding.
+2. GitHub's cache inventory returns exactly one archive for that key; its
+   `created_at` splits the job's sampled successful runs into runs that
+   restored it while it was younger than five days (fresh) and runs that
+   restored it at least five days and one hour after creation (old).
+3. At least two fresh and two old runs are confirmed from their own logs to
+   restore that same exact key without a retention step.
+4. The old runs' median job duration exceeds the fresh runs' median by at least
+   30 seconds, and every old run is slower than the fresh median.
+5. Missing or ambiguous cache metadata, too few runs in either window, or no
+   slowdown keeps the finding quiet.
+
+**Fix recipe**, safest first:
+
+1. Immediately after `setup-go` or `actions/cache`, resolve `go env GOCACHE`,
+   create it on a cache miss, and touch every restored file before any Go
+   command runs.
+2. Keep the existing cache key, flags, package set, race coverage, and failure
+   behavior. Do not substitute a warm-up build: the warm-up can trim the other
+   flag population before it is used.
+3. Pin the retention step's position in a workflow contract test, then compare
+   the same job before and after. Confirm the later build no longer recompiles
+   the broad package set and that every test still runs.
+
+**Guardrail**: touching cache entries changes only their access recency; it must
+not turn an untrusted cache into executable input, weaken the cache key, skip a
+race or non-race build, or hide a failed restore. On a cache miss, the retention
+step is a no-op. Preserve Go's own cache validation and every existing test flag.
+
+**Sizing**: the wall-clock saving is the measured median slowdown of old-archive
+runs over fresh-archive runs of the same cache key, the same job and the same
+dependency set. The runner-minute saving is stated as a ceiling: that slowdown
+times the workflow's 30-day run count, because runs that restore an archive
+younger than five days save nothing. The comparison is between sampled runs,
+not a before/after of the fix, so confirm it on the same job after adding the
+retention step.
+
+**Real-world example (OpenClaw)**, their numbers, not a forecast for another
+repository: openclaw/crabbox [#2833](https://github.com/openclaw/crabbox/pull/2833)
+reported the first in-test CLI build falling from a 135-second mean to 30
+seconds after retaining restored Go cache entries, while the race-shard test
+time fell by about 110 seconds.
+
+**Risk**: **LOW**. The change is reversible and leaves cache keys and test
+commands intact, but its ordering is load-bearing: it must run after restore
+and before the first Go command.
+
+---
+
 ### OPT11 — Redundant Environment Variables
 
 <!-- METADATA
@@ -1455,6 +1533,32 @@ title_template: "Within-Job Duplicate Commands"
 **Anti-pattern**: The same script or command is invoked twice within a single job's steps — once in a dedicated "build" step, then again inside a "run tests" step (often with a comment like "rebuild in case of stale artifacts").
 
 **Detection heuristic**:
+
+The static scanner also recognizes one form of repeated analysis in which
+the runs differ only in report or issue-selection flags. It covers Knip only:
+Knip's `--include`, `--reporter` and issue-type flags (`--files`, `--exports`,
+`--dependencies` and the like) select or render issues from one project
+analysis, so the scanner can tell them apart from scope-defining arguments.
+Other analysis tools run several times over one scope are not flagged by this
+static form. Each step's command is read through the shared run-leaf resolver,
+so package scripts (`pnpm knip:json`, `npm run knip`) and `\`-continued lines
+are followed. Runs in one job match, in one step or in several, when the
+working directory, the step `if:` condition and every other argument
+(`--config`, `--production`, `--workspace` and so on) are identical; a `>`
+redirect of the report counts as output. A different config, production mode,
+workspace, working directory or step condition stays quiet, and so do a run
+with `--fix`, a step that changes directory, and runs in one step that a
+conditional chain (`||`, `if`, `case`) chooses between. Evidence: the public
+[OpenClaw #185851](https://github.com/openclaw/openclaw/pull/185851) change
+took 91.3 s to 65.9 s.
+
+For this form, run Knip once with the combined issue selection, then split or
+filter its output, keeping each selection's pass/fail policy. The
+runner-minute effect is a saving (25.4 s, about 0.42 runner-minutes per run,
+in the cited change), but the finding reports `runner-minute saving: unsized`
+because the combined run still performs the analysis once and its cost is
+specific to each repository. Time the separate runs and the combined run on
+the same commit before crediting minutes.
 
 Job logs can prove the Cargo variant even when the workflow commands differ:
 if two distinct step groups print the same in-repository
@@ -2279,7 +2383,7 @@ impact: MEDIUM
 class: static
 detector: bespoke
 risk: MEDIUM
-affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,pyproject.toml,pytest.ini,setup.cfg,.bazelrc,.config/nextest.toml,jest.config.*,vitest.config.*,package.json"
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,**/*_test.go,pyproject.toml,pytest.ini,setup.cfg,.bazelrc,.config/nextest.toml,jest.config.*,vitest.config.*,package.json"
 fix_strategy: measure-test-concurrency
 title_template: "Test concurrency is set by guess, not measurement"
 -->
@@ -2294,7 +2398,7 @@ title_template: "Test concurrency is set by guess, not measurement"
 
 **Detection heuristic**:
 
-A configured Jest `maxWorkers` below 100% is static evidence to measure, never evidence of a saving. A log-level `test-loop-serial` observation can also point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another. In both cases the safe worker count still has to be measured.
+A configured Jest `maxWorkers` below 100% is static evidence to measure, never evidence of a saving. A log-level `test-loop-serial` observation can also point here when timestamped evidence shows that one shell runner executes at least ten distinct test files one after another. For Go, the long-pole `go test` log (run directly, through `gotestsum`, or through a `make` target or repository script whose recipe is a plain `go test` line) identifies a test taking at least 10 seconds from verbose `--- PASS` lines or `go test -json` events, with its package when the log prints it; the source is matched in that package, and a test name defined in more than one place without a measured package is withheld. Without per-test times, a plain `ok <package> Ns` (or gotestsum) line of at least 10 seconds leads to a static read of that package's tests; the wall-clock effect is then unsized, because the package's measured time is only an upper bound. The source must then prove that its table-driven subtests each create their own `t.TempDir` with a store opened on it and an `httptest` server (or their own config and server, blocked only by `t.Setenv`), omit `t.Parallel()`, capture no parent-scope or package-level variable, and read rows from a literal table that names no variable and opens nothing. A parent `defer`, `t.Setenv` or `t.Chdir`, any `t.Chdir`, `os.Setenv`/`os.Chdir`, global `http` mux or default registration, or other process-global mutation withholds it. Unreadable source or an unclassified resource withholds the Go finding. In every case the safe worker count still has to be measured.
 
 1. The slow step runs tests, and concurrency is set explicitly (serial, or a fixed number), or not at all on a runner whose test tool defaults to serial. Look everywhere it can be set: the test command, the workflow, and the test tool's own config files (for example `local_test_jobs` and a `test_env` thread count such as `RUST_TEST_THREADS` in `.bazelrc`, or pytest, jest and nextest config files).
 2. The setting does not match the runner: compare it with the core count of the job's runner label. If the label is custom and its core count is not documented, measure it first with a one-line probe step (`nproc`, or `[Environment]::ProcessorCount` on Windows).
@@ -2323,9 +2427,10 @@ The table carries no seconds and no modeled saving. Time the settings on the rep
 **Fix recipe**:
 
 1. Separate what cannot share: give each worker its own resource (a per-worker database name, an ephemeral port, a per-worker temp directory), and move tests that truly cannot run concurrently onto a serial lane that still runs in the same command (run the parallel set, then the serial set).
-2. Replace real-time waits with deterministic synchronization, so workers are not idle.
-3. Measure: on the same runner class and commit, with test-result caching off so the tests really run, time the current setting and two or three others (for example the core count and twice it), several runs each. Keep the fastest; stop at the first setting that regresses.
-4. Pin the measured value in configuration, per runner class, with a comment naming the measurement; re-measure when the runner changes.
+2. In Go table tests whose cases already own those resources, pass configuration explicitly instead of calling `t.Setenv` only where the code under test takes that value from the config; a case whose code still reads the environment keeps `t.Setenv` and stays serial. On a module whose `go` directive is below 1.22, copy the loop variable before `t.Run`. Then call `t.Parallel()` at the start of each independent subtest. Keep cases that share process-global state serial.
+3. Replace real-time waits with deterministic synchronization, so workers are not idle.
+4. Measure: on the same runner class and commit, with test-result caching off so the tests really run, time the current setting and two or three others (for example the core count and twice it), several runs each. For Go, include a focused `go test -race` run and confirm the same cases and failures. Keep the fastest; stop at the first setting that regresses.
+5. Pin the measured value in configuration, per runner class, with a comment naming the measurement; re-measure when the runner changes.
 
 **Guardrail**: the same tests pass at every setting compared, and the flake rate does not rise. Watch memory: a setting that runs out of memory on some runs is not faster.
 
@@ -2335,6 +2440,11 @@ The table carries no seconds and no modeled saving. Time the settings on the rep
 
 - openai/codex [#31352](https://github.com/openai/codex/pull/31352) (2026-07-07): "Controlled forced-test-execution measurements in #31339 found that 8 local jobs reduced Bazel elapsed time on every shard by 19–29%, including the slow shard from 835.5s to 609.3s, while 12 jobs regressed." The PR raised the Windows test shards' local test-jobs cap from 4 to 8, the measured best, not the highest value tried.
 - openai/openai-agents-python [#2563](https://github.com/openai/openai-agents-python/pull/2563) (2026-03-01): replaced "real-time waits in several slow tests with deterministic synchronization", moved shard-safe tests onto `pytest-xdist`, and isolated Redis/Dapr-sensitive files onto "a serial lane that still runs automatically". `make tests` "averaged 53.59 seconds before these changes and 14.34 seconds after them", measured "on the same machine" across three warm-cache runs: a local measurement, not a CI run.
+
+**Real-world examples (OpenClaw)**, their numbers and changes, not a forecast for another repository:
+
+- openclaw/crabbox [#1761](https://github.com/openclaw/crabbox/pull/1761) reported two HTTP test groups falling from 88.498 seconds to 42.304 seconds in a focused local race run after independent cases became parallel.
+- openclaw/crabbox [#2455](https://github.com/openclaw/crabbox/pull/2455) opted independent subtests into parallel execution in its slow checkpoint and installer tests.
 
 **Risk**: **MEDIUM**. More workers can expose tests that share state, which shows up as new flakes; the serial lane and the guardrail contain that.
 
@@ -3019,6 +3129,11 @@ title_template: "Conditional Step With Unconditional Setup"
 
 **Anti-pattern**: A step (typically a tool install, browser install, or large download) exists ONLY to support a downstream step that has an `if:` condition gating it. The downstream step is conditionally skipped (e.g., when a secret is missing, when a feature is disabled, on certain branches), but the upstream setup step runs unconditionally — paying the full setup cost for runs where the consumer never executes.
 
+A second form occurs in an aggregate job: a shell-only step reads
+`needs.<job>.result` values and fails when a producer was unsuccessful, but it
+runs after checkout or a `setup-*` action. A failed dependency therefore pays
+for setup before the result gate ends the job.
+
 **Why this is missed by OPT1 (Unnecessary Tool Install)**: OPT1 catches the case where the tool is NEVER invoked in the job. OPT31 catches the case where the tool IS invoked, but only conditionally — and the install step is missing the same condition.
 
 **Detection heuristic**:
@@ -3032,6 +3147,17 @@ title_template: "Conditional Step With Unconditional Setup"
    - `gh auth setup-git` → only used in conditional `gh` calls
 4. Flag if the setup is unconditional but the consumer's `if:` would skip in some fraction of runs.
 5. The savings = `setup_step_p50_seconds × P(consumer skips)`.
+
+For the aggregate-job form, require a result step that reads only literal
+`needs.*.result` values, can exit non-zero, and has no `continue-on-error`.
+Every simple command in it (split on `;`, `&&`, `||` and `|`) must be a shell
+control, output or test builtin, and it must use bash or sh with no
+`working-directory` at step, job or workflow level. Flag only checkout or
+`setup-*` actions before the first such result gate. Withhold the finding when
+the gate runs a repository script or tool, uses command substitution or an
+input redirect, tests a file, reads a variable that is not in step, job or
+workflow `env` (an earlier step may export it), reads another GitHub context or
+an unreadable expression, or when setup already has a needs-result condition.
 
 **Fix**: Copy the `if:` condition from the consumer step onto the setup step (or wrap both in a guard step that exits early). Example:
 
@@ -3054,9 +3180,93 @@ title_template: "Conditional Step With Unconditional Setup"
   run: cd apps/web && bunx playwright test smoke
 ```
 
+For a needs-result gate, move that unchanged gate to the first step, before
+checkout and toolchain setup. Preserve its complete success predicate and test
+successful, failed, cancelled, skipped and missing dependency results.
+
+**Sizing**: Runner-minute effect is a **saving**: the affected setup steps'
+measured billed compute on runs where the conditional consumer is skipped or a
+dependency result is unsuccessful. Do not state a number until both the setup
+time and that run share are measured. A result gate that ends a failed run
+earlier normally does not reduce successful pull-request merge wait.
+
 **Real-world example (blen-starter-kit)**: `ci.yml` `web-quality` job has `Install Playwright Chromium` (line 92, ~16s) followed by `Web smoke e2e` (line 95) gated on `if: env.CLERK_SECRET_KEY != '' && env.NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY != ''`. PRs from forks (no Clerk secrets) pay 16s for setup that's never consumed.
 
-**Risk**: LOW. The fix is purely defensive — add the same `if:` to the upstream step. If the conditions diverge later, both steps still execute together (consumer just runs without setup, which would surface as a clear error).
+**Public evidence**: [openclaw/crabbox pull request #2868](https://github.com/openclaw/crabbox/pull/2868):
+the coverage gate fails at its first step and skips checkout and Go setup when
+a producer fails.
+
+**Risk**: LOW. The conditional-consumer fix is defensive when both steps keep
+the same condition. Moving a needs-result gate is safe only under the narrower
+shell-only detection above; changing its predicate can instead hide a producer
+failure, so preserve it byte-for-byte.
+
+---
+
+### OPT109 — Failure Reporter Runs on Healthy Pull Requests
+
+<!-- METADATA
+pattern: OPT109
+impact: MEDIUM
+class: static
+detector: yaml-job-correlated
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: failure-reporter-on-failure
+title_template: "Failure reporter runs on healthy pull requests"
+-->
+
+**Anti-pattern**: A job depends on every independent check, does nothing except
+post a failure comment, summary or notification, and uses `if: always()`. GitHub
+therefore allocates its runner on healthy pull requests where there is no
+failure to report.
+
+**Detection heuristic**: Find a job with at least two `needs` whose condition is
+`always()`, alone or with `!cancelled()`; any other term (a result comparison,
+an event guard) may already skip healthy runs and stays quiet. Every
+independent job must be upstream of it, directly or through another need such
+as a shared `setup` job; a later aggregate gate may depend on the reporter.
+Beyond checkout, setup and dependency installs, every step must only report:
+each shell command is a summary, log, `gh pr|issue comment`, webhook or
+report-named script call, or a recognized comment, notification or report
+action. The report must be failure-only: the job's id or name says so, or every
+reporting step is gated on a failed or cancelled need. Fail closed on any other
+command, a non-zero `exit` (that job is a gate), and a step that edits, hides
+or clears an earlier report.
+
+**Fix recipe (safest first)**:
+
+1. Confirm the reporter does nothing on a healthy run that you still need, such
+   as clearing or updating an earlier failure comment after a green rerun. Keep
+   that path before gating the job.
+2. Change the reporter condition to `if: failure() || cancelled()` (or
+   `if: failure()` when it used `always() && !cancelled()`, to keep excluding
+   cancelled runs) so the job is skipped when all of its dependencies succeed.
+3. In every final required aggregate gate that `needs` the reporter: keep (or
+   add) `if: always()`, because without a status-check function a skipped need
+   skips the gate and a skipped job reports success to a required check. Accept
+   `needs.<reporter>.result` of `success` or `skipped`, and require every
+   workload check to be `success`, for example by failing when
+   `contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled')`,
+   which a skipped reporter passes. Change any comparison that demands
+   `success` from the reporter, or rejects `skipped` for every need.
+4. Test the truth table: all checks pass (reporter skipped, gate passes); one
+   check fails (reporter runs, gate fails); one check is cancelled (gate
+   fails); and the reporter itself fails (gate fails).
+
+**Sizing**: Runner-minute effect is a **saving**: the failure reporter's billed
+compute on healthy runs. It stays unsized until the reporter job's measured
+compute and the healthy-run share are available. When a final gate needs the
+reporter, the skip also removes the reporter's queue and run time from the
+healthy path to that gate; otherwise there is no merge-wait effect.
+
+**Public evidence**: [OpenClaw pull request #191007](https://github.com/openclaw/openclaw/pull/191007)
+is the public example of this shape and of the fix: a failure-or-cancellation
+condition on the reporter, with the final required gate treating its skip as
+success.
+
+**Risk**: MEDIUM. A blanket change can make the final required gate fail on the
+reporter's expected skip, let a skipped gate pass a required check, or conceal a
+cancelled workload job. Exercise the full result truth table before rollout.
 
 ---
 
@@ -3255,7 +3465,7 @@ fix_strategy: cron-schedule-too-frequent
 title_template: "Cron Schedule Too Frequent"
 -->
 
-**TL;DR**: A scheduled (cron) workflow runs more often than it needs to, piling up runs.
+**TL;DR**: A scheduled (cron) workflow runs more often than it needs to, or reruns scanner categories whose explicitly defined inputs have not changed.
 
 **Anti-pattern**: Cron-triggered workflows running more frequently than necessary for their purpose. Common examples: cleanup/triage jobs running every 5 minutes when every 15-60 minutes would suffice, or scheduled builds running hourly when daily is adequate.
 
@@ -3276,16 +3486,28 @@ done
 
 **Fix**: Increase the cron interval to match the actual operational need. For issue cleanup/triage bots: `*/15` or `*/30` is typically sufficient. For scheduled builds: daily or every 6 hours. Document the rationale for the chosen frequency.
 
+For a multi-category scanner, keep a separate last-successful commit for each category. Before the next scheduled scan, compare that category's current input paths with its own baseline and skip it only when the complete comparison contains no relevant change. If the baseline, compare result, exclusion syntax, or changed-file list is unavailable or incomplete, run the scan. Keep pull-request and manual scans unchanged. This fail-open recipe preserves coverage while avoiding work whose inputs are proven unchanged.
+
 **Real-world example (mastra)**: PR #14432 changed spam issue cleanup from every 5 minutes (`*/5 * * * *`) to every 15 minutes — the job rarely finds new spam within a 5-minute window.
 
+**Public evidence**: openclaw/openclaw#191805 (API requests per tick went from 21 to 3).
+
 **Tier-2 render note**: When run history shows consecutive `event=schedule`
-runs on the same `head_sha`, OPT36 can promote as measured schedule burn. The
+runs on the same `head_sha`, or a complete compare between consecutive scheduled
+runs touches only the scanner's explicit inline `paths-ignore` (every job a CodeQL
+category with resolvable interpreted `languages` and the same inline exclusions, a
+forward `ahead`/`identical` compare, a successful previous scan, renames counted at
+both paths, and workflow/CodeQL-config/local-action paths always relevant), OPT36 can promote
+as measured schedule burn. The
 finding must size only the schedule-event subset, carry `sizing_basis=measured`,
 price from successful schedule-event job timings only, stamp
 `tier2_run_subset_events: ["schedule"]`, and carry a `non_pr_event`
-certificate. Static cron-frequency hits without same-`head_sha` run evidence
-remain modeled residual findings in "Also noticed"; a matching static row on a
-measured workflow is superseded by the measured finding.
+certificate. The measured finding states a signed runner-minute saving and scales
+one sampled schedule-run population to the schedule's 30-day volume. A changed
+relevant path, an unreadable/truncated compare, or exclusions the audit cannot
+classify retains the scan. Static cron-frequency hits without measured redundant
+run evidence remain modeled residual findings in "Also noticed"; a matching
+static row on a measured workflow is superseded by the measured finding.
 
 ---
 
@@ -3453,46 +3675,104 @@ fix_strategy: multi-language-matrix-without-path-filter
 title_template: "Multi-Language Matrix Without Path Filter"
 -->
 
-**Anti-pattern**: A security/static-analysis workflow uses a matrix to run language-specific scanners (CodeQL, Snyk, Semgrep, dependency-scan) but never gates the matrix legs on whether files of THAT language changed. CodeQL Python runs on JS-only PRs, CodeQL JavaScript runs on Python-only PRs — both consume runner time + analysis time for zero signal.
+**Anti-pattern**: A pull-request workflow runs language-specific work when the change touches none of that language's inputs. This includes a security scanner's language matrix and separate Go, Rust, or Python contract/proof jobs. The unused lane still installs its toolchain and runs its checks, consuming runner time for no signal.
 
 **Detection heuristic**:
 
 - Workflow declares a matrix with `language: [javascript, python, ...]` (or similar)
 - Uses `github/codeql-action/init` (or `snyk/actions`, `returntocorp/semgrep-action`, etc.) with `languages: ${{ matrix.language }}`
-- The workflow has NO preceding `dorny/paths-filter` job or per-leg `if:` checking changed file extensions
+- Or an explicit Go, Rust, or Python lane, or a language-neutral contract/proof/conformance lane, installs that toolchain with `setup-go`, `setup-python`, a Rust toolchain action, or `rustup toolchain install`; a generic primary job using Python only to run repository tooling is not enough. The workflow must also run another language's lane (another job installs a different toolchain, such as `setup-node` or `setup-java`) or declare a complete input map; a single-language project's test job runs for every code change, and its non-code pull requests belong to OPT32
+- The workflow has NO preceding `dorny/paths-filter` job or per-leg `if:` checking changed file extensions. For a per-language lane, a gate is an `if:` reading an upstream job output that comes from `dorny/paths-filter`, `tj-actions/changed-files`, a shell step listing changed files (`git diff --name-only`, `gh pr diff --name-only`) into that output, or a `github-script` comparison; an unrelated upstream output is not a gate, nor is an output that gates only another event (`github.event_name != 'schedule' || needs.scope.outputs.rust == 'true'`). An output the scanner cannot read (from a reusable workflow, a local or unrecognized action, or a script whose output keys are not in the workflow) withholds the finding, and a toolchain step that runs only behind a same-job selector's output (`if: steps.filter.outputs.go == 'true'`) is not counted as an install
 - **Activation fidelity**: only flag when the workflow actually runs on every PR — suppress when the `pull_request:` trigger is `types:`-gated to a non-lifecycle activity (e.g. `types: [labeled]`), since the legs then don't run on a normal PR. (Shared `_pr_trigger_runs_every_pr` in `scan.py`; see OPT33.)
+- **Measured admission**: for a per-language job, require an explicit complete input map (for example, a reused scheduled-change action's `paths:` contract), then compare the exact base and head revisions recorded on each sampled run. Credit only the affected job's measured billed-equivalent minutes when every changed path is inside the workflow's declared input universe and outside that language's inputs. A missing map, stale run identity, unknown input, incomplete comparison, failed lookup, or unreadable job time receives no saving credit.
 
-**Fix**: Add a pre-job that uses `dorny/paths-filter@v3` to detect which languages changed, then gate each matrix leg with `if: needs.changes.outputs.<lang> == 'true'`. Example:
+**Fix**: Derive each lane's complete input set from the repository, then select jobs from the exact pull-request comparison. Run every language job when the lookup is missing, incomplete, capped, malformed, or contains an input whose owner is unknown. A lane may be skipped only when the selector finished and proved that lane untouched. Example (fail-open selector, gated lanes, one aggregate required check):
 
 ```yaml
 jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      js: ${{ steps.filter.outputs.js }}
-      python: ${{ steps.filter.outputs.python }}
+      # An empty output (selector failed or never set it) means "run".
+      go: ${{ steps.select.outputs.go || 'true' }}
+      rust: ${{ steps.select.outputs.rust || 'true' }}
+    steps:
+      - id: select
+        continue-on-error: true
+        uses: actions/github-script@<sha>
+        with:
+          script: |
+            const owners = {
+              go: [/\.go$/, /^go\.(mod|sum|work)$/],
+              rust: [/\.rs$/, /^Cargo\.(toml|lock)$/, /^rust-toolchain/],
+            };
+            const shared = [/^testdata\//, /^\.github\/workflows\/ci\.yml$/];
+            const inert = [/^docs\//, /\.md$/];  // proven to feed no lane
+            const hit = (patterns, path) => patterns.some((re) => re.test(path));
+            const run = { go: true, rust: true };   // default: run everything
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              ...context.repo, pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const paths = files.flatMap((f) => [f.filename, f.previous_filename])
+              .filter(Boolean);
+            const known = paths.every((p) => hit(shared, p) || hit(inert, p)
+              || Object.values(owners).some((patterns) => hit(patterns, p)));
+            // listFiles stops at 3000 files: treat a capped or empty list as unknown.
+            if (files.length > 0 && files.length < 3000 && known
+                && !paths.some((p) => hit(shared, p))) {
+              run.go = paths.some((p) => hit(owners.go, p));
+              run.rust = paths.some((p) => hit(owners.rust, p));
+            }
+            core.setOutput('go', String(run.go));
+            core.setOutput('rust', String(run.rust));
+
+  go-contract:
+    needs: changes
+    # Skip only when the selector succeeded AND proved Go untouched.
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.go != 'false') }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@<sha>
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            js: ['**/*.js', '**/*.ts', '**/*.tsx', 'package.json', 'package-lock.json']
-            python: ['**/*.py', 'pyproject.toml', 'requirements*.txt']
+      - uses: actions/setup-go@<sha>
+      - run: go test ./...
 
-  codeql:
+  rust-contract:
     needs: changes
-    strategy:
-      matrix:
-        language: [javascript, python]
-    if: |
-      (matrix.language == 'javascript' && needs.changes.outputs.js == 'true') ||
-      (matrix.language == 'python'     && needs.changes.outputs.python == 'true')
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust != 'false') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@<sha>
+      - uses: dtolnay/rust-toolchain@<sha>
+      - run: cargo test --locked
+
+  ci-ok:  # the required status check
+    needs: [changes, go-contract, rust-contract]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          SELECTOR: ${{ needs.changes.result }}
+          GO: ${{ needs.go-contract.result }}/${{ needs.changes.outputs.go }}
+          RUST: ${{ needs.rust-contract.result }}/${{ needs.changes.outputs.rust }}
+        run: |
+          # A lane passes when it ran and succeeded, or when it was skipped
+          # because the selector succeeded and proved it untouched. Any other
+          # skip (a cancelled run, a cancelled selector) fails this check.
+          for lane in "$GO" "$RUST"; do
+            case "$lane" in
+              success/*) ;;
+              skipped/false) [ "$SELECTOR" = success ] || { echo "unproven skip"; exit 1; } ;;
+              *) echo "lane: $lane"; exit 1 ;;
+            esac
+          done
 ```
 
-Caveat: GitHub renders skipped matrix legs as "skipped" (not "passed"). If you have a required-status-check rule on `codeql (javascript)`, change it to `codeql` without the matrix-leg suffix, or make the leg's terminal step a no-op success rather than `if:`-skipping the whole leg. Document the chosen approach in the workflow.
+`dorny/paths-filter` can replace the script when its filters list every input of each lane; give its step `continue-on-error: true` and its job outputs the same `|| 'true'` default. For a scanner matrix, a job-level `if:` cannot read `matrix`: emit the language list from the selector (the full list on any failure) and use `matrix: { language: ${{ fromJSON(needs.changes.outputs.languages) }} }`.
 
-**Real-world example (blen-starter-kit deep-scan)**: `security.yml` runs CodeQL Python and JavaScript on every PR regardless of which app changed. JS-only PRs paid Python init+analyze (~30-60s) for nothing, and vice versa.
+Required checks: a job skipped by its own `if:` reports **Success** to branch protection under its own name, so a gated lane that stays a required check still lets an unrelated pull request merge. That is also why a plain `if: needs.changes.outputs.go == 'true'` is unsafe: when the selector fails, the lane is skipped and its required check reports Success with nothing validated, so the lane condition above runs on any selector result other than a proven `false`. A matrix leg left out of the matrix reports no check at all, so a required `codeql (python)` would stay expected forever; require the `ci-ok` aggregate instead of the per-leg names. `ci-ok` runs under `always()` and accepts a skipped lane only when the selector succeeded and set that lane's output to `false`, so a failed or cancelled lane, a cancelled selector, or a run cancelled before its lanes start fails the required check instead of reporting Success with nothing validated. Do not move this gating into a workflow-level `paths:` filter: a workflow that never starts leaves its required checks pending.
+
+**Public evidence**: [OpenClaw PR #193865](https://github.com/openclaw/openclaw/pull/193865) decides which per-language pull-request jobs to run from the changed paths, and runs every job when the changed-path lookup is unknown or fails.
 
 **Risk**: MEDIUM. If a polyglot file (a Python/JS bridge, or a config that affects both) changes, both legs should still run. The `paths-filter` rules need to be inclusive enough to catch shared config files.
 
@@ -5243,38 +5523,50 @@ title_template: "Runtime TypeScript Transpilation on the Long Pole"
 -->
 
 **TL;DR**: A long-pole tool or test step starts through `tsx`, `ts-node`, or a
-`node --loader` / `node --import` TypeScript hook, and a structured summary
-derived from a retained CPU profile attributes a material share of the job to
-the loader. Precompile the
-exact tool surface once, or preload a cached transform, then make any fallback
-to runtime transpilation fail loudly.
+`node --loader` / `--import` / `--require` TypeScript hook, transpiling the same
+files on every process start. Measure the loader's share of the step, then
+precompile the exact tool surface once, or preload a cached transform, and make
+any fallback to runtime transpilation fail loudly.
 
-**Detection heuristic** (every gate required):
+**Detection heuristic** (default path, every gate required):
 
-1. The captured representative job is a measured long pole.
-2. Its log contains a command boundary that directly invokes `tsx` or `ts-node`,
-   or invokes `node` with a `tsx`, `ts-node`, or `jiti` loader hook. A prose
-   mention does not count.
-3. The same step emits `CI_SPEEDUP_RUNTIME_TS_PROFILE_V1` with the loader,
-   self-time in milliseconds, retained `.cpuprofile` filename and SHA-256. The
-   workflow produces this line from its CPU-profile parser; Node's
-   `--cpu-prof` flag does not emit such a summary by itself. A loader-looking
-   command or a free-form `jiti self time` line is not evidence of expensive
-   transpilation: the transform cache may already be warm, and unaffiliated log
-   text must not receive measured credit.
-4. The profiled self-time is at least 30 seconds and at least 20% of the job's
-   measured wall, and does not exceed that wall. Smaller or impossible
-   observations stay silent.
+1. The step is on a measured long pole: its measured p50 is at least 20 seconds
+   and at least 15% of the pole job's p50 (the OPT83 step floors).
+2. The step's workflow `run:` command, resolved through `package.json` scripts
+   the same way OPT84 reads them (`pnpm test` -> `tsx --test src/*.test.ts`),
+   starts a runtime TypeScript loader: the `tsx`, `ts-node` or `ts-node-esm`
+   binary (directly or through `npx`, `pnpm exec`, `yarn`, `bunx`); `node` with
+   `--loader`, `--experimental-loader`, `--import`, `-r` or `--require` naming
+   `tsx` or `ts-node` (`tsx/esm`, `ts-node/register`, `ts-node/esm` ...); or a
+   `NODE_OPTIONS` carrying such a flag, inline (`cross-env` and `env` read
+   through) or in the step, job or workflow `env`. A package script whose name
+   only starts with a loader name (`yarn tsx-lint`), an `echo`, a comment, and
+   a precompiled `node dist/...` do not count. A command the read cannot follow
+   (an expression, a directory change, an unreadable script) stays quiet.
+
+Without a profile the loader's share of the step is unknown, so the finding is
+unsized on both axes and its fix starts with measuring it.
+
+**Upgrade path** (profiled): when the same step also emits
+`CI_SPEEDUP_RUNTIME_TS_PROFILE_V1` with the loader, self-time in milliseconds,
+retained `.cpuprofile` filename and SHA-256 (produced by the workflow's own
+CPU-profile parser; Node's `--cpu-prof` flag does not emit such a summary by
+itself), and that self-time is at least 30 seconds and at least 20% of the job's
+measured wall without exceeding it, the finding is sized from the profile.
+A free-form `jiti self time` line or a summary in another step is not evidence.
 
 **Fix recipe**, safest first:
 
-1. Identify the exact TypeScript entry surfaces the measured command loads.
+1. Measure first: profile one run of the step (`node --cpu-prof`, or one
+   instrumented run) to learn the loader's self time. Skip the rest if it is
+   small.
+2. Identify the exact TypeScript entry surfaces the measured command loads.
    Precompile those surfaces once, or preload their cached transform through the
    existing module graph. Keep the same module format, inputs, and outputs.
-2. Add a guard around the exercised path that records every runtime-loader
+3. Add a guard around the exercised path that records every runtime-loader
    fallback and fails if the count is non-zero. The guard is part of the fix:
    without it, a new entry surface can silently restore the long pole.
-3. Compare generated bytes where applicable, run the same tests, and profile the
+4. Compare generated bytes where applicable, run the same tests, and profile the
    same command again on the same runner class and cache state.
 
 **Guardrail**: do not skip an entry surface, commit stale generated output, or
@@ -5283,16 +5575,19 @@ module resolution, source-map behavior, test coverage, failures, and exit
 status. A warm transform cache is acceptable only when its key includes every
 source and toolchain input that changes the emitted code.
 
-**Sizing**: the structured profile summary's loader self-time is a ceiling on both per-run wall
-clock and runner-minute saving. It is multiplied by the measured 30-day run
-volume, then clamped to the affected job's measured completed-run compute. The
-realized saving is the matched before/after difference after the guarded
-replacement; the report never credits more than the profiled self-time.
+**Sizing**: on the default path both axes read
+"unsized (loader share not measured; the step's measured p50 of N s is an upper
+bound)"; the step's duration is never credited as a saving. On the profiled
+path the loader self-time is a ceiling on both per-run wall clock and
+runner-minute saving: "runner-minute saving: at most N/month (profiled loader
+ceiling from 1 representative run x R workflow runs in 30 days)", clamped to the
+affected job's measured completed-run compute. The realized saving is the
+matched before/after difference after the guarded replacement.
 
 **Real-world example (OpenClaw)**, their numbers, not a forecast for another
 repository: openclaw/openclaw [#109757](https://github.com/openclaw/openclaw/pull/109757)
-reported a prompt-snapshot step falling from 354 seconds to 54 seconds after
-preloading the exact plugin surfaces and adding a zero-runtime-loader guard.
+reported 354 seconds falling to 54 seconds for the runtime-transpilation fix in
+that pull request.
 
 **Risk**: **MEDIUM**. The mechanical change is reversible, but a missing entry
 surface can leave CI green while testing a different path. The fallback guard
@@ -6259,7 +6554,7 @@ fix_strategy: run-independent-pole-steps-in-parallel
 title_template: "Independent steps on the long pole run one after another"
 -->
 
-**TL;DR**: The slowest job gating the merge runs several independent compute steps (say lint, typecheck and unit tests) one after another on one runner. Grouping them to run side by side could cut that job's wall time, by at most the sum of the steps minus the longest. That is an upper bound, not a saving: it is never credited until a benchmark confirms it.
+**TL;DR**: The slowest job gating the merge runs several independent compute steps (say lint, typecheck and unit tests) one after another on one runner. When they can safely share the runner, grouping them side by side has an uncredited upper bound. When two Go test steps each need the runner's cores, move one into a sibling job, preserve the required check through a strict aggregator, and report both the measured merge-wait saving and the added runner-minute cost.
 
 **Anti-pattern**: A drilled long-pole job whose measured step decomposition shows two or more heavy compute steps, adjacent in the workflow file, none of which depends on another's output.
 
@@ -6311,6 +6606,10 @@ steps:
         run: npm test
 ```
 
+**Separate-job extension for Go tests that cannot share one runner**: move one candidate unchanged into a sibling job that runs beside the remaining work. Duplicate the measured setup it needs. Add one final aggregator with `if: always()` and `needs:` on every sibling; it succeeds only when every upstream `result` is `success`, and it keeps the required check name branch protection already expects. A local container or background service is not this recipe because it is not reachable from the sibling runner; that shape remains held back. The split is also held back, with its reason, when a later step or a job output may read what the moved step writes (a coverage gate or report upload would lose its input), when a step before the candidates is not setup, checkout or install (the sibling's duplicated work is then unmeasured), and when the job is a matrix (setup repeats in every cell).
+
+The extension sizes merge wait, re-derived from measured step p50s, as up to the serial candidate sum minus the slower of (a) the remaining candidates in the original job and (b) the moved candidate plus measured setup; the aggregator job's own pickup comes off it. Its runner-minute effect is an **added cost** stated as a floor, at least +(duplicated setup) runner-min per run, since the aggregator job and per-job minute rounding add more, and it states that the workflow uses one additional concurrent runner. Public evidence: openclaw/crabbox#2645 split a Windows gate; openclaw/crabbox#1722 moved an all-module pass beside the race job; openclaw/crabbox#1639 moved coverage out of the serial Go job.
+
 Parallel steps (changelog 2026-06-25) run the group's children concurrently with an implicit wait at the group's end. Sources: [GitHub changelog](https://github.blog/changelog/2026-06-25-actions-steps-can-now-be-run-in-parallel/) and [workflow syntax: `jobs.<job_id>.steps.parallel`](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#jobsjob_idstepsparallel). **Runner caveat**: GitHub-hosted runners support it; on self-hosted runners, run actions/runner 2.336.0 or newer: its release notes list background steps in 2.335.0 and, in 2.336.0, a fix that stops a cancelled background step from affecting the job result. GitHub publishes no minimum runner version for the feature itself. The feature is documented for github.com and GitHub Enterprise Cloud, not GitHub Enterprise Server. At most 10 background steps run at once (more queue for a free slot); a background step's outputs are visible only after a `wait` or `wait-all` that covers it (this audit assumes the same of its `GITHUB_ENV` and `GITHUB_PATH` writes); the syntax is not usable inside composite actions.
 
 **Mandatory guardrail (this pattern is invalid without it)**: the independence checklist above, a CPU and memory headroom check on the runner, and each step keeping its own log so a failure still names its step.
@@ -6319,7 +6618,7 @@ Parallel steps (changelog 2026-06-25) run the group's children concurrently with
 
 **Conservative rollout (REQUIRED)**: one PR; compare the job's wall time over the next sampled runs; keep the serial form on the merge queue until the gain is measured.
 
-**Sizing — deliberately uncredited**: no `_SIZING` model, no wall-clock or runner-minute saving. The only number is the upper bound (sum of the candidates' p50s minus the largest), which assumes each step keeps its solo speed on one runner; CPU, memory and disk contention can erase it. It is never summed into any total, the headline, Tier 2 or Also noticed. **Benchmark first**: rewrite only those steps as one `parallel:` group on a branch, compare the job's wall time over the next sampled runs, and keep it only if the measured gain holds.
+**Sizing**: the same-runner recipe remains deliberately uncredited: no `_SIZING` model, no wall-clock or runner-minute saving. Its only number is the upper bound (sum of the candidates' p50s minus the largest), which assumes each step keeps its solo speed on one runner; CPU, memory and disk contention can erase it. The separate-job extension re-derives an up-to wall-clock saving from the pole's measured step decomposition and states the duplicated setup as a signed runner-minute added cost per run, as a floor; it never turns that added cost into a saving. **Benchmark first** on the same commits and keep either rewrite only if the measured gain holds.
 
 **Risk**: **MEDIUM** — a missed dependency can turn a green job into an order-dependent one.
 
