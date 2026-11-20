@@ -11522,6 +11522,12 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                       f"(~{_clock(wc)}) is below the long-pole threshold, so it is NOT "
                       "credited as a merge-gating long pole - treat it as a minor cleanup, "
                       "not a merge-wait win.")
+        elif pat in {"OPT24", "OPT25"} and not rmin:
+            # Sharding never cuts the bill: extra legs add runner minutes (the
+            # runner-minute effect line above), so do not call this a bill cut.
+            saving = ("Saving: none credited - off the merge-gating critical path, so "
+                      "~0 developer wall-clock, and the split adds runner minutes "
+                      "rather than cutting the bill.")
         else:
             saving = (f"Saving: {bill} - off the merge-gating critical path, so ~0 developer "
                       "wall-clock (a cloud-bill cut, not a merge-wait cut).")
@@ -11570,7 +11576,43 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "crediting seconds."
         )
     if pat in {"OPT24", "OPT25"}:
-        body += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE]
+        body.append(_CONCURRENCY_ORDER_LINE)
+        go_member = next(
+            (member for member in members if member.get("go_dominant_package")),
+            None,
+        )
+        if pat == "OPT24" and go_member is not None:
+            package = str(go_member["go_dominant_package"])
+            extra = _num(go_member.get("go_shard_extra_runner_s"))
+            body.append(
+                f"Go list-then-run recipe: List the tests in `{package}` with "
+                "`go test -list` using the same build tags and flags (`-race`, "
+                "`-tags`) as the run, partition every listed test exactly once, and "
+                f"run each part against `{package}` only with an anchored `-run` "
+                "regex in two matrix legs. Run every other package the step tests in "
+                "exactly one leg, unfiltered. Keep the required check name on an "
+                "`always()` aggregate job that rejects every non-success result. For "
+                "coverage, write and upload one atomic profile per shard, merge only "
+                "after every shard succeeds, and apply the unchanged threshold."
+            )
+            if extra is not None:
+                body.append(
+                    f"Runner-minute effect: added cost of ~{_clock(extra)} per run for "
+                    "the assumed two-shard split. Extra shard jobs repeat checkout and "
+                    "setup and bill each job; here the second runner repeats the "
+                    "measured pre-test floor."
+                )
+            else:
+                reason = str(go_member.get("go_shard_extra_runner_unsized_reason")
+                             or "the repeated floor is not measured")
+                body.append(
+                    "Runner-minute effect: added cost per run for the assumed "
+                    f"two-shard split, unsized ({reason}). Extra shard jobs repeat "
+                    "checkout and setup and bill each job; the second runner also "
+                    "repeats compilation."
+                )
+        else:
+            body.append(_SHARD_RUNNER_MINUTE_LINE)
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.

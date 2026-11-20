@@ -647,6 +647,23 @@ an unrelated global threshold.
 
 **Approval status:** awaiting owner approval.
 
+### `go-package-dominance`
+
+**Current value:** OPT24 classifies a long `go test` step for list-then-run
+sharding only when one package accounts for at least 60% of the package time
+printed by the sampled command (`_OPT24_GO_PACKAGE_DOMINANT_SHARE`).
+
+**Report statements:** that one Go package dominates the long test step and is
+therefore a concrete candidate for internal test-name partitioning.
+
+**Reason:** A majority substantially above one half distinguishes one package
+that can move the pole from an already distributed package set. Missing timing
+or a balanced package set stays unclassified.
+
+**Proposed decision:** **Keep 60%.**
+
+**Approval status:** owner-approved 2026-11-20 (60%).
+
 ### `go-fixed-wait-thresholds`
 
 **Current value:** the measured OPT19 Go poll route needs at least two
@@ -795,6 +812,12 @@ implementation lands.
     "decision": "gate-frequency-interval",
     "planned_sources": {
       "gate_frequency_contract.py:GATE_INTERVAL_Z": 1.96
+    }
+  },
+  "go-package-dominance": {
+    "decision": "go-package-dominance",
+    "sources": {
+      "collect_runs.py:_OPT24_GO_PACKAGE_DOMINANT_SHARE": 0.6
     }
   },
   "go-fixed-wait-thresholds": {
@@ -1145,6 +1168,7 @@ implementation lands.
 - [ ] Approve 100 completed PR commits over at least 5 days.
 - [ ] Approve the 12-page cap with early stopping and the 1,200 job-list read cap.
 - [ ] Approve the conditional 60-second bookkeeping rule.
+- [x] Approve the 60% `go-package-dominance` share (owner-approved 2026-11-20).
 - [ ] Approve 5 last-finisher observations for supported ranking/grouping.
 - [ ] Approve two-sided 95% Wilson intervals and overlap as unsupported order.
 - [ ] Confirm #305, #306, and #311 may merge after their implementations match

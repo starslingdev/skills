@@ -29,8 +29,15 @@ REQUIRED_DECISIONS = {
     "dependency-cache-floor", "cold-cache-miss-threshold",
     "cache-partial-miss-floor",
     "default-branch-batching-window",
-    "ceiling-minimum-gates", "partial-majority-rule", "go-fixed-wait-thresholds",
-    "account-weekly-paired-minimum",
+    "ceiling-minimum-gates", "partial-majority-rule", "go-package-dominance",
+    "go-fixed-wait-thresholds", "account-weekly-paired-minimum",
+}
+
+# Decisions the owner has approved, with the exact status line each section
+# must carry. Every decision not listed here must still read "awaiting owner
+# approval"; a listed one must carry its approval and not the pending status.
+APPROVED_DECISIONS = {
+    "go-package-dominance": "**Approval status:** owner-approved 2026-11-20 (60%).",
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
@@ -102,6 +109,7 @@ REQUIRED_CURRENT_SOURCES = {
     "blocking_path.py:_AGG_GATE_TRIVIAL_S": 30.0,
     "blocking_path.py:_ALSO_NOTICED_CAP": 12,
     "blocking_path.py:_CHAIN_MAKESPAN_DIVERGENCE_PCT": 25.0,
+    "collect_runs.py:_OPT24_GO_PACKAGE_DOMINANT_SHARE": 0.6,
     "collect_runs.py:_OPT19_GO_MIN_INTERVALS": 2,
     "collect_runs.py:_OPT19_GO_MIN_JOB_SHARE": 0.2,
     "collect_runs.py:_OPT19_GO_MIN_TEST_SHARE": 0.5,
@@ -353,8 +361,15 @@ def test_report_defaults_review_covers_every_owner_decision():
         for field in ("**Current value:**", "**Report statements:**", "**Reason:**",
                       "**Proposed decision:**"):
             assert field in section, f"{decision} lacks {field}"
-        assert "awaiting owner approval" in section, (
-            f"{decision} does not preserve its pending approval status")
+        if decision in APPROVED_DECISIONS:
+            assert APPROVED_DECISIONS[decision] in section, (
+                f"{decision} lacks its recorded owner approval")
+            assert "awaiting owner approval" not in section, (
+                f"{decision} is approved but still reads as pending")
+        else:
+            assert "awaiting owner approval" in section, (
+                f"{decision} does not preserve its pending approval status")
+    assert set(APPROVED_DECISIONS) <= REQUIRED_DECISIONS
     assert "references/report-defaults.md" in (SKILL / "SKILL.md").read_text(encoding="utf-8")
 
 
