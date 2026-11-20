@@ -2,7 +2,7 @@
 pattern: OPT13
 impact: MEDIUM
 class: static
-detector: yaml-job-correlated
+detector: manual
 affected_files: '.github/workflows/*.yml,.github/workflows/*.yaml'
 fix_strategy: build-step-in-jobs-that-dont-need-it
 title_template: 'Build Step in Jobs That Don''t Need It'
@@ -26,10 +26,15 @@ category: 2
 With `--with-logs`, ci-speedup also recognizes the narrow measured case where a
 lint, test, check, or type-check package script logs a declaration emit, bundle,
 or full build before its quality command. It credits only the build interval
-printed by the tool (or bounded by timestamped commands). A plain build job, an
-untimed build, or a job that visibly loads `dist/`, `build/`, or `lib/` output
-does not qualify. This is evidence of work placement, not proof that a
-production build may be deleted.
+printed by the tool. A plain build job, an untimed build, JavaScript/TypeScript
+source that may load Node compiled output, or a quality job without a separate
+full-build validation job does not qualify. This is evidence of work placement,
+not proof that a production build may be deleted.
+
+The catalog metadata stays static because the broad "does this job need its
+build?" judgment remains manual and is still disclosed as an uncovered scanner
+pattern. Only the fully proven exception above becomes a data-driven finding
+during collection.
 
 **Fix**: Safest first, add a runtime-only build target for the lint/test job and
 keep one full build in the artifact or validation job. Compare the same workload
@@ -37,10 +42,12 @@ before and after. Remove a build only after the guardrails below prove that no
 runtime consumer or validation surface depends on it. If using Turbo, ensure
 `turbo.json` task graph is accurate so Turbo skips unneeded builds.
 
-**Sizing**: The log-backed finding reports the measured build interval. Its
-runner-minute effect is a saving (measured seconds × the workflow's 30-day run
-count); if run volume is unavailable, it says the runner-minute saving was not
-sized instead of printing a bare zero.
+**Sizing**: The log-backed finding reports the measured build interval as a
+ceiling, not a credited saving. The corresponding runner-minute ceiling is
+measured seconds × the workflow's 30-day run count ÷ 60. The saving itself is
+not sized until a before/after benchmark measures the runtime-only replacement;
+if run volume is unavailable, the report also withholds the ceiling instead of
+printing a bare zero.
 
 **GUARDRAIL — Framework build steps (`next build`, `nuxt build`, `vite build`, `remix build`, `astro build`, `gatsby build`, `ng build`, `nest build`, `expo export`, `react-scripts build`, `webpack`/`rollup`/`turbopack`/`rspack` production builds, `tsc -b`/project-references full builds, `mvn package`, `gradle assemble`, etc.):**
 
@@ -89,7 +96,8 @@ If ANY non-test source contains the above, the build is load-bearing at runtime 
 
 **Worked counter-example.** The 2026-05-19 langfuse audit's Finding 15 shipped a "drop `pnpm --filter=worker... run build`" recommendation as a MEDIUM-severity probe, citing ~150 min/mo. The D7 source-code safety check (DB-retry, HTTP-client, service-discovery patterns) returned zero hits, so the probe looked safe. Phase 6 round 2 ran the four-grep set above and found `worker/src/features/tokenisation/worker-thread.ts:4` requires `dist/features/tokenisation/usage.js` via a spawned Node Worker thread (`new Worker(path.join(__dirname, "worker-thread.js"))` inside `async-usage.ts` → `TokenCountWorkerManager`). The finding was INVALIDATED — a build that is load-bearing at runtime (a spawned Worker resolving its target under `dist/`) must never be proposed for removal, even as a probe.
 
-**Public examples**:
+**Public evidence for the broader optimization shape** (the automatic detector
+remains narrower than either change):
 
 - [OpenClaw #121805](https://github.com/openclaw/openclaw/pull/121805)
 - [OpenClaw #134294](https://github.com/openclaw/openclaw/pull/134294)

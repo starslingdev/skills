@@ -23922,17 +23922,21 @@ _OPT13_BUILD_SUMMARY_RE = _re.compile(
     _re.IGNORECASE,
 )
 _OPT13_LOADS_BUILD_OUTPUT_RE = _re.compile(
-    r"(?:^|\s)(?:node|deno|bun)\s+(?:\./)?(?:dist|build|lib)/|"
-    r"(?:require|import)\s*\([^\n]*(?:dist|build|lib)/",
+    r"(?:^|\s)(?:node|deno|bun|vitest|jest|mocha|ava)\b[^\n]*"
+    r"(?:^|[\s'\"/(])(?:\.\.?/|/[^\s'\"]*/)?(?:dist|build|lib)/|"
+    r"(?:require|import)\s*\([^\n]*(?:^|/)(?:dist|build|lib)/|"
+    r"\bfrom\s+['\"][^'\"]*(?:^|/)(?:dist|build|lib)/",
     _re.IGNORECASE,
 )
 
 
-def _opt13_command_text(line: str) -> str:
+def _opt13_command_text(line: str) -> str | None:
     """Return command text only; package-manager banners and output stay inert."""
     clean = _OPT24_LOG_TS_RE.sub("", line).strip()
-    clean = _re.sub(r"^(?:##\[command\]|[>$+]\s*)", "", clean).strip()
-    return clean
+    marker = _re.match(r"^(?:##\[command\]|[>$+]\s+)", clean)
+    if marker is None:
+        return None
+    return clean[marker.end():].strip()
 
 
 def _opt13_build_label(command: str) -> str:
@@ -23960,47 +23964,40 @@ def _opt13_build_in_quality_log(log: str) -> dict[str, Any] | None:
     recipe shrinks it to a runtime-only target and keeps one full validation
     build; it never recommends deleting the only production-build gate.
     """
-    records = [(_opt24_log_timestamp(line), _opt13_command_text(line))
+    records = [(_opt24_log_timestamp(line), _opt13_command_text(line),
+                _OPT24_LOG_TS_RE.sub("", line).strip())
                for line in log.splitlines()]
-    commands = [text for _stamp, text in records]
+    commands = [command for _stamp, command, _text in records if command is not None]
     if not any(_OPT13_QUALITY_COMMAND_RE.search(text) for text in commands):
         return None
     if any(_OPT13_LOADS_BUILD_OUTPUT_RE.search(text) for text in commands):
         return None
-    build_at = next((index for index, (_stamp, text) in enumerate(records)
-                     if _OPT13_BUILD_COMMAND_RE.search(text)), None)
+    build_at = next((index for index, (_stamp, command, _text) in enumerate(records)
+                     if command is not None and _OPT13_BUILD_COMMAND_RE.search(command)), None)
     if build_at is None:
         return None
-    # A quality command must occur outside the build command itself.  This
-    # rejects a plain build job whose log happens to mention tests in prose.
-    quality_after = next(
-        (index for index in range(build_at + 1, len(records))
-         if _OPT13_QUALITY_COMMAND_RE.search(records[index][1])), None)
-    quality_before = any(
-        _OPT13_QUALITY_COMMAND_RE.search(text)
-        for _stamp, text in records[:build_at])
-    if quality_after is None and not quality_before:
-        return None
-
     seconds: float | None = None
-    for _stamp, text in records[build_at + 1:]:
+    quality_after: int | None = None
+    for index in range(build_at + 1, len(records)):
+        _stamp, command, text = records[index]
         match = _OPT13_BUILD_SUMMARY_RE.search(text)
         if match:
             value = float(match.group(1))
             unit = match.group(2).lower()
             seconds = value / 1000.0 if unit == "ms" else value * 60.0 if unit[0] == "m" else value
+            continue
+        if command is not None and _OPT13_QUALITY_COMMAND_RE.search(command):
+            quality_after = index
             break
-        if _OPT13_QUALITY_COMMAND_RE.search(text):
-            break
-    if seconds is None and quality_after is not None:
-        start = records[build_at][0]
-        end = records[quality_after][0]
-        if start is not None and end is not None and end > start:
-            seconds = end - start
-    if seconds is None or seconds <= 0:
+        # A different command means the following summary/quality command no
+        # longer bounds this build.  Omit instead of folding unrelated work
+        # (sleep, setup, another script) into the measured interval.
+        if command is not None:
+            return None
+    if quality_after is None or seconds is None or seconds <= 0:
         return None
     return {
-        "build_command": _opt13_build_label(records[build_at][1]),
+        "build_command": _opt13_build_label(str(records[build_at][1])),
         "build_s": round(seconds, 1),
     }
 
@@ -29140,11 +29137,12 @@ def _persist_pole_logs(
 
 def _detect_opt13_build_in_scripts(
     pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
-    start_idx: int,
+    start_idx: int, workflow_docs: dict[str, Any], root: "Path | None",
 ) -> list[dict[str, Any]]:
     """Turn conservative, measured pole-log facts into OPT13 findings."""
     out: list[dict[str, Any]] = []
     idx = start_idx
+    source_guard: dict[str, Any] | None = None
     for entry in pole_logs:
         fact = entry.get("opt13_build_in_script")
         if not isinstance(fact, dict):
@@ -29154,25 +29152,38 @@ def _detect_opt13_build_in_scripts(
             continue
         wf = str(entry.get("workflow_file") or "")
         job = str(entry.get("job") or "")
+        validation_job = _opt13_validation_build_job(workflow_docs, wf, job)
+        if validation_job is None:
+            continue
+        if source_guard is None:
+            source_guard = _opt13_source_output_guard(root)
+        if not source_guard.get("safe"):
+            continue
+        entry["opt13_validation_build"] = validation_job
+        entry["opt13_source_guard"] = source_guard
         command = str(fact.get("build_command") or "build")
         runs = volume_by_workflow.get(wf)
         runner_min = (round(float(seconds) * runs / 60.0, 1)
                       if isinstance(runs, int) and runs > 0 else None)
         url = str(entry.get("html_url") or "")
         shown = _link(float(seconds), url)
-        runner_effect = (f"saves +{runner_min:.1f} runner-minutes/month"
-                         if runner_min is not None
-                         else "runner-minute saving not sized because monthly run volume is unavailable")
+        runner_effect = (
+            f"measured ceiling +{runner_min:.1f} runner-minutes/month; saving not sized "
+            "until the runtime-only replacement is benchmarked"
+            if runner_min is not None else
+            "runner-minute saving not sized because replacement cost and monthly run volume are unavailable")
         evidence = (
             f"The representative `{job}` log runs `{command}` inside its quality "
-            f"script; the build itself takes {shown}."
+            f"script; the build itself takes {shown}. A separate "
+            f"`{validation_job['job']}` job retains the full validation build, and "
+            f"{source_guard['source_files_checked']} source file(s) passed the compiled-output backstop."
         )
         measured = _measured_evidence(
             ["Job", "Build command", "Measured build", "Representative run"],
             [[f"`{job}`", f"`{command}`", f"{float(seconds):.1f}s",
               f"[job log]({url})" if url else "captured job log"]],
             f"The quality script spends {float(seconds):.1f}s in build work.",
-            "Only the measured build interval is credited; keep one full build as a validation gate.",
+            "The measured build interval is a ceiling only; benchmark the runtime-only replacement before crediting a saving.",
         )
         idx += 1
         finding = _new_finding(
@@ -29181,15 +29192,103 @@ def _detect_opt13_build_in_scripts(
             "Add a runtime-only build target for this quality job first; keep the full build "
             "once in the artifacts/validation job, then compare the same workload before and after.",
             "opt13--build-step-in-jobs-that-dont-need-it", idx,
-            wc_p50=float(seconds), rm=runner_min,
-            size_note=(f"measured build interval {float(seconds):.1f}s; {runner_effect}"),
-            realization="direct", measured_evidence=measured,
+            wc_p50=None, rm=None,
+            size_note=(f"measured build ceiling {float(seconds):.1f}s; {runner_effect}"),
+            realization="none", measured_evidence=measured,
         )
         finding["sizing_basis"] = "measured"
+        finding["opt13_wall_clock_ceiling_s"] = float(seconds)
+        finding["opt13_runner_min_ceiling"] = runner_min
+        finding["opt13_validation_build"] = validation_job
+        finding["opt13_source_guard"] = source_guard
         if isinstance(runs, int):
             finding["workflow_runs_30d"] = runs
         out.append(finding)
     return out
+
+
+_OPT13_VALIDATION_BUILD_LINE_RE = _re.compile(
+    r"^[ \t]*(?:(?:pnpm|yarn|bun)(?:\s+run)?\s+"
+    r"build(?::(?:ci[-:]?)?artifacts?)?|"
+    r"npm\s+run\s+build(?::(?:ci[-:]?)?artifacts?)?|"
+    r"(?:vite|next|nuxt|remix|astro|gatsby|ng|nest)\s+build"
+    r"(?:\s+--[\w-]+(?:=\S+)?)*|"
+    r"(?:webpack|rollup|rspack|turbopack|tsup|esbuild)(?:\s+--[\w-]+(?:=\S+)?)*|"
+    r"tsc\b[^\n]*(?:--emitDeclarationOnly|--declaration(?:\s+true)?\b)|"
+    r"(?:mvn|mvnw)\s+(?:[^\n]*\s)?package|"
+    r"(?:gradle|gradlew)\s+(?:[^\n]*\s)?assemble)\s*$",
+    _re.IGNORECASE,
+)
+_OPT13_SOURCE_OUTPUT_RE = _re.compile(
+    r"\bnew\s+Worker\s*\(|\bworker_threads\b|\bchild_process\b|"
+    r"\.(?:fork|spawn|exec|execFile|execSync)\s*\(|"
+    r"(?:require|import)\s*\([^\n]*(?:dist|build|lib)/|"
+    r"\bfrom\s+['\"][^'\"]*(?:dist|build|lib)/|"
+    r"__dirname[^\n]*\.js['\"]",
+    _re.IGNORECASE,
+)
+_OPT13_SOURCE_SUFFIXES = frozenset({
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+})
+
+
+def _opt13_validation_build_job(
+    workflow_docs: dict[str, Any], affected_workflow: str, affected_job: str,
+) -> dict[str, str] | None:
+    """Name a separate job that keeps the full validation build."""
+    doc = workflow_docs.get(affected_workflow)
+    jobs = (doc or {}).get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return None
+    for key, spec in jobs.items():
+        if (not isinstance(spec, dict) or spec.get("if") is not None
+                or spec.get("continue-on-error") not in (None, False)):
+            continue
+        name = str(spec.get("name") or key)
+        static_name = _opt24_static_job_name(name) if "${{" in name else ""
+        if (affected_job in {str(key), name}
+                or (static_name and (affected_job == static_name
+                                     or affected_job.startswith(static_name + " ")))):
+            continue
+        steps = [step for step in (spec.get("steps") or []) if isinstance(step, dict)]
+        for step in steps:
+            if (step.get("if") is not None
+                    or step.get("continue-on-error") not in (None, False)):
+                continue
+            if any(_OPT13_VALIDATION_BUILD_LINE_RE.fullmatch(line)
+                   for line in str(step.get("run") or "").splitlines()):
+                return {"workflow_file": str(affected_workflow), "job": name}
+    return None
+
+
+def _opt13_source_output_guard(root: "Path | None") -> dict[str, Any]:
+    """Whole-repository D11 backstop; any possible runtime consumer withholds."""
+    if root is None or not root.is_dir():
+        return {"safe": False, "source_files_checked": 0,
+                "reason": "repository source was unavailable"}
+    checked = 0
+    for path in root.rglob("*"):
+        if (path.is_symlink() or not path.is_file()
+                or path.suffix.lower() not in _OPT13_SOURCE_SUFFIXES
+                or any(part in {".git", "node_modules", "dist", "build",
+                                "test", "tests", "__tests__"} for part in path.parts)
+                or ".test." in path.name or ".spec." in path.name):
+            continue
+        try:
+            if path.stat().st_size > 1_000_000:
+                return {"safe": False, "source_files_checked": checked,
+                        "reason": "a source file was too large to inspect"}
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {"safe": False, "source_files_checked": checked,
+                    "reason": "a source file could not be read"}
+        checked += 1
+        if _OPT13_SOURCE_OUTPUT_RE.search(text):
+            return {"safe": False, "source_files_checked": checked,
+                    "reason": "source may load compiled output"}
+    return {"safe": checked > 0, "source_files_checked": checked,
+            "reason": "no compiled-output runtime consumer was found" if checked else
+                      "no readable source file was available to inspect"}
 
 
 # =============================================================================
@@ -33416,7 +33515,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             opt96_findings=[f for f in findings if f.get("pattern") == "OPT96"],
             wf_docs=_wf_docs,
             cache_effective_paths=findings_doc.get("cache_effective_paths"))
-        new = _detect_opt13_build_in_scripts(pole_logs, vol_by_wf, next_id)
+        new = _detect_opt13_build_in_scripts(
+            pole_logs, vol_by_wf, next_id, _wf_docs, root)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         findings_doc["findings"] = findings

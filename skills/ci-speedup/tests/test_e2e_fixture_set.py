@@ -434,6 +434,17 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
     """Measured package-script internals, not the wrapper name, decide OPT13."""
     positive = tmp_path / "opt13-build-in-script"
     shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    (positive / "src").mkdir()
+    (positive / "src" / "index.ts").write_text(
+        "export const answer = 42;\n", encoding="utf-8")
+    workflow_path = positive / "workflows" / "ci.yml"
+    workflow_path.write_text(
+        workflow_path.read_text(encoding="utf-8") + """
+  build-artifacts:
+    runs-on: ubuntu-latest
+    steps:
+      - run: vite build
+""", encoding="utf-8")
     responses_path = positive / "responses.json"
     recorded = json.loads(responses_path.read_text(encoding="utf-8"))
     recorded["logs"]["1103"] = """\
@@ -452,12 +463,26 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
         positive, monkeypatch, positive_root, max_runs=20)
     finding = next(row for row in doc["findings"]
                    if row.get("pattern") == "OPT13")
-    assert finding["wall_clock_p50_s"] == 120.0
-    assert finding["runner_min_saving"] > 0
+    assert finding["wall_clock_p50_s"] is None
+    assert finding["runner_min_saving"] is None
+    assert finding["opt13_wall_clock_ceiling_s"] == 120.0
+    assert finding["opt13_runner_min_ceiling"] > 0
     assert "runtime-only" in finding["fix_strategy"]
-    assert "saves" in finding["size_note"]
-    assert "Build Step in Jobs That Don't Need It" in report
+    assert "not sized" in finding["size_note"]
+    assert finding["opt13_validation_build"]["job"] == "build-artifacts"
+    assert finding["opt13_source_guard"]["safe"] is True
+    assert finding["opt13_source_guard"]["source_files_checked"] == 1
+    assert ("A separate `build-artifacts` job retains the full validation build, "
+            "and 1 source file(s) passed the compiled-output backstop" in report)
     assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    findings_path = positive_root / positive.name / "findings.json"
+    tampered = json.loads(findings_path.read_text(encoding="utf-8"))
+    next(entry for entry in tampered["data_bundle"]["logs"]
+         if entry.get("opt13_build_in_script")).pop("opt13_build_in_script")
+    tampered_path = positive_root / "tampered-opt13.json"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    assert not vr.check_opt13_build_in_script_provenance(tampered_path).ok
 
     negative = tmp_path / "opt13-quality-only"
     shutil.copytree(FIXTURE_ROOT / "serial-chain", negative)
@@ -479,6 +504,84 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
                 if row.get("pattern") == "OPT13"]
     assert [check for check in negative_checks
             if not check.skipped and not check.ok] == []
+
+
+def test_opt13_log_parser_rejects_output_post_quality_builds_and_compiled_consumers():
+    prose = """\
+2026-01-28T00:00:00Z vite build
+2026-01-28T00:02:00Z built in 120s
+2026-01-28T00:02:01Z Documentation: run vitest separately
+"""
+    assert cr._opt13_build_in_quality_log(prose) is None
+
+    post_quality = """\
+2026-01-28T00:00:00Z > vitest run
+2026-01-28T00:10:00Z > vite build
+2026-01-28T00:12:00Z built in 120s
+"""
+    assert cr._opt13_build_in_quality_log(post_quality) is None
+
+    build_only_wrapper = """\
+2026-01-28T00:00:00Z > pnpm test
+2026-01-28T00:00:01Z > vite build
+2026-01-28T00:02:01Z built in 120s
+"""
+    assert cr._opt13_build_in_quality_log(build_only_wrapper) is None
+
+    loads_output = """\
+2026-01-28T00:00:00Z > pnpm test
+2026-01-28T00:00:01Z > vite build
+2026-01-28T00:02:01Z built in 120s
+2026-01-28T00:02:02Z > node --enable-source-maps ../dist/index.js
+2026-01-28T00:02:03Z > vitest run dist/unit.test.js
+"""
+    assert cr._opt13_build_in_quality_log(loads_output) is None
+
+
+def test_opt13_requires_a_separate_validation_build_and_clean_source_guard(tmp_path):
+    docs = {
+        ".github/workflows/ci.yml": {
+            "jobs": {
+                "test": {"steps": [{"run": "pnpm test"}]},
+                "artifacts": {"steps": [{"run": "pnpm build:ci-artifacts"}]},
+            }
+        }
+    }
+    assert cr._opt13_validation_build_job(
+        docs, ".github/workflows/ci.yml", "test") == {
+            "workflow_file": ".github/workflows/ci.yml", "job": "artifacts"}
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {"jobs": {"test": {"steps": [{"run": "pnpm test"}]}}}},
+        "ci.yml", "test") is None
+    for false_build in (
+        "echo pnpm build", "pnpm build:docs", "pnpm build qaRuntime",
+        "pnpm build-and-test",
+    ):
+        assert cr._opt13_validation_build_job(
+            {"ci.yml": {"jobs": {
+                "test": {"steps": [{"run": "pnpm test"}]},
+                "other": {"steps": [{"run": false_build}]},
+            }}}, "ci.yml", "test") is None
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {"jobs": {"matrix": {
+            "name": "Checks (${{ matrix.node }})",
+            "steps": [{"run": "pnpm build"}],
+        }}}}, "ci.yml", "Checks (20)") is None
+    assert cr._opt13_validation_build_job(
+        {"ci.yml": {"jobs": {
+            "test": {"steps": [{"run": "pnpm test"}]},
+            "optional": {"continue-on-error": True,
+                         "steps": [{"run": "pnpm build"}]},
+        }}}, "ci.yml", "test") is None
+
+    src = tmp_path / "src"
+    src.mkdir()
+    source = src / "worker.ts"
+    source.write_text("export const answer = 42;\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is True
+    source.write_text(
+        "import { Worker } from 'node:worker_threads';\n", encoding="utf-8")
+    assert cr._opt13_source_output_guard(tmp_path)["safe"] is False
 
 
 def test_pr_sample_day_floor_stays_coupled_through_the_findings_contract(

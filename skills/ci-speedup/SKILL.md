@@ -90,10 +90,10 @@ docstring); it never invents a *new* pattern or OPT-id. A catalog entry with no
 registered detector is reported honestly in `catalog_patterns_without_detector` —
 the scanner never fabricates a finding to fill the gap.
 
-**Irreducibly-semantic patterns are NOT auto-detected.** OPT13 (build step in jobs
-that don't need it) and OPT15 (cross-workflow build redundancy) require judgment
-that has produced confident-but-wrong findings before; they surface as a
-**manual-review checklist appendix**, never as findings — omit rather than fake.
+**Irreducibly-semantic patterns are NOT auto-detected.** OPT15 and broad OPT13
+judgment stay disclosed as uncovered catalog judgments. OPT13's sole exception requires a
+timed build then quality command, a separate same-workflow full build, and a clean repository-wide
+JS/TS Node-output backstop; its interval stays an uncredited ceiling until benchmarked.
 
 ## Structural / critical-path findings (the high-leverage track)
 
@@ -505,8 +505,8 @@ The scannable rule list; each is detailed in the section named in parentheses.
 - **Present a structural change as a safe quick win** — each states its `risk`,
   `guardrail`, and `rollout`; scoping to "only what changed" (OPT70) is the canonical
   danger, never shipped without the full-suite fallback + parallel-run rollout.
-- **Fake a confident finding for a judgment-needed pattern** — OPT13/OPT15 are a
-  manual-review checklist, not auto-emitted.
+- **Fake a confident finding for a judgment-needed pattern** — OPT15 and broad OPT13 stay manual;
+  OPT13's narrow exception must pass every proof and stays uncredited until benchmarked.
 - **Drop the intent check from the prompt** — every prompt instructs the user's agent to
   read the file's git history/intent and flag an intent-contradicting fix as a policy
   change needing sign-off ("Interrogate the target file's history & intent").
