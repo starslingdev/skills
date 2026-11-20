@@ -3241,11 +3241,16 @@ done
 
 For a multi-category scanner, keep a separate last-successful commit for each category. Before the next scheduled scan, compare that category's current input paths with its own baseline and skip it only when the complete comparison contains no relevant change. If the baseline, compare result, exclusion syntax, or changed-file list is unavailable or incomplete, run the scan. Keep pull-request and manual scans unchanged. This fail-open recipe preserves coverage while avoiding work whose inputs are proven unchanged.
 
-**Public evidence**: openclaw/openclaw#191805 consolidated scheduled CodeQL admission while preserving a separate successful baseline per category. With seven categories sharing unchanged inputs and a valid baseline, its public evidence reports run, job, and comparison requests falling from 21 to 3; unknown syntax, incomplete comparisons, unavailable blobs, and relevant changes retain the scans.
+**Real-world example (mastra)**: PR #14432 changed spam issue cleanup from every 5 minutes (`*/5 * * * *`) to every 15 minutes — the job rarely finds new spam within a 5-minute window.
+
+**Public evidence**: openclaw/openclaw#191805 (API requests per tick went from 21 to 3).
 
 **Tier-2 render note**: When run history shows consecutive `event=schedule`
 runs on the same `head_sha`, or a complete compare between consecutive scheduled
-runs touches only the scanner's explicit inline `paths-ignore`, OPT36 can promote
+runs touches only the scanner's explicit inline `paths-ignore` (every job a CodeQL
+category with resolvable interpreted `languages` and the same inline exclusions, a
+forward `ahead`/`identical` compare, a successful previous scan, renames counted at
+both paths, and workflow/CodeQL-config/local-action paths always relevant), OPT36 can promote
 as measured schedule burn. The
 finding must size only the schedule-event subset, carry `sizing_basis=measured`,
 price from successful schedule-event job timings only, stamp
