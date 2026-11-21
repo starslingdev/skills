@@ -4747,6 +4747,13 @@ _FIX_META: dict[str, dict[str, Any]] = {
         "docs": ["https://developer.apple.com/documentation/xcode/build-settings-reference"],
         "deliver": "For CI build/test work, set COMPILER_INDEX_STORE_ENABLE=NO and restrict ARCHS to the runner host when using a generic simulator destination. Keep generic archive destinations. Compare matched builds on the same runner and cache state, preserve the test/archive outputs, and roll back either setting if output parity changes.",
     },
+    "remove-or-reuse-unused-artifact": {
+        "cause": "A job uploads an Actions artifact that no repository workflow downloads and no release or deploy step consumes.",
+        "look": "Search every workflow and release/deploy path for the exact artifact name and uploaded path, then check documented human or external API consumers before treating the repository-local absence as proof.",
+        "constraints": "The repository scan cannot prove that a person or external system never downloads the artifact. Preserve diagnostics, release assets, retention policy and failure evidence; do not remove an upload until those consumers are checked.",
+        "docs": ["https://docs.github.com/en/actions/using-workflows/storing-workflow-data-as-artifacts"],
+        "deliver": "After confirming there is no external consumer, remove the unused upload; otherwise reuse it in jobs that rebuild the same output. Preserve every retained consumer and measure the upload step before claiming a numeric runner-minute saving.",
+    },
     "review-once-after-quiet-window": {
         "cause": "An automated reviewer runs on every pull-request head update, so nearby fix-up pushes repeat the whole review.",
         "look": "Inspect the workflow's pull-request activity types, the review job, and any explicit re-review command or external quiet-window admission before changing when reviews run.",

@@ -1584,6 +1584,18 @@ upper bound. It can include nearby work in that step, so the report never credit
 more than that duration and requires re-measurement after the duplicate leaf
 command is removed.
 
+Test source can hide the same duplication from both workflow and job-log command
+matching. In one Go package, inspect distinct `Test*` functions for the same
+`exec.Command` build (`go build`, `cargo build`, or a bundler build) whose output
+is routed through that test's own `t.TempDir`. Two or more tests with the same
+build inputs are one OPT16 finding. Same inputs means the same literal tool,
+verb, flags (`-tags`, `-ldflags`), target, command `Env` and `Dir`, in files
+with the same build constraint. A shared helper containing the one build,
+different build targets, and builds without per-test temporary output stay quiet.
+A test that sets process environment (`t.Setenv("GOOS", ...)`), changes
+directory, or passes a test-local variable as a build input is withheld: source
+alone cannot show that its build matches the others.
+
 ```bash
 # For each job in each workflow, check if any command appears in multiple steps
 for f in /tmp/workflows/*.yml; do
@@ -1603,6 +1615,79 @@ then confirm every original test target still builds and runs. If distinct featu
 or platform coverage is intentional, keep both builds. If the rebuild is a
 workaround for stale artifacts, fix the root cause (e.g., cache key, build system
 incremental support) instead.
+
+For repeated builds inside test source, create one once-per-process build helper
+shared by those tests and clean its artifact at process exit. Build into a
+directory the process owns (for Go, `os.MkdirTemp` in `TestMain`, removed after
+`m.Run()`), not into the first caller's `t.TempDir`, which is deleted when that
+test ends. Keep the build error and fail every caller with it. Preserve each test's
+arguments, environment, failure assertions, and isolation around the built binary;
+only construction is shared. Add a helper failure test and run the original tests
+against the shared artifact before deleting their local build paths. Static source
+does not reveal the build duration or monthly execution count, so the runner-minute
+saving remains unsized until before/after timing is collected. A public example
+shares one CLI build across five contract tests in
+[openclaw/crabbox#1674](https://github.com/openclaw/crabbox/pull/1674).
+
+---
+
+### OPT110 — Uploaded Artifact Has No Repository Consumer
+
+<!-- METADATA
+pattern: OPT110
+impact: MEDIUM
+class: static
+detector: yaml-cross-workflow
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: remove-or-reuse-unused-artifact
+title_template: "Uploaded artifact has no repository consumer (unverified externally)"
+-->
+
+**Anti-pattern**: A job packs and uploads a build output or compiled worker that
+no job downloads and no release or deploy step consumes. The upload time,
+retention storage and repeated packaging are pure cost when no human or
+external system uses the artifact either.
+
+**Detection heuristic**: Index each literal `actions/upload-artifact` name
+across the repository. Match it against literal `actions/download-artifact`
+names and patterns, `gh run download` selectors, `actions/deploy-pages`, other
+artifact actions that name the artifact, and uploaded paths referenced by
+release or deploy steps. A download without a selector consumes all names.
+Withhold every finding when a download selector is dynamic or unreadable, or
+when the repository calls the artifacts API, an external reusable workflow, a
+third-party artifact action without a literal name, or a local action that may
+download. Withhold an upload whose likely reader is a person or a delivery:
+uploads gated on `failure()`, `always()` or `cancelled()`, diagnostic names or
+paths (logs, reports, traces, coverage, screenshots), release- or deploy-named
+artifacts, `github-pages`, uploads whose URL or id output is read, and every
+upload in a reusable (`workflow_call`), tag- or release-triggered or
+release-like workflow or in a release or deploy job. The scan cannot see a
+human download or an external API consumer, so a remaining finding is
+explicitly unverified outside the repository.
+
+**Fix recipe (safest first)**:
+
+1. Search workflow history, release automation and owner documentation for the
+   artifact name and path. Confirm whether a person or external system still
+   depends on it and whether its retention is required for diagnostics.
+2. If there is no consumer, remove the upload and any packaging done only for
+   it. Preserve every test, build, diagnostic and release step.
+3. If another job rebuilds the same output, keep one producer and reuse its
+   artifact there instead (OPT14). Prove the consumer validates the same source,
+   dependency and toolchain inputs before deleting its local build.
+
+**Sizing**: Runner-minute effect is a **saving**: the upload step's measured
+billed compute, plus packaging time performed only for that upload. Do not
+state a number until those steps are timed. Storage reduction is real but is a
+separate retention quantity, not runner-minute saving. Removing an off-path
+upload normally does not shorten pull-request merge wait.
+
+**Public evidence**: [OpenClaw pull request #154095](https://github.com/openclaw/openclaw/pull/154095)
+is the public example of this shape.
+
+**Risk**: MEDIUM. A repository-local search cannot disprove human downloads or
+external API use. Removing a diagnostic or release artifact can break incident
+response or delivery without making CI red, so confirm those consumers first.
 
 ---
 
