@@ -203,7 +203,6 @@ class _SeparateBuildClient(_Client):
                 },
             ]
         return response
-
     def text(self, endpoint: str, allow_missing: bool = False):
         job_id = int(endpoint.split("/")[-2])
         if job_id % 10 != 1:
@@ -216,6 +215,12 @@ class _SeparateBuildClient(_Client):
             f"{_iso(2990)} Finished `test` profile [unoptimized + debuginfo] target(s) in 29m 50s",
             f"{_iso(2995)} test result: ok. 42 passed; 0 failed; finished in 5.00s",
         ])
+
+
+class _SeparateBuildExpiredClient(_SeparateBuildClient):
+    def text(self, endpoint: str, allow_missing: bool = False):
+        self.queries += 1
+        return ""
 
 
 class _BalancedGoPackagesClient(_Client):
@@ -261,6 +266,14 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
     assert cargo["wall_clock_p50_s"] <= 5.0, (
         "the 49m50s compile repeats on every shard, so it is not shardable payload")
     assert "49m 50s" in cargo["measured_evidence"]["note"]
+    effect = cargo["runner_minute_effect"]
+    assert effect == {
+        "direction": "added_cost",
+        "runner_min_per_month": 598.0,
+        "runs_per_month": 12,
+        "setup_floor_s": 2990.0,
+        "assumed_shards": 2,
+    }
 
     go = _finding(doc, "go tests")
     assert go["go_dominant_package"] == "example/project"
@@ -271,6 +284,9 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
     assert jest["wall_clock_p50_s"] == 1400.0
 
     report = bp.render(doc, captured_at="2026-11-07T00:00:00Z", bmf=True)
+    assert "+598 runner-min/month" in report
+    assert "assumes 2 shards" in report
+    assert "scales as (N-1)" in report
     assert "| test compile log probe | 3 job log(s) read |" in report
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"
@@ -337,6 +353,15 @@ def test_dynamic_matrix_name_with_expired_log_holds_back_compile_credit(
     cargo = _finding(doc, "cargo tests")
     assert cargo["wall_clock_p50_s"] == 0.0
     assert cargo["pre_test_floor_unmeasured"] is True
+    assert cargo["runner_minute_effect"]["direction"] == "unsized"
+
+
+def test_measured_setup_with_unreadable_compile_floor_stays_unsized(
+        monkeypatch, tmp_path: Path) -> None:
+    doc = _collect_and_verify(monkeypatch, tmp_path, _SeparateBuildExpiredClient)
+    cargo = _finding(doc, "cargo tests")
+    assert cargo["runner_minute_effect"]["direction"] == "unsized"
+    assert cargo["pre_test_floor_unmeasured"] is True
 
 
 def test_separate_build_compile_is_not_subtracted_from_test_payload_twice(
@@ -345,6 +370,106 @@ def test_separate_build_compile_is_not_subtracted_from_test_payload_twice(
     cargo = _finding(doc, "cargo tests")
     assert cargo["wall_clock_p50_s"] == 0.0
     assert cargo["pre_test_floor_s"] == 1790.0
+    assert cargo["runner_minute_effect"] == {
+        "direction": "added_cost",
+        "runner_min_per_month": 598.0,
+        "runs_per_month": 12,
+        "setup_floor_s": 2990.0,
+        "assumed_shards": 2,
+    }
+
+
+def test_fractional_shard_cost_is_positive_and_report_amount_is_verified(
+        tmp_path: Path) -> None:
+    doc = {
+        "runner_minute_effect_schema": 1,
+        "findings": [{
+            "pattern": "OPT24",
+            "runner_minute_effect": {
+                "direction": "added_cost",
+                "runner_min_per_month": 0.2,
+                "runs_per_month": 12,
+                "setup_floor_s": 1.0,
+                "assumed_shards": 2,
+            },
+        }],
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    good = ("Runner-minute effect: +0.2 runner-min/month added cost; assumes 2 "
+            "shards and a measured 1s repeated setup floor across 12 runs/month; "
+            "scales as (N−1) with N shards.")
+    assert vr.check_wall_clock_runner_minute_effects(good, findings_path).ok
+    bad = good.replace("+0.2 runner-min/month", "+999999 runner-min/month")
+    assert not vr.check_wall_clock_runner_minute_effects(bad, findings_path).ok
+
+
+def test_small_positive_shard_cost_does_not_round_to_zero(tmp_path: Path) -> None:
+    finding = {"pattern": "OPT24"}
+    finding["runner_minute_setup_floor_s"] = 1.0
+    cr._size_finding(finding, {}, 2)
+    assert finding["runner_minute_effect"]["runner_min_per_month"] > 0
+    doc = {"runner_minute_effect_schema": 1, "findings": [finding]}
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report = bp._finding_runner_minute_effect_line(finding)
+    assert vr.check_wall_clock_runner_minute_effects(report, findings_path).ok
+
+
+def test_large_fractional_shard_cost_keeps_displayed_precision(tmp_path: Path) -> None:
+    finding = {"pattern": "OPT24", "runner_minute_setup_floor_s": 60.1}
+    cr._size_finding(finding, {}, 1201)
+    assert finding["runner_minute_effect"]["runner_min_per_month"] == 1203.002
+    doc = {"runner_minute_effect_schema": 1, "findings": [finding]}
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report = bp._finding_runner_minute_effect_line(finding)
+    assert "+1203.002 runner-min/month" in report
+    assert vr.check_wall_clock_runner_minute_effects(report, findings_path).ok
+
+
+def test_uncredited_shard_cost_prompt_does_not_promise_a_speedup() -> None:
+    finding = {
+        "pattern": "OPT24",
+        "affected_jobs": ["tests"],
+        "wall_clock_p50_s": 0.0,
+        "runner_minute_effect": {"direction": "added_cost"},
+    }
+    prompt = bp._build_generic_agent_prompt(
+        {"check": "tests", "job": "tests", "workflow_file": "ci.yml", "p50_s": 300},
+        [], None, "o/r", "abcdef0", 1, 1, None, data_driven=[finding],
+    )
+    assert "shrinks this pole's wall time" not in prompt
+    assert "no wall-clock saving is credited" in prompt
+
+
+def test_mixed_shard_group_discloses_unknown_cost_beside_measured_subtotal() -> None:
+    line = bp._group_runner_minute_effect_line([
+        {"pattern": "OPT24", "runner_minute_effect": {
+            "direction": "added_cost", "runner_min_per_month": 10.0,
+            "runs_per_month": 12, "setup_floor_s": 50.0,
+            "assumed_shards": 2,
+        }},
+        {"pattern": "OPT25", "runner_minute_effect": {
+            "direction": "unsized", "reason": "setup floor unavailable",
+            "assumed_shards": 2,
+        }},
+    ])
+    assert "+10 runner-min/month measured subtotal" in line
+    assert "1 additional split is not sized" in line
+
+
+def test_shard_group_ignores_unrelated_unsized_findings() -> None:
+    line = bp._group_runner_minute_effect_line([
+        {"pattern": "OPT24", "runner_minute_effect": {
+            "direction": "added_cost", "runner_min_per_month": 10.0,
+            "runs_per_month": 12, "setup_floor_s": 50.0,
+            "assumed_shards": 2,
+        }},
+        {"pattern": "OPT81"},
+    ])
+    assert "+10 runner-min/month added cost" in line
+    assert "additional split" not in line
 
 
 def test_long_go_step_without_one_dominant_package_stays_quiet(

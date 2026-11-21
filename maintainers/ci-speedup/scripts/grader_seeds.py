@@ -69,6 +69,7 @@ TRIAGE_ALLOWLIST = {
     "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor": AUTO_SEED,  # check_pole_anchors_resolve
     "RCA hands off via prompts (never prescribes a fix, never dead-ends)": AUTO_SEED,               # check_rca_hands_off_never_prescribes
     "job-adding prompts state their runner-minute effect": AUTO_SEED,                               # check_job_adding_prompts_state_runner_minute_effect
+    "wall-clock fixes state a signed runner-minute effect": AUTO_SEED,                             # check_wall_clock_runner_minute_effects
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": AUTO_SEED,  # check_measured_cause_matches_rendered_timeline
     "TOC 'Also noticed' count == appendix rows + hidden pointer": AUTO_SEED,                        # check_also_noticed_count_honest
     "an unsized runner-minute saving never reads `no bill saving` or neutral": AUTO_SEED,  # check_no_bill_heading_for_unsized_saving
@@ -204,6 +205,7 @@ CHECK_CLASS = {
     "every #pole-N / #also-noticed / #pre-start-wait / #runner-minute-reductions reference resolves to an anchor": "missing-phase-check",  # broken cross-reference — a rendering-completeness gap
     "RCA hands off via prompts (never prescribes a fix, never dead-ends)": "prescribed-a-fix",  # exact match
     "job-adding prompts state their runner-minute effect": "missing-phase-check",  # a required cost disclosure is absent from a job-expanding hand-off
+    "wall-clock fixes state a signed runner-minute effect": "fabricated-or-unsupported-finding",  # a signed cost/saving fails to re-derive, or the axis silently reads as zero
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": "fabricated-or-unsupported-finding",  # a canned cause asserts a timeline shape the report contradicts
     "TOC 'Also noticed' count == appendix rows + hidden pointer": "fabricated-or-unsupported-finding",  # a rendered count not backed by the data
     "an unsized runner-minute saving never reads `no bill saving` or neutral": "fabricated-or-unsupported-finding",  # a "no bill saving" claim the finding's own sizing does not support

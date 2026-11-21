@@ -3029,6 +3029,10 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
                        f"compile/install {emulated:g}s ({scope})"),
         "magnitude": {"label": "emulated compile/install seconds", "unit": "s",
                       "value": round(emulated, 3)},
+        # The fix still pays about one native compile per foreign architecture
+        # (`_FIX_META` deliver), so the runner-minute saving subtracts it.
+        "native_compile_s": round(native, 3),
+        "foreign_arches": len(foreign_by_arch),
         "deeper": [{"rows": rows,
                     "blocker_note": (f"foreign-architecture work is {scope}"),
                     "pct_of": "sum"}],
@@ -4894,6 +4898,130 @@ _SHARD_RUNNER_MINUTE_LINE = (
     "each job; N shards also add roughly (N−1) × the measured pre-test floor in runner "
     "minutes. Measure compile and setup before adding jobs."
 )
+
+
+def _runner_minute_amount(value: float) -> str:
+    """Render the signed-effect schema's stored thousandth precision."""
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def _finding_runner_minute_effect_line(finding: dict[str, Any]) -> str:
+    """Render a signed compute effect for a job-expanding wall-clock lever."""
+    effect = finding.get("runner_minute_effect")
+    if (not isinstance(effect, dict) and str(finding.get("pattern") or "") == "OPT25"
+            and not _bmf_held_back(finding)):
+        # Unstamped (pre-schema) OPT25 whose remedy keeps the same legs.
+        effect = {"direction": "neutral",
+                  "reason": "rebalancing moves the same test work between the legs "
+                            "that already run"}
+    if isinstance(effect, dict) and effect.get("direction") == "neutral":
+        reason = str(effect.get("reason") or "").strip()
+        return ("Runner-minute effect: roughly level"
+                + (f"; {reason}" if reason else "")
+                + ". Adding shard jobs instead would repeat checkout and setup and "
+                  "bill each job.")
+    if not isinstance(effect, dict) or effect.get("direction") == "unsized":
+        reason = (effect or {}).get("reason") if isinstance(effect, dict) else None
+        tail = f" ({reason})" if reason else ""
+        return ("Runner-minute effect: not sized" + tail
+                + "; extra shard jobs repeat checkout and setup and bill each job.")
+    if effect.get("direction") == "added_cost":
+        amount = _num(effect.get("runner_min_per_month")) or 0.0
+        shards = int(_num(effect.get("assumed_shards")) or 2)
+        floor = _num(effect.get("setup_floor_s")) or 0.0
+        runs = int(_num(effect.get("runs_per_month")) or 0)
+        return (
+            f"Runner-minute effect: +{_runner_minute_amount(amount)} runner-min/month "
+            "added cost; assumes "
+            f"{shards} shards and a measured {floor:g}s repeated setup floor across "
+            f"{runs} runs/month; scales as (N−1) with N shards."
+        )
+    return "Runner-minute effect: not sized."
+
+
+def _group_runner_minute_effect_line(findings: list[dict[str, Any]]) -> str:
+    # A static positional-splitter OPT25 changes only how tests are assigned to
+    # the shard jobs that already run; it adds no job, and its unsized saving is
+    # stated by its own `runner_min_unsized_reason`.
+    splitters = [f for f in findings if f.get("positional_splitter_static")]
+    shard_findings = [
+        finding for finding in findings
+        if finding.get("pattern") in {"OPT24", "OPT25"}
+        and not finding.get("positional_splitter_static")
+    ]
+    if not shard_findings and splitters:
+        reason = _flatten_cell(str(splitters[0].get("runner_min_unsized_reason")
+                                   or "not measured"))
+        return (f"Runner-minute effect: saving not sized ({reason}); the fix keeps "
+                "the existing shard jobs and adds none.")
+    if shard_findings:
+        findings = shard_findings
+    sized = [f for f in findings
+             if isinstance(f.get("runner_minute_effect"), dict)
+             and f["runner_minute_effect"].get("direction") == "added_cost"]
+    if not sized:
+        return _finding_runner_minute_effect_line(findings[0])
+    amount = sum(_num(f["runner_minute_effect"].get("runner_min_per_month")) or 0.0
+                 for f in sized)
+    runs = sorted({int(_num(f["runner_minute_effect"].get("runs_per_month")) or 0)
+                   for f in sized})
+    floors = sorted({_num(f["runner_minute_effect"].get("setup_floor_s")) or 0.0
+                     for f in sized})
+    # Only an explicitly unsized (or unstamped) split is an unknown cost; a
+    # rebalance that keeps the same legs is level and adds nothing to the subtotal.
+    unsized = [f for f in findings if f not in sized
+               and _as_dict(f.get("runner_minute_effect")).get("direction") != "neutral"]
+    detail = (f"a measured {floors[0]:g}s repeated setup floor across {runs[0]} runs/month"
+              if len(floors) == len(runs) == 1
+              else f"{len(sized)} measured repeated setup floors")
+    label = "measured subtotal" if unsized else "added cost"
+    unknown = (f"; {len(unsized)} additional split"
+               f"{'s are' if len(unsized) != 1 else ' is'} not sized"
+               if unsized else "")
+    return (f"Runner-minute effect: +{_runner_minute_amount(amount)} runner-min/month "
+            f"{label}; assumes "
+            f"2 shards and {detail}; extra shard jobs repeat checkout and setup and bill "
+            f"each job; scales as (N−1) with N shards{unknown}.")
+
+
+def _emulated_runner_minute_effect_line(
+        doc: dict[str, Any], pole: dict[str, Any], leaf: dict[str, Any]) -> str:
+    """Size a confirmed emulated-build saving and bind it to measured compute."""
+    if (leaf.get("fix_key") != "emulated-image-compile"
+            or leaf.get("builder_topology_unconfirmed") is True):
+        return "Runner-minute effect: not sized; builder topology is unconfirmed."
+    magnitude = _num((leaf.get("magnitude") or {}).get("value"))
+    wf = str(pole.get("workflow_file") or "")
+    job = str(pole.get("job") or pole.get("check") or "")
+    rows = [row for row in ((doc.get("runner_minute_spine") or {}).get("rows") or [])
+            if str(row.get("workflow_file") or "") == wf
+            and str(row.get("job_name") or "") == job]
+    if magnitude is None or not rows:
+        return "Runner-minute effect: not sized; no measured cost-spine row."
+    volume = sum(_num(row.get("effective_monthly_job_volume")) or 0.0 for row in rows)
+    measured = sum(
+        _num(row.get("completed_billable_equiv_min_per_month")) or 0.0
+        for row in rows)
+    if volume <= 0 or measured <= 0:
+        return "Runner-minute effect: not sized; measured monthly compute is unavailable."
+    native = _num(leaf.get("native_compile_s"))
+    arches = int(_num(leaf.get("foreign_arches")) or 0)
+    if native is None or native <= 0 or arches <= 0:
+        # Native cross-compilation still costs about one native compile per foreign
+        # architecture; with no native compile measured there is nothing to
+        # subtract, so the emulated seconds are not all removable.
+        return ("Runner-minute effect: not sized; no native compile was measured to "
+                "subtract from the emulated seconds.")
+    per_run = magnitude - native * arches
+    if per_run <= 0:
+        return ("Runner-minute effect: not sized; the native compile per foreign "
+                "architecture is as long as the emulated work.")
+    modeled = per_run * volume / 60.0
+    saving = round(min(modeled, measured), 1)
+    return (f"Runner-minute effect: saving ~{saving:g} runner-min/month; modeled as "
+            f"{magnitude:g}s emulated minus {native:g}s native compile for each of "
+            f"{arches} foreign architecture(s), across {volume:g} runs/month, and "
+            f"capped at the job's measured compute ({measured:g} runner-min/month).")
 _MACHINE_RUNNER_MINUTE_LINE = (
     "Runner cost effect: A faster machine can reduce elapsed runner minutes, while "
     "each runner class bills at its own rate; compare both elapsed minutes and billed cost."
@@ -6179,10 +6307,13 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
            *_shard_floor_prompt_lines(pole),
            ""]
 
+    if leaf.get("runner_minute_effect_line"):
+        out += [str(leaf["runner_minute_effect_line"]), ""]
+
     fix_key = str((leaf or {}).get("fix_key", ""))
     if fix_key in _JOB_EXPANDING_LEAVES:
         out += [*_bmf_concurrency_lines(), ""]
-    elif structural:
+    elif structural and not leaf.get("runner_minute_effect_line"):
         out += ["Structural cost context: This pole also matched a structural catalog "
                 "pattern; account for its job or machine movement separately.",
                 _RELOCATION_RUNNER_MINUTE_LINE, ""]
@@ -6322,6 +6453,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                           if f.get("pattern")})
     dd_pats = sorted({str(f.get("pattern", "")) for f in (data_driven or [])
                       if f.get("pattern")})
+    dd_saves_wall_clock = any(_saves_wall_clock(f) for f in (data_driven or []))
     # OPT79 claims the pole only at the long-pole magnitude (`_opt79_pole_covers`);
     # a smaller one is mentioned as a side note, never as the pole's explanation.
     opt79_minor = bool(opt79) and not _opt79_pole_covers(opt79)
@@ -6417,7 +6549,10 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
            *_timing_spread_prompt_lines(pole),
            *_shard_floor_prompt_lines(pole),
            ""]
-    if struct_pats:
+    if "OPT24" in dd_pats or "OPT25" in dd_pats:
+        out += [_bmf_concurrency_lines()[0],
+                _group_runner_minute_effect_line(list(data_driven or [])), ""]
+    elif struct_pats:
         out += [_RELOCATION_RUNNER_MINUTE_LINE, ""]
     wtg = ["WHERE THE TIME GOES" + (f" (representative run {rid})" if rid else "")]
     pole_dom = str(pole.get("dominant_step") or "")
@@ -6471,11 +6606,16 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
                 "runs use the slower runner class. It is about where the job runs, not "
                 "about the step above.", ""]
     elif dd_pats:
+        effect = (
+            "it sits ON the critical path, so it shrinks this pole's wall time"
+            if dd_saves_wall_clock else
+            "its repeated runner cost is measured, but no wall-clock saving is credited"
+        )
         out += ["DATA-DRIVEN CATALOG PATTERN MATCHED",
                 f"- A data-driven catalog pattern ({', '.join(dd_pats)}) matched this "
                 f"pole - see {_dd_where(dd_pats)} for the measured lever and "
-                "its catalog fix recipe (it sits ON the critical path, so it shrinks this "
-                "pole's wall time). The step above is the load-bearing one that lever "
+                f"its catalog fix recipe ({effect}). The step above is the load-bearing "
+                "one that lever "
                 f"targets; {log_ref} to see what inside it the lever reshapes.", ""]
     if opt79:
         out += ["MEASURED CACHE PATTERN MATCHED",
@@ -11903,6 +12043,10 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                     "checkout and setup and bill each job; the second runner also "
                     "repeats compilation."
                 )
+        elif _BMF_ENABLED:
+            # Under --bmf the job-adding option is shown, so it carries its signed
+            # runner-minute effect (#379); the default view holds it back.
+            body.append(_group_runner_minute_effect_line(members))
         else:
             body.append(_bmf_concurrency_lines()[1])
     if pat == "OPT25":
@@ -13555,6 +13699,8 @@ def _also_noticed_block(findings: list[dict[str, Any]],
                          "its catalog fix **cuts developer wall-clock**, it is not a "
                          "bill-only cleanup. See the spine above and this pattern's "
                          "catalog recipe below for the remedy.")
+            if pat in {"OPT24", "OPT25"}:
+                lines.append("**" + _group_runner_minute_effect_line(ms) + "**")
         elif saves_wc:
             # `spine_rare`: the job carries a real multi-minute wall-clock saving, but the spine
             # DEMOTES it as opt-in/rare (present on only a minority of PRs). So its fix cuts
@@ -14020,8 +14166,10 @@ def _data_driven_for_pole(pole: dict[str, Any],
             continue  # pre-start wait has its own section
         if _is_opt79_pole_finding(f):
             continue  # rendered AT the pole (`_opt79_pole_for`), never in the appendix
-        if not _saves_wall_clock(f):
-            continue  # only a credited-wall-clock finding claims the spine
+        if (not _saves_wall_clock(f)
+                and _as_dict(f.get("runner_minute_effect")).get("direction")
+                != "added_cost"):
+            continue  # credited wall-clock or sized added runner minutes claim the pole
         jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
         if not jobs:
             continue  # an unrouted finding can't anchor to a pole
@@ -17380,6 +17528,10 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         # leaf whose category contradicts the pole's dominant work is kept as a secondary note,
         # never crowned).
         log_text, leaf, offcat_leaf = _pole_leaves[id(p)]
+        if leaf is not None and leaf.get("fix_key") == "emulated-image-compile":
+            leaf = dict(leaf)
+            leaf["runner_minute_effect_line"] = _emulated_runner_minute_effect_line(
+                doc, p, leaf)
         sample = _match(samples)
         run_url = _match(log_runs)
         timeline = _match(steps)

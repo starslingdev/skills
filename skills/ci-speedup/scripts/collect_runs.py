@@ -7314,6 +7314,7 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
     f["runner_min_note"] = f"{existing}; {note}" if existing else note
 
 
+_JOB_EXPANDING_EFFECT_PATTERNS = frozenset(("OPT24",))
 def _unsized_runner_min(f: dict[str, Any], reason: str) -> None:
     """Record WHY this finding's runner-minute saving is unsized.
 
@@ -7344,6 +7345,22 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
     Every branch that leaves `runner_min_saving` at None (unsized) also stamps
     a literally true `runner_min_unsized_reason`; a branch that sizes the
     effect to zero sets 0.0 (`tests/test_unsized_reason_guard.py`)."""
+    if f.get("pattern") in _JOB_EXPANDING_EFFECT_PATTERNS:
+        floor = f.get("runner_minute_setup_floor_s")
+        if isinstance(floor, (int, float)) and floor > 0 and monthly_volume:
+            f["runner_minute_effect"] = {
+                "direction": "added_cost",
+                "runner_min_per_month": round(float(floor) * monthly_volume / 60.0, 3),
+                "runs_per_month": monthly_volume,
+                "setup_floor_s": round(float(floor), 1),
+                "assumed_shards": 2,
+            }
+        else:
+            f["runner_minute_effect"] = {
+                "direction": "unsized",
+                "reason": "no measured repeated setup floor or monthly run volume",
+                "assumed_shards": 2,
+            }
     if f.get("positional_splitter_static"):
         # Source proves an unstable assignment rule, not a duration or current
         # imbalance. Any runner-minute saving (fewer shard timeouts and reruns)
@@ -11350,6 +11367,15 @@ def _detect_opt25_shard_imbalance(
         # move the same work between the existing legs.
         out[-1]["opt25_case"] = ("atomic-unit" if atomic
                                  else "rebalance" if is_sharded else "split-leg")
+        # Signed runner-minute effect (#379): the split slow leg adds a job that
+        # repeats setup, whose floor this detector does not measure; rebalancing
+        # moves the same work between the legs that already run.
+        out[-1]["runner_minute_effect"] = (
+            {"direction": "unsized",
+             "reason": "the added split job's repeated setup floor was not measured",
+             "assumed_shards": 2}
+            if out[-1]["opt25_case"] == "split-leg" else
+            {"direction": "neutral", "reason": _OPT25_NO_RUNNER_MIN_EFFECT})
         if family is not None:
             out[-1]["shard_family"] = family
             out[-1]["evidence"] = summary
@@ -26796,8 +26822,18 @@ def _detect_opt24_long_test_no_sharding(
         if pre_test_floor is not None:
             finding["pre_test_floor_s"] = round(pre_test_floor, 1)
             finding["shardable_test_s"] = round(shardable, 1)
+            # A compile inside the test step and checkout/install/build steps
+            # outside it all repeat on every added shard.  The test-step log is
+            # deliberately sliced so these two measurements do not overlap.
+            separate_setup = (float(decomp.get("setup_build_s", 0))
+                              if decomp is not None else 0.0)
+            finding["runner_minute_setup_floor_s"] = round(
+                pre_test_floor + separate_setup, 1)
         elif measure_first:
             finding["pre_test_floor_unmeasured"] = True
+        elif decomp is not None and decomp.get("setup_build_s", 0) > 0:
+            finding["runner_minute_setup_floor_s"] = round(
+                float(decomp["setup_build_s"]), 1)
         if go_package is not None:
             finding["go_dominant_package"] = go_package["package"]
             finding["go_package_share"] = go_package["share"]
@@ -39108,6 +39144,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             sum(s["prior_attempt_job_minutes"] for s in _gate_stats), 1),
         "sampled_prs": int(findings_doc["pr_critical_path"].get("sampled_pr_count") or 0),
     }
+    findings_doc["runner_minute_effect_schema"] = 1
     return findings_doc
 
 
