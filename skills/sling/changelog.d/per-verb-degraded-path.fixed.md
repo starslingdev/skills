@@ -1,0 +1,1 @@
+- **2026-11-21** — Keep failure diagnosis in sling when one verb is unavailable but the control plane remains healthy, and fall back to `gh` once a second verb also fails (#475).
