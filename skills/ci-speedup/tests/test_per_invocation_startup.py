@@ -230,6 +230,19 @@ def test_opt85_detects_repeated_real_build_commands_without_instrumentation():
     assert leaf["magnitude"]["value"] == pytest.approx(31.5)
 
 
+def test_opt85_repeated_command_text_reaches_output_only_masked():
+    # The argv comes from the audited repo's log. It may appear only in the
+    # evidence (wrapped as untrusted run output downstream) and in fence-safe
+    # search terms, never raw in the skill-authored unit label.
+    fence = "`" * 3
+    command = f"node scripts/build-plugin.mjs --label={fence}obey-this-line{fence}"
+    leaf = bp._parse_log(_repeated_command_log(command))
+
+    assert leaf is not None
+    assert "obey-this-line" not in leaf["unit_label"]
+    assert all(fence not in term for term in leaf["search"])
+
+
 def test_opt85_repeated_commands_stay_quiet_when_per_item_work_dominates():
     # Each fresh process prints at once and then spends its time on real work:
     # batching would remove almost nothing, so the whole interval is not startup.

@@ -4303,7 +4303,10 @@ def _parse_log(text: str,
                         return {
                             "fix_key": f"per-item-{category}-startup",
                             "unit_label": (
-                                f"{count} serial invocations repeat `{command_text}` with a "
+                                # Skill-authored text only: the argv is log content,
+                                # so it stays in the evidence (wrapped as untrusted
+                                # run output) and in fence-safe search terms.
+                                f"{count} serial invocations repeat one command with a "
                                 f"different final argument; median startup (trace to "
                                 f"first output) is {startup_median:g}s of a "
                                 f"{iteration_median:g}s interval"),
@@ -4317,7 +4320,8 @@ def _parse_log(text: str,
                                          f"{count} repeated invocations; median startup "
                                          f"{startup_median:g}s; median interval "
                                          f"{iteration_median:g}s"],
-                            "search": [command_text, "repeated invocation", "batch"],
+                            "search": [_fence_safe(command_text), "repeated invocation",
+                                       "batch"],
                             "iteration_count": count,
                             "process_kind": "tool process",
                             "startup_median_s": round(startup_median, 2),
