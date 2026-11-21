@@ -392,7 +392,7 @@ variation.
 
 ### `account-weekly-paired-minimum`
 
-**Current value:** at least 2 explicit paired run observations per side
+**Current value:** at least 5 explicit paired run observations per side
 (`before_after.py::_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS`), with equal before and
 after counts, before an account weekly export states a runner-minute effect.
 
@@ -400,14 +400,13 @@ after counts, before an account weekly export states a runner-minute effect.
 the optional account-level weekly section, or the reason that comparison is
 withheld.
 
-**Reason:** One run per side cannot expose ordinary run-to-run variation. Two is
-the smallest population that can disagree and matches phase 7's locked minimum
-without treating the account export as a repository rerun.
+**Reason:** A handful of runs per side cannot show ordinary run-to-run
+variation. Five per side is enough for each side's median to be meaningful and
+matches OPT81's minimum of 5 runs per runner size.
 
-**Proposed decision:** **Keep 2 paired observations per side.** The value
-remains awaiting owner approval.
+**Proposed decision:** **Require 5 paired observations per side.**
 
-**Approval status:** awaiting owner approval.
+**Approval status:** owner-approved 2026-11-20 (5).
 
 ### `rare-push-lane`
 
@@ -731,7 +730,7 @@ implementation lands.
   "account-weekly-paired-minimum": {
     "decision": "account-weekly-paired-minimum",
     "sources": {
-      "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 2
+      "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 5
     }
   },
   "bimodal-noise-band": {
@@ -1169,6 +1168,7 @@ implementation lands.
 - [ ] Approve the 12-page cap with early stopping and the 1,200 job-list read cap.
 - [ ] Approve the conditional 60-second bookkeeping rule.
 - [x] Approve the 60% `go-package-dominance` share (owner-approved 2026-11-20).
+- [x] Approve 5 paired runs per side for `account-weekly-paired-minimum` (owner-approved 2026-11-20).
 - [ ] Approve 5 last-finisher observations for supported ranking/grouping.
 - [ ] Approve two-sided 95% Wilson intervals and overlap as unsupported order.
 - [ ] Confirm #305, #306, and #311 may merge after their implementations match
