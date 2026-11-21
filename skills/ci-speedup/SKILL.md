@@ -166,9 +166,9 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    cluster-floor model from `references/wall-clock-methodology.md`). You don't invoke
    it yourself — **`run.py` orchestrates phases 2–3**:
    `python3 scripts/run.py --root <ROOT> --out <OUT.json> --repo <owner/repo>
-   --with-logs` (`run.py --help` lists its flags; add `--bmf` only if the user puts
-   wall-clock before runner minutes, and offer it when the report's held-back line
-   appears). `--with-logs` fetches the gating
+   --with-logs` (`run.py --help` lists its flags; the default spends at most 5% of measured monthly runner minutes on one report-wide
+   budget, `--minute-budget 0` restores strict holdback, and `--bmf` shows all wall-clock-only options). Offer `--bmf` only if the user puts
+   wall-clock before runner minutes and the held-back line appears. `--with-logs` fetches the gating
    jobs' logs and captures the **drill bundle** (`data_bundle`: per pole, the
    nearest-P50 run's log + step timeline + cross-run magnitude sample) into an
    **auto-derived `<OUT>.data` dir** — **never pass `--data-dir`** to `run.py` (it's

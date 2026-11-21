@@ -725,6 +725,13 @@ def test_render_command_is_runnable_and_complete():
     assert "--captured-at 2026-06-11T07:10:57+00:00" in cmd
 
 
+def test_render_command_carries_non_default_minute_budget():
+    strict = render_command(_doc(), minute_budget=0)
+    default = render_command(_doc())
+    assert "--minute-budget 0" in strict
+    assert "--minute-budget" not in default
+
+
 def test_render_command_empty_without_drill_logs():
     doc = _doc()
     doc["data_bundle"] = {}

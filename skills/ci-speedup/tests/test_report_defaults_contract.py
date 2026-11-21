@@ -32,6 +32,7 @@ REQUIRED_DECISIONS = {
     "ceiling-minimum-gates", "partial-majority-rule", "go-package-dominance",
     "go-fixed-wait-thresholds", "account-weekly-paired-minimum",
     "opt25-universal-housekeeping",
+    "runner-minute-budget",
 }
 
 # Decisions the owner has approved, with the exact status line each section
@@ -40,9 +41,11 @@ REQUIRED_DECISIONS = {
 APPROVED_DECISIONS = {
     "go-package-dominance": "**Approval status:** owner-approved 2026-11-20 (60%).",
     "account-weekly-paired-minimum": "**Approval status:** owner-approved 2026-11-20 (5).",
+    "runner-minute-budget": "**Approval status:** owner-approved 2026-11-21 (5%).",
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
+    "verify_report.py:_VR_DEFAULT_MINUTE_BUDGET_PERCENT",
     "verify_report.py:_VR_POLE_HOLDS_UP_MIN_COUNT",
     "verify_report.py:_VR_DEFAULT_BRANCH_PUSH_SAMPLE_MAX",
     "verify_report.py:_VR_RARE_PRESENCE_MIN_PR",
@@ -109,6 +112,7 @@ REQUIRED_PROVISIONAL_SOURCES = {
 REQUIRED_CURRENT_SOURCES = {
     "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 5,
     "blocking_path.py:_AGG_GATE_TRIVIAL_S": 30.0,
+    "blocking_path.py:_DEFAULT_MINUTE_BUDGET_PERCENT": 5.0,
     "blocking_path.py:_ALSO_NOTICED_CAP": 12,
     "blocking_path.py:_CHAIN_MAKESPAN_DIVERGENCE_PCT": 25.0,
     "collect_runs.py:_OPT24_GO_PACKAGE_DOMINANT_SHARE": 0.6,
@@ -210,6 +214,7 @@ REQUIRED_CURRENT_SOURCES = {
     "pr_sample_contract.py:PR_SAMPLE_PARTIAL_MAJORITY_NUMERATOR": 1,
     "pr_sample_contract.py:PR_SAMPLE_TARGET": 100,
     "verify_report.py:_CEILING_MIN_GATING_PR": 5,
+    "verify_report.py:_VR_DEFAULT_MINUTE_BUDGET_PERCENT": 5.0,
     "verify_report.py:_VR_AGG_GATE_TRIVIAL_S": 30.0,
     "verify_report.py:_VR_CACHE_COLD_MISS_PCT": 99.5,
     "verify_report.py:_VR_CACHE_FLOOR_BY_FIX_KEY": {

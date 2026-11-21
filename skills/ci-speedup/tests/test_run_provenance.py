@@ -294,10 +294,12 @@ def _capture_report_out(monkeypatch) -> dict[str, str]:
     command's --out) without needing a real render."""
     seen: dict[str, str] = {}
 
-    def fake_summary(data, *, findings_path, out_path, root=None, bmf=False):
+    def fake_summary(data, *, findings_path, out_path, root=None, bmf=False,
+                     minute_budget=5.0):
         seen["out_path"] = out_path
         seen["findings_path"] = findings_path
         seen["root"] = root
+        seen["minute_budget"] = minute_budget
         return "SUMMARY"
 
     monkeypatch.setattr(run_mod, "build_summary", fake_summary)
@@ -321,6 +323,17 @@ def test_report_defaults_to_the_session_path_beside_out_not_cwd(monkeypatch, tmp
     assert report_out != tmp_path / "ci-speedup-findings-report.md"
     # findings.json itself still points at the scratch --out (unchanged).
     assert seen["findings_path"] == str(out)
+    assert seen["minute_budget"] == 5.0
+
+
+def test_minute_budget_flag_reaches_the_render_command(monkeypatch, tmp_path):
+    _stub_steps(monkeypatch)
+    seen = _capture_report_out(monkeypatch)
+    out = tmp_path / "scratch" / "findings.json"
+    rc = run_mod.main(["--root", str(tmp_path), "--out", str(out),
+                       "--minute-budget", "0"])
+    assert rc == 0
+    assert seen["minute_budget"] == 0.0
 
 
 def test_report_out_flag_overrides_the_default(monkeypatch, tmp_path):

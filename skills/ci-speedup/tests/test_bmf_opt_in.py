@@ -397,3 +397,99 @@ def test_a_wholly_held_opt89_counts_once_in_renderer_and_verifier(tmp_path):
 
     assert "enabled=false held=1" in default
     assert vr.check_bmf_runner_minute_filter(default, findings_path).ok is True
+
+
+def _budget_finding(fid: str, *, wall_s: float, monthly_cost: float | None,
+                    pattern: str = "OPT83") -> dict:
+    effect = {"direction": "added_cost", "sampled_runs": 20}
+    if monthly_cost is not None:
+        effect["runner_min_per_month"] = monthly_cost
+    else:
+        effect["reason"] = "the repeated setup floor was not measured"
+    return {
+        "id": fid,
+        "pattern": pattern,
+        "severity": "MEDIUM",
+        "title": "Independent checks can run in parallel",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": [fid],
+        "wall_clock_p50_s": wall_s,
+        "runner_minute_effect": effect,
+        "independent_steps": {"kind": "opt83_separate_jobs"},
+    }
+
+
+def _budget_doc(findings: list[dict]) -> dict:
+    return {
+        "repo": "demo/repo",
+        "scanned_at": "2026-11-21T00:00:00Z",
+        "runner_minute_spine": {
+            "totals": {"completed_billable_equiv_min_per_month": 1000.0},
+            "rows": [{
+                "workflow_file": ".github/workflows/ci.yml",
+                "job_name": "test",
+                "runner_label": "ubuntu-latest",
+                "sampled_workflow_run_count": 20,
+            }],
+        },
+        "findings": findings,
+    }
+
+
+def test_default_budget_admits_only_the_more_efficient_finding(tmp_path):
+    efficient = _budget_finding("efficient", wall_s=120.0, monthly_cost=30.0)
+    less_efficient = _budget_finding("less-efficient", wall_s=60.0,
+                                     monthly_cost=30.0)
+    doc = _budget_doc([less_efficient, efficient])
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    report = bp.render(doc)
+
+    assert "minute-budget percent=5 used=30 limit=50 admitted=1" in report
+    assert "`efficient` | +30 runner-min/mo | 20 sampled runs" in report
+    assert "`less-efficient`" not in report.split("Runner-minute budget admissions", 1)[1]
+    assert "enabled=false held=1" in report
+    assert vr.check_bmf_runner_minute_filter(report, findings_path).ok is True
+
+
+def test_budget_never_admits_unsized_runner_moves_or_queued_self_hosted_fixes():
+    unsized = _budget_finding("unsized", wall_s=300.0, monthly_cost=None)
+    runner_move = _budget_finding("runner-move", wall_s=300.0,
+                                  monthly_cost=1.0, pattern="OPT81")
+    queued = _budget_finding("queued", wall_s=300.0, monthly_cost=1.0,
+                             pattern="OPT97")
+
+    report = bp.render(_budget_doc([unsized, runner_move, queued]),
+                       minute_budget=1000)
+
+    assert "minute-budget percent=1000 used=0 limit=10000 admitted=0" in report
+    assert "enabled=false held=3" in report
+    assert "Runner-minute budget admissions" not in report
+
+
+def test_zero_minute_budget_is_byte_identical_to_the_strict_459_policy():
+    finding = _budget_finding("strict", wall_s=120.0, monthly_cost=1.0)
+    doc = _budget_doc([finding])
+
+    strict = bp.render(doc, minute_budget=0)
+    without_measured_budget = bp.render({
+        **doc,
+        "runner_minute_spine": {},
+    })
+
+    assert strict == without_measured_budget
+    assert "ci-speedup:minute-budget" not in strict
+    assert "enabled=false held=1" in strict
+
+
+def test_verifier_rejects_a_forged_budget_total(tmp_path):
+    finding = _budget_finding("efficient", wall_s=120.0, monthly_cost=30.0)
+    doc = _budget_doc([finding])
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report = bp.render(doc)
+
+    assert vr.check_bmf_runner_minute_filter(report, findings_path).ok is True
+    forged = report.replace("used=30 limit=50", "used=20 limit=50")
+    assert vr.check_bmf_runner_minute_filter(forged, findings_path).ok is False

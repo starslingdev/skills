@@ -1,0 +1,1 @@
+- **2026-11-21** — Allow a configurable report-wide runner-minute budget to admit the most efficient sized wall-clock improvements while keeping unsized, runner-size, and queued-pool changes held back (#478).

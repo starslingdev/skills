@@ -18291,6 +18291,11 @@ def check_no_bill_heading_for_unsized_saving(report: str, findings_path) -> Chec
 
 _VR_BMF_MARKER_RE = re.compile(
     r"<!-- ci-speedup:bmf enabled=(true|false) held=(\d+) -->")
+_VR_DEFAULT_MINUTE_BUDGET_PERCENT = 5.0
+_VR_MINUTE_BUDGET_RE = re.compile(
+    r"<!-- ci-speedup:minute-budget percent=([0-9]+(?:\.[0-9]+)?) "
+    r"used=([0-9]+(?:\.[0-9]+)?) limit=([0-9]+(?:\.[0-9]+)?) "
+    r"admitted=(\d+) -->")
 
 
 def _vr_bmf_held_back(finding: dict) -> bool:
@@ -18365,6 +18370,88 @@ def _vr_bmf_disclosure(count: int) -> str:
             "change to an unpriced runner; rerun with `--bmf` to show them.")
 
 
+def _vr_budget_total(data: dict) -> float | None:
+    totals = _as_dict(_as_dict(data.get("runner_minute_spine")).get("totals"))
+    value = _num(totals.get("completed_billable_equiv_min_per_month"))
+    if value is None:
+        value = _num(totals.get("billable_equiv_min_per_month"))
+    return value if value is not None and value > 0 else None
+
+
+def _vr_budget_cost(finding: dict, data: dict) -> float | None:
+    effect = _as_dict(finding.get("runner_minute_effect"))
+    monthly = _num(effect.get("runner_min_per_month"))
+    if monthly is None:
+        per_run = _num(effect.get("runner_min_per_run"))
+        volume = _num(_as_dict(data.get("per_workflow_monthly_volume")).get(
+            str(finding.get("workflow_file") or "")))
+        if per_run is not None and per_run > 0 and volume is not None and volume > 0:
+            monthly = per_run * volume
+    return monthly if monthly is not None and monthly > 0 else None
+
+
+def _vr_budget_samples(finding: dict, data: dict) -> int | None:
+    direct = _num(_as_dict(finding.get("runner_minute_effect")).get("sampled_runs"))
+    if direct is not None and direct > 0:
+        return int(direct)
+    wf = str(finding.get("workflow_file") or "")
+    values = []
+    for row in _as_list(_as_dict(data.get("runner_minute_spine")).get("rows")):
+        if not isinstance(row, dict) or str(row.get("workflow_file") or "") != wf:
+            continue
+        value = _num(row.get("sampled_workflow_run_count"))
+        if value is not None and value > 0:
+            values.append(int(value))
+    return max(values) if values else None
+
+
+def _vr_budget_queued_pool(finding: dict, data: dict) -> bool:
+    if str(finding.get("pattern") or "") == "OPT97":
+        return True
+    wf = str(finding.get("workflow_file") or "")
+    jobs = {str(v) for v in _as_list(finding.get("affected_jobs"))}
+    for other in _as_list(data.get("findings")):
+        if not isinstance(other, dict) or str(other.get("pattern") or "") not in {
+                "OPT43", "OPT97"}:
+            continue
+        if str(other.get("workflow_file") or "") == wf and jobs & {
+                str(v) for v in _as_list(other.get("affected_jobs"))}:
+            return True
+    return False
+
+
+def _vr_budget_admissions(data: dict, percent: float) -> tuple[list[tuple[dict, float, int]], float, float]:
+    total = _vr_budget_total(data)
+    if total is None or percent <= 0:
+        return [], 0.0, 0.0
+    limit = total * percent / 100.0
+    candidates = []
+    for index, finding in enumerate(_as_list(data.get("findings"))):
+        if not isinstance(finding, dict) or not _vr_bmf_held_back(finding):
+            continue
+        if str(finding.get("pattern") or "") == "OPT81" or _vr_budget_queued_pool(
+                finding, data):
+            continue
+        cost = _vr_budget_cost(finding, data)
+        samples = _vr_budget_samples(finding, data)
+        saved = _num(finding.get("wall_clock_p50_s"))
+        if cost is None or samples is None or saved is None or saved <= 0:
+            continue
+        candidates.append((saved / cost, index, finding, cost, samples))
+    admitted = []
+    used = 0.0
+    for _efficiency, _index, finding, cost, samples in sorted(
+            candidates, key=lambda row: (-row[0], row[1])):
+        if used + cost <= limit + 1e-9:
+            admitted.append((finding, cost, samples))
+            used += cost
+    return admitted, used, limit
+
+
+def _vr_budget_number(value: float) -> str:
+    return f"{value:,.3f}".rstrip("0").rstrip(".")
+
+
 def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
     name = "default report holds back runner-minute-adding wall-clock levers"
     markers = list(_VR_BMF_MARKER_RE.finditer(report))
@@ -18390,16 +18477,51 @@ def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
         return Check(name, True, "findings JSON unavailable", skipped=True)
     enabled = markers[0].group(1) == "true"
     stamped = int(markers[0].group(2))
+    budget_markers = list(_VR_MINUTE_BUDGET_RE.finditer(report))
+    admitted: list[tuple[dict, float, int]] = []
+    budget_bad: list[str] = []
+    if budget_markers:
+        if len(budget_markers) != 1:
+            budget_bad.append(
+                f"expected one minute-budget marker, found {len(budget_markers)}")
+        elif enabled:
+            budget_bad.append("--bmf report carries a default minute-budget marker")
+        else:
+            budget = budget_markers[0]
+            percent = float(budget.group(1))
+            admitted, used, limit = _vr_budget_admissions(data, percent)
+            if abs(float(budget.group(2)) - used) > 0.0005:
+                budget_bad.append("minute-budget used total does not rederive")
+            if abs(float(budget.group(3)) - limit) > 0.0005:
+                budget_bad.append("minute-budget limit does not rederive")
+            if int(budget.group(4)) != len(admitted):
+                budget_bad.append("minute-budget admitted count does not rederive")
+            total = _vr_budget_total(data)
+            summary = (f"Runner-minute budget: +{_vr_budget_number(used)} of "
+                       f"+{_vr_budget_number(limit)} runner-min/mo used "
+                       f"({_vr_budget_number(percent)}% of "
+                       f"{_vr_budget_number(total or 0.0)} measured runner-min/mo).")
+            if report.count(summary) != 1:
+                budget_bad.append("minute-budget used summary is missing or duplicated")
+            for finding, cost, samples in admitted:
+                fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_",
+                             str(finding.get("id") or finding.get("pattern") or "finding"))
+                row = (f"| `{fid}` | +{_vr_budget_number(cost)} runner-min/mo "
+                       f"| {samples} sampled runs |")
+                if report.count(row) != 1:
+                    budget_bad.append(f"admitted finding {fid} lacks its signed added cost")
+    admitted_ids = {id(finding) for finding, _cost, _samples in admitted}
     leaves = [key for key in _VR_LEAF_CROWN_RE.findall(report)
               if key in _VR_BMF_HELD_LEAVES]
-    expected = 0 if enabled else len(held) + len(held_options) + len(leaves)
-    bad = []
+    held_after_budget = [f for f in held if id(f) not in admitted_ids]
+    expected = 0 if enabled else len(held_after_budget) + len(held_options) + len(leaves)
+    bad = budget_bad
     if stamped != expected:
         bad.append(f"marker says {stamped} held, expected {expected}")
     if expected and report.count(_vr_bmf_disclosure(expected)) != 1:
         bad.append("the one-line held-back disclosure is missing or duplicated")
     if not enabled:
-        for f in held:
+        for f in held_after_budget:
             fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(f.get("id") or "x"))
             pattern = str(f.get("pattern") or "")
             if pattern == "OPT83" and f'<a id="opt83-{fid}"></a>' in report:
@@ -18410,7 +18532,7 @@ def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
             if len(evidence) >= 40 and evidence in report:
                 bad.append(f"held {pattern} {fid} still renders its evidence")
         for pattern in ("OPT24", "OPT97"):
-            if (any(str(f.get("pattern")) == pattern for f in held)
+            if (any(str(f.get("pattern")) == pattern for f in held_after_budget)
                     and f"<strong>{pattern} - " in report):
                 bad.append(f"held {pattern} still renders a recommendation card")
         opt89 = _vr_bmf_pattern_block(report, "OPT89")

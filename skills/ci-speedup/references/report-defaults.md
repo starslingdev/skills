@@ -722,6 +722,29 @@ Measured detectors may use stamped exact evidence but cannot cross physical
 bounds.
 
 **Approval status:** awaiting owner approval.
+
+### `runner-minute-budget`
+
+**Current value:** the default report may add up to 5% of the repository's
+measured monthly runner minutes across all admitted wall-clock findings
+(`_DEFAULT_MINUTE_BUDGET_PERCENT`), mirrored independently by
+`_VR_DEFAULT_MINUTE_BUDGET_PERCENT`. `--minute-budget 0` restores strict
+holdback, and `--bmf` remains the explicit all-options mode.
+
+**Report statements:** which minute-adding wall-clock findings are visible by
+default, each admitted finding's signed monthly cost, and the report-wide
+budget used.
+
+**Reason:** a small measured cost can be a good trade for a large merge-wait
+reduction, but the cap must apply once per report rather than once per finding.
+Unsized findings, runner-size moves, and changes on an already queued
+self-hosted pool never spend the budget.
+
+**Proposed decision:** **Keep one 5% report-wide budget, admitting sized
+findings by wall-clock seconds saved per added runner-minute.**
+
+**Approval status:** owner-approved 2026-11-21 (5%).
+
 ### `rendered-row-caps`
 
 **Current value:** 12 rows each for Also noticed, promoted runner-minute findings,
@@ -1079,6 +1102,13 @@ implementation lands.
       "collect_runs.py:_RARE_PRESENCE_MIN_PR": 6,
       "verify_report.py:_VR_RARE_PRESENCE_FRAC": 0.5,
       "verify_report.py:_VR_RARE_PRESENCE_MIN_PR": 6
+    }
+  },
+  "runner-minute-budget": {
+    "decision": "runner-minute-budget",
+    "sources": {
+      "blocking_path.py:_DEFAULT_MINUTE_BUDGET_PERCENT": 5.0,
+      "verify_report.py:_VR_DEFAULT_MINUTE_BUDGET_PERCENT": 5.0
     }
   },
   "rare-push-lane": {
