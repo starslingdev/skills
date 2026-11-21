@@ -97,10 +97,10 @@ clean repository-wide JS/TS Node-output backstop; its interval stays uncredited 
 
 ## Structural / critical-path findings (the high-leverage track)
 
-On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79–OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96–OPT98, OPT100–OPT103 — mostly declarative)
+On real repos almost every hygiene hit (OPT1–OPT9, OPT11–OPT66, OPT68, OPT69, OPT76, OPT77, OPT79–OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96–OPT98, OPT100–OPT103, OPT106–OPT114 — mostly declarative)
 moves **~0 developer wall-clock** — the true bottleneck is usually a check working
 as intended that is simply the slowest thing gating the merge, with no catalog
-match. The **structural track** (category 14, OPT70–OPT75, OPT78, OPT83–OPT85, OPT87) attacks that: a second
+match. The **structural track** (`class: structural`: OPT70–OPT75, OPT78, OPT83–OPT85, OPT87, OPT104) attacks that: a second
 finding class **routed from the measured critical path** in `collect_runs.py` (the
 long-pole job decomposed to steps, required checks cross-referenced, shared cluster
 work detected; OPT78 via a config-gated vitest log leaf; OPT74/85/87 have no router yet), not a YAML match — still
