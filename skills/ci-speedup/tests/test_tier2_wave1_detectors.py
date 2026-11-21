@@ -1495,10 +1495,17 @@ def test_opt46_pending_run_replacement_recipe_has_a_per_run_escape_hatch():
     # the condition must name the runs it actually protects.
     assert "every non-PR commit" not in guardrail
     assert "every default-branch commit and tag must be validated" in guardrail
-    assert ("${{ github.workflow }}-${{ (github.ref == "
-            "format('refs/heads/{0}', github.event.repository.default_branch) || "
-            "startsWith(github.ref, 'refs/tags/')) && github.run_id || "
-            "github.head_ref || github.ref_name }}") in guardrail
+    combined = ("${{ github.workflow }}-${{ (github.ref == "
+                "format('refs/heads/{0}', github.event.repository.default_branch) || "
+                "startsWith(github.ref, 'refs/tags/')) && github.run_id || "
+                "format('{0}/{1}', github.event.pull_request.head.repo.full_name || "
+                "github.repository, github.head_ref || github.ref_name) }}")
+    assert combined in guardrail
+    # #458: the finding hands out the catalog's fork-safe key verbatim, not a
+    # stale copy keyed on the bare branch name.
+    catalog = (Path(__file__).resolve().parents[1] / "references"
+               / "optimization-patterns.md").read_text(encoding="utf-8")
+    assert f"group: {combined}" in catalog
     assert "github.event.repository.default_branch" in guardrail
     assert "startsWith(github.ref, 'refs/tags/')" in guardrail
     assert "`github.run_id`" in guardrail
