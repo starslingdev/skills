@@ -851,6 +851,7 @@ class GhClient:
         # jobs-endpoint 502 fallback; every other failure keeps the ordinary loud-gap
         # path. Cleared when the same endpoint later succeeds.
         self._failure_status_by_endpoint: dict[str, int | None] = {}
+        self._failure_message_by_endpoint: dict[str, str] = {}
         # Deterministic offline replay/record — see `_fixture_name` above. Read
         # once here (not re-checked per call) so a run's mode is fixed for its
         # lifetime. Both unset (the default) is byte-identical to the live path
@@ -891,18 +892,29 @@ class GhClient:
             self.job_fetch_count += 1
             self.job_fetch_failed_count += int(failed)
 
-    def _remember_failure_status(self, endpoint: str, status: int | None) -> None:
+    def _remember_failure_status(
+            self, endpoint: str, status: int | None, message: str = "") -> None:
         with self._lock:
             self._failure_status_by_endpoint[endpoint] = status
+            if message:
+                self._failure_message_by_endpoint[endpoint] = message
+            else:
+                self._failure_message_by_endpoint.pop(endpoint, None)
 
     def _clear_failure_status(self, endpoint: str) -> None:
         with self._lock:
             self._failure_status_by_endpoint.pop(endpoint, None)
+            self._failure_message_by_endpoint.pop(endpoint, None)
 
     def failure_status(self, endpoint: str) -> int | None:
         """Final HTTP status from this endpoint's latest failed live request."""
         with self._lock:
             return self._failure_status_by_endpoint.get(endpoint)
+
+    def failure_message(self, endpoint: str) -> str | None:
+        """GitHub's structured message from this endpoint's latest failure."""
+        with self._lock:
+            return self._failure_message_by_endpoint.get(endpoint)
 
     def recover_failure(self, endpoint: str) -> None:
         """Remove a counted endpoint failure after its complete fallback succeeds."""
@@ -910,6 +922,7 @@ class GhClient:
             if endpoint in self._failure_status_by_endpoint:
                 self.errors = max(0, self.errors - 1)
                 del self._failure_status_by_endpoint[endpoint]
+                self._failure_message_by_endpoint.pop(endpoint, None)
 
     @property
     def gave_up(self) -> bool:
@@ -1384,6 +1397,7 @@ class GhClient:
                 return None
             headers: dict[str, str] = {}
             status: int | None = None
+            failure_message = ""
             try:
                 r = subprocess.run(
                     _gh_argv(endpoint),
@@ -1454,6 +1468,13 @@ class GhClient:
                         self._consecutive_auth_failures = 0
                     return body
                 stderr = (r.stderr or "").strip()
+                try:
+                    error_doc = json.loads(body)
+                    if isinstance(error_doc, dict) and isinstance(
+                            error_doc.get("message"), str):
+                        failure_message = error_doc["message"]
+                except json.JSONDecodeError:
+                    pass
                 # GitHub puts auth diagnostics in the JSON response body on some
                 # 403s, while gh's stderr can be only "HTTP 403". Classification
                 # needs both pieces of the same failed response; logging below still
@@ -1481,7 +1502,7 @@ class GhClient:
                         _GH_MAX_ATTEMPTS, wait, stderr[:200])
                     continue
                 self._bump(error=True)
-                self._remember_failure_status(endpoint, status)
+                self._remember_failure_status(endpoint, status, failure_message)
                 logger.warning(
                     "gh api %s: %s — GAVE UP after %d attempts. This is a REAL "
                     "COVERAGE GAP (the data exists; we were blocked from it), not "
@@ -1508,7 +1529,7 @@ class GhClient:
                 # fetch, including calls short-circuited after the breaker opens, so
                 # the report states the full sample gap without continuing to hit gh.
                 self._bump(error=True)
-                self._remember_failure_status(endpoint, status)
+                self._remember_failure_status(endpoint, status, failure_message)
                 first_stop = False
                 with self._lock:
                     if self._had_successful_invoke:
@@ -1531,7 +1552,7 @@ class GhClient:
                 return None
             if not allow_missing:
                 self._bump(error=True)
-            self._remember_failure_status(endpoint, status)
+            self._remember_failure_status(endpoint, status, failure_message)
             logger.debug("gh api %s failed (rc=%s, %s): %s",
                          endpoint, r.returncode, kind, stderr[:200])
             return None
@@ -10032,9 +10053,10 @@ def _fetch_required_checks(
     # resolve it, skip rather than guess "main" (a wrong guess 404s and would
     # silently under-detect required checks), and mark the read incomplete.
     if branch:
+        protection_endpoint = (
+            f"repos/{repo}/branches/{branch}/protection/required_status_checks")
         prot = client.json(
-            f"repos/{repo}/branches/{branch}/protection/required_status_checks",
-            allow_missing=True)
+            protection_endpoint, allow_missing=True)
         classic_shape_readable = (
             isinstance(prot, dict)
             and (isinstance(prot.get("contexts"), list)
@@ -10051,6 +10073,16 @@ def _fetch_required_checks(
             for c in prot.get("checks") or []:
                 if isinstance(c, dict) and c.get("context"):
                     names.add(str(c["context"]))
+        elif (prot is None
+              and getattr(client, "failure_status", lambda _endpoint: None)(
+                  protection_endpoint) == 404
+              and getattr(client, "failure_message", lambda _endpoint: None)(
+                  protection_endpoint) == "Branch not protected"):
+            # GitHub's explicit 404 is a readable answer: this branch has no
+            # classic protection. A generic 404 can also mean the caller cannot
+            # read protection, so only the API's exact message closes the gap.
+            classic_read = True
+            found_any = True
     else:
         complete = False
     if branch_rules is not None:
