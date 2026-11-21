@@ -687,7 +687,9 @@ option change for a one-off subprocess.
 ### `opt25-universal-housekeeping`
 
 **Current value:** 60 seconds per matrix leg
-(`_OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S`).
+(`_OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S`). A shared step named as a setup action
+(`Run <owner>/setup-*@`), an artifact upload or download, an upload, or a
+cleanup counts as housekeeping at any duration.
 
 **Report statements:** whether work shared by every active matrix leg is treated
 as short housekeeping or retained as real work when diagnosing OPT25 imbalance.

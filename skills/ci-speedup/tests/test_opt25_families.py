@@ -277,6 +277,69 @@ def test_shared_test_work_keeps_working_legs_in_the_matrix():
     assert findings[0]["legs_excluded_no_work"] == 0
 
 
+@pytest.mark.parametrize("housekeeping", [
+    "Run actions/setup-node@v4", "Upload test results", "Clean up workspace", "",
+])
+def test_slow_universal_housekeeping_does_not_make_idle_legs_look_active(
+        housekeeping):
+    """A setup action or upload that runs on every leg is housekeeping however
+    long it takes; legs whose only other step was skipped stay excluded."""
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((900, 700, 80, 80)):
+        ran = index < 2
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"number": 2, "name": housekeeping, "conclusion": "success",
+                 "started_at": start.isoformat(),
+                 "completed_at": (start + timedelta(seconds=75)).isoformat()},
+                {"number": 3, "name": "Run divided tests",
+                 "conclusion": "success" if ran else "skipped",
+                 "started_at": ((start + timedelta(seconds=75)).isoformat()
+                                if ran else None),
+                 "completed_at": ((start + timedelta(seconds=duration)).isoformat()
+                                  if ran else None)},
+            ],
+        })
+
+    assert cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900}) == []
+
+
+def test_shared_test_step_mentioning_an_upload_is_still_real_work():
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for index, duration in enumerate((900, 100, 100)):
+        integration = index == 0
+        jobs.append({
+            "name": f"Test (Shard {index + 1})",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"name": "Run tests and upload coverage", "conclusion": "success",
+                 "started_at": start.isoformat(),
+                 "completed_at": (start + timedelta(seconds=100)).isoformat()},
+                {"name": "Run integration tests",
+                 "conclusion": "success" if integration else "skipped",
+                 "started_at": (start + timedelta(seconds=100)).isoformat()
+                 if integration else None,
+                 "completed_at": (start + timedelta(seconds=900)).isoformat()
+                 if integration else None},
+            ],
+        })
+
+    findings = cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900})
+
+    assert findings
+    assert findings[0]["legs_excluded_no_work"] == 0
+
+
 def test_unmeasured_universal_work_is_not_assumed_to_be_housekeeping():
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     jobs = []

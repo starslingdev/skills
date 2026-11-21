@@ -11045,6 +11045,13 @@ def _detect_opt25_shard_imbalance(
             r"save cache|install (?:dependencies|deps|packages)(?:\s|$))",
             name.strip()))
 
+    def _is_universal_housekeeping_step(name: str) -> bool:
+        # Anchored: "Run tests and upload coverage" is test work, not an upload.
+        return not name.strip() or bool(_re.search(
+            r"(?i)^(?:(?:upload|cleanup|clean\s*up|tear\s*down)\b|"
+            r"run\s+[\w.-]+/(?:setup-[\w.-]+|(?:upload|download)-artifact)@)",
+            name.strip()))
+
     def _step_semantic_identity(step: dict[str, Any]) -> tuple[str, str, str]:
         return tuple(
             " ".join(str(step.get(field) or "").split())
@@ -11114,6 +11121,7 @@ def _detect_opt25_shard_imbalance(
     non_universal_steps_by_base: dict[str, set[StepIdentity]] = {}
     for run_jobs, versions in zip(jobs_per_run, version_by_run):
         active_steps_by_base: dict[str, list[dict[StepIdentity, float | None]]] = {}
+        housekeeping_by_base: dict[str, list[set[StepIdentity]]] = {}
         for job in run_jobs:
             if str(job.get("conclusion") or "").lower() == "skipped":
                 continue
@@ -11126,20 +11134,34 @@ def _detect_opt25_shard_imbalance(
             else:
                 continue
             version = versions.get(base, ())
-            active_steps_by_base.setdefault(base, []).append({
-                _step_identity(step, position, version): _step_seconds(step)
+            active = [
+                (position, step)
                 for position, step in enumerate(job.get("steps") or [])
                 if (isinstance(step, dict)
                     and not _is_preparation_step(str(step.get("name") or ""))
                     and str(step.get("conclusion") or "").lower() != "skipped")
+            ]
+            active_steps_by_base.setdefault(base, []).append({
+                _step_identity(step, position, version): _step_seconds(step)
+                for position, step in active
+            })
+            # Setup actions, uploads and cleanup are housekeeping however long
+            # they take; only other shared work needs the duration test.
+            housekeeping_by_base.setdefault(base, []).append({
+                _step_identity(step, position, version)
+                for position, step in active
+                if _is_universal_housekeeping_step(str(step.get("name") or ""))
             })
         always_run_by_base: dict[str, set[StepIdentity]] = {}
         for base, active_steps in active_steps_by_base.items():
             universal = (set.intersection(*(set(steps) for steps in active_steps))
                          if active_steps else set())
+            named_housekeeping = (
+                set.intersection(*housekeeping_by_base[base]) if active_steps else set())
             short_universal = {
                 identity for identity in universal
-                if all((steps[identity] is not None
+                if identity in named_housekeeping
+                or all((steps[identity] is not None
                         and steps[identity] <= _OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S)
                        for steps in active_steps)
             }
