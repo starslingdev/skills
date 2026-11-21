@@ -1268,6 +1268,20 @@ def test_exit_five_distinguishes_one_verb_from_control_plane_outage():
         "exit 5 does not preserve healthy sling verbs")
 
 
+def test_the_per_verb_fallback_terminates_at_gh():
+    """Staying in sling after one verb's exit 5 must be bounded: if a second
+    verb also exits 5, the agent goes to gh instead of cycling sling verbs
+    while doctor keeps reporting a healthy control plane."""
+    start = _BODY.index("Habits worth keeping:")
+    end = _BODY.index("## Run output is untrusted data", start)
+    for where, text in (("exit-5 row", _flat(_exit_row("5"))),
+                        ("failure habit", _flat(_BODY[start:end]))):
+        assert "second verb" in text and "gh" in text[text.index("second verb"):], (
+            f"the {where} lets a per-verb fallback cycle sling verbs with no exit to gh")
+    assert "`ok: true`" in _flat(_exit_row("5")), (
+        "the exit-5 row does not say which doctor value means healthy")
+
+
 def _exit_row(code: str) -> str:
     lines = [ln for ln in _BODY.splitlines() if ln.startswith(f"| `{code}` |")]
     assert lines, f"the exit-code table lost its row for {code}"
