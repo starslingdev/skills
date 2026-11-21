@@ -179,6 +179,8 @@ REQUIRED_CURRENT_SOURCES = {
     "collect_runs.py:_OPT84_MIN_SHARE": 0.0,
     "collect_runs.py:_OPT84_MIN_STEP_S": 20.0,
     "collect_runs.py:_OPT84_INSTALL_MIN_SHARE": 0.15,
+    "collect_runs.py:_OPT105_MIN_DUPLICATE_STEP_S": 20.0,
+    "collect_runs.py:_OPT105_MIN_JOB_SHARE": 0.15,
     "collect_runs.py:_OPT106_MIN_JOB_SHARE": 0.2,
     "collect_runs.py:_OPT106_MIN_PROFILE_S": 30.0,
     "blocking_path.py:_OPT106_MIN_JOB_SHARE": 0.2,

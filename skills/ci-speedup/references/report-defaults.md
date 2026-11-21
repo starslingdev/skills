@@ -976,6 +976,13 @@ implementation lands.
       "verify_report.py:_VR_OPT84_INSTALL_MIN_SHARE": 0.15
     }
   },
+  "opt105-hook-duplication-minimums": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT105_MIN_DUPLICATE_STEP_S": 20.0,
+      "collect_runs.py:_OPT105_MIN_JOB_SHARE": 0.15
+    }
+  },
   "opt106-profile-minimums": {
     "decision": "per-pattern-minimums",
     "sources": {

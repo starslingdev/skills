@@ -11662,6 +11662,63 @@ def _opt98_task(members: list[dict[str, Any]]) -> list[str]:
                     "and full results in parallel before adopting scoping."]
 
 
+def _opt105_prompt(title: str, members: list[dict[str, Any]], url: str,
+                   locs: str) -> list[str]:
+    """The hook-reuse hand-off keeps the safe recipe and opt-in trust guards local."""
+    evidence = _group_evidence(members, compose=True)
+    wall = max((_num(member.get("wall_clock_p50_s")) or 0.0) for member in members)
+    # Both figures are already capped (critical-path headroom, measured
+    # compute); an unsized runner-minute saving says why, never "~0".
+    wall_text = (f"~{_clock(wall)} of merge wait" if wall > 0
+                 else "no credited merge-wait saving")
+    unsized = next((str(m.get("runner_min_unsized_reason") or "").strip()
+                    for m in members
+                    if not isinstance(_num(m.get("runner_min_saving")), (int, float))), None)
+    if unsized is not None:
+        runner_text = f"runner-minute saving: unsized ({unsized or 'not measured'})"
+    else:
+        runner_text = f"runner-minute saving: at most {_rmin_of(members):,.0f}/month"
+    body = [
+        "ci-speedup measured the pattern below but does NOT prescribe the fix -",
+        "investigate it in the repo and apply a safe change.",
+        "ci-speedup measured local-hook work repeated in pull-request CI.",
+        f"Pattern: OPT105 - {title}.",
+        f"Where: {locs}.",
+        f"What ci-speedup saw: {evidence}",
+        f"Measured saving ceiling: {wall_text}; {runner_text}.",
+        "",
+        "DEFAULT - input-keyed reuse (CI remains authoritative): make the second",
+        "proof cheap using tsc --incremental with cached .tsbuildinfo, eslint",
+        "--cache with a persisted cache file, changed-file tests (--changedSince),",
+        "or a remote Turborepo/Nx task cache. Key reuse on source/config inputs,",
+        "the lockfile, and tool versions; any changed input or miss runs the full",
+        "check in CI.",
+        "For actions/cache tool-result state, use a rolling primary key like",
+        "<tool>-<os>-<lockfile-hash>-${{ github.sha }} with the matching restore-keys",
+        "prefix <tool>-<os>-<lockfile-hash>-, plus an explicit cache budget/retention.",
+        "",
+        "Optional opt-in only - a commit-trailer skip changes the trust model. If the owner",
+        "chooses it, bind the trailer to the commit tree hash, lockfile, and tool",
+        "versions; honour it only on a branch in the same repository, never a fork;",
+        "and keep the full suite on the merge queue or default branch so the merge",
+        "gate still proves the work. A trailer can be written by hand and the hook",
+        "can be bypassed with --no-verify, so this is an explicit trust decision.",
+        "Do not credit the trailer recipe for the full merge-gate run it retains.",
+        "",
+        "Read the catalog entry and recover the hook/workflow history and intent:",
+        f"  {url}",
+        "",
+        *_NO_WEAKENING_LINES,
+        "",
+        *_VERIFICATION_BAR_LINES,
+        "",
+        "Confirm every matched command and cache input in this repository before",
+        "changing it; state the invalidation and trust guardrails before shipping.",
+    ]
+    return ["#### 🤖 Prompt for your coding agent", "", "```text",
+            *[_fence_safe(line) for line in body], "```"]
+
+
 def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                     url: str, *, wait: bool = False, saves_wc: bool = False,
                     tier2: bool = False,
@@ -11706,6 +11763,8 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
         # describe it falsely (it may sit ON the critical path, and it claims
         # no runner-minutes), so it gets its own body.
         return _opt82_prompt(title, members, url, locs)
+    if pat == "OPT105":
+        return _opt105_prompt(title, members, url, locs)
     opt9_measure = [m for m in members if m.get("opt9_measure_before_after") is True]
     prefer: dict[str, Any] | None = None
     if pat == "OPT9" and len(opt9_measure) == len(members):
