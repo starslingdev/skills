@@ -27,8 +27,8 @@ developer's wait. It gets its own prominent section below.
 ## 1. Purpose & scope
 
 ci-speedup audits a repository's GitHub Actions workflows against a 108-pattern
-catalog — 96 **hygiene/data-driven** patterns (OPT1–OPT69 with gaps 10 and 67, plus OPT76, OPT77, OPT79, OPT80, OPT81, OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96, OPT97, OPT98, OPT100–OPT103, OPT106–OPT114) plus 12 **structural /
-critical-path** patterns (OPT70–OPT75, OPT78, OPT83, OPT84, OPT85, OPT87 and OPT104, routed from the measured long pole; see
+catalog — 96 **hygiene/data-driven** patterns (OPT1–OPT9, OPT11–OPT66, OPT68, OPT69, OPT76, OPT77, OPT79–OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96–OPT98, OPT100–OPT103, OPT106–OPT114) plus 12 **structural /
+critical-path** patterns (OPT70–OPT75, OPT78, OPT83–OPT85, OPT87, OPT104; routed from the measured long pole; see
 §11) — and produces a **root-cause-analysis** markdown report with **measured**
 impact on two axes: developer wall-clock wait (the ranking axis) and
 runner-minutes (the cloud bill). Detection, ranking, and every measured number

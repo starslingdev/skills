@@ -29,6 +29,12 @@ the first of them; the compiled file parses (`scan.load_catalog`) to exactly
 the entries the directory parses to, and every compiled heading's GFM anchor
 equals that entry's `anchor`. `--check` exits 1 when the committed file differs
 from the build (a hand edit, or a source edited without rebuilding).
+
+It also owns the catalog counts the shipped docs state: the total, the
+hygiene/data-driven vs structural split (from each file's `class`) and both id
+lists, in the sentences DOC_CLAIMS names in SKILL.md, ARCHITECTURE.md and
+evals/evals.json. A build rewrites them; `--check` exits 1 when one is stale, and
+exits 2 when a named sentence no longer matches exactly once.
 """
 from __future__ import annotations
 
@@ -196,31 +202,103 @@ def _verify(text: str, patterns: Path) -> None:
             raise BuildError(f"{e.pattern}: compiled heading anchor differs from the entry's anchor")
 
 
+# Doc claims derived from the catalog. Each rule names a file under the skill dir
+# and a regex that must match exactly once there; every named group in it is
+# replaced with the value of the same name in `catalog_facts()`. A pattern is
+# structural when its frontmatter says `class: structural`; every other class
+# (`static`, `data-driven`) counts as hygiene/data-driven. Cut and removed stubs
+# keep their id, so they stay in the count.
+DOC_CLAIMS = (
+    ("SKILL.md",
+     r"against a (?P<total>\d+)-pattern\s+catalog — (?P<hygiene>\d+) \*\*hygiene/data-driven\*\* "
+     r"patterns plus (?P<structural>\d+) \*\*structural /"),
+    ("SKILL.md", r"almost every hygiene hit \((?P<hygiene_ids>OPT[^()]*?) — mostly declarative\)"),
+    ("SKILL.md", r"The \*\*structural track\*\* \(`class: structural`: (?P<structural_ids>OPT[^()]*?)\)"),
+    ("ARCHITECTURE.md",
+     r"against a (?P<total>\d+)-pattern\s+catalog — (?P<hygiene>\d+) \*\*hygiene/data-driven\*\* "
+     r"patterns \((?P<hygiene_ids>OPT[^()]*?)\) plus (?P<structural>\d+) \*\*structural /\s+"
+     r"critical-path\*\* patterns \((?P<structural_ids>OPT[^();]*?); routed from"),
+    ("ARCHITECTURE.md", r"the (?P<total>\d+)-pattern catalog, one file per pattern"),
+    ("evals/evals.json", r"the (?P<total>\d+)-pattern detector catalog"),
+)
+
+
+def _id_list(nums: list[int]) -> str:
+    """`OPT1–OPT9, OPT11, OPT12`: three or more consecutive ids collapse to a range."""
+    runs: list[list[int]] = []
+    for n in sorted(nums):
+        if runs and n == runs[-1][-1] + 1:
+            runs[-1].append(n)
+        else:
+            runs.append([n])
+    return ", ".join(f"OPT{r[0]}–OPT{r[-1]}" if len(r) >= 3 else ", ".join(f"OPT{n}" for n in r)
+                     for r in runs)
+
+
+def catalog_facts(patterns: Path = PATTERNS) -> dict[str, str]:
+    entries = scan.load_catalog(patterns)
+    structural = [int(e.pattern[3:]) for e in entries if e.finding_class == "structural"]
+    hygiene = [int(e.pattern[3:]) for e in entries if e.finding_class != "structural"]
+    return {"total": str(len(entries)), "hygiene": str(len(hygiene)), "structural": str(len(structural)),
+            "hygiene_ids": _id_list(hygiene), "structural_ids": _id_list(structural)}
+
+
+def build_docs(skill: Path = _SKILL, patterns: Path = PATTERNS) -> dict[Path, str]:
+    """Each doc named in DOC_CLAIMS, with its counts and id lists regenerated."""
+    facts = catalog_facts(patterns)
+    texts: dict[Path, str] = {}
+    for rel, rx in DOC_CLAIMS:
+        path = skill / rel
+        if path not in texts:
+            texts[path] = path.read_text(encoding="utf-8")
+        hits = list(re.finditer(rx, texts[path]))
+        if len(hits) != 1:
+            raise BuildError(f"{rel}: expected exactly one catalog-count sentence matching {rx!r}, "
+                             f"found {len(hits)}; keep the sentence's shape or update DOC_CLAIMS")
+        m, text = hits[0], texts[path]
+        for name in sorted(m.re.groupindex, key=lambda g: m.start(g), reverse=True):
+            text = text[:m.start(name)] + facts[name] + text[m.end(name):]
+        texts[path] = text
+    return texts
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--check", action="store_true",
-                    help="exit 1 if the committed compiled file differs from the build")
+                    help="exit 1 if the compiled file or a derived catalog count differs from the build")
     args = ap.parse_args(argv)
     try:
         text = build()
+        docs = build_docs()
     except (BuildError, ValueError, scan.yaml.YAMLError) as exc:
         print(f"build_catalog: {exc}", file=sys.stderr)
         return 2
-    current = COMPILED.read_text(encoding="utf-8") if COMPILED.is_file() else ""
+    outputs = {COMPILED: text, **docs}
+    stale = []
+    for path, built in outputs.items():
+        current = path.read_text(encoding="utf-8") if path.is_file() else ""
+        if current == built:
+            continue
+        stale.append(path)
+        if args.check:
+            diff = difflib.unified_diff(current.splitlines(), built.splitlines(), "committed", "built",
+                                        lineterm="", n=1)
+            print("\n".join(list(diff)[:60]))
+            print(f"build_catalog: {path.relative_to(_REPO)} is stale or hand-edited", file=sys.stderr)
     if args.check:
-        if current == text:
-            print(f"build_catalog: {COMPILED.relative_to(_REPO)} is current")
-            return 0
-        diff = difflib.unified_diff(current.splitlines(), text.splitlines(), "committed", "built",
-                                    lineterm="", n=1)
-        print("\n".join(list(diff)[:60]))
-        print(f"build_catalog: {COMPILED.relative_to(_REPO)} is stale or hand-edited; run "
-              "python3 maintainers/ci-speedup/scripts/build_catalog.py and commit it", file=sys.stderr)
-        return 1
-    COMPILED.write_text(text, encoding="utf-8")
-    print(f"build_catalog: wrote {COMPILED.relative_to(_REPO)} ({len(text.encode()):,} bytes)")
+        if stale:
+            print("build_catalog: run python3 maintainers/ci-speedup/scripts/build_catalog.py and commit "
+                  "the result", file=sys.stderr)
+            return 1
+        print(f"build_catalog: {COMPILED.relative_to(_REPO)} and the catalog counts in "
+              f"{', '.join(sorted(str(p.relative_to(_SKILL)) for p in docs))} are current")
+        return 0
+    for path in stale:
+        path.write_text(outputs[path], encoding="utf-8")
+        print(f"build_catalog: wrote {path.relative_to(_REPO)} ({len(outputs[path].encode()):,} bytes)")
+    if not stale:
+        print("build_catalog: everything is current")
     return 0
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
