@@ -166,19 +166,20 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    cluster-floor model from `references/wall-clock-methodology.md`). You don't invoke
    it yourself — **`run.py` orchestrates phases 2–3**:
    `python3 scripts/run.py --root <ROOT> --out <OUT.json> --repo <owner/repo>
-   --with-logs` (`run.py --help` lists its flags). `--with-logs` fetches the gating
+   --with-logs` (`run.py --help` lists its flags). Recommendations save or preserve
+   runner minutes; add `--bmf` only when the user puts wall-clock first, and offer it
+   when the report's held-back line appears. `--with-logs` fetches the gating
    jobs' logs and captures the **drill bundle** (`data_bundle`: per pole, the
    nearest-P50 run's log + step timeline + cross-run magnitude sample) into an
    **auto-derived `<OUT>.data` dir** — **never pass `--data-dir`** to `run.py` (it's
    `collect_runs.py`'s internal flag, and passing it to `run.py` errors). `<OUT.json>`
    and its `.data` bundle hold raw third-party job logs, so write `--out` to a scratch
-   path outside any tracked tree (or a gitignored dir). gh calls are frugal and the
-   sampling adaptive (ARCHITECTURE §2.1): the gate/poles/floor are exact, off-path
-   hygiene figures approximate (flagged). `run.py` then prints a **data-pass summary**
+   path outside any tracked tree (or a gitignored dir). Off-path hygiene figures are
+   approximate (flagged; ARCHITECTURE §2.1). `run.py` then prints a **data-pass summary**
    to stdout — the gating resolution (required checks, **already resolved from rulesets
    + branch protection**: a fileless/managed check like `Claude Code Review` is flagged
    auto-demoted, an empty set means none are declared), the addressable long poles, the gh
-   API call count, and the **exact `blocking_path.py` render command** with per-pole bindings pre-filled. By default recommendations save or preserve runner minutes; if the user explicitly prioritizes wall-clock time, add `--bmf` to include wall-clock-only levers with signed runner-minute effects, otherwise the report gives only their held-back count.
+   API call count, and the **exact `blocking_path.py` render command** with per-pole bindings pre-filled.
    **Act on that summary.** Do NOT re-query gh for branch protection / rulesets (the
    data pass did it — read `required_checks`), manually verify a fileless check's
    gating, or hand-spelunk `findings.json` with `python -c` — it's all in the summary.
