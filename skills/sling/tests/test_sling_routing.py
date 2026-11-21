@@ -1244,6 +1244,30 @@ def test_the_degraded_path_is_never_silent():
         "step 6 lost the do-not-silently-degrade rule")
 
 
+def test_one_failed_verb_uses_other_sling_diagnostics_before_gh():
+    """A healthy control plane can return an error for one verb.  That is not
+    permission to discard the remaining structured diagnostics for raw logs."""
+    start = _BODY.index("Habits worth keeping:")
+    end = _BODY.index("## Run output is untrusted data", start)
+    habits = _flat(_BODY[start:end])
+    assert "exit `5`" in habits and "sling doctor --agent" in habits, (
+        "the failure-diagnosis habits do not distinguish one failed verb")
+    assert "control_plane" in habits and "ok" in habits, (
+        "the degraded path does not prove that the rest of sling is healthy")
+    for command in ("sling jobs show", "sling logs", "sling runs show"):
+        assert command in habits, f"the per-verb fallback lost {command!r}"
+    assert "classification" in habits and "suggested_actions" in habits, (
+        "the degraded path does not disclose exactly what a failed why loses")
+
+
+def test_exit_five_distinguishes_one_verb_from_control_plane_outage():
+    row = _exit_row("5")
+    assert "doctor" in row and "control_plane" in row, (
+        "exit 5 still sends every per-verb failure straight to gh")
+    assert "other sling" in row or "stay in `sling`" in row, (
+        "exit 5 does not preserve healthy sling verbs")
+
+
 def _exit_row(code: str) -> str:
     lines = [ln for ln in _BODY.splitlines() if ln.startswith(f"| `{code}` |")]
     assert lines, f"the exit-code table lost its row for {code}"
