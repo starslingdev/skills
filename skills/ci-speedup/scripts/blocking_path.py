@@ -4917,7 +4917,9 @@ def _finding_runner_minute_effect_line(finding: dict[str, Any]) -> str:
     if isinstance(effect, dict) and effect.get("direction") == "neutral":
         reason = str(effect.get("reason") or "").strip()
         return ("Runner-minute effect: roughly level"
-                + (f"; {reason}" if reason else "") + ".")
+                + (f"; {reason}" if reason else "")
+                + ". Adding shard jobs instead would repeat checkout and setup and "
+                  "bill each job.")
     if not isinstance(effect, dict) or effect.get("direction") == "unsized":
         reason = (effect or {}).get("reason") if isinstance(effect, dict) else None
         tail = f" ({reason})" if reason else ""

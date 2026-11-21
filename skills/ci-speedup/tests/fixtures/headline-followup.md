@@ -79,7 +79,7 @@ THE GATE
 - Slowest check a typical PR waits on: P50 10m 00s; its workflow `test.yml` gates 4/4 sampled PRs.
 
 Concurrency order: Use OPT88 to measure and fill the existing job's idle cores. Before adding workers, confirm that they cannot interfere through a shared external server.
-Runner-minute effect: roughly level; rebalancing moves the same test work between the legs that already run.
+Runner-minute effect: roughly level; rebalancing moves the same test work between the legs that already run. Adding shard jobs instead would repeat checkout and setup and bill each job.
 
 WHERE THE TIME GOES
 - No per-step breakdown was captured for this job; profile its slowest step in the repo.
@@ -136,7 +136,7 @@ DELIVER & VERIFY
 **Where:** `test.yml` (tests)
 **Activity:** not measured.
 **Wall-clock:** unlike the other findings in this section, this one **sits ON the merge-gating critical path** (a long pole) - its catalog fix **cuts developer wall-clock**, it is not a bill-only cleanup. See the spine above and this pattern's catalog recipe below for the remedy.
-**Runner-minute effect: roughly level; rebalancing moves the same test work between the legs that already run.**
+**Runner-minute effect: roughly level; rebalancing moves the same test work between the legs that already run. Adding shard jobs instead would repeat checkout and setup and bill each job.**
 **Evidence:** One shard gates the matrix.
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/abcdef1234567890/skills/ci-speedup/references/optimization-patterns.md
 
