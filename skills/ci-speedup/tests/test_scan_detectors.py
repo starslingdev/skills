@@ -972,6 +972,53 @@ def pick(tests, durations, shard, count):
 const files = listed.slice().sort((a, b) => timings[b] - timings[a]);
 export const mine = files.filter((_, index) => index % total === shard);
 '''),
+    # Compound identifiers: the measured word is one part of a snake_case or
+    # camelCase name, which is how real planners name a loaded timings map.
+    "python-loaded-weights-map": ("scripts/shard.py", '''\
+import json
+weights_map = json.load(open("test-weights.json"))
+def pick(tests, shard, count):
+    names = sorted(tests, key=lambda name: weights_map[name])
+    return names[shard::count]
+'''),
+    "python-get-default-compound": ("scripts/shard.py", '''\
+def pick(tests, test_durations, shard, count):
+    names = sorted(tests, key=lambda name: test_durations.get(name, 1.0))
+    return names[shard::count]
+'''),
+    "python-bound-get-times": ("scripts/shard.py", '''\
+def pick(tests, test_times, shard, count):
+    names = sorted(tests, key=test_times.get, reverse=True)
+    return names[shard::count]
+'''),
+    "python-named-key-function": ("scripts/shard.py", '''\
+import json
+WEIGHTS = json.load(open("test-weights.json"))
+def cost(name):
+    return WEIGHTS.get(name, 1)
+def pick(tests, shard, count):
+    names = sorted(tests, key=cost, reverse=True)
+    return names[shard::count]
+'''),
+    "js-camel-timings": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => testTimings[b] - testTimings[a]);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "js-duration-map-default": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => (durationMap[b] ?? 0) - (durationMap[a] ?? 0));
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "js-named-comparator": ("scripts/test-shard.mjs", '''\
+function byCost(a, b) {
+  return weights[b] - weights[a];
+}
+const files = listed.slice().sort(byCost);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "js-duration-field": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => b.durationMs - a.durationMs);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
 }
 
 
@@ -1002,6 +1049,39 @@ def pick(listing, shard, count):
     names = sorted(listing)
     return names[shard::count]
 '''),
+    "python-key-str-lower": ("scripts/shard.py", '''\
+def pick(listing, shard, count):
+    names = sorted(listing, key=str.lower)
+    return names[shard::count]
+'''),
+    "python-key-len": ("scripts/shard.py", '''\
+def pick(listing, shard, count):
+    names = sorted(listing, key=len)
+    return names[shard::count]
+'''),
+    "js-name-length": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => a.length - b.length);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "python-lambda-name-tuple": ("scripts/shard.py", '''\
+def pick(listing, shard, count):
+    names = sorted(listing, key=lambda name: (len(name), name))
+    return names[shard::count]
+'''),
+    "python-named-name-key": ("scripts/shard.py", '''\
+def by_name(name):
+    return name.lower()
+def pick(listing, shard, count):
+    names = sorted(listing, key=by_name)
+    return names[shard::count]
+'''),
+    "js-named-locale-comparator": ("scripts/test-shard.mjs", '''\
+function compare(a, b) {
+  return a.localeCompare(b);
+}
+const files = listed.slice().sort(compare);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
 }
 
 
@@ -1016,6 +1096,37 @@ def test_opt25_finds_name_sorted_positional_splitter_shapes(tmp_path: Path, case
         ("OPT25", rel)]
     facts = hits[0][2].facts
     assert "exactly one shard" in facts["fix_strategy"], facts
+
+
+@pytest.mark.parametrize("rel,source", [
+    ("scripts/shard.py", '''\
+from planner import by_cost
+def pick(tests, shard, count):
+    names = sorted(tests, key=by_cost)
+    return names[shard::count]
+'''),
+    ("scripts/shard.py", '''\
+import planner
+def pick(tests, shard, count):
+    names = sorted(tests, key=planner.order)
+    return names[shard::count]
+'''),
+    ("scripts/test-shard.mjs", '''\
+import { compareTests } from "./planner.mjs";
+const files = listed.slice().sort(compareTests);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+])
+def test_opt25_positional_splitter_withholds_unread_sort_key(
+        tmp_path: Path, rel: str, source: str):
+    """A key defined outside the file cannot be classified: it may read
+    measured timings or derive from the name. The scan withholds the warning
+    instead of guessing."""
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, _incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert hits == [], hits
 
 
 def test_opt16_finds_same_binary_built_in_separate_go_tests(tmp_path: Path):
