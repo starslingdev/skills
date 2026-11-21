@@ -497,8 +497,8 @@ def test_merge_keys_resolve_the_same_way_in_both_walkers() -> None:
                 run: own
               - <<: [*a, *b]
         """)
-    leaves = [s.step["run"] for s in scan._iter_job_steps(
-        yaml.safe_load(text)["jobs"]["j"])]
+    doc = scan._parse_yaml_text(text, Path("merge-keys.yml"))
+    leaves = [s.step["run"] for s in scan._iter_job_steps(doc["jobs"]["j"])]
     assert leaves == ["own", "from-a"]
     steps_node = scan._node_keys(scan._job_nodes(text)["j"])["steps"]
     assert [scan._node_keys(n)["run"].value

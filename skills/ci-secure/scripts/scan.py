@@ -129,6 +129,64 @@ except ImportError:
     )
     sys.exit(1)
 
+
+class _StableSafeLoader(yaml.SafeLoader):
+    """SafeLoader with the YAML merge-key precedence ci-secure promises.
+
+    PyYAML 6.0.4 changed how sequence merge keys are flattened.  Its normal
+    mapping constructor still lets later duplicate keys win, so flattening
+    ``<<: [*a, *b]`` in source order makes ``b`` override ``a``.  The YAML
+    merge-key rule is the opposite: earlier sources win, while keys written on
+    the mapping itself win over every source.  Resolve that order here instead
+    of inheriting whichever rule the installed PyYAML release happens to use.
+    """
+
+    def flatten_mapping(self, node: Any) -> None:
+        merge: list[tuple[Any, Any]] = []
+        index = 0
+        while index < len(node.value):
+            key_node, value_node = node.value[index]
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                del node.value[index]
+                if isinstance(value_node, yaml.MappingNode):
+                    sources = [value_node]
+                elif isinstance(value_node, yaml.SequenceNode):
+                    sources = list(value_node.value)
+                    if not all(isinstance(src, yaml.MappingNode)
+                               for src in sources):
+                        bad = next(src for src in sources
+                                   if not isinstance(src, yaml.MappingNode))
+                        raise yaml.constructor.ConstructorError(
+                            "while constructing a mapping", node.start_mark,
+                            "expected a mapping for merging, but found "
+                            f"{bad.id}", bad.start_mark,
+                        )
+                else:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping", node.start_mark,
+                        "expected a mapping or list of mappings for merging, "
+                        f"but found {value_node.id}", value_node.start_mark,
+                    )
+
+                # PyYAML's mapping constructor lets later duplicate keys win.
+                # Put later merge sources first so the YAML-specified earlier
+                # source is encountered last and therefore wins.
+                for source in reversed(sources):
+                    self.flatten_mapping(source)
+                    merge.extend(source.value)
+            elif key_node.tag == "tag:yaml.org,2002:value":
+                key_node.tag = "tag:yaml.org,2002:str"
+                index += 1
+            else:
+                index += 1
+        if merge:
+            node.value = merge + node.value
+
+
+def _stable_safe_load(text: str) -> Any:
+    """Load YAML with version-independent merge-key precedence."""
+    return yaml.load(text, Loader=_StableSafeLoader)
+
 # Allow `from config import ...` and `from gh_utils import ...` regardless
 # of where this script is invoked from.
 _THIS_DIR = Path(__file__).resolve().parent
@@ -575,7 +633,7 @@ def _parse_yaml_text(text: str, file_path: Path, quiet: bool = False) -> Any:
     announcing it again tells the operator nothing new.
     """
     try:
-        return yaml.safe_load(text)
+        return _stable_safe_load(text)
     except yaml.YAMLError as e:
         key = str(file_path)
         if not quiet and key not in _PARSE_FAILURES_LOGGED:
@@ -612,7 +670,7 @@ def _probe_scannability(file_path: Path) -> str | None:
     except OSError as e:
         return f"unreadable — not scanned for any pattern ({e})"
     try:
-        doc = yaml.safe_load(text)
+        doc = _stable_safe_load(text)
     except yaml.YAMLError as e:
         # PyYAML messages span several lines (problem + context + marker);
         # collapse to one line so the report banner stays scannable.
@@ -1970,7 +2028,7 @@ def _step_spans(text: str,
     if "parallel" not in text and "background" not in text:
         return []
     try:
-        doc = yaml.safe_load(text)
+        doc = _stable_safe_load(text)
     except yaml.YAMLError:
         return []
     if not (isinstance(doc, dict) and isinstance(doc.get("jobs"), dict)):
@@ -3286,7 +3344,7 @@ def _pnpm_build_allowlist(root: Path | None) -> str | None:
         except OSError:
             continue
         try:
-            doc = yaml.safe_load(text)
+            doc = _stable_safe_load(text)
         except yaml.YAMLError:
             return None
         if not isinstance(doc, dict):
