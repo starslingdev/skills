@@ -19268,10 +19268,18 @@ def _detect_opt46_superseded_runs(
               "true and saves nothing, so use the catalog's WIDENED predicate. "
               "PENDING-RUN SAFETY: GitHub keeps at most one pending run in a "
               "concurrency group, so a third arrival replaces the second pending run "
-              "even when cancellation is disabled. If every non-PR commit must be "
-              "validated, use the catalog's event-and-PR-number group with "
-              "`github.run_id` as the non-PR fallback; do not use the widened "
-              "cancellation recipe for those protected runs."))
+              "even when cancellation is disabled. If every default-branch commit "
+              "and tag must be validated, use the catalog's combined group "
+              "`${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', "
+              "github.event.repository.default_branch) || startsWith(github.ref, "
+              "'refs/tags/')) && github.run_id || github.head_ref || "
+              "github.ref_name }}`: default-branch and tag "
+              "runs (selected with `github.event.repository.default_branch` and "
+              "`startsWith(github.ref, 'refs/tags/')`) use `github.run_id`, while "
+              "feature-branch push and PR runs share `github.head_ref || "
+              "github.ref_name`. Do not add `github.event_name` when the same workflow "
+              "handles push and pull_request: it separates those branch groups and "
+              "breaks OPT47 push+PR dedup."))
     f = _new_finding(
         "OPT46", "MEDIUM", title, wf_path, "", evidence,
         "superseded-runs-not-cancelled-missing-concurrency-or-cancel-",
@@ -30875,7 +30883,10 @@ def _persist_pole_logs(
         # A replay-heavy test log can still contain an independent catalog leaf
         # (most commonly dependency-cache state). Preserve that drill; replay
         # exclusion applies only when the log has no other recognized work.
-        leaf0 = bp._parse_log(log, iso, job_duration_s=repr_dur) or {}
+        leaf0 = bp._parse_log(
+            log, iso, job_duration_s=repr_dur,
+            dominant_category=str(p.get("dominant_category") or ""),
+        ) or {}
         replay = bp._test_result_replay_share(log)
         if (not leaf0 and isinstance(replay, dict)
                 and replay.get("replayed") is True):
@@ -36182,7 +36193,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 ]
                 _push_decomp = _decompose_job_steps(_push_instances)
                 _push_leaf = bp._parse_log(
-                    _push_log or "", findings_doc.get("test_runner_isolation"))
+                    _push_log or "", findings_doc.get("test_runner_isolation"),
+                    dominant_category=str((_push_decomp or {}).get(
+                        "dominant_category") or ""))
                 _leaf_fix_key = str((_push_leaf or {}).get("fix_key") or "")
                 # The numbered catalog routes that can also have a static/data-driven
                 # finding on this job. Other recognised leaves still carry their full

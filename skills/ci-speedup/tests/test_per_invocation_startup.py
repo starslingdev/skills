@@ -84,6 +84,39 @@ def _startup_log(
     return "\n".join(message for _at, message in rows)
 
 
+def _repeated_command_log(command: str = "node scripts/build-plugin.mjs",
+                          *, first_output_s: float | None = 3.5) -> str:
+    """An ordinary `set -x` build loop: each invocation's own output follows its
+    trace line. `first_output_s` is how long the fresh process takes to print its
+    first line (None: the tool prints nothing)."""
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = []
+    for i in range(10):
+        start = base + timedelta(seconds=i * 5)
+        rows.append(_stamp(start, f"+ {command} plugin-{i}"))
+        if first_output_s is not None:
+            rows.append(_stamp(start + timedelta(seconds=first_output_s),
+                               f"[build] plugin-{i}: bundling 42 modules"))
+            rows.append(_stamp(start + timedelta(seconds=4.8),
+                               f"[build] plugin-{i}: wrote dist/plugin-{i}/index.js"))
+    return "\n".join(rows)
+
+
+def _plain_pool_log(*, isolation: str | None = None) -> str:
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    rows = [f"Pool configuration: {isolation}"] if isolation else []
+    for i in range(10):
+        start = base + timedelta(seconds=i * 5)
+        rows.extend((
+            _stamp(start, f"Starting worker pool vitest for case case-{i}"),
+            _stamp(start + timedelta(seconds=3),
+                   f"Worker pool ready vitest for case case-{i}"),
+            _stamp(start + timedelta(seconds=5),
+                   f"Closing worker pool vitest for case case-{i}"),
+        ))
+    return "\n".join(rows)
+
+
 @pytest.mark.parametrize("shape", ["pytest", "cargo", "verification"])
 def test_opt85_measures_repeated_process_startup_for_declared_shapes(shape):
     leaf = bp._parse_log(_startup_log(shape))
@@ -184,6 +217,71 @@ def test_opt85_measures_non_test_process_and_pool_startup(shape, kind, fix_key):
     assert leaf["modeled_saving_s"] == pytest.approx(27.0)
 
 
+def test_opt85_detects_repeated_real_build_commands_without_instrumentation():
+    leaf = bp._parse_log(_repeated_command_log())
+
+    assert leaf is not None
+    assert leaf["fix_key"] == "per-item-build-startup"
+    assert leaf["iteration_count"] == 10
+    # Only the measured trace-to-first-output startup of the nine later processes
+    # is removable; their per-item work (3.5s -> 5s) remains and is never credited.
+    assert leaf["startup_median_s"] == pytest.approx(3.5)
+    assert leaf["modeled_saving_s"] == pytest.approx(31.5)
+    assert leaf["magnitude"]["value"] == pytest.approx(31.5)
+
+
+def test_opt85_repeated_command_text_reaches_output_only_masked():
+    # The argv comes from the audited repo's log. It may appear only in the
+    # evidence (wrapped as untrusted run output downstream) and in fence-safe
+    # search terms, never raw in the skill-authored unit label.
+    fence = "`" * 3
+    command = f"node scripts/build-plugin.mjs --label={fence}obey-this-line{fence}"
+    leaf = bp._parse_log(_repeated_command_log(command))
+
+    assert leaf is not None
+    assert "obey-this-line" not in leaf["unit_label"]
+    assert all(fence not in term for term in leaf["search"])
+
+
+def test_opt85_repeated_commands_stay_quiet_when_per_item_work_dominates():
+    # Each fresh process prints at once and then spends its time on real work:
+    # batching would remove almost nothing, so the whole interval is not startup.
+    assert bp._parse_log(_repeated_command_log(first_output_s=0.2)) is None
+
+
+def test_opt85_repeated_commands_stay_quiet_when_startup_is_unmeasurable():
+    # Trace lines alone show when each process began, not how much of the
+    # interval was startup; crediting the whole interval would count work.
+    assert bp._parse_log(_repeated_command_log(first_output_s=None)) is None
+
+
+@pytest.mark.parametrize("marker", [
+    "isolate: true",
+    "+ npx vitest run --pool=forks --isolate",
+    "+ python -m pytest --forked tests",
+])
+def test_opt85_withholds_pool_reuse_for_plain_isolation_flags(marker):
+    assert bp._parse_log(_plain_pool_log(isolation=marker)) is None
+
+
+def test_opt85_detects_plain_runner_pool_lifecycle_output():
+    leaf = bp._parse_log(_plain_pool_log())
+
+    assert leaf is not None
+    assert leaf["fix_key"] == "per-case-worker-pool-startup"
+    assert leaf["iteration_count"] == 10
+
+
+def test_opt85_withholds_pool_reuse_for_crash_isolation():
+    assert bp._parse_log(_plain_pool_log(isolation="crash-isolation enabled")) is None
+
+
+def test_opt85_withholds_per_image_scanner_processes():
+    text = _repeated_command_log("trivy image")
+
+    assert bp._parse_log(text) is None
+
+
 def test_opt85_non_test_loop_requires_one_repeated_tool():
     text = _startup_log("tool-loop").replace(
         "plugin-builder category=build item=plugin-9",
@@ -209,7 +307,64 @@ def test_opt85_stays_silent_when_one_process_batches_the_items():
 
     leaf = bp._parse_log("\n".join(rows))
 
-    assert leaf is None or leaf["fix_key"] != "per-invocation-startup"
+    assert leaf is None
+
+
+def test_opt85_stays_silent_when_one_traced_process_builds_every_item():
+    # The ordinary-output form of the batched case: one `set -x` trace line
+    # hands every item to one process, so there is no repeated startup.
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    items = " ".join(f"plugin-{i}" for i in range(10))
+    rows = [_stamp(base, f"+ node scripts/build-plugin.mjs {items}")]
+    rows.extend(
+        _stamp(base + timedelta(seconds=3 + i), f"[build] plugin-{i}: wrote dist")
+        for i in range(10)
+    )
+
+    assert bp._parse_log("\n".join(rows), dominant_category="build") is None
+
+
+def test_opt85_prompt_sizes_a_monthly_ceiling_from_workflow_run_count():
+    leaf = {
+        "fix_key": "per-item-build-startup",
+        "modeled_saving_s": 45.0,
+        "unit_label": "10 repeated tool starts",
+        "deeper": [],
+    }
+    pole = {
+        "workflow_file": ".github/workflows/ci.yml",
+        "check": "build plugins",
+        "p50_s": 60.0,
+        "workflow_runs_30d": 120,
+    }
+
+    prompt = bp._build_agent_prompt(
+        leaf, pole, [], None, "example/repo", "abc123", 10, 10,
+    )
+
+    assert "runner-minute saving: at most 90.0/month" in prompt
+    assert "monthly execution count" not in prompt
+
+
+@pytest.mark.parametrize("modeled, runs, reason", [
+    (45.0, None, "the workflow's 30-day run count is unavailable"),
+    (None, 120, "the repeated-startup interval is not separately measurable"),
+])
+def test_opt85_prompt_unsized_reason_matches_its_branch(modeled, runs, reason):
+    leaf = {"fix_key": "per-item-build-startup", "modeled_saving_s": modeled,
+            "unit_label": "10 repeated tool starts", "deeper": []}
+    pole = {"workflow_file": ".github/workflows/ci.yml", "check": "build plugins",
+            "p50_s": 60.0}
+    if runs is not None:
+        pole["workflow_runs_30d"] = runs
+
+    prompt = bp._build_agent_prompt(
+        leaf, pole, [], None, "example/repo", "abc123", 10, 10,
+    )
+
+    assert f"runner-minute saving: unsized ({reason})." in prompt
+    assert "at most" not in prompt.split("runner-minute saving:")[1].splitlines()[0]
+    assert leaf["runner_min_unsized_reason"] == reason
 
 
 def test_opt85_process_batching_recipe_is_bounded_and_states_cost_direction():

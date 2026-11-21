@@ -4632,23 +4632,29 @@ concurrency:
 **A non-cancelled group does not preserve every pending run.** GitHub keeps at
 most one running and one pending run in a concurrency group. If a third run
 joins while one is running and another is pending, the new run replaces the
-older pending run even when `cancel-in-progress` is false. When every non-PR
-commit must receive its own validation, keep the default cancellation predicate
-but give non-PR events a per-run group:
+older pending run even when `cancel-in-progress` is false. When every
+default-branch commit and tag must receive its own validation *and* superseded
+feature-branch runs should still cancel, use one combined group: default-branch
+and tag runs select their unique `run_id`; feature-branch push and PR runs keep
+the shared short branch name that cancellation and OPT47 dedup require.
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && github.run_id || github.head_ref || github.ref_name }}
   cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request'
-    && github.head_ref != github.event.repository.default_branch }}
+    ${{ github.event_name != 'merge_group'
+    && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+    && github.head_ref != github.event.repository.default_branch
+    && !startsWith(github.ref, 'refs/tags/') }}
 ```
 
-This preserves PR supersession by pull-request number while making each `push`,
-`merge_group`, `schedule`, tag, and manual run independent. Do not use this key
-for the widened feature-branch-push recipe below: unique push groups cannot
-cancel superseded feature-branch runs, so that recipe and an every-commit
-validation requirement are mutually exclusive for the same event.
+Do not add `github.event_name` to this group when the same workflow handles
+both events: adding `github.event_name` to a `push` + `pull_request` workflow
+splits one branch into separate event groups,
+so the OPT47 push+PR duplicate runs can no longer supersede or cancel one
+another. The key above deliberately omits it. If every event truly must be
+independent, adding the event name is an explicit trade: it preserves those
+event-specific runs but gives up OPT47 dedup.
 
 **The tension you must not "simplify" away.** The group key uses `github.head_ref || github.ref_name` — both are the **short** branch name (`head_ref` is set only on `pull_request`; `ref_name` is the short form on `push`, where `github.ref` would be the fully-formed `refs/heads/…`). That is deliberate: it lands a branch's `push` and `pull_request` runs in the **same** group, which is the whole point of the push+PR double-trigger dedup (OPT47). Writing `github.head_ref || github.ref` instead yields two different strings for one branch, the runs never share a group, and that saving is zero.
 
@@ -4681,9 +4687,8 @@ Keep the continuation lines at the **same indent** as `${{` (as above). YAML fol
 **Real-world example (2026-05)**: a `Pre-merge` workflow triggered on `push` with `branches-ignore: [main]` and had no top-level concurrency block. 62% of branches had ≥2 runs in a 30-day window. Adding the **widened** block above (this is a Flavor A / push-triggered case) saved an estimated 70-125 min/mo of runner compute.
 
 **Public evidence**: [OpenClaw Crabbox pull request #2286](https://github.com/openclaw/crabbox/pull/2286)
-groups by event and pull-request number, with the run ID as the fallback for
-non-PR events, so default-branch and manual validations cannot replace one
-another in the pending slot. [OpenClaw Crabbox pull request #2868](https://github.com/openclaw/crabbox/pull/2868)
+cancelled pull-request runs on a newer push while keeping main runs per commit.
+[OpenClaw Crabbox pull request #2868](https://github.com/openclaw/crabbox/pull/2868)
 replaced `if: always()` on result-aggregating jobs with `if: !cancelled()`; on a
 superseded run, all old work was cancelled and the aggregate jobs acquired no
 runner.
@@ -7093,7 +7098,7 @@ fix_strategy: run-tests-in-fewer-processes
 title_template: "Repeated work starts a new process or worker pool for every item"
 -->
 
-**Auto-detected from a drilled log.** The OPT85 startup leaves require at least ten timestamped, strictly serial iterations from a declared tool signature. They measure process boundary → first work and boundary → completion for every iteration. For non-test loops, the structured boundary must also name one repeated tool, its `build` or `scan` category, and a unique item; pool boundaries name one pool and a unique case. This category is checked against the pole's measured dominant step, so startup in a shorter test step cannot explain a build-dominant job. Unparseable timestamps, mixed tools, overlapping iterations, retries and periodic progress lines fail closed.
+**Auto-detected from a drilled log.** The OPT85 startup leaves require at least ten timestamped, strictly serial iterations. Test subprocesses use the runner's ordinary start/work/completion output. Tool loops use repeated shell-trace commands (`+ ...` or `> ...`) with one argv prefix and a distinct final argument; startup is measured from each trace line to that process's first output line, and an invocation that prints nothing withholds the finding. Their category comes from the measured dominant step. Worker-pool loops use the runner's own start/ready/close lifecycle lines. Explicit crash isolation, fork-per-test, per-case process isolation, `isolate: true`, `--isolate` or `--forked` withholds the finding. Unparseable timestamps, mixed commands, overlapping iterations, retries, periodic progress lines and per-image scanner loops fail closed.
 
 **TL;DR**: A slow job spends most of each serial iteration starting the same tool process or worker pool. Keep a bounded pool alive across cases, or process a memory-capped batch of items per tool start. Tests still keep every case, while packaging and analysis loops still keep every input.
 
@@ -7110,7 +7115,7 @@ title_template: "Repeated work starts a new process or worker pool for every ite
 
 1. The drilled long pole's dominant step category is `build`, `scan` or `test`. This is a gate only: it holds before and after a regression alike, so it cannot identify one by itself.
 2. Process per case: a declared pytest invocation, Cargo test-binary banner, or structured verification-script boundary starts each iteration; its first-work and completion lines are timestamped.
-3. Tool/pool loop: structured `started`, `ready` and `finished`/`stopped` lines carry the same tool or pool identity and a unique item or case identity. A tool loop also declares `build` or `scan`; that exact category must dominate the pole. A mixed-tool or mixed-category loop is withheld rather than treated as reusable startup.
+3. Tool/pool loop: timestamped shell traces repeat the same argv prefix with a unique last argument, or ordinary pool lifecycle lines bind one pool to a unique case. The pole's measured dominant step supplies the tool-loop category. Mixed tools and explicitly isolated cases are withheld rather than treated as reusable startup.
 4. For either measured shape, at least ten unique iterations must be strictly serial. Median startup must be at least half the median iteration, and count × median startup must reach 20 seconds.
 5. Binary per file: the crate has several `tests/*.rs` files, and the captured log shows one `Running tests/<name>.rs` line per file. Corroborate with timing: the link time per binary (`cargo test --no-run` timed, or `cargo build --timings`) and the gaps between binaries in the log.
 
@@ -7122,6 +7127,7 @@ The shape alone is not a finding. The measured share of the step it accounts for
 - **Binary per file**: move the integration tests into one test target, for example `tests/all/main.rs` declaring each former file as a module (`mod foo;`). Every test keeps its body and gains a module path. The crate is linked once, and the harness runs all tests in parallel.
 - **Tool process per item**: safest first, put a measured memory ceiling on each batch, keep the existing per-item output and failures, and send several items to one tool process. Compare produced bytes or reports before increasing the cap.
 - **Worker pool per case**: reset case-scoped state after every case, retain a fixed-size pool across cases, and close it in the suite's final teardown. Keep a canary that detects state leaking from one case into the next.
+- **Isolation exception**: when crash isolation, fork-per-test or another per-case process boundary is part of the suite's correctness contract, keep it. Do not trade that contract for worker reuse; optimize work inside each isolated case instead.
 - Either way, turn on slow-test reporting (`pytest --durations=N` in the configuration, or the runner's timing report) so the next regression of this shape is visible in the log.
 
 **Mandatory guardrail (this pattern is invalid without it)**: the collected test list before and after must match (diff the collect-only listing; a Rust conversion adds a module path to every test name, so map each old name to its new one and check that none is lost or duplicated); each case must still execute the same code path; state a case can leak must be reset explicitly. Put a deliberately broken iteration at several positions and require every position to fail, then add a state-leak canary. The converted suite must also pass in random order where the runner can shuffle (for example with pytest-randomly). Stable Rust's test harness cannot shuffle, so run the converted binary both with `--test-threads=1` and with the default parallelism and require both green.
@@ -7132,16 +7138,14 @@ The shape alone is not a finding. The measured share of the step it accounts for
 
 **Conservative rollout (REQUIRED)**: convert one suite at a time; run the old and new paths side by side over real PR traffic and compare case lists and results; keep the subprocess path for the boundary cases permanently.
 
-**Sizing**: the modeled saving is `N × median startup − one startup`; the first process remains. Running independent iterations concurrently is an alternative on those same measured seconds, never an added saving. **Benchmark first.**
+**Sizing**: the modeled saving is a ceiling, never a promise. Without a known batch cap it is at most `(N − 1) × median startup`; the first process remains. With cap `C`, it is `(N − ceil(N/C)) × median startup`, so every batch's startup remains. Multiply that measured ceiling by the workflow's 30-day run count when it is available; otherwise state that the monthly saving is unsized because the count is unavailable. Running independent iterations concurrently is an alternative on those same measured seconds, never an added saving. **Benchmark first.**
 
-**Runner-minute effect**: **saving** — batching or retaining the bounded pool removes measured startup work from the same runner. The exact monthly saving remains unsized when the drilled log has no monthly execution count.
+**Runner-minute effect**: **saving** — batching or retaining the bounded pool removes measured startup work from the same runner. Report it as **at most** the measured monthly ceiling and never credit the process starts that remain.
 
-**Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
+**Public evidence**, exactly as reported by the source issues, not a forecast for your repo:
 
-- openai/openai-python [#3830](https://github.com/openai/openai-python/pull/3830) (2026-09-09): a 1,760-case dependency-policy matrix had each case launch "a Python checker and up to four Python Git stubs". A harness comparison "measured median 180ms per subprocess case versus 0.9ms in-process". The fix compiles the checker "once per pytest worker" and runs each case "with fresh globals", keeping "real subprocess execution for CLI parity cases". The Python 3.14 test job went from 2m24s before the regression, to 7m00s with it, to 2m41s after the fix.
-- openai/codex [#2633](https://github.com/openai/codex/pull/2633) (2025-08-24): moving every file in the crate's `tests/` into "a single suite in order to have a single binary" took `cargo test -p codex-core` from "8:49.80 total" to "21.407 total". Both runs were measured "hot", on a second run "to exclude compile times"; it is a developer-machine `time` measurement, not a CI run.
-- openclaw/openclaw [#200290](https://github.com/openclaw/openclaw/pull/200290) (2026-11-17): batched 55 plugin builds into 14 bounded child-process starts (up to four plugins each). The PR reports median elapsed time dropping from 64.51s to 40.62s and requires byte-identical artifacts; those are that PR's samples, not a forecast for another repository.
-- openclaw/openclaw [#196117](https://github.com/openclaw/openclaw/pull/196117) (2026-11-14): retained a bounded worker pool across cases, added case-scoped database cleanup, and closed the workers in final teardown. Its local comparison reports 174.152s to 97.131s over 96 cases; it is one local pair, not a runner-billing measurement.
+- openclaw/openclaw [#200290](https://github.com/openclaw/openclaw/pull/200290): median elapsed time changed from 64.5 seconds to 40.6 seconds.
+- openclaw/openclaw [#196117](https://github.com/openclaw/openclaw/pull/196117).
 
 **Risk**: **MEDIUM**. Reversible, but in-process execution can let one case's leftovers decide another's result. Never list as a quick win.
 
