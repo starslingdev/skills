@@ -3029,6 +3029,10 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
                        f"compile/install {emulated:g}s ({scope})"),
         "magnitude": {"label": "emulated compile/install seconds", "unit": "s",
                       "value": round(emulated, 3)},
+        # The fix still pays about one native compile per foreign architecture
+        # (`_FIX_META` deliver), so the runner-minute saving subtracts it.
+        "native_compile_s": round(native, 3),
+        "foreign_arches": len(foreign_by_arch),
         "deeper": [{"rows": rows,
                     "blocker_note": (f"foreign-architecture work is {scope}"),
                     "pct_of": "sum"}],
@@ -4998,11 +5002,24 @@ def _emulated_runner_minute_effect_line(
         for row in rows)
     if volume <= 0 or measured <= 0:
         return "Runner-minute effect: not sized; measured monthly compute is unavailable."
-    modeled = magnitude * volume / 60.0
-    saving = min(modeled, measured)
-    return (f"Runner-minute effect: saving ~{saving:g} runner-min/month; modeled from "
-            f"{magnitude:g}s across {volume:g} runs/month and capped at the job's "
-            f"measured compute ({measured:g} runner-min/month).")
+    native = _num(leaf.get("native_compile_s"))
+    arches = int(_num(leaf.get("foreign_arches")) or 0)
+    if native is None or native <= 0 or arches <= 0:
+        # Native cross-compilation still costs about one native compile per foreign
+        # architecture; with no native compile measured there is nothing to
+        # subtract, so the emulated seconds are not all removable.
+        return ("Runner-minute effect: not sized; no native compile was measured to "
+                "subtract from the emulated seconds.")
+    per_run = magnitude - native * arches
+    if per_run <= 0:
+        return ("Runner-minute effect: not sized; the native compile per foreign "
+                "architecture is as long as the emulated work.")
+    modeled = per_run * volume / 60.0
+    saving = round(min(modeled, measured), 1)
+    return (f"Runner-minute effect: saving ~{saving:g} runner-min/month; modeled as "
+            f"{magnitude:g}s emulated minus {native:g}s native compile for each of "
+            f"{arches} foreign architecture(s), across {volume:g} runs/month, and "
+            f"capped at the job's measured compute ({measured:g} runner-min/month).")
 _MACHINE_RUNNER_MINUTE_LINE = (
     "Runner cost effect: A faster machine can reduce elapsed runner minutes, while "
     "each runner class bills at its own rate; compare both elapsed minutes and billed cost."

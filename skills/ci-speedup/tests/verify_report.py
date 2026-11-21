@@ -17769,18 +17769,40 @@ def check_wall_clock_runner_minute_effects(
         if ("Runner-minute effect: saving" not in prompt
                 and "Runner-minute effect: not sized" not in prompt):
             failures.append("emulated-image wall-clock lever has no sized/unsized effect")
-        savings = [float(value) for value in re.findall(
-            r"Runner-minute effect:\s*saving\s+~([0-9]+(?:\.[0-9]+)?)\s+runner-min/month",
-            prompt,
-        )]
-        measured_cap = sum(
-            _num(row.get("completed_billable_equiv_min_per_month")) or 0.0
-            for row in _as_list(_as_dict(data.get("runner_minute_spine")).get("rows"))
-            if isinstance(row, dict)
-        )
-        if savings and (measured_cap <= 0 or any(value > measured_cap + 0.05
-                                                  for value in savings)):
-            failures.append("emulated-image saving exceeds measured completed-run compute")
+        # Re-derive every displayed saving from its own stated inputs, and bind
+        # its cap and volume to one measured cost-spine job.
+        jobs: dict[tuple[str, str], list[float]] = {}
+        for row in _as_list(_as_dict(data.get("runner_minute_spine")).get("rows")):
+            if not isinstance(row, dict):
+                continue
+            key = (str(row.get("workflow_file") or ""), str(row.get("job_name") or ""))
+            acc = jobs.setdefault(key, [0.0, 0.0])
+            acc[0] += _num(row.get("effective_monthly_job_volume")) or 0.0
+            acc[1] += _num(row.get("completed_billable_equiv_min_per_month")) or 0.0
+        num = r"([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)"
+        saving_re = re.compile(
+            rf"Runner-minute effect: saving ~{num} runner-min/month; modeled as "
+            rf"{num}s emulated minus {num}s native compile for each of ([0-9]+) "
+            rf"foreign architecture\(s\), across {num} runs/month, and capped at "
+            rf"the job's measured compute \({num} runner-min/month\)\.")
+        if re.search(r"Runner-minute effect:\s*saving\s+~", prompt) and not \
+                saving_re.search(prompt):
+            failures.append("emulated-image saving does not state its derivation")
+
+        def _close(a: float, b: float) -> bool:
+            return abs(a - b) <= max(0.05, 1e-5 * max(abs(a), abs(b)))
+
+        for m in saving_re.finditer(prompt):
+            shown, emu, nat, arches, volume, cap = (
+                float(m.group(1)), float(m.group(2)), float(m.group(3)),
+                int(m.group(4)), float(m.group(5)), float(m.group(6)))
+            if not any(_close(volume, v) and _close(cap, c) for v, c in jobs.values()):
+                failures.append("emulated-image saving cap/volume match no measured "
+                                "cost-spine job")
+            want = min((emu - nat * arches) * volume / 60.0, cap)
+            if nat <= 0 or arches <= 0 or want <= 0 or not _close(shown, round(want, 1)):
+                failures.append("emulated-image saving does not re-derive from emulated "
+                                "minus native seconds, runs and measured compute")
     zero_effects = [float(value) for value in re.findall(
         r"Runner-minute effect:\s*\+?([0-9]+(?:\.[0-9]+)?)\b", report)]
     if any(value == 0 for value in zero_effects):
