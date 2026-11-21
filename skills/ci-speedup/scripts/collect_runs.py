@@ -26584,6 +26584,8 @@ def _detect_opt24_long_test_no_sharding(
     wf_doc: "dict[str, Any] | None" = None,
     overlap_withheld: "list[dict[str, Any]] | None" = None,
     logs_by_job_id: "dict[Any, str] | None" = None,
+    repo_root: "str | Path | None" = None,
+    opt24_withheld: "list[dict[str, Any]] | None" = None,
 ) -> list[dict[str, Any]]:
     """Long test jobs with no sharding — catalog body OPT24.
 
@@ -26605,6 +26607,13 @@ def _detect_opt24_long_test_no_sharding(
     as 'no shard axis observed' on a job that is already split.
     """
     sharded_bases = sharded_bases or set()
+    # A matrix-fed `go test -run`/`-skip` split is an existing shard only when
+    # it is a verified partition. A provable non-partition is classified
+    # normally and says why; one that cannot be checked is held back (listed,
+    # never called verified, never told to shard).
+    go_states = _go_filter_states(wf_doc or {}, repo_root)
+    non_go_sharded = (_sharded_bases(wf_doc, repo_root, include_go=False)
+                      if go_states and wf_doc else set())
     # Jobs that are LEGS of a heterogeneous matrix (different packages/configs)
     # are OPT25's domain ("Matrix Leg Imbalance — split the slow leg"), not
     # OPT24's ("unsharded suite"). Flagging such a leg here too double-counts
@@ -26656,7 +26665,9 @@ def _detect_opt24_long_test_no_sharding(
     out: list[dict[str, Any]] = []
     idx = start_idx
     for base, samples in by_base.items():
-        if has_shard_sibling.get(base) or base in sharded_bases:
+        go_state, go_reason = go_states.get(base, (None, None))
+        go_unverified = go_state == "unknown" and base not in non_go_sharded
+        if has_shard_sibling.get(base) or (base in sharded_bases and not go_unverified):
             continue  # sharding already configured (name parens, split axis, or splitter cmd)
         if len(samples) < 2:
             continue
@@ -26677,6 +26688,13 @@ def _detect_opt24_long_test_no_sharding(
         short = [d for d in durs if d < max(90.0, 0.25 * p50)]
         if len(short) >= max(2, round(0.2 * len(durs))):
             continue
+        if go_unverified:
+            if opt24_withheld is not None:
+                opt24_withheld.append({"workflow_file": wf_path, "job": base,
+                                       "pattern": "OPT24",
+                                       "gate": _GO_PARTITION_UNVERIFIED_GATE})
+            continue
+        partition_note = go_reason if go_state == "broken" else None
         decomp = _measured_decomposition(_decompose_job_steps(inst_by_base.get(base, [])))
         # The saving below halves the test payload's summed step medians, which
         # assumes the steps run one after another. A payload step inside a
@@ -26900,6 +26918,15 @@ def _detect_opt24_long_test_no_sharding(
                       f"path by ~{wc:.0f}s (does not reduce runner-minutes)."))
         if compile_note:
             me["note"] = f"{me['note']} {compile_note}"
+        if partition_note:
+            split_clause = ("its matrix legs pass `go test` -run/-skip filters "
+                            f"that do not partition its tests: {partition_note}")
+            me["summary"] = (me["summary"]
+                             .replace("it runs as a single job with no "
+                                      "`shard`/`partition` axis", split_clause)
+                             .replace(f"`{base}` runs unsharded at", f"`{base}` runs at")
+                             .replace("— no `shard`/`partition` axis in any sampled "
+                                      "job name", f"— {split_clause}"))
         # `wc_eff` is `wc` for a single-job workflow and the genuine pole; it is 0 when
         # a longer concurrent sibling means sharding saves no wall-clock. The size_note
         # must not claim "the long pole" for a non-pole finding (it survives into the
@@ -26919,6 +26946,12 @@ def _detect_opt24_long_test_no_sharding(
         )
         if compile_note:
             evidence_text += f"; {compile_note}"
+        if partition_note:
+            evidence_text = (
+                f"job `{base}` p50 {p50:.0f}s over {len(samples)} runs; its Go "
+                f"matrix filters do not partition the tests: {partition_note}")
+            if compile_note:
+                evidence_text += f"; {compile_note}"
         idx += 1
         finding = _new_finding(
             "OPT24", "HIGH", "Long Test Job Without Sharding", wf_path, base,
@@ -27354,28 +27387,364 @@ _SHARD_CMD_RE = _re.compile(
 
 _GO_RUN_FILTER_RE = _re.compile(
     r"\bgo\s+test\b[^\n]*?\s-(?:test\.)?(?:run|skip)(?:[=\s]|$)", _re.IGNORECASE)
+_GO_TEST_CMD_RE = _re.compile(r"\bgo\s+test\b")
+_GO_MATRIX_EXPR_RE = _re.compile(
+    r"^\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*}}$")
+_GO_SHELL_VAR_RE = _re.compile(r"^\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))$")
+_GO_TEST_FUNC_RE = _re.compile(
+    r"(?m)^func\s+((Test|Fuzz|Example)([A-Za-z0-9_]*))\s*\(([^)]*)\)")
+# `go test` flags whose value may be the NEXT token, so that token is not a
+# package.  Boolean flags (-v, -race, -short, -json, -failfast ...) take none.
+_GO_TEST_VALUE_FLAGS = frozenset({
+    "timeout", "count", "p", "parallel", "cpu", "tags", "coverprofile",
+    "covermode", "coverpkg", "bench", "benchtime", "o", "exec", "shuffle",
+    "ldflags", "gcflags", "asmflags", "mod", "modfile", "vet", "outputdir",
+    "cpuprofile", "memprofile", "memprofilerate", "blockprofile",
+    "blockprofilerate", "mutexprofile", "mutexprofilefraction", "trace",
+    "fuzz", "fuzztime", "fuzzminimizetime", "buildmode", "compiler",
+    "installsuffix", "pkgdir", "toolexec", "overlay", "pgo", "run", "skip",
+    "list", "test.run", "test.skip", "test.timeout", "test.count",
+})
+# GOOS / GOARCH file-name suffixes: such a test file may not compile on the
+# runner, so its tests are not certain to run.
+_GO_FILE_CONSTRAINTS = frozenset({
+    "aix", "android", "darwin", "dragonfly", "freebsd", "illumos", "ios", "js",
+    "linux", "netbsd", "openbsd", "plan9", "solaris", "wasip1", "windows",
+    "386", "amd64", "arm", "arm64", "loong64", "mips", "mipsle", "mips64",
+    "mips64le", "ppc64", "ppc64le", "riscv64", "s390x", "wasm",
+})
+_GO_PARTITION_UNVERIFIED_GATE = "go_matrix_partition_unverified"
+_OPT24_WITHHELD_DOC_KEY = "opt24_withheld_candidates"
 
 
-def _go_matrix_run_split(job: dict[str, Any], matrix: Any) -> bool:
+def _go_test_commands(run: str) -> list[list[str]]:
+    """Each `go test` invocation in a run script as argv after `go test`.
+
+    `${{ }}` expressions are kept whole as single tokens (they contain spaces),
+    backslash continuations are joined, and a command ends at a shell operator.
+    A script shlex cannot split yields no command (its caller then treats the
+    split as unreadable, never as verified)."""
+    import shlex
+    text = run.replace("\\\r\n", " ").replace("\\\n", " ")
+    exprs: list[str] = []
+
+    def _hold(match: "_re.Match[str]") -> str:
+        exprs.append(match.group(0))
+        return f"\x00{len(exprs) - 1}\x00"
+
+    text = _re.sub(r"\$\{\{.*?}}", _hold, text)
+    # Redirections (`2>&1`, `> out.txt`) are not arguments.
+    text = _re.sub(r"(?<=\s)\d*(?:>>?|<)(?:&\d+|\s*[^\s;&|]+)", " ", text)
+    out: list[list[str]] = []
+    for line in text.splitlines():
+        if not _GO_TEST_CMD_RE.search(line):
+            continue
+        try:
+            lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+            lexer.whitespace_split = True
+            tokens = list(lexer)
+        except ValueError:
+            out.append(["\x00unreadable\x00"])
+            continue
+        tokens = [_re.sub(r"\x00(\d+)\x00", lambda m: exprs[int(m.group(1))], t)
+                  for t in tokens]
+        for i in range(len(tokens) - 1):
+            if tokens[i] == "go" and tokens[i + 1] == "test":
+                argv: list[str] = []
+                for token in tokens[i + 2:]:
+                    if token and set(token) <= set(";&|"):
+                        break
+                    argv.append(token)
+                out.append(argv)
+    return out
+
+
+def _go_matrix_axis_values(matrix: dict[str, Any], axis: str) -> "tuple[list[str] | None, bool]":
+    """(values, from_include) for one matrix axis, or (None, _) when the legs it
+    produces cannot be read statically."""
+    if "exclude" in matrix:
+        return None, False
+    base = matrix.get(axis)
+    include = matrix.get("include")
+    include = include if isinstance(include, list) else []
+    in_include = [entry for entry in include
+                  if isinstance(entry, dict) and axis in entry]
+    if isinstance(base, list):
+        if in_include:
+            return None, False
+        raw, from_include = base, False
+    elif base is None and in_include and len(in_include) == len(include):
+        raw, from_include = [entry[axis] for entry in in_include], True
+    else:
+        return None, False
+    if any(isinstance(value, (dict, list)) or value is None
+           or "${{" in str(value) for value in raw):
+        return None, False
+    return [str(value) for value in raw], from_include
+
+
+def _go_regex_is_portable(value: str) -> bool:
+    """True when Python's `re` reads this filter the way Go's RE2 does at the
+    top level: no `/` (Go splits subtest levels on it), no POSIX classes,
+    Unicode classes, inline flags or Python-only groups."""
+    if "/" in value or "[:" in value:
+        return False
+    if _re.search(r"\\[pPQzC1-9]", value):
+        return False
+    if _re.search(r"\(\?(?!:|i\))", value):
+        return False
+    return True
+
+
+def _go_package_dir(
+    package: str, workdir: Path, root: Path,
+) -> "Path | None":
+    if "..." in package or package.startswith("-"):
+        return None
+    if package == "." or package.startswith("./"):
+        target = (workdir / package).resolve()
+    elif "." in package.split("/", 1)[0]:
+        # An import path: map it through the module path in go.mod.
+        module = None
+        for gomod in (workdir / "go.mod", root / "go.mod"):
+            try:
+                found = _re.search(r"(?m)^module\s+(\S+)",
+                                   gomod.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError):
+                continue
+            if found:
+                module, mod_root = found.group(1), gomod.parent
+                break
+        if module is None or not (package == module
+                                  or package.startswith(module + "/")):
+            return None
+        target = (mod_root / package[len(module):].lstrip("/")).resolve()
+    else:
+        return None
+    try:
+        target.relative_to(root.resolve())
+    except ValueError:
+        return None
+    return target if target.is_dir() else None
+
+
+def _go_package_tests(package_dir: Path) -> "tuple[set[str], set[str]]":
+    """(certain, uncertain) top-level test names `-run`/`-skip` apply to.
+
+    Certain: `TestX` / `FuzzX` in a file with no build constraint.  Uncertain:
+    examples (they run only with an output comment) and tests in a file with a
+    `//go:build` line or a GOOS/GOARCH suffix, which may not compile on the
+    runner.  `TestMain(m *testing.M)` and `Testable`-style names are not tests.
+    """
+    certain: set[str] = set()
+    uncertain: set[str] = set()
+    for path in sorted(package_dir.glob("*_test.go")):
+        try:
+            source = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        stem_parts = path.name[:-len("_test.go")].split("_")
+        constrained = bool(
+            _re.search(r"(?m)^//\s*(?:go:build|\+build)\b", source)
+            or (len(stem_parts) > 1 and stem_parts[-1] in _GO_FILE_CONSTRAINTS))
+        # An example runs only with an output comment; a file with none
+        # contributes no runnable example.
+        has_output = bool(_re.search(r"(?mi)^\s*//\s*(?:unordered\s+)?output:", source))
+        for name, kind, suffix, params in _GO_TEST_FUNC_RE.findall(source):
+            if suffix and suffix[0].islower():
+                continue
+            if kind == "Example" and not has_output:
+                continue
+            if name == "TestMain" and "testing.M" in params:
+                continue
+            if kind == "Example" or constrained:
+                uncertain.add(name)
+            else:
+                certain.add(name)
+    return certain, uncertain - certain
+
+
+def _go_matrix_split_status(
+    job: dict[str, Any], matrix: Any, root: str | Path | None = None,
+    doc: "dict[str, Any] | None" = None,
+) -> "tuple[str | None, str | None]":
+    """Classify a Go job's matrix `-run` / `-skip` split.
+
+    Returns ``(state, reason)``:
+
+    * ``("verified", None)`` — the filters assign every test of the one literal
+      package to exactly one leg (an existing shard);
+    * ``("broken", reason)`` — provably not a partition: a repeated value, a
+      single leg, or a test that certainly runs in zero or several legs;
+    * ``("unknown", reason)`` — a matrix value reaches the filter but the split
+      cannot be checked (generated values, a file-fed list, an unreadable or
+      wildcard package, subtest levels, build-constrained tests);
+    * ``(None, None)`` — no matrix-fed Go filter at all.
+    """
+    if not isinstance(matrix, dict) or not matrix:
+        return None, None
+    doc = doc if isinstance(doc, dict) else {}
+
+    def _env(owner: Any) -> dict[str, Any]:
+        env = owner.get("env") if isinstance(owner, dict) else None
+        return env if isinstance(env, dict) else {}
+
+    def _workdir(step: dict[str, Any]) -> Any:
+        for owner in (step, (job.get("defaults") or {}).get("run")
+                      if isinstance(job.get("defaults"), dict) else None,
+                      (doc.get("defaults") or {}).get("run")
+                      if isinstance(doc.get("defaults"), dict) else None):
+            if isinstance(owner, dict) and owner.get("working-directory"):
+                return owner.get("working-directory")
+        return None
+
+    states: list[tuple[str, str | None]] = []
+    for step in job_walk(job).steps():
+        run = str(step.get("run", "") or "")
+        if not _GO_TEST_CMD_RE.search(run):
+            continue
+        env = {**_env(doc), **_env(job), **_env(step)}
+        mentions_matrix = "matrix." in f"{run}\n{env}"
+        for argv in _go_test_commands(run):
+            filters: list[tuple[str, str]] = []
+            packages: list[str] = []
+            readable = argv != ["\x00unreadable\x00"]
+            listing = False
+            i = 0
+            while readable and i < len(argv):
+                token = argv[i]
+                if token in ("-args", "--args"):
+                    break
+                if token.startswith("-"):
+                    flag, eq, value = token.lstrip("-").partition("=")
+                    if flag == "C":
+                        readable = False  # runs in another directory
+                        break
+                    if flag == "list":
+                        listing = True  # lists tests; runs none
+                        break
+                    if flag in ("run", "skip", "test.run", "test.skip"):
+                        if not eq:
+                            i += 1
+                            value = argv[i] if i < len(argv) else ""
+                        filters.append((flag.rsplit(".", 1)[-1], value))
+                    elif not eq and flag in _GO_TEST_VALUE_FLAGS:
+                        i += 1
+                    i += 1
+                    continue
+                packages.append(token)
+                i += 1
+            if listing or (readable and not filters):
+                continue
+            if not mentions_matrix and readable:
+                continue  # a literal filter: not a matrix split
+            axis = None
+            if readable and len(filters) == 1:
+                mode, value = filters[0]
+                expr = _GO_MATRIX_EXPR_RE.match(value.strip())
+                var = _GO_SHELL_VAR_RE.match(value.strip())
+                if expr:
+                    axis = expr.group(1)
+                elif var:
+                    mapped = _GO_MATRIX_EXPR_RE.match(
+                        str(env.get(var.group(1) or var.group(2), "")).strip())
+                    axis = mapped.group(1) if mapped else None
+            if axis is None:
+                if mentions_matrix:
+                    states.append(("unknown",
+                                   "the matrix value's path into the go test "
+                                   "filter cannot be read statically"))
+                continue
+            values, from_include = _go_matrix_axis_values(matrix, axis)
+            if values is None:
+                states.append(("unknown", "the matrix filter values are generated "
+                                          "or cannot be read statically"))
+                continue
+            if len(values) < 2:
+                states.append(("broken", "the matrix gives the filter one value, "
+                                         "so every test runs in one leg"))
+                continue
+            repeated = sorted({v for v in values if values.count(v) > 1})
+            if repeated:
+                if from_include:
+                    states.append(("unknown", "include entries repeat a filter "
+                                              "value across other matrix axes"))
+                else:
+                    # The value itself is workflow text: never quoted.
+                    states.append(("broken", f"{len(values) - len(set(values))} "
+                                             "leg(s) repeat another leg's filter"))
+                continue
+            workdir = _workdir(step)
+            if root is None or (workdir is not None and (
+                    "${{" in str(workdir) or str(workdir).startswith("/"))):
+                states.append(("unknown", "the package's test sources are not "
+                                          "readable from a local checkout"))
+                continue
+            root_path = Path(root)
+            base_dir = root_path / str(workdir) if workdir else root_path
+            pkgs = packages or ["."]
+            package_dir = (_go_package_dir(pkgs[0], base_dir, root_path)
+                           if len(pkgs) == 1 else None)
+            certain, uncertain = (_go_package_tests(package_dir)
+                                  if package_dir is not None else (set(), set()))
+            if not certain:
+                states.append(("unknown", "the tests of one literal Go package "
+                                          "could not be read from the checkout"))
+                continue
+            if not all(_go_regex_is_portable(v) for v in values):
+                states.append(("unknown", "a filter uses regex syntax (subtest "
+                                          "levels, POSIX or Unicode classes, "
+                                          "flags) not checked here"))
+                continue
+            try:
+                regexes = [_re.compile(v) for v in values]
+            except _re.error:
+                states.append(("unknown", "a filter is not a readable regex"))
+                continue
+
+            def _legs(name: str) -> int:
+                hits = sum(bool(rx.search(name)) for rx in regexes)
+                return hits if mode == "run" else len(regexes) - hits
+
+            bad = [(name, _legs(name)) for name in sorted(certain)
+                   if _legs(name) != 1]
+            if bad:
+                name, legs = bad[0]
+                where = "no leg" if legs == 0 else f"{legs} legs"
+                more = f" (and {len(bad) - 1} more)" if len(bad) > 1 else ""
+                states.append(("broken", f"`{name}` runs in {where}{more}"))
+            elif any(_legs(name) != 1 for name in uncertain):
+                states.append(("unknown", "only build-constrained tests or "
+                                          "examples fall outside the split"))
+            else:
+                states.append(("verified", None))
+    for wanted in ("broken", "unknown", "verified"):
+        for state, reason in states:
+            if state == wanted:
+                return state, reason
+    return None, None
+
+
+def _go_matrix_run_split(
+    job: dict[str, Any], matrix: Any, root: str | Path | None = None,
+    doc: "dict[str, Any] | None" = None,
+) -> bool:
     """A Go job already split into matrix legs by a ``-run``/``-skip`` filter.
 
     Go has no native shard flag, so a list-then-run split shows up as a matrix
     whose value reaches ``go test -run`` through the command or the step/job
-    environment.  Such a job is already sharded and must not be told to shard.
+    environment.  A verified partition is an existing shard; a split that
+    cannot be checked is withheld from OPT24 too (listed as held back, never
+    called verified); only a provable non-partition is classified normally.
     """
-    if not isinstance(matrix, dict) or not matrix:
-        return False
-    job_env = str(job.get("env") or "")
-    for step in job_walk(job).steps():
-        run = str(step.get("run", "") or "")
-        if not _GO_RUN_FILTER_RE.search(run):
-            continue
-        if "matrix." in f"{run}\n{step.get('env') or ''}\n{job_env}":
-            return True
-    return False
+    return _go_matrix_split_status(job, matrix, root, doc)[0] in (
+        "verified", "unknown")
 
 
-def _sharded_bases(doc: dict[str, Any]) -> set[str]:
+def _sharded_bases(
+    doc: dict[str, Any], root: str | Path | None = None,
+    *, include_go: bool = True,
+) -> set[str]:
     """Base job names in this workflow that are ALREADY sharded — via a split/shard
     matrix axis OR a command-line splitter in their run steps — so OPT24 must not flag
     them as 'no shard axis observed' just because the rendered job name carries a bare
@@ -27397,7 +27766,7 @@ def _sharded_bases(doc: dict[str, Any]) -> set[str]:
         cmd_sharded = any(
             _SHARD_CMD_RE.search(str(s.get("run", "") or ""))
             for s in job_walk(job).steps())
-        go_split = _go_matrix_run_split(job, matrix)
+        go_split = include_go and _go_matrix_run_split(job, matrix, root, doc)
         if not (axis_sharded or cmd_sharded or go_split):
             continue
         name = job.get("name")
@@ -27406,6 +27775,30 @@ def _sharded_bases(doc: dict[str, Any]) -> set[str]:
         for cand in (name if isinstance(name, str) and "${{" not in name else None, key):
             if cand:
                 out.add(_matrix_base_name(str(cand)))
+    return out
+
+
+def _go_filter_states(
+    doc: dict[str, Any], root: str | Path | None = None,
+) -> dict[str, tuple[str, str | None]]:
+    """Base job name -> (state, reason) for every job with a matrix-fed Go filter."""
+    jobs = doc.get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return {}
+    out: dict[str, tuple[str, str | None]] = {}
+    for key, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        strategy = job.get("strategy") or {}
+        matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+        state, reason = _go_matrix_split_status(job, matrix, root, doc)
+        if state is None:
+            continue
+        name = job.get("name")
+        for candidate in (name if isinstance(name, str) and "${{" not in name else None,
+                          key):
+            if candidate:
+                out[_matrix_base_name(str(candidate))] = (state, reason)
     return out
 
 
@@ -35836,6 +36229,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # Credited levers held back because their steps run side by side (OPT24,
     # the structural OPT70/72/75 route): `_PARALLEL_STEPS_WITHHELD_DOC_KEY`.
     _overlap_withheld: list[dict[str, Any]] = []
+    # OPT24 candidates whose existing Go matrix split could not be verified.
+    _opt24_withheld: list[dict[str, Any]] = []
     # The job keys each workflow DECLARES, stamped straight off the parsed YAML
     # here — once, before any detector runs, and independent of all of them.
     # OPT77's whole-workflow gate rests entirely on "these are every job the
@@ -37674,8 +38069,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             continue
         _provisional = _detect_opt24_long_test_no_sharding(
             _wf_path, _jobs_per_run, 0, vol_by_wf.get(_wf_path),
-            sharded_bases=_sharded_bases(_wf_docs.get(_wf_path, {})),
-            wf_doc=_wf_docs.get(_wf_path, {}))
+            sharded_bases=_sharded_bases(_wf_docs.get(_wf_path, {}), root),
+            wf_doc=_wf_docs.get(_wf_path, {}), repo_root=root)
         _opt24_probe_jobs.extend(
             _opt24_representative_log_jobs(_jobs_per_run, _provisional))
     # A critical matrix leg may already be sharded and therefore never be an
@@ -37788,10 +38183,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
         new = _detect_opt24_long_test_no_sharding(
             wf_path, jobs_per_run, next_id, monthly,
-            sharded_bases=_sharded_bases(_wf_docs.get(wf_path, {})),
+            sharded_bases=_sharded_bases(_wf_docs.get(wf_path, {}), root),
             wf_doc=_wf_docs.get(wf_path, {}),
             overlap_withheld=_overlap_withheld,
-            logs_by_job_id=opt24_logs)
+            logs_by_job_id=opt24_logs, repo_root=root,
+            opt24_withheld=_opt24_withheld)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
@@ -38597,6 +38993,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # groups or background steps keeps a byte-identical findings document.
     if _overlap_withheld:
         findings_doc[_PARALLEL_STEPS_WITHHELD_DOC_KEY] = _overlap_withheld
+    if _opt24_withheld:
+        findings_doc[_OPT24_WITHHELD_DOC_KEY] = _opt24_withheld
     # Record the analysis depth so the report can distinguish a check that was
     # structurally analyzed and found genuinely inherent from one ranked below
     # this depth that was never examined (don't claim "inherent cost" for it).

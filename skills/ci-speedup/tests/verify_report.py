@@ -1511,6 +1511,7 @@ _VR_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 _VR_OPT83_WITHHELD_DOC_KEY = "opt83_withheld_candidates"
 _VR_OPT84_WITHHELD_DOC_KEY = "opt84_withheld_candidates"
 _VR_PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
+_VR_OPT24_WITHHELD_DOC_KEY = "opt24_withheld_candidates"
 # (doc key, Data sources row label, counted noun, "Used for" cell) — as
 # blocking_path renders them. ONE re-derivation serves every registered pattern.
 # The fourth field is carried HERE, not just pinned: it is the column that tells
@@ -1565,6 +1566,11 @@ _VR_WITHHELD_ROWS = (
                    "Why a slow step on a long pole that may run a tool with a native "
                    "drop-in produced no tool-swap finding",
                    "step"),
+    _VrWithheldRow(_VR_OPT24_WITHHELD_DOC_KEY, "test sharding: held back",
+                   "candidate test job(s)",
+                   "Why a long Go test job already split by matrix -run/-skip filters "
+                   "produced no sharding finding",
+                   "job"),
     _VrWithheldRow(_VR_PARALLEL_STEPS_WITHHELD_DOC_KEY, "parallel steps: held back",
                    "candidate lever(s)",
                    "Why a lever priced from step times on a job that runs steps side by "
@@ -1850,7 +1856,14 @@ _VR_PARALLEL_STEPS_WITHHOLD_PHRASES = {
         "parallel step group or in the background), so their times overlap and "
         "cutting one does not come straight off the job; no saving is claimed",
 }
+_VR_OPT24_WITHHOLD_PHRASES = {
+    "go_matrix_partition_unverified":
+        "the job already splits go test across matrix legs with -run or -skip "
+        "filters, but whether every test runs in exactly one leg could not be "
+        "verified from the workflow and the checkout, so no sharding advice is given",
+}
 _VR_WITHHELD_PHRASES_BY_KEY = {
+    _VR_OPT24_WITHHELD_DOC_KEY: _VR_OPT24_WITHHOLD_PHRASES,
     _VR_OPT77_WITHHELD_DOC_KEY: _VR_OPT77_WITHHOLD_PHRASES,
     _VR_PARALLEL_STEPS_WITHHELD_DOC_KEY: _VR_PARALLEL_STEPS_WITHHOLD_PHRASES,
     _VR_OPT79_WITHHELD_DOC_KEY: _VR_OPT79_HELD_BACK_REASONS,

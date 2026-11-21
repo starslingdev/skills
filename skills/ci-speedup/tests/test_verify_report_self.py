@@ -11467,7 +11467,35 @@ _FEEDS_BY_KEY = {
     "parallel_steps_withheld_candidates":
         "Why a lever priced from step times on a job that runs steps side by "
         "side claims no saving",
+    "opt24_withheld_candidates":
+        "Why a long Go test job already split by matrix -run/-skip filters "
+        "produced no sharding finding",
 }
+
+
+def test_opt24_held_back_row_the_renderer_writes_passes_the_verifier(tmp_path):
+    """#466: an OPT24 candidate whose Go matrix split could not be verified is
+    disclosed as held back; the renderer's row satisfies the verifier, and
+    dropping it or printing the gate code reddens it."""
+    import json as _json
+    import blocking_path as bp
+    vr = _load_verify_report()
+    gate = "go_matrix_partition_unverified"
+    rows = [{"workflow_file": ".github/workflows/ci.yml", "job": "go-tests",
+             "pattern": "OPT24", "gate": gate}]
+    doc = {bp._OPT24_WITHHELD_DOC_KEY: rows}
+    path = tmp_path / "f.json"
+    path.write_text(_json.dumps(doc), encoding="utf-8")
+    line = bp._withheld_candidates_line(doc, bp._OPT24_WITHHELD_DOC_KEY,
+                                        "candidate test job(s)")
+    head = "## 🗄️ Data sources\n\n| Source | Coverage | Used for |\n"
+    feeds = _FEEDS_BY_KEY["opt24_withheld_candidates"]
+    good = head + f"| test sharding: held back | {line} | {feeds} |\n"
+    assert "could not be verified" in good
+    assert vr.check_coverage_disclosed(good, path).ok
+    assert not vr.check_coverage_disclosed(head, path).ok
+    coded = good.replace(vr._VR_OPT24_WITHHOLD_PHRASES[gate], gate)
+    assert not vr.check_coverage_disclosed(coded, path).ok
 
 
 def test_opt81_held_back_row_the_renderer_writes_passes_the_verifier(tmp_path):
