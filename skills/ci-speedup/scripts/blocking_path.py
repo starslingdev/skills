@@ -3120,7 +3120,8 @@ def _runtime_ts_loader_leaf(
 def _parse_log(text: str,
                iso: dict[str, Any] | None = None,
                cache_path_sample: dict[str, Any] | None = None,
-               job_duration_s: float | None = None) -> dict[str, Any] | None:
+               job_duration_s: float | None = None,
+               dominant_category: str | None = None) -> dict[str, Any] | None:
     """Detect the leaf root cause in a captured job log. `iso` is `scan.py`'s
     `test_runner_isolation` block — the config corroboration the OPT78
     (`vitest-isolate-pool`) leaf needs; omitted ⇒ an import-bound vitest run
@@ -4216,6 +4217,185 @@ def _parse_log(text: str,
         when = _cache_path_stamp(stamp)
         if sep and when is not None:
             timestamped.append((when, message.strip(), raw.strip()))
+
+    # Real workflow output does not carry ci-speedup's old synthetic
+    # ``Tool process started: ... category=...`` markers.  A shell trace does,
+    # however, expose the boundary between identical invocations.  Keep this
+    # deliberately narrow: one argv prefix, a distinct final argument per
+    # invocation, serial timestamps, and no shell control operators.
+    isolation_re = re.compile(
+        r"\b(?:crash[-_ ]isolation|fork[-_ ]per[-_ ]test|per[-_ ]case[-_ ]isolation|"
+        r"isolate(?:d|ion)?[-_ ](?:case|process|worker))\b"
+        # Plain runner switches: `isolate: true` / `isolate=true` in printed
+        # config, vitest's `--isolate`, and pytest-forked's `--forked`.
+        r"|\bisolate\s*[:=]\s*true\b|(?<![\w-])--(?:isolate|forked)\b", re.I)
+    per_image_re = re.compile(
+        r"\b(?:trivy\s+image|grype\b|docker\s+scan|scan(?:ning)?[-_ ](?:an?[-_ ])?image|"
+        r"container[-_ ]image[-_ ]scan)\b", re.I)
+    if not isolation_re.search(joined):
+        trace_line_re = re.compile(r"^(?:\+|>)\s*(?P<command>\S.*)$")
+        command_rows: list[tuple[int, datetime, list[str], str]] = []
+        for line_i, (when, message, raw) in enumerate(timestamped):
+            command = trace_line_re.match(message)
+            if command is None:
+                continue
+            try:
+                argv = shlex.split(command.group("command"), posix=True)
+            except ValueError:
+                continue
+            if (len(argv) < 2 or any(token in {"&&", "||", ";", "|"}
+                                     for token in argv)):
+                continue
+            command_rows.append((line_i, when, argv, raw))
+        by_prefix: dict[tuple[str, ...], list[tuple[int, datetime, str, str]]] = {}
+        for line_i, when, argv, raw in command_rows:
+            by_prefix.setdefault(tuple(argv[:-1]), []).append(
+                (line_i, when, argv[-1], raw))
+        candidates = [
+            (prefix, rows) for prefix, rows in by_prefix.items()
+            if len(rows) >= 10
+            and len({target for _i, _when, target, _raw in rows}) == len(rows)
+        ]
+        if candidates:
+            prefix, rows = max(candidates, key=lambda item: len(item[1]))
+            command_text = " ".join(prefix)
+            gaps = [(later[1] - earlier[1]).total_seconds()
+                    for earlier, later in zip(rows, rows[1:])]
+            # A trace line marks when a process began, not how much of the
+            # interval is startup. Measure startup as trace -> the process's own
+            # first output line (the same boundary -> first-work measure the
+            # declared profiles below use). An invocation that prints nothing
+            # leaves startup unmeasurable, so the finding is withheld rather
+            # than crediting per-item work as removable startup.
+            startups: list[float] = []
+            for pos, (line_i, started, _target, _raw) in enumerate(rows):
+                next_i = rows[pos + 1][0] if pos + 1 < len(rows) else len(timestamped)
+                first = next((when for when, message, _raw in
+                              timestamped[line_i + 1:next_i]
+                              if not trace_line_re.match(message)), None)
+                if first is None or first < started:
+                    break
+                startups.append((first - started).total_seconds())
+            if (gaps and all(gap > 0 for gap in gaps)
+                    and len(startups) == len(rows)
+                    and not re.search(r"\bpytest\b", command_text, re.I)
+                    and not per_image_re.search(command_text)):
+                iteration_median = _median(gaps)
+                startup_median = _median(startups)
+                count = len(rows)
+                if (startup_median >= iteration_median * 0.5
+                        and count * startup_median >= 20):
+                    category = (dominant_category
+                                if dominant_category in {"build", "scan"}
+                                else "build" if re.search(
+                                    r"\b(?:build|compile|package|bundle)\b", command_text, re.I)
+                                else "scan" if re.search(
+                                    r"\b(?:scan|lint|check|analy[sz]e)\b", command_text, re.I)
+                                else None)
+                    if category is not None:
+                        cap_match = re.search(
+                            r"\bbatch(?:[-_ ](?:size|cap))?\s*[:=]\s*(\d+)\b", joined,
+                            re.I)
+                        cap = int(cap_match.group(1)) if cap_match else None
+                        removable = ((count - math.ceil(count / cap))
+                                     if cap and cap > 0 else count - 1)
+                        modeled = round(removable * startup_median, 2)
+                        return {
+                            "fix_key": f"per-item-{category}-startup",
+                            "unit_label": (
+                                # Skill-authored text only: the argv is log content,
+                                # so it stays in the evidence (wrapped as untrusted
+                                # run output) and in fence-safe search terms.
+                                f"{count} serial invocations repeat one command with a "
+                                f"different final argument; median startup (trace to "
+                                f"first output) is {startup_median:g}s of a "
+                                f"{iteration_median:g}s interval"),
+                            "magnitude": {
+                                "label": "modeled repeated process ceiling",
+                                "value": modeled,
+                                "unit": "s",
+                            },
+                            "deeper": [],
+                            "evidence": [rows[0][3], rows[1][3],
+                                         f"{count} repeated invocations; median startup "
+                                         f"{startup_median:g}s; median interval "
+                                         f"{iteration_median:g}s"],
+                            "search": [_fence_safe(command_text), "repeated invocation",
+                                       "batch"],
+                            "iteration_count": count,
+                            "process_kind": "tool process",
+                            "startup_median_s": round(startup_median, 2),
+                            "iteration_median_s": round(iteration_median, 2),
+                            "modeled_saving_s": modeled,
+                            **({"batch_cap": cap} if cap else {}),
+                        }
+
+    # Common test runners describe pool creation and teardown in plain prose.
+    # Bind all three lifecycle lines to the same pool and case, and fail closed
+    # when the suite explicitly requires a fresh process for each case.
+    pool_start_re = re.compile(
+        r"^(?:Starting\s+worker\s+pool|Worker\s+pool\s+(?:starting|started))"
+        r"(?:\s+(?P<owner>[\w.-]+))?\s+for\s+(?:test\s+)?case\s+(?P<id>\S+)\s*$",
+        re.I)
+    pool_ready_re = re.compile(
+        r"^Worker\s+pool\s+ready(?:\s+(?P<owner>[\w.-]+))?\s+for\s+"
+        r"(?:test\s+)?case\s+(?P<id>\S+)\s*$",
+        re.I)
+    pool_done_re = re.compile(
+        r"^(?:(?:Closing|Stopping|Stopped)\s+worker\s+pool|"
+        r"Worker\s+pool\s+(?:closed|stopped))(?:\s+(?P<owner>[\w.-]+))?\s+"
+        r"for\s+(?:test\s+)?case\s+(?P<id>\S+)\s*$", re.I)
+    if not isolation_re.search(joined):
+        starts = [(i, when, m.group("owner") or "worker-pool", m.group("id"), raw)
+                  for i, (when, message, raw) in enumerate(timestamped)
+                  if (m := pool_start_re.match(message))]
+        if (len(starts) >= 10 and len({row[3] for row in starts}) == len(starts)
+                and len({row[2] for row in starts}) == 1):
+            startups: list[float] = []
+            iterations: list[float] = []
+            measurements: list[tuple[str, str, str]] = []
+            for pos, (line_i, started, owner, identity, boundary_raw) in enumerate(starts):
+                next_i = starts[pos + 1][0] if pos + 1 < len(starts) else len(timestamped)
+                window = timestamped[line_i + 1:next_i]
+                ready = next(((when, raw) for when, message, raw in window
+                              if ((m := pool_ready_re.match(message))
+                                  and (m.group("owner") or "worker-pool") == owner
+                                  and m.group("id") == identity)), None)
+                done = next(((when, raw) for when, message, raw in window
+                             if ((m := pool_done_re.match(message))
+                                 and (m.group("owner") or "worker-pool") == owner
+                                 and m.group("id") == identity)), None)
+                if ready is None or done is None or not (started < ready[0] <= done[0]):
+                    break
+                startups.append((ready[0] - started).total_seconds())
+                iterations.append((done[0] - started).total_seconds())
+                measurements.append((boundary_raw, ready[1], done[1]))
+            if len(measurements) == len(starts):
+                startup_median = _median(startups)
+                iteration_median = _median(iterations)
+                count = len(iterations)
+                if (startup_median >= iteration_median * 0.5
+                        and count * startup_median >= 20):
+                    modeled = round((count - 1) * startup_median, 2)
+                    pool_fix_key = "per-case-worker-pool-startup"
+                    return {
+                        "fix_key": pool_fix_key,
+                        "unit_label": (
+                            f"{count} serial cases each start and close `{starts[0][2]}`; "
+                            f"median pool startup is {startup_median:g}s"),
+                        "magnitude": {"label": "modeled repeated pool startup ceiling",
+                                      "value": modeled, "unit": "s"},
+                        "deeper": [],
+                        "evidence": [*measurements[0],
+                                     f"{count} measured pool lifecycles; median startup "
+                                     f"{startup_median:g}s"],
+                        "search": ["worker pool", "startup", "final teardown"],
+                        "iteration_count": count,
+                        "process_kind": "worker pool",
+                        "startup_median_s": round(startup_median, 2),
+                        "iteration_median_s": round(iteration_median, 2),
+                        "modeled_saving_s": modeled,
+                    }
     startup_leaf: dict[str, Any] | None = None
     for (profile_name, boundary_re, work_re, done_re, bind_identity,
          owner_group, process_kind, category_group, fix_key_template) in startup_profiles:
@@ -5160,10 +5340,11 @@ _FIX_META: dict[str, dict[str, Any]] = {
                        "traffic, and permanently retain real subprocess coverage for "
                        "argument parsing, exit codes, stream wiring, signals and "
                        "process-boundary isolation. Put a measured memory ceiling on "
-                       "each batch or retained pool. Runner-minute effect: saving — "
-                       "the same runner does less repeated startup work; the exact "
-                       "monthly saving is not sized because this drilled log has no "
-                       "monthly execution count.",
+                       "each batch or retained pool. Do not retain a pool when the suite "
+                       "declares crash isolation, fork-per-test, or another per-case "
+                       "process-isolation contract. Runner-minute effect: saving — the "
+                       "same runner does less repeated startup work; the measured "
+                       "ceiling below never credits process starts that remain.",
         "docs": ["OPT85 in the ci-speedup catalog — reuse a process or measure safe "
                  "iteration concurrency"],
         "deliver": "Safest first, keep a bounded worker pool alive across cases or batch "
@@ -6051,6 +6232,24 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
                 f"- {addr}", ""]
 
     constraints = [f"- {meta['constraints']}"]
+    if fix_key in {
+        "per-invocation-startup", "per-item-build-startup",
+        "per-item-scan-startup", "per-case-worker-pool-startup",
+    }:
+        modeled = _num(leaf.get("modeled_saving_s"))
+        runs = pole.get("workflow_runs_30d")
+        if modeled is not None and isinstance(runs, int) and not isinstance(runs, bool):
+            monthly = modeled * runs / 60.0
+            leaf.pop("runner_min_unsized_reason", None)
+            constraints.append(
+                f"- runner-minute saving: at most {monthly:.1f}/month "
+                f"({modeled:g}s measured ceiling x {runs} workflow runs in 30 days).")
+        else:
+            reason = ("the repeated-startup interval is not separately measurable"
+                      if modeled is None else
+                      "the workflow's 30-day run count is unavailable")
+            leaf["runner_min_unsized_reason"] = reason
+            constraints.append(f"- runner-minute saving: unsized ({reason}).")
     if fix_key == "cargo-test-shard" and _num(leaf.get("pre_test_floor_s")) is not None:
         _floor = float(leaf["pre_test_floor_s"])
         constraints.append(
@@ -7954,7 +8153,8 @@ def _derive_pole_leaf(
     pole owns none → no log), parse, reconcile the cache-hit distribution, then split off an
     off-category leaf. Pure over its inputs, so calling it twice on the same pole is exact."""
     log_text = logs.get(owner_key) if owner_key is not None else None
-    leaf = (_parse_log(log_text, iso, job_duration_s=job_duration_s)
+    leaf = (_parse_log(log_text, iso, job_duration_s=job_duration_s,
+                       dominant_category=str(pole.get("dominant_category") or ""))
             if log_text else None)
     # A restore line sits in nearly every job log. The dependency-cache leaf is
     # evidence only where the OPT96-gated sampling ran on this pole.
@@ -17238,8 +17438,13 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         if analysis and str(analysis.get("prompt", "")).strip():
             out += [_llm_agent_prompt(analysis["prompt"], p), ""]
         else:
+            _prompt_pole = dict(p)
+            _volume = _as_dict(doc.get("per_workflow_monthly_volume")).get(
+                str(p.get("workflow_file") or ""))
+            if isinstance(_volume, int) and not isinstance(_volume, bool):
+                _prompt_pole["workflow_runs_30d"] = _volume
             out += [_build_agent_prompt(
-                leaf, p, floor_pool, run_url, repo, doc.get("commit_sha"),
+                leaf, _prompt_pole, floor_pool, run_url, repo, doc.get("commit_sha"),
                 wf_gate.get(str(p.get("workflow_file", "")), 0), npop, timeline,
                 structural=structural, data_driven=data_driven, cs=cs,
                 cross_run_rendered=cross_run_rendered, opt79=opt79_pole,

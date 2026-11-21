@@ -30883,7 +30883,10 @@ def _persist_pole_logs(
         # A replay-heavy test log can still contain an independent catalog leaf
         # (most commonly dependency-cache state). Preserve that drill; replay
         # exclusion applies only when the log has no other recognized work.
-        leaf0 = bp._parse_log(log, iso, job_duration_s=repr_dur) or {}
+        leaf0 = bp._parse_log(
+            log, iso, job_duration_s=repr_dur,
+            dominant_category=str(p.get("dominant_category") or ""),
+        ) or {}
         replay = bp._test_result_replay_share(log)
         if (not leaf0 and isinstance(replay, dict)
                 and replay.get("replayed") is True):
@@ -36190,7 +36193,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 ]
                 _push_decomp = _decompose_job_steps(_push_instances)
                 _push_leaf = bp._parse_log(
-                    _push_log or "", findings_doc.get("test_runner_isolation"))
+                    _push_log or "", findings_doc.get("test_runner_isolation"),
+                    dominant_category=str((_push_decomp or {}).get(
+                        "dominant_category") or ""))
                 _leaf_fix_key = str((_push_leaf or {}).get("fix_key") or "")
                 # The numbered catalog routes that can also have a static/data-driven
                 # finding on this job. Other recognised leaves still carry their full
