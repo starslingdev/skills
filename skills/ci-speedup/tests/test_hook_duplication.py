@@ -398,3 +398,30 @@ def test_yaml_alias_fanout_has_bounded_work(tmp_path):
 
     assert elapsed < 0.5, "YAML aliases must not multiply traversal work"
     assert rows == [("lefthook.yml", "pnpm lint", "")]
+
+
+class _NoVolumeClient(_Client):
+    """The run-count query fails, so the workflow's monthly volume is unknown."""
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        if (endpoint.startswith("repos/o/r/actions/workflows/1/runs?")
+                and re.search(r"per_page=1(?![0-9])", endpoint)):
+            self.queries += 1
+            return None
+        return super().json(endpoint, allow_missing)
+
+
+def test_unmeasured_monthly_volume_states_why_the_saving_is_unsized(
+        monkeypatch, tmp_path):
+    """Without a monthly run count the repeated work is real but unsized: the
+    finding says so instead of reading "no bill saving" (#455's rule)."""
+    doc, report = _collect(
+        monkeypatch, tmp_path, "pnpm tsc --noEmit && pnpm lint && pnpm test",
+        client_cls=_NoVolumeClient)
+    findings = [f for f in doc["findings"] if f.get("pattern") == "OPT105"]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["runner_min_saving"] is None
+    assert not finding.get("runner_min_no_effect_reason")
+    assert finding.get("runner_min_unsized_reason") == cr._NO_MONTHLY_VOLUME_REASON
+    assert vr.no_bill_heading_violations(doc["findings"], report) == []

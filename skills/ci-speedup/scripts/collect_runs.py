@@ -17721,6 +17721,10 @@ def _detect_opt105_hook_duplication(
             size_note=size_note, realization="direct" if wc > 0 else "none",
             measured_evidence=measured)
         finding["sizing_basis"] = "measured"
+        if runner_minutes is None:
+            # The repeated work is measured per run; only the monthly count is
+            # missing, so the saving is real but unsized (never "no bill saving").
+            _unsized_runner_min(finding, _NO_MONTHLY_VOLUME_REASON)
         finding["hook_duplication"] = {
             "kind": "opt105_hook_duplication",
             "yaml_job": yaml_key,
