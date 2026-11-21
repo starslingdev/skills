@@ -11591,7 +11591,14 @@ def _opt25_definition_body(text: str, ref: str) -> str | None:
     return None
 
 
-def _opt25_follows_measured(text: str, snippet: str, depth: int = 2) -> bool:
+def _opt25_definition(text: str, ref: str, cache: dict[str, str | None]) -> str | None:
+    if ref not in cache:
+        cache[ref] = _opt25_definition_body(text, ref)
+    return cache[ref]
+
+
+def _opt25_follows_measured(text: str, snippet: str, cache: dict[str, str | None],
+                            depth: int = 2) -> bool:
     """True when `snippet`, or a same-file helper or map it names (followed
     `depth` levels), reads a measured timing or weight."""
     if _opt25_reads_measured(snippet):
@@ -11599,13 +11606,14 @@ def _opt25_follows_measured(text: str, snippet: str, depth: int = 2) -> bool:
     if depth <= 0:
         return False
     for ident in dict.fromkeys(_OPT25_IDENT_RE.findall(snippet)):
-        body = _opt25_definition_body(text, ident)
-        if body is not None and _opt25_follows_measured(text, body, depth - 1):
+        body = _opt25_definition(text, ident, cache)
+        if body is not None and _opt25_follows_measured(text, body, cache, depth - 1):
             return True
     return False
 
 
-def _opt25_sort_order(text: str, assignment: re.Match[str]) -> tuple[bool, str | None]:
+def _opt25_sort_order(text: str, assignment: re.Match[str],
+                      cache: dict[str, str | None]) -> tuple[bool, str | None]:
     """(warn, unread_ref). Warn unless the sort demonstrably reads a measured
     timing or weight. `unread_ref` names a key/comparator defined outside the
     file, so the warning says it was not read instead of implying name order."""
@@ -11627,9 +11635,9 @@ def _opt25_sort_order(text: str, assignment: re.Match[str]) -> tuple[bool, str |
         return True, None
     # The key/comparator text itself, then same-file helpers and maps it names
     # (`key=cost`, `key=lambda n: cost(n)`, `cmp_to_key(by_weight)`).
-    if _opt25_follows_measured(text, args):
+    if _opt25_follows_measured(text, args, cache):
         return False, None
-    if ref is not None and ("." in ref or _opt25_definition_body(text, ref) is None):
+    if ref is not None and ("." in ref or _opt25_definition(text, ref, cache) is None):
         return True, ref  # Imported or a module attribute: not read.
     return True, None
 
@@ -11687,15 +11695,16 @@ def _detect_opt25_positional_splitters(root: Path):
                     and not re.search(r"\b(?:shard|partition)\w*\b", text,
                                       re.IGNORECASE)):
                 continue
+            definitions: dict[str, str | None] = {}
             assignments = list(_OPT25_SORT_ASSIGN_RE.finditer(text))
             assignments += list(_OPT25_SORT_IN_PLACE_RE.finditer(text))
             for assignment in assignments:
                 name = assignment.group("name")
-                warn, unread_ref = _opt25_sort_order(text, assignment)
-                if not warn:
-                    continue
                 positional = _opt25_positional_use(text[assignment.end():], name)
                 if positional is None:
+                    continue
+                warn, unread_ref = _opt25_sort_order(text, assignment, definitions)
+                if not warn:
                     continue
                 line = text.count("\n", 0, assignment.end() + positional.start()) + 1
                 hit = Hit(
