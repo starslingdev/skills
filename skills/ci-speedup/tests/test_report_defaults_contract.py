@@ -29,8 +29,15 @@ REQUIRED_DECISIONS = {
     "dependency-cache-floor", "cold-cache-miss-threshold",
     "cache-partial-miss-floor",
     "default-branch-batching-window",
-    "ceiling-minimum-gates", "partial-majority-rule",
-    "account-weekly-paired-minimum",
+    "ceiling-minimum-gates", "partial-majority-rule", "go-package-dominance",
+    "go-fixed-wait-thresholds", "account-weekly-paired-minimum",
+}
+
+# Decisions the owner has approved, with the exact status line each section
+# must carry. Every decision not listed here must still read "awaiting owner
+# approval"; a listed one must carry its approval and not the pending status.
+APPROVED_DECISIONS = {
+    "go-package-dominance": "**Approval status:** owner-approved 2026-11-20 (60%).",
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
@@ -60,6 +67,8 @@ REQUIRED_VERIFIER_MIRRORS = {
     "verify_report.py:_VR_OPT80_MIN_GAP_S",
     "verify_report.py:_VR_OPT80_LOG_PROBE_MAX",
     "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL",
+    "verify_report.py:_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL",
+    "verify_report.py:_VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC",
     "verify_report.py:_VR_OPT81_MIN_GAP_FRAC",
     "verify_report.py:_VR_OPT81_MIN_GAP_S",
     "verify_report.py:_VR_OPT81_COVERED_FRAC",
@@ -100,6 +109,11 @@ REQUIRED_CURRENT_SOURCES = {
     "blocking_path.py:_AGG_GATE_TRIVIAL_S": 30.0,
     "blocking_path.py:_ALSO_NOTICED_CAP": 12,
     "blocking_path.py:_CHAIN_MAKESPAN_DIVERGENCE_PCT": 25.0,
+    "collect_runs.py:_OPT24_GO_PACKAGE_DOMINANT_SHARE": 0.6,
+    "collect_runs.py:_OPT19_GO_MIN_INTERVALS": 2,
+    "collect_runs.py:_OPT19_GO_MIN_JOB_SHARE": 0.2,
+    "collect_runs.py:_OPT19_GO_MIN_TEST_SHARE": 0.5,
+    "collect_runs.py:_OPT19_GO_RACE_HELPER_MIN_SPAWNS": 3,
     "blocking_path.py:_FLOOR_COOCCUR_MAJORITY_FRAC": 0.5,
     "blocking_path.py:_FLOOR_NEAR_UNIVERSAL_FRAC": 0.8,
     "blocking_path.py:_MAG_WIDE_REL": 0.25,
@@ -156,6 +170,8 @@ REQUIRED_CURRENT_SOURCES = {
     "collect_runs.py:_OPT81_MIN_GAP_FRAC": 0.25,
     "collect_runs.py:_OPT81_MIN_GAP_S": 30.0,
     "collect_runs.py:_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+    "collect_runs.py:_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL": 5,
+    "collect_runs.py:_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC": 0.05,
     "collect_runs.py:_OPT82_MIN_LINT_P50_S": 60.0,
     "collect_runs.py:_OPT83_MIN_SHARE": 0.15,
     "collect_runs.py:_OPT83_MIN_STEP_S": 20.0,
@@ -225,6 +241,8 @@ REQUIRED_CURRENT_SOURCES = {
     "verify_report.py:_VR_OPT81_MIN_GAP_FRAC": 0.25,
     "verify_report.py:_VR_OPT81_MIN_GAP_S": 30.0,
     "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+    "verify_report.py:_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL": 5,
+    "verify_report.py:_VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC": 0.05,
     "verify_report.py:_VR_OPT83_MIN_SHARE": 0.15,
     "verify_report.py:_VR_OPT83_MIN_STEP_S": 20.0,
     "verify_report.py:_VR_OPT84_MIN_SHARE": 0.0,
@@ -343,8 +361,15 @@ def test_report_defaults_review_covers_every_owner_decision():
         for field in ("**Current value:**", "**Report statements:**", "**Reason:**",
                       "**Proposed decision:**"):
             assert field in section, f"{decision} lacks {field}"
-        assert "awaiting owner approval" in section, (
-            f"{decision} does not preserve its pending approval status")
+        if decision in APPROVED_DECISIONS:
+            assert APPROVED_DECISIONS[decision] in section, (
+                f"{decision} lacks its recorded owner approval")
+            assert "awaiting owner approval" not in section, (
+                f"{decision} is approved but still reads as pending")
+        else:
+            assert "awaiting owner approval" in section, (
+                f"{decision} does not preserve its pending approval status")
+    assert set(APPROVED_DECISIONS) <= REQUIRED_DECISIONS
     assert "references/report-defaults.md" in (SKILL / "SKILL.md").read_text(encoding="utf-8")
 
 

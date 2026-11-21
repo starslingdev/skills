@@ -2155,6 +2155,7 @@ title_template: "Test Source Sleep Dominance (includes Playwright `waitForTimeou
 - **Cypress** — `cy.wait(N)` (note: `cy.wait('@alias')` waiting on a network intercept is OK; numeric ms is the anti-pattern).
 - **Node/Jest/Vitest** — `await new Promise(r => setTimeout(r, N))`, `await sleep(N)`, `await delay(N)` in `*.test.ts` / `*.spec.ts`.
 - **Integration-test fixtures** — `sleep N` in shell wrappers, `time.sleep(N)` in Python tests, fixed waits before assertion retries.
+- **Go tests** — on a drilled long pole whose log runs `go test` (plain, `-v` or `-json`): constant `time.Sleep` / `<-time.After` waits in a `_test.go` body that dominate the measured test or package time; repeated, equally spaced wait/poll/retry output inside one test; or a `-race` job whose test files synchronously re-execute the race-built test binary, so each child pays the race runtime's exit sleep.
 
 **Detection heuristic (run ALL greps; aggregate matches; sum `sleep_ms` across every file)**:
 
@@ -2180,6 +2181,12 @@ grep -rn 'time\.sleep([0-9]' tests/ --include='*.py' 2>/dev/null
 **Aggregation**: Sum `sleep_ms` across EVERY matched file. Compute total sleep per full test run (if test is a single script, sum is the per-run cost; if test is sharded, divide by shard count only if each shard runs a non-overlapping subset). Report the per-run total and the source-of-truth file list in `evidence`.
 
 **Fix**: Replace with event-driven waits. For Playwright: `page.waitForSelector`, `page.waitForLoadState`, `expect(locator).toBeVisible({ timeout })`. For Cypress: `cy.wait('@alias')` on route aliases. For DB/service readiness: ping the service in a bounded retry loop (e.g. `@testcontainers` readiness probes).
+
+For a Go test that reaches production poll intervals or grace periods, run the waiting test on `testing/synctest`'s virtual clock. If that dependency cannot use the virtual clock, expose only the interval as a package variable that the test shortens and restores with `t.Cleanup`; keep the production default and timeout assertions unchanged. For synchronous race-built helper children, preserve every inherited `GORACE` option and append `atexit_sleep_ms=0` only to the child environment. Do not apply that override to the parent race job or asynchronous children.
+
+The Go routes fail closed. A test-body sleep counts only when its duration is a literal or a package `const` (a `var` interval may already be shortened by the tests), it runs unconditionally (not in a loop, branch, `select`, goroutine or closure other than an inline `t.Run` body), and the test does not call `t.Parallel`, skip, return early or use `testing/synctest`; the constant total must be at most, and at least half of, the measured test time (or, without `-v`, the package time from a `go test` line with no `-run`/`-skip` filter; a `(cached)` package ran nothing), and at least one fifth of the job. The poll route needs at least two consistent intervals inside one test, timed by `go test -json` or the runner's own line timestamps, with the same shares. The race route needs a `-race` `go test` (or `GOFLAGS`) line, a package the job ran, at least three synchronous call sites that re-execute `os.Args[0]` (directly or through a helper returning `*exec.Cmd`), no asynchronous `Start`, and no `atexit_sleep_ms` anywhere in the package or the log. Sleep and poll findings state the runner-minute saving as a ceiling from one representative run and the workflow's 30-day run count; the race finding is unsized, because the log does not count helper re-execs.
+
+Public examples cut a detached-seed matrix under `-race` from 558.58 s to 297.99 s (one local run each side) in [openclaw/crabbox#2969](https://github.com/openclaw/crabbox/pull/2969), move fixture waits to virtual time in [openclaw/crabbox#2455](https://github.com/openclaw/crabbox/pull/2455), and remove the race exit sleep only for synchronous helper children in [openclaw/crabbox#1761](https://github.com/openclaw/crabbox/pull/1761).
 
 **Real-world example (mastra golden 2026-04-09)**: 37 `page.waitForTimeout()` calls across `packages/playground/e2e/tests/` totaling 65,500ms per full run. On E2E kitchen-sink (2,368 runs/mo × 65.5s/run) this is 2,585 min/mo. Initial detection required grepping `page.waitForTimeout` in the `packages/playground/e2e/` scope — looking only at `stores/*.test.ts` misses it entirely.
 
@@ -2271,6 +2278,71 @@ each runner's cores and memory against link-time optimisation and parallel links
 and build only the binaries the image ships. Preserve every platform, verify the
 produced binary architecture, test each image natively, and compare total runner
 minutes as well as wall time.
+
+---
+
+### OPT114 — Docker Image Layers Repeat npm Advisory Lookups Already Run by CI
+
+<!-- METADATA
+pattern: OPT114
+impact: MEDIUM
+class: static
+detector: yaml-job-correlated
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml,Dockerfile,**/Dockerfile*"
+fix_strategy: avoid-duplicate-docker-npm-audits
+title_template: "Docker image layers repeat npm advisory lookups already run by CI"
+-->
+
+**Anti-pattern**: A CI job runs `npm ci` on the host with npm's default audit
+reporting, then builds a local Dockerfile whose `RUN npm ci`, `npm install` or
+`npm prune` commands make the same advisory lookup again. Several image layers
+can repeat the request, and a slow advisory service can hold up the image build.
+
+**Detection heuristic**: Require both halves in one readable job. The host
+half is a direct `npm ci` that keeps audit on: its flags, step/job/workflow
+environment and every repository `.npmrc` from its effective working directory
+(`defaults.run.working-directory` included) up to the checkout root leave audit
+enabled, and it runs whenever the image build runs (no `if:`, or the build's
+own `if:`). The image half is a local Docker build whose selected stage, or a
+stage it builds from, runs `npm ci`, `npm install` or `npm prune` with audit
+still on after copying in that same host lockfile. Image audit settings are read
+as Docker applies them: `ENV`/`ARG NPM_CONFIG_AUDIT`, `npm config set audit`
+and an `.npmrc` copied into the image, in instruction order; a build-context
+`.npmrc` the Dockerfile never copies does not count. Heredoc bodies and quoted
+text are data, not commands. Expressions, `cd`/`--prefix` directory changes,
+remote contexts, unreadable files, unknown audit values, an unselected stage, a
+separate lockfile, and Docker commands that already disable audit stay quiet.
+
+**Fix recipe (safest first)**:
+
+1. Keep the host `npm ci` audit reporting unchanged so the job still reports
+   advisories once.
+2. Add `--no-audit` only to each image-layer `npm ci`, `npm install` and
+   `npm prune` that the finding names. Preserve lockfile resolution, lifecycle
+   scripts, production pruning and every image input.
+3. Build the old and new image from the same lockfile, compare the application
+   artifacts and installed production package versions/integrities, then run the
+   image's existing smoke or syntax check.
+
+**Sizing**: Runner-minute effect is a **saving** because the same image-build
+runner waits on fewer advisory requests. The static finding is **unsized**: it
+has neither measured Docker-layer duration nor the job's 30-day run count. Use
+matched before/after layer timings to size it; do not import another project's
+numbers as a forecast. Wall-clock also goes down only when these layers are on
+the job's gating path.
+
+**Public evidence**:
+
+- [OpenClaw Crabbox pull request #1804](https://github.com/openclaw/crabbox/pull/1804)
+  is the merged change for this shape.
+- [OpenClaw Crabbox pull request #1807](https://github.com/openclaw/crabbox/pull/1807)
+  measured the original Dockerfile reproducing the stall with install at 242.8
+  seconds and build/prune at 423.4 seconds; the Docker build then completed in
+  24 seconds. Those are that pull request's samples, not a forecast.
+
+**Risk**: LOW when the host audit remains mandatory. The change must not disable
+the last advisory report, alter dependency resolution or pruning, or skip the
+image's parity checks.
 
 ---
 
@@ -2389,8 +2461,11 @@ title_template: "Long Test Job Without Sharding"
 - Identify test jobs with wall-clock time >5 minutes
 - Check if the test framework supports sharding (Playwright `--shard`, vitest `--shard`)
 - Check if sharding is configured
+- For `go test` / `go test -coverprofile`, require sampled package summaries to show that one package owns at least 60% of the package time and of the job's P50. Missing summaries and balanced packages are not classified. A Go job whose matrix value already reaches `go test -run` / `-skip` is already sharded.
 
 **Fix**: First measure the worker count inside the existing job with OPT88 and use its idle cores safely. Only then add matrix-based sharding. E.g., Playwright: `--shard=${{ matrix.shard }}/${{ strategy.job-total }}`. When the split pieces are few and each leg would repeat a large setup, running the shards as a `parallel:` step group inside the one job is the alternative: setup is paid once and no new check names appear. But in-job shards share one runner's cores, and most test runners already use every core, so the saving is often near zero; separate jobs or a matrix are what add machines (OPT77's fix covers the syntax and runner requirement; OPT75's covers the independence checklist and why the saving is an upper bound until benchmarked).
+
+Go has no native suite-shard flag. For one dominant package, first list its test names with `go test -list`, using the same build tags and flags (`-race`, `-tags`) as the run, then partition that exact list exhaustively and disjointly and give each matrix leg an anchored `-run` expression applied to that package only. Every other package the step tests runs unfiltered in exactly one leg, so every test still runs exactly once. Keep the old required check name on an `always()` aggregate job that fails unless every leg succeeded. A coverage gate additionally needs one atomic profile per shard, artifact upload from every leg, profile merging only after all legs succeed, and the unchanged threshold applied to the merged profile. Public examples split a race suite into four legs in [openclaw/crabbox#2455](https://github.com/openclaw/crabbox/pull/2455), split a normal CLI test run into four partitions in [openclaw/crabbox#2875](https://github.com/openclaw/crabbox/pull/2875), and cut a coverage gate from 20m06s to 10m13s while increasing summed coverage runner time about 46.5% in [openclaw/crabbox#2810](https://github.com/openclaw/crabbox/pull/2810).
 
 **Required-checks caveat**: if the job you're sharding is a **required status check** (a merge gate — which the long pole usually is), the new shard jobs must be added to branch protection as required checks (or the ruleset equivalent), or the sharded-out test work silently stops gating merges — everything stays green while the gate no longer actually runs it. The split isn't complete until the new jobs gate the merge, and re-establishing that gating is usually an admin-only step. If the split routes the old check's work behind a `needs:` edge and an aggregator, see OPT75's [dependency-failure skip caveat](#opt75--long-pole-optimize-or-relocate-the-dominant-step) — a dependent skipped by a failed dependency reports skipped, not failed, so the aggregator must run with `always()` (not `!cancelled()`, which a cancelled run skips) and propagate every `needs.<job>.result`, and keeping the required check name on that aggregator re-gates the merge without an admin.
 
@@ -3386,13 +3461,50 @@ title_template: "Missing `paths`/`paths-ignore` on Expensive Workflows"
 # Flag workflows with >3 jobs and no path filtering
 ```
 
+**Deploy/release overlap extension**: a workflow can already have `paths:` and
+still be too broad. When the default branch is known, inspect a `push` deploy or
+release workflow's ordered positive and negative patterns against test files in
+the repository. Report it when the final matching pattern still includes a file
+under `test`, `tests`, `__tests__`, `spec` or `specs` whose own name marks it
+as a test (`*.test.*`, `*.spec.*`, `*_test.*`, `test_*.py`, `*_spec.rb`,
+`conftest.py`, `*Test.java`). Patterns are matched with GitHub semantics (`*`
+stays inside one path segment). Withhold this extension when the default
+branch, path list, a glob construct or the repository test shape cannot be
+read; when the test-named directory holds a package manifest; or when any
+non-test file the filter selects imports from it, because then the deploy
+builds from that directory. A deploy on another branch is not this finding.
+
 **Fix**: Add `paths-ignore` for documentation, markdown files, and other non-code changes. Or use `paths` to restrict to relevant source directories.
+
+For the deploy/release overlap extension, keep the existing positive list and
+add a narrow negated test-directory pattern **after** the broader positive glob,
+for example:
+
+```yaml
+paths:
+  - 'worker/**'
+  - '!worker/test/**'
+```
+
+GitHub evaluates path patterns in order, so placing the negative first lets the
+later positive re-include the test path. One event cannot use both `paths` and
+`paths-ignore`. Preserve every runtime, configuration, workflow and deployment-
+helper path, then test test-only, runtime-only and mixed changes.
 
 **Fail closed:** when a scoped workflow or job is a required check, a job-level `if:` alone is not safe: a failed detector skips the suite, and a skipped required check reads green. Add an always-running verdict job (`if: always()`) that `needs:` the detector, every intermediate job whose failure can suppress a suite, and the suites, and make that verdict the required check. Listing jobs in `needs:` is not an assertion: the verdict's step must inspect every dependency result and fail unless the detector succeeded AND each suite either succeeded or was skipped because the detector validly reported unchanged (its output exactly `'false'`). Reject `failure` and `cancelled` dependency results, and a `skipped` suite unless the detector validly reported unchanged, including an unchanged output written before failure. Keep `if: always()` rather than OPT46's `!cancelled()` here, because the verdict is the required check: a job skipped by its `if:` reports success, and a skipped required check does not block merging, so a head run cancelled without a replacement would pass with nothing validated. A strict "every suite succeeded" assertion is right only when a suite is never skipped on purpose; with intentional skips it turns every unchanged PR red. ci-secure's required-checks-skippable fact lists the assertion forms it can verify.
 
 **Required-status-check caveat (the "Pending" landmine)**: if any check this workflow produces is a required status check, do NOT skip it with `paths`/`paths-ignore` (or `branches:` filters / `[skip ci]`) — a workflow skipped by filtering leaves its required check "Pending" and the PR can never merge; official guidance says not to use path or branch filtering on required workflows. GitHub documents a job-level `if:` restating the filter (a skipped job reports Success and satisfies the gate), but on its own it shares the skipped-reads-green hole above; the safe shape is that `if:` plus the fail-closed verdict job as the required check. The no-op twin-workflow (same workflow AND job name, inverse filter) is a community-known workaround, NOT in any current GitHub docs edition. Treat required-status UNKNOWN as required: when branch protection/rulesets are unreadable (the common case on repos you don't admin), assume every check this workflow produces may be required.
 
 **Real-world example (better-auth)**: e2e.yml runs all 8 jobs on docs-only PRs.
+
+**Deploy-path sizing**: runner-minute effect is a **saving**: the deploy jobs'
+billed compute on test-only default-branch merges. Keep it unsized until those
+merges' frequency and the affected jobs' measured compute are available; PR
+changed-file sampling is not evidence for default-branch push frequency.
+
+**Public deploy-path evidence**: [OpenClaw Crabbox pull request #2839](https://github.com/openclaw/crabbox/pull/2839)
+uses the negated `'!worker/test/**'` pattern after the positive glob in the
+same `paths:` list of a default-branch deploy workflow.
 
 ---
 
@@ -3948,6 +4060,57 @@ and meaningful automation events.
 **Risk**: MEDIUM. Moving a condition earlier can suppress a command or actor
 that the handler previously accepted. Preserve the handler's exact semantics
 and prove both accepted and rejected cases before removing its inner guard.
+
+---
+
+### OPT111 — Automated Code Review Runs on Every Pull Request Push
+
+<!-- METADATA
+pattern: OPT111
+impact: MEDIUM
+class: static
+detector: yaml-job-correlated
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: review-once-after-quiet-window
+title_template: "Automated code review runs on every pull request push"
+-->
+
+**Anti-pattern**: An automated code-review action runs for every pull-request
+`synchronize` event. Several fix-up pushes close together can therefore repeat
+the entire review before the author has finished changing the pull request.
+
+**Detection heuristic**: Find a recognizable review action or review-posting
+command in a job whose `pull_request` trigger includes `synchronize`. Require
+the job to run on that activity and require no preceding quiet-window or
+debounce step. Fail closed on an unreadable activity guard or step group.
+Ordinary test, lint and security jobs on `synchronize` are not findings.
+
+**Fix recipe (safest first)**:
+
+1. Review once when the pull request opens or becomes ready for review, and
+   provide an authorized explicit re-review command for later changes.
+2. If automatic re-review is required, debounce head changes outside the
+   hosted runner and review only the latest settled head. Do not spend runner
+   time sleeping merely to create the quiet window.
+3. Preserve the current review policy, authorization and required status.
+   Exercise open, draft-to-ready, synchronize and explicit re-review paths,
+   including a head change while a review is pending.
+
+**Sizing**: Runner-minute effect is a **saving**: the automated review job's
+measured billed compute on automatic re-reviews superseded by a nearby push.
+This is a static finding, so it reports `runner-minute saving: unsized` with
+the reason: the scan reads workflow files only and samples none of the review
+job's runs, so neither the count of superseded automatic reviews nor their
+billed minutes is measured. Review admission can also reduce external model
+usage, but that cost is outside runner-minute sizing and is not estimated here.
+
+**Public evidence**: OpenClaw moved its automated reviewer to review-once with
+an explicit re-review trigger.
+
+**Risk**: MEDIUM. Reducing automatic review frequency can leave a changed head
+unreviewed if ready-state and explicit re-review admission are incomplete.
+Preserve exact-head checks and test every supported review trigger before
+rollout.
 
 ---
 
@@ -4792,7 +4955,7 @@ title_template: "The Same Job Is Measurably Faster on Another Runner"
 
 > **Disclosure (rendered on every OPT81 card, prompt and this entry).** The publisher of this skill sells CI runners. This finding compares your own runs on runner classes you already use (A1), or names a class of lever and asks you to benchmark before believing any number (A2); it never prices a runner.
 
-**TL;DR**: Your own run history already shows one job running on two kinds of runner, and it is clearly faster on one of them (A1). Or, when nothing cheaper is left for a slow compute job on a standard runner, the report names a different or larger runner class as the last lever it can name and asks you to benchmark it (A2).
+**TL;DR**: Your own run history already shows one job running on two kinds of runner, and it is clearly faster on one of them (A1), or shows two explicit sizes of one class completing the same work within 5% so an ordinary route can be downsized. Or, when nothing cheaper is left for a slow compute job on a standard runner, the report names a different or larger runner class as the last lever it can name and asks you to benchmark it (A2).
 
 **Anti-pattern**: A job that sets the merge wait runs on a runner class slower than one the repository already uses for the same job, or a compute-bound long pole has no cheaper lever left and nobody has measured it on a different or larger runner class.
 
@@ -4808,6 +4971,8 @@ title_template: "The Same Job Is Measurably Faster on Another Runner"
 6. `p50(slow) − p50(fast) ≥ max(30s, 25% of p50(slow))` (`_OPT81_MIN_GAP_S`, `_OPT81_MIN_GAP_FRAC`).
 
 Credit: the measured gap counts as wall-clock **only** when the job is its workflow's long pole, the two labels are not a runner matrix (a matrix runs both legs in every run; the slower leg sets the wait, and the finding states the gap without crediting it), and the job ran on the slower label **strictly more often** than on the faster one, counted on the same successful runs compared (an exact tie is not dominant), and the slower label is the one the long pole's median is measured on (the label the job runs on most across every run and outcome, unclassifiable labels included). When another label sets that median (a self-hosted label, or failed runs on the faster label), moving the slower label's runs does not move the wait: the gap is stated and the credit is held, counted as `slow_label_is_not_the_poles_population`. It is pre-capped at the workflow's critical-path headroom and then passes through the same cross-workflow cascade as every other credited saving. **Runner-minutes are never credited**: the finding says "unknown: a different runner class bills differently and this audit carries no rate table". The evidence shows both distributions and their sample counts, and `tests/verify_report.py` re-derives every number from the stamped per-run rows (label, duration, step-list hash): both medians, both counts, the class decision, the step-list equality, the gap and the floor.
+
+**A1 downsize extension — measured, same class, image and platform.** When two labels name two explicit core counts of one runner class and one image, on the same operating system and architecture, five successful interleaved samples per size execute the identical step list, and their medians are within 5% in either direction, OPT81 reports that the smaller runner is about as fast. The finding reads "same speed on a smaller runner size: about the same runner-minutes, billed at the smaller size's lower rate". It credits no merge-wait reduction and no wall-clock or runner-minute saving. Its runner-minute and cost effect reads "runner-cost saving: unsized (ci-speedup does not price runners; the smaller size bills at a lower per-minute rate)", and the report's group heading carries the same unsized reason. The evidence names both sample counts and both medians. A route whose job or workflow name says it is pinned, frozen, a compatibility leg, legacy, or a release, publish or deploy path is not a downsize candidate (`downsize_pinned_or_compatibility_route`). A size matrix, where both sizes run in every run, is not one either (`downsize_runner_matrix`): dropping a leg removes a configured run. The safest recipe changes only ordinary routes and retains those routes; the rollout verifies identical work, memory headroom, reliability and latency. Evidence: openclaw/openclaw#195768, paired samples of one job on two runner sizes, the smaller within a few percent of wall-clock.
 
 **A2 — advisory, the lever of last resort.** No number anywhere: no wall-clock, no runner-minutes, no estimate. It fires only when all of the following hold:
 
@@ -4834,7 +4999,7 @@ Benchmark required either way: run the job on the candidate runner beside its cu
 
 **Withheld, not silent**: every gate is tallied per audit, on the findings document (`opt81_withheld_by_gate`). A candidate the audit measured and could not decide — an unclassifiable label, too few samples on two labels, three or more qualifying labels, two labels that ran in different periods, differing step lists, or a pole whose step timings could not be read — is listed under `opt81_withheld_candidates` and stated in plain English on the report's `runner class: held back` row.
 
-**Pricing**: this entry never prices a runner and states no price. It is not a revival of the retired OPT66 (the removed published-rate ceiling); OPT81 compares measured durations only.
+**Pricing**: this entry never prices a runner and states no price, no per-minute rate figure and no rate ratio, the downsize extension included. It is not a revival of the retired OPT66 (the removed published-rate ceiling); OPT81 compares measured durations only.
 
 ---
 
