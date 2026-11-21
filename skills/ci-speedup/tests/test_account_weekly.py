@@ -31,8 +31,8 @@ def _observations(*, after_hours: float = 60.0) -> dict:
             },
         ],
         "paired_runs": {
-            "before_runner_minutes": [120.0, 100.0],
-            "after_runner_minutes": [65.0, 55.0],
+            "before_runner_minutes": [120.0, 110.0, 110.0, 110.0, 100.0],
+            "after_runner_minutes": [65.0, 60.0, 60.0, 60.0, 55.0],
             "workload_change": "same jobs on both sides",
         },
     }
@@ -78,8 +78,8 @@ def test_account_weekly_series_normalizes_and_compares_paired_medians(tmp_path: 
     assert summary["weeks"][1]["runner_hours_per_merged_pr"] == 1.5
     assert summary["paired_comparison"] == {
         "available": True,
-        "before_n": 2,
-        "after_n": 2,
+        "before_n": 5,
+        "after_n": 5,
         "before_median_runner_minutes": 110.0,
         "after_median_runner_minutes": 60.0,
         "runner_minute_effect": "saving",
@@ -102,14 +102,14 @@ def test_account_weekly_series_normalizes_and_compares_paired_medians(tmp_path: 
     assert "2.00" in report and "1.50" in report
     assert "fewer scheduled validation jobs" in report
     assert "runner-minute saving: 50.0 per paired run" in report
-    assert "median of 2 before and 2 after runs" in report
+    assert "median of 5 before and 5 after runs" in report
 
 
 def test_account_weekly_series_states_no_saving_when_work_is_unchanged(tmp_path: Path) -> None:
     data = _observations(after_hours=100.0)
     data["paired_runs"] = {
-        "before_runner_minutes": [60.0, 60.0],
-        "after_runner_minutes": [60.0, 60.0],
+        "before_runner_minutes": [60.0] * 5,
+        "after_runner_minutes": [60.0] * 5,
         "workload_change": "same jobs on both sides",
     }
     completed, doc = _run_weekly_cli(tmp_path, data)
@@ -134,7 +134,7 @@ def test_account_weekly_series_withholds_a_one_run_per_side_claim(tmp_path: Path
         "available": False,
         "before_n": 1,
         "after_n": 1,
-        "reason": "need at least 2 paired runs per side",
+        "reason": "need at least 5 paired runs per side",
     }
 
 
@@ -221,8 +221,8 @@ def test_paired_effect_that_rounds_to_zero_is_not_called_a_saving() -> None:
 
     data = _observations()
     data["paired_runs"] = {
-        "before_runner_minutes": [60.04, 60.04],
-        "after_runner_minutes": [60.0, 60.0],
+        "before_runner_minutes": [60.04] * 5,
+        "after_runner_minutes": [60.0] * 5,
         "workload_change": "same jobs on both sides",
     }
     comparison = summarize_account_weekly(data)["paired_comparison"]
@@ -242,5 +242,29 @@ def test_account_weekly_rejects_non_dates_and_non_finite_totals() -> None:
 
     data = _observations()
     data["paired_runs"]["workload_change"] = "same jobs on both sides"
-    data["paired_runs"]["before_runner_minutes"] = [float("nan"), 100.0]
+    data["paired_runs"]["before_runner_minutes"] = [float("nan"), 100.0, 100.0, 100.0, 100.0]
     assert summarize_account_weekly(data)["paired_comparison"]["available"] is False
+
+
+def test_paired_comparison_needs_five_runs_per_side() -> None:
+    """Owner-approved 2026-11-20: 4 per side is withheld, 5 per side is stated."""
+    from before_after import summarize_account_weekly
+
+    data = _observations()
+    data["paired_runs"] = {
+        "before_runner_minutes": [120.0, 110.0, 110.0, 100.0],
+        "after_runner_minutes": [65.0, 60.0, 60.0, 55.0],
+        "workload_change": "same jobs on both sides",
+    }
+    assert summarize_account_weekly(data)["paired_comparison"] == {
+        "available": False,
+        "before_n": 4,
+        "after_n": 4,
+        "reason": "need at least 5 paired runs per side",
+    }
+
+    data["paired_runs"]["before_runner_minutes"].append(110.0)
+    data["paired_runs"]["after_runner_minutes"].append(60.0)
+    comparison = summarize_account_weekly(data)["paired_comparison"]
+    assert comparison["available"] is True, comparison
+    assert (comparison["before_n"], comparison["after_n"]) == (5, 5)
