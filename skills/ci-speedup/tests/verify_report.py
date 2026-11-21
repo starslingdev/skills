@@ -2342,7 +2342,7 @@ def check_pr_sample_stop_reason(report: str, findings_path: Path | None = None) 
         problems.append(f"sample_stop_reason={actual!r}, expected {expected!r}")
     sample_size = (f"{sampled} PRs sampled (minimum target {target})"
                    if sampled > target else f"{sampled} of {target} PRs sampled")
-    rendered = f"{sample_size}: {expected.replace('_', ' ')}"
+    rendered = f"{sample_size}: {_PR_SAMPLE_CONTRACT.pr_sample_stop_reason_label(expected)}"
     if rendered not in report:
         problems.append("rendered report omits or changes the re-derived sample statement")
     budget = f"{job_reads} of at most {job_cap}"
