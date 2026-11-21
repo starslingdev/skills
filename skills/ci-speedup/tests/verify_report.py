@@ -18182,6 +18182,11 @@ def _vr_bmf_held_back(finding: dict) -> bool:
     return False
 
 
+def _vr_bmf_has_held_option(finding: dict) -> bool:
+    """Independent copy of visible findings with a minute-adding option."""
+    return str(finding.get("pattern") or "") == "OPT89"
+
+
 # Log leaves whose catalog remedy adds jobs, shards or runners; mirrors
 # blocking_path's `_BMF_LEAF_DEFAULTS` keys. In a default report their prompt's
 # DELIVER line may not split the work across jobs, runners or a matrix.
@@ -18194,6 +18199,16 @@ _VR_BMF_CROSS_JOB_RE = re.compile(
     r"(?i)\b(?:shard|split|parallelis|parallelliz|spread|move)\w*\b[^.;]*"
     r"\b(?:jobs?|runners?|matrix|emulators)\b")
 _VR_BMF_DELIVER_RE = re.compile(r"\nDELIVER & VERIFY\n((?:- .*\n?)+)")
+_VR_BMF_ADDED_COST = "Runner-minute effect: added cost"
+
+
+def _vr_bmf_pattern_block(report: str, pattern: str) -> str:
+    match = re.search(
+        rf"<details>\s*<summary><strong>{re.escape(pattern)} - .*?</details>",
+        report,
+        re.DOTALL,
+    )
+    return match.group(0) if match else ""
 
 
 def _vr_bmf_disclosure(count: int) -> str:
@@ -18214,9 +18229,13 @@ def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
     held = ([f for f in _as_list(_as_dict(data).get("findings"))
              if isinstance(f, dict) and _vr_bmf_held_back(f)]
             if data is not None else [])
+    held_options = ([f for f in _as_list(_as_dict(data).get("findings"))
+                     if isinstance(f, dict) and _vr_bmf_has_held_option(f)]
+                    if data is not None else [])
     if not markers:
-        if held:
-            return Check(name, False, f"{len(held)} lever(s) the default mode holds back, "
+        if held or held_options:
+            return Check(name, False,
+                         f"{len(held) + len(held_options)} lever(s) the default mode holds back, "
                          "but the report carries no bmf mode marker")
         return Check(name, True, "legacy report has no bmf mode marker", skipped=True)
     if len(markers) != 1:
@@ -18227,7 +18246,7 @@ def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
     stamped = int(markers[0].group(2))
     leaves = [key for key in _VR_LEAF_CROWN_RE.findall(report)
               if key in _VR_BMF_HELD_LEAVES]
-    expected = 0 if enabled else len(held) + len(leaves)
+    expected = 0 if enabled else len(held) + len(held_options) + len(leaves)
     bad = []
     if stamped != expected:
         bad.append(f"marker says {stamped} held, expected {expected}")
@@ -18248,12 +18267,24 @@ def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
             if (any(str(f.get("pattern")) == pattern for f in held)
                     and f"<strong>{pattern} - " in report):
                 bad.append(f"held {pattern} still renders a recommendation card")
+        opt89 = _vr_bmf_pattern_block(report, "OPT89")
+        if opt89 and "shard the test run across native runners" in opt89:
+            bad.append("held OPT89 native-runner sharding still renders")
         for match in _VR_BMF_DELIVER_RE.finditer(report):
             # A sentence that names `--bmf` is the held-back notice itself.
             for sentence in re.split(r"(?<=[.;])\s+", match.group(1)):
                 if _VR_BMF_CROSS_JOB_RE.search(sentence) and "`--bmf`" not in sentence:
                     bad.append("a default prompt delivers a cross-job split: "
                                + sentence.strip()[:80])
+    else:
+        for pattern in ("OPT89", "OPT97"):
+            block = _vr_bmf_pattern_block(report, pattern)
+            if not block:
+                continue
+            if _VR_BMF_ADDED_COST not in block:
+                bad.append(f"{pattern} --bmf recipe has no signed added runner-minute cost")
+            if "No runner-minute saving" in block:
+                bad.append(f"{pattern} --bmf recipe claims no runner-minute saving")
     return Check(name, not bad, "; ".join(bad) if bad else
                  ("--bmf recommendations enabled" if enabled
                   else f"{expected} runner-minute-adding lever(s) held back"))

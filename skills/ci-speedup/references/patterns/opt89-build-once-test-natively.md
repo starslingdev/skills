@@ -30,7 +30,7 @@ category: 4
 **Fix recipe**:
 
 1. Build the test binaries for the slow target on a fast runner, cross-compiling, and upload them as an artifact (a test archive where the runner supports one).
-2. Download and run them on a native runner of the target platform; shard the run across several native runners when the test phase is still long.
+2. Download and run them on one native runner of the target platform. A `--bmf` report may offer sharding the remaining test phase across native runners when it is still the measured bottleneck; that optional route repeats checkout and setup on every shard, so treat it as added runner-minute cost, never as a bill saving.
 3. Where a native runner exists, prefer it to emulation: an emulated architecture is slower at both building and testing.
 4. Keep a fully native build-and-test of that platform somewhere, after merge or on a schedule, for anything the cross-built binary cannot cover.
 

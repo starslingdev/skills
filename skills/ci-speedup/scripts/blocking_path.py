@@ -11853,6 +11853,17 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                 # is unmeasured>)"; state it as is, never beside a neutral claim.
                 note = str(positional[0].get("size_note") or "").strip()
                 saving = f"Saving: {note}." if note else "Saving: unsized."
+    if pat == "OPT89" and _BMF_ENABLED:
+        body += [
+            "Optional --bmf wall-clock recipe: shard the test run across native "
+            "runners only after the build-once handoff is working and the remaining "
+            "native test phase is still the measured bottleneck.",
+            _bmf_added_cost_line(
+                "the repeated checkout/setup floor and chosen shard count were not measured"),
+        ]
+    if pat == "OPT97" and _BMF_ENABLED:
+        body.append(_bmf_added_cost_line(
+            "the new job's checkout and setup duration were not measured"))
     body += [saving, "",
              "Read the catalog entry (background, fix recipe, and guardrail):",
              f"  {url}", ""]
@@ -15063,6 +15074,22 @@ def _bmf_held_back(finding: dict[str, Any]) -> bool:
     return False
 
 
+def _bmf_has_held_option(finding: dict[str, Any]) -> bool:
+    """Whether a visible finding has one optional minute-adding recipe.
+
+    OPT89's primary build-once handoff removes duplicated compilation, so the
+    finding remains useful in the default report. Its optional native-runner
+    sharding route is different: each shard repeats runner setup. Count and
+    suppress that one route without suppressing the whole finding.
+    """
+    return str(finding.get("pattern") or "") == "OPT89"
+
+
+def _bmf_added_cost_line(reason: str) -> str:
+    """Fail-closed runner-minute wording for an unmeasured added job."""
+    return f"Runner-minute effect: added cost, unsized ({reason})."
+
+
 # Log-leaf remedies whose catalog recipe adds jobs, shards or runners. In the
 # default mode the cross-job option is held back: a leaf with an in-job route
 # keeps only that route, and a shard-only leaf keeps its measured drill with the
@@ -15228,6 +15255,8 @@ def render(doc: dict[str, Any], *args, bmf: bool = False, **kwargs) -> str:
                 held += 1
             else:
                 finding = _bmf_default_view(source)
+                if _bmf_has_held_option(source):
+                    held += 1
         findings.append(finding)
     original_findings = doc.get("findings")
     doc["findings"] = findings

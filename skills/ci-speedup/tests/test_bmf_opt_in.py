@@ -279,3 +279,66 @@ def test_verifier_requires_the_mode_marker_when_a_lever_would_be_held(tmp_path):
     empty = tmp_path / "empty.json"
     empty.write_text(json.dumps({"findings": []}), encoding="utf-8")
     assert vr.check_bmf_runner_minute_filter("# report\n", empty).skipped is True
+
+
+def _option_report(finding: dict, *, bmf: bool) -> str:
+    return bp.render({
+        "repo": "demo/repo",
+        "scanned_at": "2026-11-21T00:00:00Z",
+        "findings": [finding],
+    }, bmf=bmf)
+
+
+def test_opt89_native_runner_sharding_is_held_by_default_and_signed_under_bmf(
+        tmp_path):
+    finding = {
+        "id": "opt89-static",
+        "pattern": "OPT89",
+        "severity": "HIGH",
+        "title": "The slowest platform compiles its own tests",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["arm"],
+        "evidence": (
+            "job `arm` compiles via `make` inside a QEMU-backed docker run "
+            "for `linux/arm64` on a hosted x64 runner"
+        ),
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
+
+    default = _option_report(finding, bmf=False)
+    opted_in = _option_report(finding, bmf=True)
+
+    assert "enabled=false held=1" in default
+    assert "shard the test run across native runners" not in default
+    assert "shard the test run across native runners" in opted_in
+    assert "Runner-minute effect: added cost, unsized" in opted_in
+    assert vr.check_bmf_runner_minute_filter(default, findings_path).ok is True
+    assert vr.check_bmf_runner_minute_filter(opted_in, findings_path).ok is True
+
+
+def test_opt97_bmf_own_job_recipe_states_added_runner_minute_cost(tmp_path):
+    finding = {
+        "id": "opt97-queue",
+        "pattern": "OPT97",
+        "severity": "MEDIUM",
+        "title": "Queue Caused by a One-at-a-Time Resource",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["test"],
+        "evidence": "job `test` has P90 queue 8m20s with a single-slot resource",
+        "wall_clock_p50_s": 120.0,
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
+
+    opted_in = _option_report(finding, bmf=True)
+
+    assert "Runner-minute effect: added cost, unsized" in opted_in
+    assert "No runner-minute saving" not in opted_in
+    assert vr.check_bmf_runner_minute_filter(opted_in, findings_path).ok is True
+
+    tampered = opted_in.replace(
+        "Runner-minute effect: added cost, unsized",
+        "No runner-minute saving",
+    )
+    assert vr.check_bmf_runner_minute_filter(tampered, findings_path).ok is False

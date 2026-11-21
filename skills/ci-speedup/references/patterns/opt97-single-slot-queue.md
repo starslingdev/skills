@@ -68,8 +68,11 @@ other jobs, no wall-clock credit. Only an established merge-gating job is
 credited. Cap each sampled reduction against all same-run job completion times,
 including queue; an independent later-finishing job removes the credit.
 Incomplete completion data receives no credit. The existing workflow and
-cross-workflow floors then apply. No runner-minute saving: waiting is not
-execution.
+cross-workflow floors then apply. Waiting itself is not execution, so narrowing
+the group or adding capacity claims no runner-minute saving. Moving the step to
+its own job is different: it repeats job checkout and setup, so under `--bmf`
+that option carries a signed added runner-minute cost, or a true unsized reason
+when the added setup was not measured.
 
 **Relations**: Replaces the same workflow's same-job OPT43 finding; a finding
 naming other jobs, or another workflow's, is kept. The merge also accepts
