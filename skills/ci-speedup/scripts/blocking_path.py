@@ -14094,7 +14094,7 @@ def _data_driven_for_pole(pole: dict[str, Any],
         if (not _saves_wall_clock(f)
                 and _as_dict(f.get("runner_minute_effect")).get("direction")
                 != "added_cost"):
-            continue  # credited wall-clock or priced added compute claims the pole
+            continue  # credited wall-clock or sized added runner minutes claim the pole
         jobs = [str(j) for j in (f.get("affected_jobs") or []) if str(j)]
         if not jobs:
             continue  # an unrouted finding can't anchor to a pole
