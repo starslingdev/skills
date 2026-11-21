@@ -6438,7 +6438,9 @@ def _measure_opt32_path_filters(
     changed_files: dict[int, list[str] | None] | None = None,
 ) -> None:
     """Measure OPT32 only from PRs already selected by the normal run sample."""
-    targets = [f for f in findings if f.get("pattern") == "OPT32"]
+    targets = [f for f in findings
+               if f.get("pattern") == "OPT32"
+               and not f.get("opt32_deploy_test_paths")]
     if not targets:
         return
     repo_patterns, pattern_sources = _opt32_repository_paths_ignore(wf_docs)
@@ -7304,6 +7306,16 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             "runner_min_unsized_reason",
             "static source finding; the same shard jobs run the same tests, and "
             "no CI per-test timings measure the imbalance or timeout reruns",
+        )
+        return
+    if f.get("opt32_deploy_test_paths"):
+        f["wall_clock_p50_s"] = 0.0
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["size_note"] = (
+            "runner-minute saving is not sized until test-only default-branch "
+            "merge frequency and the deploy jobs' measured compute are available"
         )
         return
     if f.get("oversized_fixture_static"):
@@ -15866,6 +15878,30 @@ _OPT81_MIN_SAMPLES_PER_LABEL = 8
 # half keeps a 30s wobble on a 40-minute job out.
 _OPT81_MIN_GAP_S = 30.0
 _OPT81_MIN_GAP_FRAC = 0.25
+# A measured downsize needs five interleaved successful runs on each class (the
+# paired public evidence population) and may add at most five percent wall time.
+_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL = 5
+_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC = 0.05
+# A measured downsize is never priced (the 2026-07-20 rule: ci-speedup never prices
+# a runner). The smaller size runs about as fast, so it uses about the same
+# runner-minutes billed at its lower per-minute rate; the saving is stated as a
+# runner-cost saving left unsized. A STRING CONTRACT mirrored in blocking_path.py
+# and verify_report.py (pinned by a coupling test).
+_OPT81_DOWNSIZE_SAME_SPEED = (
+    "same speed on a smaller runner size: about the same runner-minutes, billed at "
+    "the smaller size's lower rate")
+_OPT81_DOWNSIZE_UNSIZED_REASON = (
+    "ci-speedup does not price runners; the smaller size bills at a lower "
+    "per-minute rate")
+_OPT81_DOWNSIZE_COST_EFFECT = (
+    f"runner-cost saving: unsized ({_OPT81_DOWNSIZE_UNSIZED_REASON})")
+# A downsize is never recommended for a route that names itself pinned, frozen,
+# a compatibility leg or a release/publish/deploy path: those routes keep their
+# runner on purpose (issue #398's fix recipe). Matched as whole words against
+# the job's display name and the workflow file name.
+_OPT81_DOWNSIZE_PINNED_ROUTE_RE = _re.compile(
+    r"(?<![a-z0-9])(pin(ned)?|frozen|freeze|compat(ibility)?|legacy|release[sd]?|"
+    r"publish(ing)?|deploy(s|ment)?)(?![a-z0-9])", _re.I)
 # A2: the dominant step categories that count as compute.
 _OPT81_COMPUTE_CATEGORIES = frozenset({"build", "test"})
 # A2: a dominant step whose NAME says it is waiting, sleeping or moving bytes is not
@@ -15921,6 +15957,9 @@ _OPT81_VERDICT_GATES = frozenset({
     "different_operating_system",
     "different_architecture",
     "same_runner_class",
+    "downsize_slowdown_above_limit",
+    "downsize_pinned_or_compatibility_route",
+    "downsize_runner_matrix",
     # A2 verdicts: a cheaper lever exists, or the shape is not this lever's.
     "a2_not_a_pull_request_workflow",
     "a2_not_on_the_merge_gating_critical_path",
@@ -16030,6 +16069,29 @@ def _opt81_runner_class(label: str | None) -> "tuple[str, str, str, str] | None"
     if len(found) != 1:
         return None
     return next(iter(found))
+
+
+def _opt81_numeric_size_rank(
+        runner_class: tuple[str, str, str, str]) -> int | None:
+    """Comparable capacity rank for explicit numeric sizes of one runner class."""
+    size = runner_class[3]
+    return int(size) if size.isdigit() and int(size) > 0 else None
+
+
+def _opt81_size_stripped_label(label: str) -> str | None:
+    """The label set with each classified token's size tier removed, so two sizes
+    of one image compare equal (`ubuntu-24.04-8-cores` ~ `ubuntu-24.04-4-cores`)
+    and two images do not (`ubuntu-22.04-16-cores` vs `ubuntu-24.04-8-cores`)."""
+    out: list[str] = []
+    for tok in str(label or "").split():
+        for rx, _cls, _os in _OPT81_RUNNER_CLASSES:
+            m = rx.match(tok)
+            if m:
+                if m.groupdict().get("size"):
+                    tok = tok[:m.start("size")] + "<size>" + tok[m.end("size"):]
+                break
+        out.append(tok.lower())
+    return " ".join(sorted(out)) or None
 
 
 def _opt81_executed_steps(job: dict[str, Any]) -> list[str]:
@@ -16179,16 +16241,32 @@ def _detect_opt81_measured_runner_gap(
         if len(classified) < 2:
             _no("runner_label_not_classifiable_by_size", name, excluded=excluded)
             continue
-        qualifying = sorted(
+        standard_qualifying = sorted(
             (lb for lb in classified
              if len(labels[lb]) >= _OPT81_MIN_SAMPLES_PER_LABEL),
             key=lambda lb: (-len(labels[lb]), lb))
-        if len(qualifying) < 2:
+        downsize_qualifying = sorted(
+            (lb for lb in classified
+             if len(labels[lb]) >= _OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL),
+            key=lambda lb: (-len(labels[lb]), lb))
+        # Preserve A1's established eight-sample population. A third label with
+        # only five to seven observations must not block a valid old-style pair;
+        # the lower floor applies only when exactly two labels reach it.
+        if len(standard_qualifying) == 2:
+            qualifying = standard_qualifying
+        elif len(standard_qualifying) > 2:
+            _no("more_than_two_qualifying_runner_labels", name,
+                labels=standard_qualifying)
+            continue
+        elif len(downsize_qualifying) == 2:
+            qualifying = downsize_qualifying
+        elif len(downsize_qualifying) > 2:
+            _no("more_than_two_qualifying_runner_labels", name,
+                labels=downsize_qualifying)
+            continue
+        else:
             _no("fewer_than_min_samples_on_two_labels", name,
                 n={lb: len(labels[lb]) for lb in classified})
-            continue
-        if len(qualifying) > 2:
-            _no("more_than_two_qualifying_runner_labels", name, labels=qualifying)
             continue
         a, b = qualifying
         (cls_a, os_a, arch_a, size_a) = classified[a]
@@ -16217,6 +16295,105 @@ def _detect_opt81_measured_runner_gap(
             continue
         p50 = {lb: _percentile([r["duration_s"] for r in labels[lb]], 50)
                for lb in (a, b)}
+        rank_a, rank_b = (_opt81_numeric_size_rank(classified[lb]) for lb in (a, b))
+        downsize_candidate = (
+            classified[a][0] == classified[b][0]
+            and rank_a is not None and rank_b is not None and rank_a != rank_b
+            # Two images are an image change, not a size change.
+            and _opt81_size_stripped_label(a) == _opt81_size_stripped_label(b)
+        )
+        downsize_pair = False
+        if downsize_candidate:
+            small, large = (a, b) if rank_a < rank_b else (b, a)
+            small_rank = rank_a if small == a else rank_b
+            large_rank = rank_b if large == b else rank_a
+            delta_frac = ((p50[small] - p50[large]) / p50[large]
+                          if p50[large] > 0 else float("inf"))
+            downsize_pair = abs(delta_frac) <= _OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC
+            short = any(len(labels[lb]) < _OPT81_MIN_SAMPLES_PER_LABEL
+                        for lb in (a, b))
+            if not downsize_pair and short:
+                # Measured and decided: the sizes differ by more than the limit,
+                # and there are too few runs for the A1 gap comparison.
+                _no("downsize_slowdown_above_limit", name,
+                    delta_frac=round(delta_frac, 4))
+                continue
+            if downsize_pair and matrix:
+                # Both sizes run in every run: a configured size matrix. Dropping
+                # a leg removes a configured run, not a route choice.
+                _no("downsize_runner_matrix", name)
+                continue
+            if downsize_pair and (_OPT81_DOWNSIZE_PINNED_ROUTE_RE.search(name)
+                                  or _OPT81_DOWNSIZE_PINNED_ROUTE_RE.search(
+                                      wf_path.rsplit("/", 1)[-1])):
+                _no("downsize_pinned_or_compatibility_route", name)
+                continue
+        if downsize_pair:
+            steps = labels[large][0]["_steps"]
+            rows = [{k: v for k, v in r.items() if k != "_steps"}
+                    for lb in (large, small) for r in labels[lb]]
+            n_large, n_small = len(labels[large]), len(labels[small])
+            cs, cm = classified[large], classified[small]
+            effect = {"direction": "unsized",
+                      "reason": _OPT81_DOWNSIZE_UNSIZED_REASON}
+            evidence = (
+                f"{_OPT81_DOWNSIZE_SAME_SPEED[:1].upper()}{_OPT81_DOWNSIZE_SAME_SPEED[1:]}"
+                f". `{name}` ran the same "
+                f"{len(steps)} step(s) on two explicit sizes of one runner class and "
+                f"image: {n_large} successful run(s) on `{large}` at p50 "
+                f"{p50[large]:.0f}s and {n_small} on the smaller `{small}` at p50 "
+                f"{p50[small]:.0f}s ({abs(delta_frac):.1%} apart). Runner-minute and "
+                f"cost effect: {_OPT81_DOWNSIZE_COST_EFFECT}. {_OPT81_DISCLOSURE}")
+            me = _measured_evidence(
+                ["Runner label", "Class", "Successful runs (n)", "p50", "Steps executed"],
+                [[f"`{large}`", _opt81_class_display(cs[0], cs[3]), str(n_large),
+                  f"{p50[large]:.0f}s", str(len(steps))],
+                 [f"`{small}`", _opt81_class_display(cm[0], cm[3]), str(n_small),
+                  f"{p50[small]:.0f}s", str(len(steps))]],
+                summary=evidence,
+                note=("The two interleaved distributions execute the same steps. "
+                      "Downsize only ordinary routes; retain pinned, frozen, "
+                      "compatibility and release routes, and verify memory, reliability, "
+                      "work coverage and latency before switching."))
+            f = _new_finding(
+                "OPT81", "MEDIUM", "A Smaller Runner Is About as Fast", wf_path,
+                name, evidence, _OPT81_FIX_STRATEGY,
+                _catalog_anchor("OPT81", _OPT81_TITLE), start_idx + len(out) + 1,
+                wc_p50=0.0, rm=None,
+                size_note=(f"{_OPT81_DOWNSIZE_COST_EFFECT}; no wall-clock credit"),
+                realization="none", measured_evidence=me)
+            f["sizing_basis"] = "measured"
+            f["runner_cost_effect"] = effect
+            # The report's group heading reads this, so it never says "no bill
+            # saving" for a real saving the skill does not price.
+            f["runner_min_unsized_reason"] = _OPT81_DOWNSIZE_UNSIZED_REASON
+            f["faster_runner"] = {
+                "kind": "opt81_downsize", "half": "A1", "job": name,
+                "workflow_file": wf_path,
+                "large": {"label": large, "class": cs[0], "os": cs[1],
+                          "arch": cs[2], "size": cs[3],
+                          "p50_s": _opt81_round(p50[large]), "n": n_large,
+                          "first_run_at": span[large][0], "last_run_at": span[large][1]},
+                "small": {"label": small, "class": cm[0], "os": cm[1],
+                          "arch": cm[2], "size": cm[3],
+                          "p50_s": _opt81_round(p50[small]), "n": n_small,
+                          "first_run_at": span[small][0], "last_run_at": span[small][1]},
+                "large_size_rank": large_rank, "small_size_rank": small_rank,
+                "slowdown_frac": round(delta_frac, 4),
+                "max_abs_delta_frac": _OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC,
+                "min_samples_per_label": _OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL,
+                "step_list_sha": next(iter(shas)), "step_names": list(steps),
+                "rows": rows, "excluded_labels": dict(sorted(excluded.items())),
+                "runner_matrix": matrix, "runner_cost_effect": dict(effect),
+                "disclosure": _OPT81_DISCLOSURE,
+            }
+            out.append(f)
+            continue
+
+        if any(len(labels[lb]) < _OPT81_MIN_SAMPLES_PER_LABEL for lb in (a, b)):
+            _no("fewer_than_min_samples_on_two_labels", name,
+                n={lb: len(labels[lb]) for lb in classified})
+            continue
         slow, fast = (a, b) if (p50[a], a) >= (p50[b], b) else (b, a)
         if p50[slow] == p50[fast]:
             _no("gap_below_floor", name)
@@ -25077,6 +25254,11 @@ _OPT24_CARGO_COMPILE_RE = _re.compile(
 _OPT24_LOG_TS_RE = _re.compile(
     r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)\s+"
 )
+_OPT24_GO_PACKAGE_RE = _re.compile(
+    r"^(?:ok|FAIL)\s+([A-Za-z0-9][A-Za-z0-9._~+/-]*)\s+"
+    r"(\d+(?:\.\d+)?)s(?:\s|$)"
+)
+_OPT24_GO_PACKAGE_DOMINANT_SHARE = 0.60
 
 
 def _opt24_duration_seconds(text: str) -> float | None:
@@ -25097,6 +25279,36 @@ def _opt24_log_timestamp(line: str) -> float | None:
         return parsed.timestamp() if parsed is not None else None
     except (AttributeError, TypeError, ValueError):
         return None
+
+
+def _opt24_go_package_fact(log: str) -> dict[str, Any] | None:
+    """Return the one package that measurably dominates a ``go test`` log.
+
+    Go's package summary is the timing boundary available without changing the
+    repository.  Fail closed when summaries are absent or their time is spread
+    across packages: list-then-run sharding is useful only when one package owns
+    enough of the serial wall to split internally.
+    """
+    elapsed: dict[str, float] = {}
+    for raw in log.splitlines():
+        line = _OPT24_LOG_TS_RE.sub("", raw).strip()
+        match = _OPT24_GO_PACKAGE_RE.match(line)
+        if match:
+            package = match.group(1)
+            elapsed[package] = elapsed.get(package, 0.0) + float(match.group(2))
+    total = sum(elapsed.values())
+    if total <= 0:
+        return None
+    package, seconds = max(elapsed.items(), key=lambda item: item[1])
+    share = seconds / total
+    if share < _OPT24_GO_PACKAGE_DOMINANT_SHARE:
+        return None
+    return {
+        "package": package,
+        "seconds": round(seconds, 1),
+        "total_s": round(total, 1),
+        "share": round(share, 3),
+    }
 
 
 # OPT13's narrow automatic path is deliberately log-backed.  The general
@@ -25688,7 +25900,6 @@ def _detect_opt24_long_test_no_sharding(
                                          "pattern": "OPT24",
                                          "gate": _DOMINANT_STEP_OVERLAP_GATE})
             continue
-        idx += 1
         # Wall-clock saving from sharding: split the job across N shards (assume
         # N=2 conservative). Sharding does not save runner-min (catalog body
         # is explicit on this), so leave rm=0.
@@ -25714,9 +25925,46 @@ def _detect_opt24_long_test_no_sharding(
         test_step_log = (_opt24_test_step_log(logged_job, base_log)
                          if logged_job is not None else "")
         pre_test_floor = _opt24_pre_test_floor(test_step_log, compiled_kind)
+        go_package = (_opt24_go_package_fact(test_step_log)
+                      if compiled_kind == "go" else None)
+        if (go_package is not None
+                and float(go_package["seconds"]) / p50
+                < _OPT24_GO_PACKAGE_DOMINANT_SHARE):
+            go_package = None
+        # Go has no native suite-shard flag. Recommend its list-then-run split
+        # only when the sampled log proves that one package dominates the long
+        # step; balanced packages and missing summaries fail closed.
+        if (compiled_kind == "go" and go_package is None
+                and logs_by_job_id is not None):
+            continue
         compile_note = ""
         measure_first = compiled_kind is not None and pre_test_floor is None
-        if pre_test_floor is not None:
+        go_extra_unsized = ""
+        if go_package is not None:
+            shardable = min(float(go_package["seconds"]), p50)
+            outside = p50 - float(go_package["total_s"])
+            wc = round(min(shardable / 2.0, p50 / 2.0), 1)
+            measure_first = False
+            if outside > 0:
+                pre_test_floor = outside
+                cost = (f"With two shards, the measured repeated floor adds about "
+                        f"{_opt24_floor_label(pre_test_floor)} of runner time per run.")
+            else:
+                # Packages ran concurrently: summed package time is not the
+                # job's test time, so job time minus it measures no floor. The
+                # second leg still repeats checkout, setup and compile.
+                pre_test_floor = None
+                go_extra_unsized = (
+                    "package times overlap, so the floor the second leg repeats "
+                    "is not measurable")
+                cost = ("With two shards, the second leg adds runner time per run "
+                        f"that is unsized ({go_extra_unsized}).")
+            compile_note = (
+                f"Go package `{go_package['package']}` accounts for "
+                f"{float(go_package['share']) * 100:.0f}% of the package time "
+                f"({shardable:.0f}s). {cost}"
+            )
+        elif pre_test_floor is not None:
             pre_test_floor = min(pre_test_floor, shardable)
             shardable = max(0.0, shardable - pre_test_floor)
             wc = round(shardable / 2.0, 1)
@@ -25881,6 +26129,7 @@ def _detect_opt24_long_test_no_sharding(
         )
         if compile_note:
             evidence_text += f"; {compile_note}"
+        idx += 1
         finding = _new_finding(
             "OPT24", "HIGH", "Long Test Job Without Sharding", wf_path, base,
             evidence_text,
@@ -25897,6 +26146,13 @@ def _detect_opt24_long_test_no_sharding(
             finding["shardable_test_s"] = round(shardable, 1)
         elif measure_first:
             finding["pre_test_floor_unmeasured"] = True
+        if go_package is not None:
+            finding["go_dominant_package"] = go_package["package"]
+            finding["go_package_share"] = go_package["share"]
+            if go_extra_unsized:
+                finding["go_shard_extra_runner_unsized_reason"] = go_extra_unsized
+            else:
+                finding["go_shard_extra_runner_s"] = round(pre_test_floor or 0.0, 1)
         out.append(finding)
     return out
 
@@ -26296,6 +26552,29 @@ _SHARD_CMD_RE = _re.compile(
     _re.IGNORECASE)
 
 
+_GO_RUN_FILTER_RE = _re.compile(
+    r"\bgo\s+test\b[^\n]*?\s-(?:test\.)?(?:run|skip)(?:[=\s]|$)", _re.IGNORECASE)
+
+
+def _go_matrix_run_split(job: dict[str, Any], matrix: Any) -> bool:
+    """A Go job already split into matrix legs by a ``-run``/``-skip`` filter.
+
+    Go has no native shard flag, so a list-then-run split shows up as a matrix
+    whose value reaches ``go test -run`` through the command or the step/job
+    environment.  Such a job is already sharded and must not be told to shard.
+    """
+    if not isinstance(matrix, dict) or not matrix:
+        return False
+    job_env = str(job.get("env") or "")
+    for step in job_walk(job).steps():
+        run = str(step.get("run", "") or "")
+        if not _GO_RUN_FILTER_RE.search(run):
+            continue
+        if "matrix." in f"{run}\n{step.get('env') or ''}\n{job_env}":
+            return True
+    return False
+
+
 def _sharded_bases(doc: dict[str, Any]) -> set[str]:
     """Base job names in this workflow that are ALREADY sharded — via a split/shard
     matrix axis OR a command-line splitter in their run steps — so OPT24 must not flag
@@ -26318,7 +26597,8 @@ def _sharded_bases(doc: dict[str, Any]) -> set[str]:
         cmd_sharded = any(
             _SHARD_CMD_RE.search(str(s.get("run", "") or ""))
             for s in job_walk(job).steps())
-        if not (axis_sharded or cmd_sharded):
+        go_split = _go_matrix_run_split(job, matrix)
+        if not (axis_sharded or cmd_sharded or go_split):
             continue
         name = job.get("name")
         # The gh job base is `name:` when it's a plain literal (no matrix interpolation),
@@ -30560,6 +30840,7 @@ def _persist_pole_logs(
         opt13_fact = _opt13_build_in_quality_log(log)
         runtime_ts_loader = (leaf0 if leaf0.get("fix_key") == "runtime-ts-transpilation"
                              else None)
+        go_fixed_wait = _opt19_go_wait_fact(log, repr_dur)
         go_slow_tests = _go_slow_test_results(log)
         go_cache_trim = _go_cache_trim_fact(client, repo, log, repr_job, qual)
         manifest.append({
@@ -30573,6 +30854,7 @@ def _persist_pole_logs(
             **({"opt13_build_in_script": opt13_fact} if opt13_fact else {}),
             **({"runtime_ts_loader": runtime_ts_loader}
                if runtime_ts_loader else {}),
+            **({"go_fixed_wait": go_fixed_wait} if go_fixed_wait else {}),
             **({"go_slow_tests": go_slow_tests} if go_slow_tests else {}),
             **({"go_cache_trim": go_cache_trim} if go_cache_trim else {}),
         })
@@ -30727,6 +31009,741 @@ def _detect_runtime_ts_transpilation(
         out.append(finding)
     return out
 
+
+_OPT19_GO_MIN_INTERVALS = 2
+_OPT19_GO_MIN_TEST_SHARE = 0.50
+_OPT19_GO_MIN_JOB_SHARE = 0.20
+_OPT19_GO_RACE_HELPER_MIN_SPAWNS = 3
+_OPT19_GO_MAX_FILES = 400
+_OPT19_GO_MAX_FILE_BYTES = 512_000
+_OPT19_GO_WAIT_OUTPUT_RE = _re.compile(
+    r"\b(?:wait(?:ing)?|poll(?:ing)?|retry(?:ing)?|grace|settling)\b",
+    _re.IGNORECASE,
+)
+# `go test ... -race` on one line, or `-race` inside a GOFLAGS value.
+_OPT19_GO_RACE_RE = _re.compile(
+    r"(?m)^(?=.*(?:\bgo\s+test\b|\bGOFLAGS\b)).*?(?:(?<=\s)|(?<=['\"=:]))"
+    r"-race(?:=true)?(?=\s|$|['\"])")
+_OPT19_GO_TEST_CMD_RE = _re.compile(r"\bgo\s+test\b[^\n]*")
+_OPT19_GO_RUN_RE = _re.compile(r"^=== (?:RUN|CONT)\s+(?P<test>Test\w*)(?:/\S*)?\s*$")
+_OPT19_GO_RESULT_RE = _re.compile(
+    r"^(?P<indent>\s*)--- (?:PASS|FAIL):\s+(?P<test>Test\w*)(?P<sub>/\S+)?\s+"
+    r"\((?P<seconds>\d+(?:\.\d+)?)s\)\s*$")
+_OPT19_GO_PACKAGE_RE = _re.compile(
+    r"^(?:ok|FAIL)\s+(?P<package>[A-Za-z0-9_.\-~/]+)\s+"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)s|(?P<cached>\(cached\))|\[[^\]]*\])")
+_OPT19_GO_UNITS = {"Nanosecond": 1e-9, "Microsecond": 1e-6, "Millisecond": 1e-3,
+                   "Second": 1.0, "Minute": 60.0, "Hour": 3600.0}
+_OPT19_GO_TEST_FUNC_RE = _re.compile(
+    r"(?m)^func\s+(?P<test>Test\w*)\s*\(\s*[A-Za-z_]\w*\s+\*testing\.T\s*\)")
+_OPT19_GO_FUNC_RE = _re.compile(r"(?m)^func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(")
+_OPT19_GO_REEXEC_RE = _re.compile(
+    r"\bexec\.Command(?:Context)?\s*\(\s*(?:[A-Za-z_][\w.]*\s*,\s*)?"
+    r"(?:os\.Args\s*\[\s*0\s*\]|testenv\.Executable\s*\(\s*\w+\s*\)|"
+    r"(?P<var>[A-Za-z_]\w*)\s*[,)])")
+_OPT19_GO_SYNC_RE = _re.compile(r"\.(?:Run|Output|CombinedOutput)\s*\(\s*\)")
+_OPT19_GO_ASYNC_RE = _re.compile(r"\.(?:Start|Process)\b")
+
+
+def _opt19_go_message_key(text: str) -> str:
+    return _re.sub(r"\d+(?:\.\d+)?", "#", _re.sub(r"\s+", " ", text.strip()))
+
+
+def _opt19_go_wait_fact(log: str, job_duration_s: float | None) -> dict[str, Any] | None:
+    """What one long-pole ``go test`` log measures about fixed waits.
+
+    Reads ``go test -json`` events and plain (``-v`` or not) output with the
+    runner's own line timestamps: per-test elapsed records, package times
+    (a ``(cached)`` package ran nothing and is dropped), whether the job runs
+    the race detector, and whether ``atexit_sleep_ms=0`` is already present.
+
+    ``poll`` is the measured route: repeated, equally spaced wait messages
+    inside one test whose gaps dominate both that test and the job. Merely
+    slow or irregular tests do not produce it. The static routes (test-body
+    sleeps, race helpers) are resolved against the checkout by the detector.
+    """
+    if not isinstance(job_duration_s, (int, float)) or job_duration_s <= 0:
+        return None
+    elapsed: dict[tuple[str, str], float] = {}
+    packages: dict[str, float] = {}
+    cached: set[str] = set()
+    messages: dict[tuple[str, str, str], list[float]] = {}
+    pending_elapsed: dict[str, float] = {}
+    pending_messages: dict[tuple[str, str], list[float]] = {}
+    current = ""
+    commands: list[str] = []
+
+    def flush(package: str) -> None:
+        for test, seconds in pending_elapsed.items():
+            elapsed[(package, test)] = max(seconds, elapsed.get((package, test), 0.0))
+        for (test, message), stamps in pending_messages.items():
+            messages.setdefault((package, test, message), []).extend(stamps)
+        pending_elapsed.clear()
+        pending_messages.clear()
+
+    for raw in log.splitlines():
+        if not raw.strip():
+            continue
+        parsed = _opt80_log_line(raw)
+        stamp, text = (parsed[0].timestamp(), parsed[1]) if parsed else (None, raw.strip())
+        start = text.find("{")
+        if start >= 0 and '"Action"' in text:
+            try:
+                row = json.loads(text[start:])
+            except (json.JSONDecodeError, TypeError):
+                row = None
+            if isinstance(row, dict):
+                package = str(row.get("Package") or "")
+                test = str(row.get("Test") or "")
+                action = str(row.get("Action") or "")
+                output = str(row.get("Output") or "").strip()
+                value = row.get("Elapsed")
+                if action in {"pass", "fail"} and isinstance(value, (int, float)) and value > 0:
+                    if test and "/" not in test:
+                        elapsed[(package, test)] = float(value)
+                    elif not test and package:
+                        packages[package] = float(value)
+                if (action == "output" and test and "/" not in test
+                        and _OPT19_GO_WAIT_OUTPUT_RE.search(output)
+                        and not output.startswith(("=== ", "--- "))):
+                    when = _parse_dt(row.get("Time"))
+                    if when is not None:
+                        messages.setdefault(
+                            (package, test, _opt19_go_message_key(output)), []
+                        ).append(when.timestamp())
+                if action == "output" and not test and "(cached)" in output and package:
+                    cached.add(package)
+                continue
+        if _OPT19_GO_TEST_CMD_RE.search(text):
+            commands.append(_OPT19_GO_TEST_CMD_RE.search(text).group(0))
+        run = _OPT19_GO_RUN_RE.match(text)
+        if run:
+            current = run.group("test")
+            continue
+        result = _OPT19_GO_RESULT_RE.match(text)
+        if result:
+            if not result.group("indent") and not result.group("sub"):
+                test = result.group("test")
+                pending_elapsed[test] = max(float(result.group("seconds")),
+                                            pending_elapsed.get(test, 0.0))
+            continue
+        package_line = _OPT19_GO_PACKAGE_RE.match(text)
+        if package_line:
+            name = package_line.group("package")
+            flush(name)
+            if package_line.group("cached"):
+                cached.add(name)
+            elif package_line.group("seconds"):
+                packages[name] = max(float(package_line.group("seconds")),
+                                     packages.get(name, 0.0))
+            current = ""
+            continue
+        if current and stamp is not None and _OPT19_GO_WAIT_OUTPUT_RE.search(text):
+            pending_messages.setdefault(
+                (current, _opt19_go_message_key(text)), []).append(stamp)
+    flush("")
+    for name in cached:
+        packages.pop(name, None)
+    elapsed = {key: value for key, value in elapsed.items() if key[0] not in cached}
+
+    poll: dict[str, Any] | None = None
+    for (package, test, message), stamps in messages.items():
+        ordered = sorted(set(stamps))
+        gaps = [later - earlier for earlier, later in zip(ordered, ordered[1:])
+                if later > earlier]
+        if len(gaps) < _OPT19_GO_MIN_INTERVALS:
+            continue
+        interval = statistics.median(gaps)
+        if max(gaps) - min(gaps) > max(0.25, interval * 0.10):
+            continue
+        fixed_s = sum(gaps)
+        test_s = elapsed.get((package, test))
+        if (not isinstance(test_s, (int, float)) or fixed_s > test_s
+                or fixed_s / test_s < _OPT19_GO_MIN_TEST_SHARE
+                or fixed_s / float(job_duration_s) < _OPT19_GO_MIN_JOB_SHARE):
+            continue
+        candidate = {
+            "kind": "poll-interval", "package": package, "test": test,
+            "fixed_wait_s": round(fixed_s, 2),
+            "interval_s": round(interval, 2), "wait_count": len(gaps),
+            "test_elapsed_s": round(test_s, 2), "message": message,
+        }
+        if poll is None or candidate["fixed_wait_s"] > poll["fixed_wait_s"]:
+            poll = candidate
+    tests = [{"package": package, "test": test, "elapsed_s": round(seconds, 2)}
+             for (package, test), seconds in sorted(elapsed.items())]
+    package_rows = [{"package": name, "elapsed_s": round(seconds, 2)}
+                    for name, seconds in sorted(packages.items())]
+    if poll is None and not tests and not package_rows:
+        return None
+    return {
+        "poll": poll, "tests": tests, "packages": package_rows,
+        "race": bool(_OPT19_GO_RACE_RE.search(log)),
+        "exit_sleep_off": bool(_re.search(r"\batexit_sleep_ms\s*=\s*0\b", log)),
+        # A `-run`/`-skip` filter means a package line does not say which
+        # tests ran; the package-level route then stays quiet.
+        "filtered": any(_re.search(r"(?<!\S)-(?:test\.)?(?:run|skip)\b", cmd)
+                        for cmd in commands),
+        "command_seen": bool(commands),
+    }
+
+
+def _opt19_go_mask(text: str) -> str:
+    """Blank Go comments and string/rune literals, keeping offsets and newlines."""
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            for j in range(i, end):
+                if text[j] != "\n":
+                    out[j] = " "
+            i = end
+            continue
+        if ch in "\"'`":
+            j = i + 1
+            while j < n and text[j] != ch:
+                if ch != "`" and text[j] == "\\":
+                    j += 1
+                elif ch != "`" and text[j] == "\n":
+                    break
+                j += 1
+            end = min(j + 1, n)
+            for k in range(i, end):
+                if text[k] != "\n":
+                    out[k] = " "
+            i = end
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _opt19_go_block_end(masked: str, opening: int, pair: str = "{}") -> int | None:
+    depth = 0
+    for index in range(opening, len(masked)):
+        if masked[index] == pair[0]:
+            depth += 1
+        elif masked[index] == pair[1]:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def _opt19_go_import_path(root: Path, directory: Path) -> str | None:
+    current = directory
+    while True:
+        mod = current / "go.mod"
+        try:
+            if mod.is_file():
+                found = _re.search(r'(?m)^\s*module\s+"?([^\s"]+)',
+                                   mod.read_text(encoding="utf-8"))
+                if not found:
+                    return None
+                rel = directory.relative_to(current).as_posix()
+                return found.group(1) if rel == "." else f"{found.group(1)}/{rel}"
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if current == root or current.parent == current:
+            return None
+        current = current.parent
+
+
+def _opt19_go_index(root: "Path | None") -> tuple[list[dict[str, Any]], bool]:
+    """Every Go package directory with ``_test.go`` files under ``root``.
+
+    Returns ``(packages, complete)``. Each package carries its import path,
+    its test files (raw and masked) and the duration constants declared in
+    any of its files. ``complete`` is False when a cap or unreadable file
+    truncated the read; a test name is then not provably unique.
+    """
+    if root is None:
+        return [], False
+    try:
+        resolved = root.resolve()
+        paths = sorted(p for p in root.rglob("*_test.go")
+                       if not any(part in {"vendor", "testdata", "node_modules"}
+                                  or part.startswith(".")
+                                  for part in p.relative_to(root).parts[:-1]))
+    except OSError:
+        return [], False
+    complete = len(paths) <= _OPT19_GO_MAX_FILES
+    by_dir: dict[Path, list[Path]] = {}
+    for path in paths[:_OPT19_GO_MAX_FILES]:
+        by_dir.setdefault(path.parent, []).append(path)
+    out: list[dict[str, Any]] = []
+    for directory, files in sorted(by_dir.items()):
+        tests: list[dict[str, Any]] = []
+        consts: dict[str, str] = {}
+        ok = True
+        try:
+            sources = sorted(directory.glob("*.go"))
+        except OSError:
+            complete = False
+            continue
+        for path in sources:
+            try:
+                if (path.is_symlink() or not path.resolve().is_relative_to(resolved)
+                        or path.stat().st_size > _OPT19_GO_MAX_FILE_BYTES):
+                    ok = False
+                    continue
+                raw = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError, ValueError):
+                ok = False
+                continue
+            masked = _opt19_go_mask(raw)
+            # Package-level `const` durations only: a `var` can be shortened by
+            # TestMain or another test, so its value is not readable statically.
+            for block in _re.finditer(r"(?m)^const\s*\(", masked):
+                end = _opt19_go_block_end(masked, block.end() - 1, "()")
+                body = masked[block.end():(end or block.end()) - 1]
+                for line in body.splitlines():
+                    found = _re.match(
+                        r"^\s*([A-Za-z_]\w*)\s*(?:time\.Duration\s*)?=\s*(.+?)\s*$", line)
+                    if found:
+                        consts[found.group(1)] = found.group(2)
+            for found in _re.finditer(
+                    r"(?m)^const\s+([A-Za-z_]\w*)\s*(?:time\.Duration\s*)?=\s*(.+?)\s*$",
+                    masked):
+                consts[found.group(1)] = found.group(2)
+            if path in files:
+                tests.append({"path": path, "raw": raw, "masked": masked})
+        if not ok:
+            complete = False
+        out.append({"dir": directory,
+                    "rel": directory.relative_to(root).as_posix(),
+                    "import_path": _opt19_go_import_path(root, directory),
+                    "files": tests, "consts": consts, "complete": ok})
+    return out, complete
+
+
+def _opt19_go_duration_s(expr: str, consts: dict[str, str], depth: int = 0) -> float | None:
+    """Seconds in a constant Go duration expression, or None when not constant."""
+    text = _re.sub(r"\s+", "", expr)
+    while text.startswith("(") and _opt19_go_block_end(text, 0, "()") == len(text):
+        text = text[1:-1]
+    unit = r"time\.(Nanosecond|Microsecond|Millisecond|Second|Minute|Hour)"
+    number = r"(\d+(?:\.\d+)?)"
+    for pattern, order in ((rf"{unit}", "u"), (rf"{number}\*{unit}", "nu"),
+                           (rf"{unit}\*{number}", "un"),
+                           (rf"time\.Duration\({number}\)\*{unit}", "nu")):
+        found = _re.fullmatch(pattern, text)
+        if found:
+            groups = found.groups()
+            if order == "u":
+                return _OPT19_GO_UNITS[groups[0]]
+            value, name = (groups[0], groups[1]) if order == "nu" else (groups[1], groups[0])
+            return float(value) * _OPT19_GO_UNITS[name]
+    if depth >= 3:
+        return None
+    found = _re.fullmatch(r"(?:(\d+(?:\.\d+)?)\*)?([A-Za-z_]\w*)(?:\*(\d+(?:\.\d+)?))?", text)
+    if found and found.group(2) in consts and not (found.group(1) and found.group(3)):
+        base = _opt19_go_duration_s(consts[found.group(2)], consts, depth + 1)
+        if base is None:
+            return None
+        return base * float(found.group(1) or found.group(3) or 1)
+    return None
+
+
+def _opt19_go_fixed_sleeps(masked: str, opening: int, end: int,
+                           consts: dict[str, str]) -> tuple[float, list[int]] | None:
+    """Unconditional fixed waits in one test body: ``time.Sleep(D)`` and
+    ``<-time.After(D)`` with a constant ``D``, outside loops, branches,
+    goroutines and closures (a ``t.Run`` subtest body counts; it runs inline).
+
+    None when the test cannot be read as serial and always-run: it calls
+    ``Parallel``, may skip or return early, or already uses ``testing/synctest``.
+    """
+    body = masked[opening:end]
+    if (_re.search(r"\.Parallel\s*\(|\.Skip(?:f|Now)?\s*\(|\bsynctest\.|\breturn\b", body)):
+        return None
+    total = 0.0
+    lines: list[int] = []
+    stack: list[str] = []
+    boundary = statement_start = opening + 1
+    index = opening + 1
+    wait_re = _re.compile(r"\btime\.Sleep\s*\(|<-\s*time\.After\s*\(")
+    while index < end - 1:
+        ch = masked[index]
+        if ch == "{":
+            header = masked[boundary:index]
+            if _re.search(r"\.Run\s*\(.*\bfunc\s*\(", header):
+                kind = "inline"
+            elif _re.search(r"\b(?:for|if|else|switch|select|go|defer|func)\b", header):
+                kind = "conditional"
+            else:
+                kind = "inline"
+            stack.append(kind)
+            index += 1
+            boundary = statement_start = index
+            continue
+        if ch == "}":
+            if stack:
+                stack.pop()
+            index += 1
+            boundary = statement_start = index
+            continue
+        if ch == "\n":
+            index += 1
+            boundary = statement_start = index
+            continue
+        if ch == ";":
+            # A `for init; cond; post {` header spans semicolons: only the
+            # statement start moves, not the block header's start.
+            index += 1
+            statement_start = index
+            continue
+        found = wait_re.match(masked, index)
+        if found:
+            close = _opt19_go_block_end(masked, found.end() - 1, "()")
+            if close is None:
+                return None
+            statement = masked[statement_start:index]
+            if (all(kind == "inline" for kind in stack)
+                    and not _re.search(r"\b(?:go|defer|case|select)\b", statement)):
+                seconds = _opt19_go_duration_s(masked[found.end():close - 1], consts)
+                if seconds is not None and seconds > 0:
+                    total += seconds
+                    lines.append(masked.count("\n", 0, index) + 1)
+            index = close
+            continue
+        index += 1
+    return total, lines
+
+
+def _opt19_go_test_definitions(
+    index: list[dict[str, Any]], name: str, package: str | None, complete: bool,
+) -> list[tuple[dict[str, Any], dict[str, Any], re.Match[str]]]:
+    hits = []
+    for pkg in index:
+        if package and pkg["import_path"] != package:
+            continue
+        for source in pkg["files"]:
+            for found in _OPT19_GO_TEST_FUNC_RE.finditer(source["masked"]):
+                if found.group("test") == name:
+                    hits.append((pkg, source, found))
+    if package and not any(pkg["import_path"] == package for pkg in index):
+        return []
+    if not package and not complete:
+        return []
+    return hits
+
+
+def _opt19_go_sleep_of(pkg: dict[str, Any], source: dict[str, Any],
+                       found: re.Match[str]) -> dict[str, Any] | None:
+    masked = source["masked"]
+    opening = masked.find("{", found.end())
+    end = _opt19_go_block_end(masked, opening) if opening >= 0 else None
+    if end is None:
+        return None
+    sleeps = _opt19_go_fixed_sleeps(masked, opening, end, pkg["consts"])
+    if not sleeps or sleeps[0] <= 0:
+        return None
+    rel = source["path"].name
+    file = f"{pkg['rel']}/{rel}" if pkg["rel"] not in {"", "."} else rel
+    return {"test": found.group("test"), "file": file, "lines": sleeps[1],
+            "sleep_s": round(sleeps[0], 3)}
+
+
+def _opt19_go_static_sleep(index: list[dict[str, Any]], complete: bool,
+                           facts: dict[str, Any], job_s: float) -> dict[str, Any] | None:
+    """The measured test (or package) whose source sleeps dominate it."""
+    best: dict[str, Any] | None = None
+    timed_packages = {row["package"] for row in facts.get("tests") or []}
+    for row in facts.get("tests") or []:
+        test_s = float(row.get("elapsed_s") or 0)
+        if test_s <= 0:
+            continue
+        hits = _opt19_go_test_definitions(
+            index, str(row.get("test") or ""), row.get("package") or None, complete)
+        if len(hits) != 1 or not hits[0][0]["complete"]:
+            continue
+        sleep = _opt19_go_sleep_of(*hits[0])
+        if not sleep:
+            continue
+        fixed = float(sleep["sleep_s"])
+        if (fixed > test_s or fixed / test_s < _OPT19_GO_MIN_TEST_SHARE
+                or fixed / job_s < _OPT19_GO_MIN_JOB_SHARE):
+            continue
+        candidate = {"kind": "test-sleep", "package": row.get("package") or "",
+                     "test": sleep["test"], "fixed_wait_s": round(fixed, 2),
+                     "test_elapsed_s": round(test_s, 2),
+                     "sources": [sleep], "level": "test"}
+        if best is None or candidate["fixed_wait_s"] > best["fixed_wait_s"]:
+            best = candidate
+    if best or facts.get("filtered") or not facts.get("command_seen"):
+        return best
+    # Without per-test times, a package line bounds its serial tests' sleeps.
+    for row in facts.get("packages") or []:
+        package = str(row.get("package") or "")
+        if not package or package in timed_packages:
+            continue
+        matches = [pkg for pkg in index if pkg["import_path"] == package]
+        if len(matches) != 1 or not matches[0]["complete"]:
+            continue
+        pkg = matches[0]
+        sleeps = [s for source in pkg["files"]
+                  for found in _OPT19_GO_TEST_FUNC_RE.finditer(source["masked"])
+                  for s in [_opt19_go_sleep_of(pkg, source, found)] if s]
+        fixed = sum(float(s["sleep_s"]) for s in sleeps)
+        package_s = float(row.get("elapsed_s") or 0)
+        if (not sleeps or package_s <= 0 or fixed > package_s
+                or fixed / package_s < _OPT19_GO_MIN_TEST_SHARE
+                or fixed / job_s < _OPT19_GO_MIN_JOB_SHARE):
+            continue
+        candidate = {"kind": "test-sleep", "package": package,
+                     "test": sleeps[0]["test"] if len(sleeps) == 1 else "",
+                     "fixed_wait_s": round(fixed, 2),
+                     "test_elapsed_s": round(package_s, 2),
+                     "sources": sleeps, "level": "package"}
+        if best is None or candidate["fixed_wait_s"] > best["fixed_wait_s"]:
+            best = candidate
+    return best
+
+
+def _opt19_go_functions(masked: str) -> list[tuple[str, int, int, str]]:
+    """Top-level functions: (name, start, end, signature text)."""
+    out = []
+    for found in _OPT19_GO_FUNC_RE.finditer(masked):
+        params_end = _opt19_go_block_end(masked, found.end() - 1, "()")
+        if params_end is None:
+            continue
+        opening = masked.find("{", params_end)
+        end = _opt19_go_block_end(masked, opening) if opening >= 0 else None
+        if end is None:
+            continue
+        out.append((found.group("name"), found.start(), end, masked[params_end:opening]))
+    return out
+
+
+def _opt19_go_race_helpers(index: list[dict[str, Any]],
+                           facts: dict[str, Any]) -> dict[str, Any] | None:
+    """Synchronous re-execs of the race-built test binary in a package the
+    race job ran, with no ``atexit_sleep_ms`` override anywhere in it."""
+    ran = ({str(row.get("package") or "") for row in facts.get("packages") or []}
+           | {str(row.get("package") or "") for row in facts.get("tests") or []}) - {""}
+    best: dict[str, Any] | None = None
+    for pkg in index:
+        if pkg["import_path"] not in ran or not pkg["complete"]:
+            continue
+        if any("atexit_sleep_ms" in source["raw"] for source in pkg["files"]):
+            continue
+        functions = [(source, *fn) for source in pkg["files"]
+                     for fn in _opt19_go_functions(source["masked"])]
+        constructors: set[str] = set()
+        sites: list[tuple[str, int]] = []
+        for source, name, start, end, signature in functions:
+            body = source["masked"][start:end]
+            reexecs = []
+            for found in _OPT19_GO_REEXEC_RE.finditer(body):
+                var = found.group("var")
+                if var and not _re.search(
+                        rf"\b{_re.escape(var)}\b[^\n=]*:?=\s*(?:os\.Executable\s*\(|"
+                        r"os\.Args\s*\[\s*0\s*\])", body):
+                    continue
+                reexecs.append(found)
+            if not reexecs or _OPT19_GO_ASYNC_RE.search(body):
+                continue
+            if _re.search(r"\*\s*exec\.Cmd\b", signature):
+                constructors.add(name)
+            elif _OPT19_GO_SYNC_RE.search(body):
+                line = source["masked"].count("\n", 0, start + reexecs[0].start()) + 1
+                sites.extend((source["path"].name, line) for _ in reexecs)
+        for source, name, start, end, _signature in functions:
+            if name in constructors:
+                continue
+            body = source["masked"][start:end]
+            if _OPT19_GO_ASYNC_RE.search(body) or not _OPT19_GO_SYNC_RE.search(body):
+                continue
+            for helper in constructors:
+                for found in _re.finditer(rf"(?<![\w.]){_re.escape(helper)}\s*\(", body):
+                    sites.append((source["path"].name,
+                                  source["masked"].count("\n", 0, start + found.start()) + 1))
+        if len(sites) < _OPT19_GO_RACE_HELPER_MIN_SPAWNS:
+            continue
+        candidate = {
+            "kind": "race-helper-exit", "package": pkg["import_path"],
+            "helper_sites": len(sites),
+            "sources": [{"file": (f"{pkg['rel']}/{f}" if pkg["rel"] not in {"", "."} else f),
+                         "line": line} for f, line in sorted(set(sites))[:6]],
+        }
+        if best is None or candidate["helper_sites"] > best["helper_sites"]:
+            best = candidate
+    return best
+
+
+def _detect_opt19_go_waits(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int, root: "Path | None" = None,
+) -> list[dict[str, Any]]:
+    """Turn Go fixed waits on drilled long poles into OPT19 findings.
+
+    Three routes: a measured poll interval in the log; constant test-body
+    sleeps read from ``_test.go`` that dominate a measured test or package;
+    and synchronous re-execs of the race-built test binary in a race job.
+    """
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    index: list[dict[str, Any]] | None = None
+    complete = False
+    for entry in pole_logs:
+        facts = entry.get("go_fixed_wait")
+        job_s = entry.get("duration_s")
+        if not isinstance(facts, dict) or not isinstance(job_s, (int, float)) or job_s <= 0:
+            continue
+        found: list[dict[str, Any]] = []
+        if isinstance(facts.get("poll"), dict):
+            found.append(facts["poll"])
+        elif root is not None:
+            if index is None:
+                index, complete = _opt19_go_index(root)
+            sleep = _opt19_go_static_sleep(index, complete, facts, float(job_s))
+            if sleep:
+                found.append(sleep)
+        if facts.get("race") and not facts.get("exit_sleep_off") and root is not None:
+            if index is None:
+                index, complete = _opt19_go_index(root)
+            helpers = _opt19_go_race_helpers(index, facts)
+            if helpers:
+                found.append(helpers)
+        wf = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        url = str(entry.get("html_url") or "")
+        runs = volume_by_workflow.get(wf)
+        for fact in found:
+            kind = fact.get("kind")
+            if kind == "race-helper-exit":
+                sites = int(fact.get("helper_sites") or 0)
+                where = ", ".join(f"`{s['file']}:{s['line']}`" for s in fact["sources"])
+                evidence = (
+                    f"The representative `{job}` log runs `go test` with the race "
+                    f"detector, and package `{fact['package']}` re-executes its "
+                    f"race-built test binary synchronously at {sites} call sites "
+                    f"({where}) without an `atexit_sleep_ms=0` override. Each such "
+                    "child sleeps for the race runtime's default 1 s before it exits."
+                )
+                fix = (
+                    "Preserve every existing `GORACE` option and append "
+                    "`atexit_sleep_ms=0` only to the environment of the synchronous "
+                    "helper children (for example, in the helper that builds the "
+                    "`exec.Cmd`); keep the parent job, its race options and any "
+                    "asynchronous children unchanged. Then compare the package's "
+                    "`go test -race` time before and after on the same runner."
+                )
+                size_note = (
+                    "wall-clock effect: unsized (the log does not count helper "
+                    "re-execs per run; each one sleeps 1 s at exit by default); "
+                    "runner-minute saving: unsized (the log does not count helper "
+                    "re-execs per run)")
+                idx += 1
+                finding = _new_finding(
+                    "OPT19", "MEDIUM", "Race Helper Exit Sleep", wf, job, evidence,
+                    fix, "opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout",
+                    idx, wc_p50=0.0, rm=None, size_note=size_note, realization="none",
+                    measured_evidence=_measured_evidence(
+                        ["Helper call site", "Package", "Representative run"],
+                        [[f"`{s['file']}:{s['line']}`", f"`{fact['package']}`",
+                          f"[job log]({url})" if url else "captured job log"]
+                         for s in fact["sources"]],
+                        evidence,
+                        "Static source read; measure the package before and after."),
+                )
+                finding["sizing_basis"] = "measured"
+                finding["go_wait_kind"] = kind
+                finding["go_race_helper_sites"] = sites
+                out.append(finding)
+                continue
+            seconds = float(fact.get("fixed_wait_s") or 0)
+            if seconds <= 0:
+                continue
+            runner_min = (round(seconds * runs / 60.0, 1)
+                          if isinstance(runs, int) and runs > 0 else None)
+            if kind == "poll-interval":
+                test = str(fact.get("test") or "Go test")
+                evidence = (
+                    f"`{test}` spends {seconds:.1f}s in "
+                    f"{int(fact.get('wait_count') or 0)} measured "
+                    f"{float(fact.get('interval_s') or 0):.1f}s fixed poll intervals "
+                    f"of its {float(fact.get('test_elapsed_s') or 0):.1f}s "
+                    "in the representative long-pole log."
+                )
+                fix = (
+                    "Change only the test. Run the waiting test on `testing/synctest`'s "
+                    "virtual clock. If the dependency cannot use that clock, expose "
+                    "only the interval as a package variable that this test shortens "
+                    "and restores with `t.Cleanup`; keep the production default "
+                    "unchanged and retain the timeout assertions."
+                )
+                rows = [[f"`{job}`", f"`{test}`", f"{seconds:.1f}s",
+                         f"[job log]({url})" if url else "captured job log"]]
+                headers = ["Job", "Test", "Measured fixed wait", "Representative run"]
+                basis = "measured fixed-wait ceiling"
+            else:
+                sources = fact.get("sources") or []
+                lead = sources[0] if sources else {}
+                subject = (f"`{fact['test']}`" if fact.get("test")
+                           else f"the serial tests of package `{fact['package']}`")
+                measured = ("its measured" if fact.get("level") == "test"
+                            else "the package's measured")
+                evidence = (
+                    f"{subject} sleep for a constant {seconds:.1f}s in "
+                    f"`time.Sleep`/`time.After` calls (`{lead.get('file')}` lines "
+                    f"{', '.join(str(n) for n in (lead.get('lines') or [])[:6])}), "
+                    f"{seconds / float(fact['test_elapsed_s']):.0%} of {measured} "
+                    f"{float(fact['test_elapsed_s']):.1f}s in the representative "
+                    "long-pole log."
+                )
+                fix = (
+                    "Change only the test. Replace each fixed sleep with a wait on "
+                    "the event it stands in for (a channel, or a readiness check "
+                    "polled with a deadline). Where it waits out a timer in the code "
+                    "under test, run the test on `testing/synctest`'s virtual clock, "
+                    "or expose only that interval as a package variable the test "
+                    "shortens and restores with `t.Cleanup`; keep the production "
+                    "default unchanged and retain the timeout assertions."
+                )
+                rows = [[f"`{s.get('test')}`", f"`{s.get('file')}`",
+                         ", ".join(f"L{n}" for n in (s.get("lines") or [])[:8]),
+                         f"{float(s.get('sleep_s') or 0):.1f}s"]
+                        for s in sources]
+                headers = ["Test", "Source", "Sleep lines", "Constant sleep"]
+                basis = "constant source sleeps, within the measured test time"
+            if runner_min is not None:
+                size_note = (
+                    f"runner-minute saving: at most {runner_min:.1f}/month ({basis}"
+                    f" of {seconds:.1f}s from 1 representative run x {runs} workflow "
+                    "runs in 30 days)"
+                )
+            elif runs == 0:
+                size_note = ("runner-minute saving: unsized (the 30-day volume window "
+                             "holds no runs of this workflow)")
+            else:
+                size_note = ("runner-minute saving: unsized (30-day run volume for this "
+                             "workflow is unavailable)")
+            idx += 1
+            finding = _new_finding(
+                "OPT19", "HIGH", "Go Test Fixed Wait Dominance", wf, job, evidence,
+                fix, "opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout",
+                idx, wc_p50=round(seconds, 1), rm=runner_min,
+                size_note=size_note, realization="direct",
+                measured_evidence=_measured_evidence(
+                    headers, rows, evidence,
+                    "The fixed wait is a ceiling; re-measure the same test after the change."),
+            )
+            finding["sizing_basis"] = "measured"
+            finding["go_wait_kind"] = kind
+            finding["go_fixed_wait_s"] = round(seconds, 1)
+            if isinstance(runs, int):
+                finding["workflow_runs_30d"] = runs
+            out.append(finding)
+    return out
 
 _GO_TEST_COMMAND_RE = re.compile(
     r"^##\[group\]Run\s+(?:(?:env|sudo|time)\s+)?(?:go\s+test|gotestsum)(?:\s|$)",
@@ -36476,6 +37493,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         new = _detect_runtime_ts_transpilation(pole_logs, vol_by_wf, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        new = _detect_opt19_go_waits(pole_logs, vol_by_wf, next_id, root)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
         new = _detect_go_test_parallelism(pole_logs, root, next_id)

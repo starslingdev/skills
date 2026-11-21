@@ -34,11 +34,14 @@ def _have_yaml() -> bool:
     ).returncode == 0
 
 
-def _scan(root: Path) -> dict:
+def _scan(root: Path, default_branch: str | None = None) -> dict:
     if not _have_yaml():
         pytest.skip("PyYAML not installed in the test runner")
+    command = [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)]
+    if default_branch:
+        command.extend(["--default-branch", default_branch])
     result = subprocess.run(
-        [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)],
+        command,
         capture_output=True, text=True, check=True,
     )
     return json.loads(result.stdout)
@@ -1683,6 +1686,541 @@ jobs:
             await react(body);
 """
     assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt111_automated_review_runs_on_every_pr_push(tmp_path: Path):
+    workflow = """name: Automated review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    _write_workflow(tmp_path, "review.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT111"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["review"]
+    assert "synchronize" in finding["evidence"]
+    assert "quiet window" in finding["evidence"]
+    assert "explicit re-review" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+    assert (
+        "runner-minute saving: unsized (static finding: the scan samples none of "
+        "the review job's runs" in finding["evidence"]
+    )
+    assert "+" not in finding["evidence"]
+
+
+def test_opt111_review_once_with_explicit_rereview_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: >-
+      github.event_name == 'pull_request' ||
+      contains(github.event.comment.body, '@reviewer re-review')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_explicit_comment_review_job_does_not_inherit_sync_trigger(
+        tmp_path: Path):
+    workflow = """name: Automated review
+on: [pull_request, issue_comment]
+jobs:
+  review:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      contains(github.event.comment.body, '@reviewer re-review')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_non_review_job_on_synchronize_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt111_review_after_a_quiet_window_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for a quiet window
+        run: sleep 10m
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_unreadable_event_guard_holds_back_the_finding(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    if: contains(fromJSON(vars.REVIEW_EVENTS), github.event.action)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+@pytest.mark.parametrize("step", [
+    'run: gh pr review --approve "$PR_URL"',
+    "run: gh api repos/$REPO/pulls/$PR/reviews --jq 'length'",
+    """uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.createReview({pull_number, event: 'APPROVE'})""",
+    """uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.createReview({
+              pull_number,
+              event: 'APPROVE',
+            })""",
+])
+def test_opt111_approval_or_review_read_is_not_an_automated_review(
+        tmp_path: Path, step: str):
+    workflow = f"""name: Approvals
+on: pull_request
+jobs:
+  approvals:
+    runs-on: ubuntu-latest
+    steps:
+      - {step}
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "approve.yml")
+
+
+def test_opt111_posted_comment_review_from_a_command_fires(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          body="$(./scripts/review.sh)"
+          gh api -X POST repos/$REPO/pulls/$PR/reviews -f event=COMMENT -f body="$body"
+"""
+    assert "OPT111" in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_step_guard_reviewing_only_on_open_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - if: github.event.action == 'opened' || github.event.action == 'ready_for_review'
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+@pytest.mark.parametrize("guard", [
+    "contains(github.event.comment.body, '/review')",
+    "github.event.label.name == 'ai-review'",
+    "steps.gate.outputs.review == 'true'",
+])
+def test_opt111_explicit_trigger_or_unread_gate_holds_back(
+        tmp_path: Path, guard: str):
+    workflow = f"""name: Automated review
+on:
+  pull_request:
+    types: [opened, synchronize, labeled]
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: {guard}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+    step_guarded = workflow.replace(f"    if: {guard}\n", "").replace(
+        "      - uses: example/automated-code-review@v2",
+        f"      - id: gate\n        run: ./gate.sh\n"
+        f"      - if: {guard}\n        uses: example/automated-code-review@v2")
+    assert "OPT111" not in _scan_one(tmp_path, step_guarded, "review.yml")
+
+
+def test_opt111_step_guard_admitting_synchronize_still_fires(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.action == 'opened' || github.event.action == 'synchronize'
+        uses: anthropics/claude-code-action@v1
+"""
+    assert "OPT111" in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_quiet_window_in_an_upstream_job_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 300
+  prepare:
+    needs: settle
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ready
+  review:
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+@pytest.mark.parametrize("action", [
+    "example/auto-assign-reviewer-by-files@v1",
+    "example/reviewer-lottery@v3",
+    "example/pr-review-reminder@v1",
+])
+def test_opt111_reviewer_assignment_action_is_not_a_review(
+        tmp_path: Path, action: str):
+    workflow = f"""name: Assign reviewers
+on: pull_request
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {action}
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "assign.yml")
+
+
+def test_opt111_ai_codereviewer_action_fires(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example/ai-codereviewer@main
+"""
+    assert "OPT111" in _scan_one(tmp_path, workflow, "review.yml")
+
+
+_OPT114_LOCK = '{"lockfileVersion": 3, "packages": {}}\n'
+
+
+def _write_opt114_repo(tmp_path: Path, workflow_steps: str, files: dict[str, str], *,
+                       on: str = "pull_request", job_extra: str = "",
+                       workflow_extra: str = "") -> None:
+    """A repository with one CI job whose steps are ``workflow_steps``."""
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
+    _write_workflow(tmp_path, "image.yml", f"""name: Image CI
+on: {on}
+{workflow_extra}jobs:
+  image:
+    runs-on: ubuntu-latest
+{job_extra}    steps:
+      - uses: actions/checkout@v4
+{workflow_steps}""")
+
+
+def _write_opt114_fixture(tmp_path: Path, docker_commands: str, *, host: str = "npm ci") -> None:
+    """Host ``npm ci`` and the image install read the same root lockfile."""
+    _write_opt114_repo(tmp_path, f"""      - run: {host}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": ("FROM node:22\nWORKDIR /app\n"
+                       "COPY package.json package-lock.json ./\n" + docker_commands),
+    })
+
+
+def _opt114_findings(tmp_path: Path) -> list[dict]:
+    return [row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT114"]
+
+
+def test_opt114_docker_npm_audit_repeats_host_advisory_lookup(tmp_path: Path):
+    _write_opt114_fixture(
+        tmp_path,
+        "RUN npm ci\nRUN npm run build && npm prune --omit=dev\n",
+    )
+
+    findings = _opt114_findings(tmp_path)
+    assert len(findings) == 1, findings
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["image"]
+    assert "npm ci" in finding["evidence"]
+    assert "npm prune" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+    assert "unsized" in finding["evidence"]
+
+
+@pytest.mark.parametrize(
+    ("docker_commands", "host"),
+    [
+        ("RUN npm ci --no-audit\nRUN npm prune --omit=dev --no-audit\n", "npm ci"),
+        ("RUN npm ci\nRUN npm prune --omit=dev\n", "npm ci --no-audit"),
+        ("RUN npm ci\nRUN npm prune --omit=dev\n", "pnpm install"),
+        ("RUN NPM_CONFIG_AUDIT=$AUDIT npm ci\n", "npm ci"),
+        ("RUN npm ci\n", "NPM_CONFIG_AUDIT=$NPM_AUDIT npm ci"),
+    ],
+)
+def test_opt114_stays_silent_without_duplicate_audit_reporting(
+    tmp_path: Path, docker_commands: str, host: str,
+):
+    _write_opt114_fixture(tmp_path, docker_commands, host=host)
+
+    assert "OPT114" not in _patterns(_scan(tmp_path))
+
+
+def test_opt114_host_install_in_image_context_directory_fires(tmp_path: Path):
+    # The host install and the image both read worker/package-lock.json.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+        working-directory: worker
+      - uses: docker/build-push-action@v6
+        with:
+          context: worker
+""", {
+        "worker/package.json": "{}\n",
+        "worker/package-lock.json": _OPT114_LOCK,
+        "worker/Dockerfile": ("FROM node:22\nCOPY package*.json ./\nRUN npm ci\n"),
+    })
+
+    assert [row["affected_jobs"] for row in _opt114_findings(tmp_path)] == [["image"]]
+
+
+def test_opt114_inherited_working_directory_npmrc_disables_host_audit(tmp_path: Path):
+    # `defaults.run.working-directory: app` puts the bare host `npm ci` under
+    # app/.npmrc, which turns audit off: the image lookup is the only report.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+      - run: docker build -f ../Dockerfile ..
+""", {
+        "app/package.json": "{}\n",
+        "app/package-lock.json": _OPT114_LOCK,
+        "app/.npmrc": "audit=false\n",
+        "Dockerfile": ("FROM node:22\nCOPY app/package.json app/package-lock.json ./\n"
+                       "RUN npm ci\n"),
+    }, job_extra="    defaults:\n      run:\n        working-directory: app\n")
+
+    assert _opt114_findings(tmp_path) == []
+
+
+@pytest.mark.parametrize("host_step", [
+    "      - run: cd tools && npm ci\n",
+    "      - run: npm ci --prefix tools\n",
+    "      - run: npm ci\n        working-directory: ${{ matrix.dir }}\n",
+])
+def test_opt114_unresolved_host_install_directory_withholds(tmp_path: Path, host_step: str):
+    _write_opt114_repo(tmp_path, host_step + """      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "tools/package.json": "{}\n",
+        "tools/package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_conditional_host_install_does_not_cover_every_build(tmp_path: Path):
+    # Push builds run the image install but skip the host audit.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+        if: github.event_name == 'pull_request'
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    }, on="[push, pull_request]")
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_host_and_build_under_the_same_condition_fire(tmp_path: Path):
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+        if: github.event_name == 'pull_request'
+      - uses: docker/build-push-action@v6
+        if: github.event_name == 'pull_request'
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    }, on="[push, pull_request]")
+
+    assert len(_opt114_findings(tmp_path)) == 1
+
+
+def test_opt114_image_with_separate_lockfile_is_not_a_duplicate(tmp_path: Path):
+    # Host `npm ci` audits the root tools; the image installs worker's own lockfile.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+      - uses: docker/build-push-action@v6
+        with:
+          context: worker
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "worker/package.json": "{}\n",
+        "worker/package-lock.json": _OPT114_LOCK,
+        "worker/Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_host_heredoc_text_is_not_an_install(tmp_path: Path):
+    _write_opt114_repo(tmp_path, """      - run: |
+          cat <<'EOF'
+          npm ci
+          EOF
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+@pytest.mark.parametrize("docker_run", [
+    "RUN cat > /usr/local/bin/setup.sh <<'EOF'\nnpm ci\nEOF\n",
+    "RUN echo 'npm ci; npm prune' > /notes.txt\n",
+])
+def test_opt114_image_text_that_is_not_run_stays_quiet(tmp_path: Path, docker_run: str):
+    _write_opt114_fixture(tmp_path, docker_run)
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_unselected_stage_install_stays_quiet(tmp_path: Path):
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": ("FROM node:22 AS dev\nCOPY package*.json ./\nRUN npm ci\n"
+                       "FROM node:22-slim AS runtime\nCOPY server.js ./\n"
+                       "FROM dev AS test\nRUN npm test\n"),
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_unrelated_stage_audit_setting_does_not_hide_selected_stage(
+    tmp_path: Path,
+):
+    _write_opt114_fixture(tmp_path, (
+        "RUN npm ci\n"
+        "FROM node:22 AS tools\nENV NPM_CONFIG_AUDIT=false\nRUN npm install -g x\n"
+        "FROM node:22-slim AS runtime\nCOPY --from=0 /app /app\n"
+    ))
+
+    findings = _opt114_findings(tmp_path)
+    assert len(findings) == 1, findings
+    assert "`npm ci`" in findings[0]["evidence"]
+    assert "npm install" not in findings[0]["evidence"]
+
+
+@pytest.mark.parametrize(("docker_commands", "fires"), [
+    # A setting that reaches the image before the install turns its audit off.
+    ("COPY docker.npmrc ./.npmrc\nRUN npm ci\n", False),
+    ("ENV NPM_CONFIG_AUDIT=false\nRUN npm ci\n", False),
+    ("ARG NPM_CONFIG_AUDIT\nRUN npm ci\n", False),
+    ("RUN npm config set audit false && npm ci\n", False),
+    # A setting applied only after the install does not cover it.
+    ("RUN npm ci\nENV NPM_CONFIG_AUDIT=false\n", True),
+])
+def test_opt114_image_audit_settings_follow_docker_order(
+    tmp_path: Path, docker_commands: str, fires: bool,
+):
+    _write_opt114_fixture(tmp_path, docker_commands)
+    (tmp_path / "docker.npmrc").write_text("audit=false\n", encoding="utf-8")
+
+    assert bool(_opt114_findings(tmp_path)) is fires
+
+
+def test_opt114_context_npmrc_not_copied_into_image_does_not_reach_it(tmp_path: Path):
+    # The Dockerfile copies only the manifests, so worker/.npmrc never applies
+    # inside the image: its `npm ci` still audits.
+    (tmp_path / "worker").mkdir()
+    (tmp_path / "worker" / ".npmrc").write_text("audit=false\n", encoding="utf-8")
+    (tmp_path / "worker" / "package-lock.json").write_text(_OPT114_LOCK, encoding="utf-8")
+    dockerfile = "FROM node:22\nCOPY package-lock.json ./\nRUN npm ci\n"
+
+    commands = scan._opt114_image_npm_commands(
+        dockerfile, tmp_path / "worker", tmp_path)
+
+    assert [(verb, copied) for verb, _command, copied in commands] == [
+        ("ci", ["worker/package-lock.json"])]
+    copied_npmrc = scan._opt114_image_npm_commands(
+        "FROM node:22\nCOPY . .\nRUN npm ci\n", tmp_path / "worker", tmp_path)
+    assert copied_npmrc == []
 
 
 def test_opt109_always_failure_reporter_runs_on_healthy_prs(tmp_path: Path):
@@ -3983,6 +4521,168 @@ jobs:
       - run: pnpm test
 """
     assert "OPT45" in _scan_one(tmp_path, pos)
+
+
+def test_opt32_deploy_positive_path_also_matches_test_directory(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+
+    findings = [
+        row for row in _scan(tmp_path, default_branch="main")["findings"]
+        if row["pattern"] == "OPT32" and row.get("opt32_deploy_test_paths")
+    ]
+    assert len(findings) == 1
+    assert "'!worker/test/**'" in findings[0]["evidence"]
+    assert "after" in findings[0]["evidence"]
+    assert "Runner-minute effect: saving" in findings[0]["evidence"]
+
+
+def test_opt32_deploy_test_exclusion_after_positive_stays_quiet(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '!worker/test/**'
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    assert "OPT32" not in {
+        row["pattern"] for row in _scan(tmp_path, default_branch="main")["findings"]
+    }
+
+
+def test_opt32_deploy_test_exclusion_before_positive_is_reincluded(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - '!worker/test/**'
+      - 'worker/**'
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    findings = _scan(tmp_path, default_branch="main")["findings"]
+    assert any(row.get("opt32_deploy_test_paths") for row in findings)
+
+
+def test_opt32_deploy_filter_on_non_default_branch_stays_quiet(tmp_path: Path):
+    workflow = """name: Deploy Preview
+on:
+  push:
+    branches: [staging]
+    paths: ['worker/**']
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    assert "OPT32" not in {
+        row["pattern"] for row in _scan(tmp_path, default_branch="main")["findings"]
+    }
+
+
+_OPT32_DEPLOY_WF = """name: Deploy
+on:
+  push:
+    branches: [main]
+    paths: [{paths}]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+
+
+def _opt32_deploy_hits(root: Path, paths: str, files: dict[str, str]) -> list[dict]:
+    _write_workflow(root, "deploy.yml", _OPT32_DEPLOY_WF.format(paths=paths))
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if text is not None:
+            target.write_text(text)
+    return [row for row in _scan(root, default_branch="main")["findings"]
+            if row.get("opt32_deploy_test_paths")]
+
+
+@pytest.mark.parametrize("paths,files", [
+    # GitHub `*` stays inside one segment: `worker/*` never selects worker/test/.
+    ("'worker/*'", {"worker/test/a.test.ts": "test('a', () => {})\n"}),
+    # An OpenAPI `spec/` the docs deploy ships holds no test-named file.
+    ("'spec/**', 'docs/**'", {"spec/openapi.yaml": "openapi: 3.0.0\n"}),
+    # A test-dir helper imported by production code is a deploy input.
+    ("'worker/**'", {
+        "worker/test/a.test.ts": "test('a', () => {})\n",
+        "worker/test/fixtures.ts": "export const seed = 1\n",
+        "worker/src/index.ts": "import { seed } from '../test/fixtures'\n",
+    }),
+    # A Python test package imported by the service.
+    ("'svc/**'", {
+        "svc/tests/test_api.py": "def test_api(): pass\n",
+        "svc/tests/helpers.py": "SEED = 1\n",
+        "svc/app.py": "from tests.helpers import SEED\n",
+    }),
+    # A test-named package with its own manifest can ship on its own.
+    ("'packages/**'", {
+        "packages/test/package.json": '{"name": "@x/test"}\n',
+        "packages/test/src/index.test.ts": "test('a', () => {})\n",
+        "packages/test/src/index.ts": "export const x = 1\n",
+    }),
+    # Unsupported glob syntax: what the filter selects is unknown.
+    ("'worker/[a-z]*/**'", {"worker/test/a.test.ts": "test('a', () => {})\n"}),
+], ids=["single-star", "openapi-spec", "helper-imported-js",
+        "helper-imported-py", "test-named-package", "unsupported-glob"])
+def test_opt32_deploy_test_path_near_misses_stay_quiet(tmp_path: Path, paths, files):
+    assert _opt32_deploy_hits(tmp_path, paths, files) == []
+
+
+def test_opt32_deploy_test_path_fires_beside_unrelated_production_source(tmp_path: Path):
+    hits = _opt32_deploy_hits(tmp_path, "'worker/**'", {
+        "worker/test/a.test.ts": "import { x } from '../src/index'\n",
+        "worker/src/index.ts": "import { y } from './util'\nexport const x = y\n",
+        "worker/src/util.ts": "export const y = 1\n",
+    })
+    assert len(hits) == 1
+    assert "'!worker/test/**'" in hits[0]["evidence"]
 
 
 def _opt46_candidate_jobs(tmp_path: Path, content: str) -> list[str]:
