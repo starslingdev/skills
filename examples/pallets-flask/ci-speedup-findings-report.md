@@ -603,7 +603,7 @@ failure mode and how you have guarded it before shipping.
 > ⚠️ _Approximate: computed across all workflows, but 1 capped workflow(s) still use the shallow 10-run job sample for finding/queue values; 1 runner-minute source workflow(s) still use a shallow 10-run cost-spine sample. Figures can shift run-to-run; re-run with `--shallow-runs 20` to confirm exact values._
 
 <details>
-<summary><strong>OPT32 - Missing `paths`/`paths-ignore` on Expensive Workflows</strong> · no bill saving · HIGH · 1 across 1 wf</summary>
+<summary><strong>OPT32 - Missing `paths`/`paths-ignore` on Expensive Workflows</strong> · runner-minute saving: unsized (the workflow's monthly run count was not measured) · HIGH · 1 across 1 wf</summary>
 
 **Where:** `publish.yaml:2` (build)
 **Activity:** 0 runs in 30 days · most recent 2026-02-19.
@@ -668,7 +668,7 @@ failure mode and how you have guarded it before shipping.
 </details>
 
 <details>
-<summary><strong>OPT33 - No Draft PR Gating on Expensive Jobs</strong> · no bill saving · MEDIUM · 1 across 1 wf</summary>
+<summary><strong>OPT33 - No Draft PR Gating on Expensive Jobs</strong> · runner-minute saving: unsized (the skipped job's duration could not be resolved from sampled run timings) · MEDIUM · 1 across 1 wf</summary>
 
 **Where:** `tests.yaml:13` (tests)
 **Activity:** 37 runs in 30 days · most recent 2026-07-22.

@@ -2386,6 +2386,7 @@ def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
                     "sizing_basis": "measured",
                     "wall_clock_p50_s": round(before - projection.projected_s, 1),
                     "runner_min_saving": None,
+                    "runner_min_no_effect_reason": _OPT21_NO_RUNNER_MIN_EFFECT,
                     "tier": 1,
                     "realization": "direct",
                     "size_note": "measured change in the workflow's longest dependency path",
@@ -6255,6 +6256,7 @@ def _opt108_unmeasured(finding: dict[str, Any], reason: str, **counts: Any) -> N
     finding["realization"] = "none"
     finding["size_note"] = (f"runner-minute saving not sized ({reason}); "
                             f"{_OPT108_NO_WALL_CLOCK}")
+    finding["runner_min_unsized_reason"] = reason
 
 
 def _size_opt108_comment_runs(
@@ -6610,6 +6612,7 @@ def _opt39_unsized(finding: dict[str, Any], reason: str, **counts: Any) -> None:
     finding["size_note"] = (
         f"runner-minute saving not sized ({reason}); changed-path lookup must "
         "run the job whenever it is unknown or fails")
+    finding["runner_min_unsized_reason"] = reason
 
 
 def _measure_opt39_language_jobs(
@@ -7120,6 +7123,8 @@ def _apply_cache_sizing_guard(
         prior_note = str(finding.get("size_note") or "").strip()
         guard_note = f"cache saving uncredited: {details}"
         finding["size_note"] = f"{prior_note}; {guard_note}" if prior_note else guard_note
+        finding["runner_min_unsized_reason"] = (
+            f"the cache sizing checks did not pass: {details}")
 
 
 def _affected_job_p50(f: dict[str, Any], crit: dict[str, Any]) -> float:
@@ -7201,6 +7206,8 @@ def _ground_opt12_duplicate_test_work(
                 "size_note": ("duplicate test work found, but matching push-lane job "
                               "timings were unavailable; measure the duplicate suite "
                               "before crediting time"),
+                "runner_min_unsized_reason": (
+                    "matching push-lane job timings were unavailable"),
                 "sizing_basis": "measured",
             })
             continue
@@ -7284,28 +7291,56 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
     f["runner_min_note"] = f"{existing}; {note}" if existing else note
 
 
+def _unsized_runner_min(f: dict[str, Any], reason: str) -> None:
+    """Record WHY this finding's runner-minute saving is unsized.
+
+    The report's group heading reads `runner_min_unsized_reason`; without it a
+    finding whose saving is real but unsized falls back to "no bill saving",
+    which misstates it. The reason must be literally true for the branch that
+    left `runner_min_saving` at None. A reason an earlier branch already stamped
+    is kept (it is the more specific one)."""
+    if not f.get("runner_min_unsized_reason"):
+        f["runner_min_unsized_reason"] = reason
+
+
+_NO_MONTHLY_VOLUME_REASON = "the workflow's monthly run count was not measured"
+_OPT16_TEST_BUILD_UNSIZED = (
+    "static source proves the repeated build shape but no build duration or "
+    "monthly execution count is measured")
+# Removing a `needs:` edge changes when the dependent job starts, not how long
+# any job runs; on runs where the dependency fails the dependent now runs too.
+_OPT21_NO_RUNNER_MIN_EFFECT = (
+    "removing a `needs:` edge changes when the dependent job starts, not how long "
+    "any job runs")
+
+
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
-    """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
+    """Set wall_clock_p50_s and runner_min_saving on the finding in-place.
+
+    Every branch that leaves `runner_min_saving` at None (unsized) also stamps
+    a literally true `runner_min_unsized_reason`; a branch that sizes the
+    effect to zero sets 0.0 (`tests/test_unsized_reason_guard.py`)."""
     if f.get("positional_splitter_static"):
         # Source proves an unstable assignment rule, not a duration or current
-        # imbalance. Preserve its neutral runner-cost disclosure without
-        # inventing the measured OPT25 wall-clock model.
+        # imbalance. Any runner-minute saving (fewer shard timeouts and reruns)
+        # is real but unsized; do not invent the measured OPT25 wall-clock model.
         f["wall_clock_p50_s"] = None
         f["runner_min_saving"] = None
         f["tier"] = 2
         f["realization"] = "none"
         f.setdefault(
             "size_note",
-            "runner-minute effect: roughly neutral for passing runs because the "
-            "same existing shard jobs run the same tests; any saving from fewer "
-            "shard timeouts and reruns is unsized, and the wall-clock saving is "
-            "unsized until CI per-test timings measure the imbalance",
+            "runner-minute saving: unsized (passing runs execute the same tests in "
+            "the same shard jobs, so any saving comes from fewer shard timeouts and "
+            "reruns, which no CI per-test timings measure yet); the wall-clock saving "
+            "is unsized until CI per-test timings measure the imbalance",
         )
         f.setdefault(
             "runner_min_unsized_reason",
-            "static source finding; the same shard jobs run the same tests, and "
-            "no CI per-test timings measure the imbalance or timeout reruns",
+            "passing runs execute the same tests in the same shard jobs, so any "
+            "saving comes from fewer shard timeouts and reruns, which no CI per-test "
+            "timings measure yet",
         )
         return
     if f.get("source_test_build_repeat"):
@@ -7321,6 +7356,7 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             "runner-minute saving: unsized (static source proves the repeated "
             "build shape but no build duration or monthly execution count is measured)",
         )
+        _unsized_runner_min(f, _OPT16_TEST_BUILD_UNSIZED)
         return
     if f.get("opt32_deploy_test_paths"):
         f["wall_clock_p50_s"] = 0.0
@@ -7331,6 +7367,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             "runner-minute saving is not sized until test-only default-branch "
             "merge frequency and the deploy jobs' measured compute are available"
         )
+        _unsized_runner_min(f, (
+            "test-only default-branch merge frequency and the deploy jobs' "
+            "measured compute were not available"))
         return
     if f.get("oversized_fixture_static"):
         # Source proves that a very large artifact is used as byte payload, but
@@ -7366,6 +7405,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f["size_note"] = ("workflow configuration proves the cache shape needs review; "
                           "credit no saving until this job's logs measure a miss and "
                           "the restore/build cost")
+        _unsized_runner_min(f, (
+            "this job's logs have not measured a cache miss or the restore/build "
+            "cost"))
         return
     if f.get("sizing_basis") == "measured" and (
             "wall_clock_p50_s" in f or "runner_min_saving" in f):
@@ -7377,6 +7419,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f.setdefault("tier", 1 if isinstance(wc, (int, float)) and wc > 0 else 2)
         f.setdefault("realization", "direct" if isinstance(wc, (int, float)) and wc > 0 else "none")
         f.setdefault("size_note", "")
+        if not isinstance(f.get("runner_min_saving"), (int, float)):
+            _unsized_runner_min(f, "the measuring detector produced no monthly "
+                                   "runner-minute figure")
         return
     pat = f.get("pattern", "")
     cfg = _SIZING.get(pat)
@@ -7388,6 +7433,7 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f["tier"] = 2
         f["realization"] = "none"
         f["size_note"] = "no sizing model wired for this pattern yet"
+        _unsized_runner_min(f, "no sizing model is wired for this pattern yet")
         return
 
     long_pole = crit.get("long_pole_p50", 0.0)
@@ -7408,6 +7454,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             "runner-minute saving: unsized (the combined run still performs the "
             "analysis once; time the separate runs and the combined run on the "
             "same commit before crediting minutes)")
+        _unsized_runner_min(f, (
+            "the combined run still performs the analysis once, and the separate "
+            "and combined runs were not timed on the same commit"))
         return
 
     if _opt9_is_build_state(f):
@@ -7421,6 +7470,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             "validation, and save overhead — measure before and after on the "
             "same workload before crediting seconds"
         )
+        _unsized_runner_min(f, (
+            "the cache's restore, validation and save overhead were not measured "
+            "before and after on the same workload"))
         return
 
     # Guardrail A — D12 serial-gate auto-demote.
@@ -7475,6 +7527,8 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f["tier"] = 1 if wc > 0 else 2
         f["realization"] = "direct" if wc > 0 else "none"
         f["size_note"] = note
+        if rm is None:
+            _unsized_runner_min(f, _NO_MONTHLY_VOLUME_REASON)
 
     elif model == "parallel-rebalance":
         # Sharding spreads a job's work across N shards (N=2 conservative floor).
@@ -7560,12 +7614,16 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             f["size_note"] = (
                 "runner-minute (bill) only - hit rate not measured "
                 f"({reason})")
+            _unsized_runner_min(f, f"the path-filter hit rate was not measured ({reason})")
         elif unresolved and cost_basis == "affected_jobs":
             f["runner_min_saving"] = None
             f["size_note"] = ("whole-run cancel runner-minutes not sized — none of "
                               "the affected jobs' durations could be resolved from "
                               "sampled run timings; saving ≈ the affected jobs' own "
                               "minutes × superseded-run rate × volume")
+            _unsized_runner_min(f, (
+                "none of the affected jobs' durations could be resolved from "
+                "sampled run timings"))
         elif unresolved:
             f["runner_min_saving"] = None
             f["size_note"] = ("per-job runner-minutes not sized — this finding "
@@ -7573,10 +7631,17 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                               "couldn't be resolved from sampled run timings "
                               "(reusable-workflow caller or name-overridden job); "
                               "saving ≈ the job's own minutes × skip-rate × volume")
+            _unsized_runner_min(f, (
+                "the skipped job's duration could not be resolved from sampled "
+                "run timings"))
         else:
+            # A zero hit rate (OPT12's composite-action dedup) is SIZED: it
+            # changes no runtime, so the effect is zero whatever the volume.
             f["runner_min_saving"] = (
                 round(rate * per_run_s * (monthly_volume or 0) / 60.0, 1)
-                if monthly_volume else None)
+                if monthly_volume else 0.0 if not rate else None)
+            if f["runner_min_saving"] is None:
+                _unsized_runner_min(f, _NO_MONTHLY_VOLUME_REASON)
             if cost_basis == "affected_jobs":
                 rate_label = cfg.get("cost_basis_rate_label", "the superseded-run rate")
                 f["size_note"] = (
@@ -7614,6 +7679,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                           "fan-out adds a serial gate) — prefer warming the cache "
                           "so each parallel copy stays cheap; runner-minute "
                           "(bill) saving only")
+        if rm is None:
+            _unsized_runner_min(f, _NO_MONTHLY_VOLUME_REASON if s else (
+                "no per-run saving is modeled for this pattern"))
 
     elif model == "measured":
         # Data-driven detector already set the axes from measured timings;
@@ -7633,6 +7701,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         existing = f.get("size_note") or ""
         f["size_note"] = f"{existing}; {_EPHEMERAL_CAVEAT}" if existing else _EPHEMERAL_CAVEAT
         _demote_runner_min(f, _EPHEMERAL_RUNNER_MIN_CAVEAT)
+        _unsized_runner_min(f, (
+            "the cache writes to a working-dir path the next ephemeral runner "
+            "discards, and no warm-versus-cold delta was measured"))
     # Removing a `needs:` edge is a queue-wait (wall-clock) lever, never a
     # compute saving — its modeled runner-min is not realizable.
     if pat in _WALL_CLOCK_ONLY_NO_RUNNER_MIN:
@@ -7649,6 +7720,19 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             "jobs don't ALREADY self-skip (via `if:` guards or an internal "
             "change-gate) and the trigger can be narrowed safely — verify per "
             "workflow before crediting"))
+        measurement = f.get("path_filter_measurement")
+        if (isinstance(measurement, dict) and measurement.get("status") != "unmeasured"
+                and int(measurement.get("sampled_prs") or 0) > 0
+                and int(measurement.get("would_skip_prs") or 0) == 0):
+            # Measured zero: no sampled PR would skip, so the filter has no
+            # runner-minute effect on this sample. "No bill saving" is true.
+            f["runner_min_no_effect_reason"] = (
+                f"none of the {int(measurement['sampled_prs'])} sampled PRs would "
+                "skip under the path filter")
+        else:
+            _unsized_runner_min(f, (
+                "the modeled figure is a gross upper bound, realizable only where "
+                "the workflow's jobs do not already self-skip"))
 
 
 def _cap_opt19_wall_clock(f: dict[str, Any], global_long_pole_p50: float) -> None:
@@ -8057,6 +8141,7 @@ def _reground_whole_run_cancel_saving(
             f["size_note"] = ("runner-minutes not sized — no affected job resolved "
                               "to a cost-spine row with measured billable compute, "
                               "so there is no measured basis to bound the saving")
+            f["runner_min_unsized_reason"] = _NO_SPINE_MATCH_REASON
             continue
         rate = cfg.get("hit_rate", 0.0)
         f["runner_min_saving"] = round(rate * measured, 1)
@@ -8082,6 +8167,10 @@ def _all_runs_excluded(wf: str, jobs: "list[str]", all_index: Any,
     return matched > 0 and every > 0
 
 
+_NO_SPINE_MATCH_REASON = (
+    "no affected job resolved to a cost-spine row with measured billable compute")
+
+
 def _mark_all_runs_excluded(f: dict[str, Any]) -> None:
     """A saving DERIVED from completed-run compute (OPT45/OPT29), clamped to it
     (the serial gates / OPT73) or capped at it (a modeled estimate) has no basis when every sampled run
@@ -8093,6 +8182,7 @@ def _mark_all_runs_excluded(f: dict[str, Any]) -> None:
     f["size_note"] = (
         (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
         + "runner-minutes not sized — " + _ALL_RUNS_EXCLUDED_NOTE)
+    f["runner_min_unsized_reason"] = _ALL_RUNS_EXCLUDED_NOTE
 
 
 def _measured_billable_index(
@@ -8504,6 +8594,7 @@ def _reground_runner_minute_savings(
             + "runner-minutes not sized — no affected job resolved to a cost-spine "
             "row with measured billable compute, so there is no measured basis to "
             "bound the saving")
+        f["runner_min_unsized_reason"] = _NO_SPINE_MATCH_REASON
 
     for f in findings:
         saving = f.get("runner_min_saving")
@@ -11223,11 +11314,17 @@ def _detect_opt25_shard_imbalance(
             out[-1]["measured_signal"] = summary
         if next_step is not None:
             out[-1]["next_step"] = next_step
+        # Rebalancing or splitting shards moves the same test work between legs;
+        # it removes no compute, so "no bill saving" is literally true here.
+        out[-1]["runner_min_no_effect_reason"] = _OPT25_NO_RUNNER_MIN_EFFECT
         out[-1]["legs_excluded_no_work"] = len(excluded_by_base.get(base, set()))
     return out
 
 
 _OPT43_CANCELLED_RUN_PROBE_MAX = 3
+_OPT25_NO_RUNNER_MIN_EFFECT = (
+    "rebalancing or splitting shards moves the same test work between legs and "
+    "removes no compute")
 
 
 def _detect_opt43_queue_time(
@@ -24584,6 +24681,9 @@ def _detect_structural_candidates(
                     "Uncredited. The measured coverage step is only a ceiling; "
                     "benchmark before and after on the same runner and require an "
                     "unchanged covered-line count before claiming a saving.")
+                f["runner_min_unsized_reason"] = (
+                    "the measured coverage step is only a ceiling and was not "
+                    "benchmarked before and after on the same runner")
             else:
                 # NAME-INFERRED structural pick (`sizing == "qualitative"` — set ONLY by the
                 # `mapping is None` branch, where there is NO sampled job/step): the cost category is
@@ -25155,6 +25255,10 @@ def _detect_shared_substep(
                     f"not developer wall-clock")
             f["size_note"] = f"{prev}; {demote}" if prev else demote
         f["runner_min_saving"] = rm_per_mo
+        if rm_per_mo is None and credit.runner_min_s:
+            f["runner_min_unsized_reason"] = (
+                f"~{credit.runner_min_s:.0f}s/run is saved, but the workflow's "
+                "monthly run count is unknown")
         out.append(f)
     return out
 
@@ -26899,6 +27003,8 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
                                   "measured miss, so no saving is credited")
                 f["wall_clock_p50_s"] = None
                 f["runner_min_saving"] = None
+                f["runner_min_unsized_reason"] = (
+                    "the sampled logs did not confirm a measured cache miss")
                 f["tier"] = 2
                 f["realization"] = "none"
                 continue
@@ -30291,6 +30397,9 @@ def _ground_opt96(findings: list[dict[str, Any]], poles: list[dict[str, Any]],
         if pole is None:
             finding["size_note"] = (f"check this: {_opt96_unconfirmed_reason(candidates)}; "
                                     "savings uncredited")
+            finding["runner_min_unsized_reason"] = (
+                f"{_opt96_unconfirmed_reason(candidates)}, so the cache seeding "
+                "saving is uncredited")
             continue
         cd = pole["cache_dist"]
         cd["static_confirmed"] = True
@@ -33223,6 +33332,50 @@ def _opt13_source_output_guard(root: "Path | None") -> dict[str, Any]:
 # Orchestration
 # =============================================================================
 
+def _stamp_runner_min_states(doc: dict[str, Any]) -> None:
+    """Close the runner-minute state of every finding leaving `collect()`.
+
+    An OPT21 finding (remove a `needs:` edge) has no runner-minute effect
+    whatever was sampled. A finding with no `runner_min_saving` at all and no
+    reason was never sized: an early exit (no `--repo`, gh refused, the
+    collection aborted) returned before the sizing pass. Its saving is unsized,
+    not absent, so stamp a literally true reason; otherwise its group heading
+    would read "no bill saving" (`tests/test_unsized_reason_guard.py`)."""
+    sources = doc.get("data_sources") if isinstance(doc.get("data_sources"), dict) else {}
+    reason = ("no CI runs were sampled, so nothing measured its runner-minutes"
+              if not sources.get("tiers_run")
+              else "the run collection stopped before this finding was sized")
+    for f in doc.get("findings") or []:
+        if not isinstance(f, dict) or f.get("runner_min_no_effect_reason"):
+            continue
+        if (f.get("pattern") == "OPT21"
+                and not isinstance(f.get("runner_min_saving"), (int, float))):
+            f["runner_min_no_effect_reason"] = _OPT21_NO_RUNNER_MIN_EFFECT
+            continue
+        if "runner_min_saving" in f or f.get("runner_min_unsized_reason"):
+            continue
+        cfg = _SIZING.get(str(f.get("pattern") or "")) or {}
+        if cfg.get("model") == "runner-min-only" and not cfg.get("hit_rate"):
+            # Sized to zero whatever the sample: the model credits no hit rate.
+            f["runner_min_no_effect_reason"] = (
+                "the sizing model credits this fix no runner-minute saving")
+        else:
+            f["runner_min_unsized_reason"] = reason
+
+
+def _closes_runner_min_states(fn):
+    """Run `_stamp_runner_min_states` on whatever document `collect()` returns,
+    from every one of its exits (early returns included)."""
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        doc = fn(*args, **kwargs)
+        if isinstance(doc, dict):
+            _stamp_runner_min_states(doc)
+        return doc
+    return wrapper
+
+
+@_closes_runner_min_states
 def collect(findings_doc: dict[str, Any], repo: str | None,
             max_runs: int, with_logs: bool = False,
             created_before: str | None = None,
