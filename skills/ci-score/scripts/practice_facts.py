@@ -207,6 +207,8 @@ _TEST_CMD_RE = re.compile(
     r"|\bmake\s+(?:test|check)\b"
     r"|(?:\./)?\bgradlew?\b[^\n]{0,120}?\btest\b|\bmvn\b[^\n]{0,120}?\btest\b",
     re.IGNORECASE)
+_DIRECT_REPO_SCRIPT_RE = re.compile(
+    r"^\s*(?P<path>\./[A-Za-z0-9_.\-/]+)(?:\s+[^;&|`$<>]*)?\s*$")
 
 
 def _has_dep_manifest(root: Path) -> bool:
@@ -253,6 +255,58 @@ def _has_test_command(step_sources: list[tuple[str, list[dict]]]) -> bool:
             script = with_.get("script")
             if isinstance(script, str) and _TEST_CMD_RE.search(_SHELL_COMMENT_RE.sub("", script)):
                 return True
+    return False
+
+
+def _script_has_test_command(code: str) -> bool:
+    """Recognise a runner at shell-command position, never in prose/output."""
+    clean = _SHELL_COMMENT_RE.sub("", code)
+    for command in re.split(r"(?:&&|\|\||[;\n])", clean):
+        command = command.strip()
+        command = re.sub(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)+", "", command)
+        if command.startswith("exec "):
+            command = command[5:].lstrip()
+        if _TEST_CMD_RE.match(command):
+            return True
+    return False
+
+
+def _has_delegated_test_command(
+        root: Path, step_sources: list[tuple[str, list[dict]]]) -> bool:
+    """Read a statically and directly invoked repository script for tests.
+
+    Repository content is untrusted data used only for this boolean decision.
+    Dynamic paths, shell pipelines, scripts outside the checkout, and oversized
+    files are withheld rather than guessed about.
+    """
+    try:
+        root_real = root.resolve()
+    except OSError:
+        return False
+    for _rel, steps in step_sources:
+        for step in steps:
+            run = step.get("run")
+            if not isinstance(run, str):
+                continue
+            for line in run.splitlines():
+                match = _DIRECT_REPO_SCRIPT_RE.fullmatch(
+                    _SHELL_COMMENT_RE.sub("", line))
+                if not match:
+                    continue
+                relative = Path(match.group("path")[2:])
+                if ".." in relative.parts:
+                    continue
+                try:
+                    candidate = (root_real / relative).resolve()
+                    candidate.relative_to(root_real)
+                    if (not candidate.is_file()
+                            or candidate.stat().st_size > _SCRIPT_MAX_BYTES):
+                        continue
+                    code = candidate.read_text(encoding="utf-8", errors="replace")
+                except (OSError, ValueError):
+                    continue
+                if _script_has_test_command(code):
+                    return True
     return False
 
 
@@ -334,6 +388,8 @@ def _automation_only(parsed: list[tuple[str, dict, str]], root: Path) -> bool:
     step_sources = _step_sources(parsed, _composite_action_docs(root, parsed=parsed))
     if _has_test_command(step_sources):
         return False  # signal 1 (test-runner command)
+    if _has_delegated_test_command(root, step_sources):
+        return False  # signal 1 (test runner in a directly invoked repo script)
     if _has_build_signal(parsed, root, step_sources):
         return False  # signal 2
     if _has_install_command(step_sources):

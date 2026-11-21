@@ -308,6 +308,29 @@ def test_automation_only_refuses_bots_but_never_real_ci(tmp_path):
         assert pf_mod._automation_only(parsed(*files), tmp_path) is False, label
 
 
+def test_automation_only_reads_only_directly_invoked_repo_test_scripts(tmp_path):
+    """A workflow may delegate its real test command to a repository script.
+
+    Only a statically named script invoked as the command is evidence: merely
+    mentioning that path, or mentioning a runner inside an automation script,
+    must not turn automation into project CI.
+    """
+    workflow = lambda command: parsed((
+        "a.yml",
+        PR_ON + "jobs:\n  ci:\n    steps:\n      - run: " + command + "\n",
+    ))
+
+    script = tmp_path / "ci.sh"
+    script.write_text("#!/bin/sh\npython -m pytest -q\n")
+    assert pf_mod._automation_only(workflow("./ci.sh"), tmp_path) is False
+
+    script.write_text("#!/bin/sh\necho 'pytest is handled elsewhere'\n")
+    assert pf_mod._automation_only(workflow("./ci.sh"), tmp_path) is True
+
+    script.write_text("#!/bin/sh\npython -m pytest -q\n")
+    assert pf_mod._automation_only(workflow("echo ./ci.sh"), tmp_path) is True
+
+
 def test_automation_only_flag_drives_a_scorer_refusal(spec):
     """The collector sets doc.automation_only; compute_ci_score turns it into
     the automation_only refusal — no value, ahead of facts_unavailable."""
