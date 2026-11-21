@@ -184,8 +184,13 @@ class _StableSafeLoader(yaml.SafeLoader):
 
 
 def _stable_safe_load(text: str) -> Any:
-    """Load YAML with version-independent merge-key precedence."""
-    return yaml.load(text, Loader=_StableSafeLoader)
+    """Load YAML with version-independent merge-key precedence (a SafeLoader:
+    no Python tags are constructed)."""
+    loader = _StableSafeLoader(text)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
 
 # Allow `from config import ...` and `from gh_utils import ...` regardless
 # of where this script is invoked from.

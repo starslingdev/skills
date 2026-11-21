@@ -1618,3 +1618,25 @@ def test_a_repo_without_the_syntax_renders_no_parallel_steps_row(
                                       "background_steps": 0, "workflows": []}
     md = load_script("ci_secure_report", "report.py").render(data)
     assert "Parallel steps" not in md, md
+
+
+def test_stable_loader_is_called_without_a_generic_yaml_load() -> None:
+    """`yaml.load(..., Loader=<subclass>)` reads, to a reviewer or a registry
+    scanner, like the unsafe loader; ci-score settled on constructing the
+    SafeLoader subclass directly (#165). Same rule here."""
+    import ast
+    tree = ast.parse(_SCAN_SCRIPT.read_text(encoding="utf-8"))
+    calls = [node.lineno for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and isinstance(node.func.value, ast.Name)
+             and node.func.value.id == "yaml" and node.func.attr == "load"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("tag", ["python/tuple", "python/object:builtins.object"])
+def test_stable_loader_keeps_the_safe_loader_boundary(tag: str) -> None:
+    import yaml
+    # Inert tags only; never an executable payload in a fixture.
+    with pytest.raises(yaml.constructor.ConstructorError):
+        scan._stable_safe_load("!!" + tag + " []")
