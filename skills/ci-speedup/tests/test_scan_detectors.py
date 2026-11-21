@@ -1096,14 +1096,19 @@ def test_opt25_finds_name_sorted_positional_splitter_shapes(tmp_path: Path, case
         ("OPT25", rel)]
     facts = hits[0][2].facts
     assert "exactly one shard" in facts["fix_strategy"], facts
-    assert "could not show" not in hits[0][2].evidence, hits[0][2].evidence
 
 
 @pytest.mark.parametrize("rel,source", [
     ("scripts/shard.py", '''\
-from planner_weights import cost
-def pick(listing, shard, count):
-    names = sorted(listing, key=cost)
+from planner import by_cost
+def pick(tests, shard, count):
+    names = sorted(tests, key=by_cost)
+    return names[shard::count]
+'''),
+    ("scripts/shard.py", '''\
+import planner
+def pick(tests, shard, count):
+    names = sorted(tests, key=planner.order)
     return names[shard::count]
 '''),
     ("scripts/test-shard.mjs", '''\
@@ -1112,18 +1117,16 @@ const files = listed.slice().sort(compareTests);
 export const mine = files.filter((_, index) => index % total === shard);
 '''),
 ])
-def test_opt25_positional_splitter_names_unread_sort_key(
+def test_opt25_positional_splitter_withholds_unread_sort_key(
         tmp_path: Path, rel: str, source: str):
-    """A key defined outside the file cannot prove timing order, so the
-    warning stays, and its evidence says the key was not read instead of
-    implying the order is known."""
+    """A key defined outside the file cannot be classified: it may read
+    measured timings or derive from the name. The scan withholds the warning
+    instead of guessing."""
     path = tmp_path / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(source, encoding="utf-8")
     hits, _incomplete = scan._detect_opt25_positional_splitters(tmp_path)
-    assert len(hits) == 1, hits
-    evidence = hits[0][2].evidence
-    assert "could not show" in evidence and "measured timings or weights" in evidence, evidence
+    assert hits == [], hits
 
 
 def test_opt16_finds_same_binary_built_in_separate_go_tests(tmp_path: Path):

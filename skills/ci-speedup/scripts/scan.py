@@ -11613,33 +11613,33 @@ def _opt25_follows_measured(text: str, snippet: str, cache: dict[str, str | None
 
 
 def _opt25_sort_order(text: str, assignment: re.Match[str],
-                      cache: dict[str, str | None]) -> tuple[bool, str | None]:
-    """(warn, unread_ref). Warn unless the sort demonstrably reads a measured
-    timing or weight. `unread_ref` names a key/comparator defined outside the
-    file, so the warning says it was not read instead of implying name order."""
+                      cache: dict[str, str | None]) -> bool:
+    """Warn when the sort orders by name. Stay quiet when it demonstrably reads
+    a measured timing or weight, and withhold the warning when the key or
+    comparator is defined outside the file: an unread key cannot be classified."""
     args = _opt25_call_args(text, assignment.start("args"))
     if assignment.groupdict().get("py_sorted") or _OPT25_PY_KEY_RE.search(args):
         if not _OPT25_PY_KEY_RE.search(args):
-            return True, None  # Python `sorted(iterable)`: name order.
+            return True  # Python `sorted(iterable)`: name order.
         # Read only the key: the iterable (`list(durations)`) says nothing
         # about the order the key imposes.
         args = args[_OPT25_PY_KEY_RE.search(args).start():]
         key_ref = _OPT25_PY_KEY_REF_RE.search(args)
         ref = key_ref.group("ref") if key_ref else None
     elif not _OPT25_JS_COMPARATOR_RE.search(args):
-        return True, None  # JavaScript `.sort()` without a comparator is lexical.
+        return True  # JavaScript `.sort()` without a comparator is lexical.
     else:
         js_ref = _OPT25_JS_REF_RE.match(args)
         ref = js_ref.group("ref") if js_ref else None
     if ref in _OPT25_NAME_CALLABLES:
-        return True, None
+        return True
     # The key/comparator text itself, then same-file helpers and maps it names
     # (`key=cost`, `key=lambda n: cost(n)`, `cmp_to_key(by_weight)`).
     if _opt25_follows_measured(text, args, cache):
-        return False, None
+        return False
     if ref is not None and ("." in ref or _opt25_definition(text, ref, cache) is None):
-        return True, ref  # Imported or a module attribute: not read.
-    return True, None
+        return False  # Imported or a module attribute: unread, so withheld.
+    return True
 
 
 # The saving is real but unsized: passing runs cost the same, and what a stable
@@ -11703,17 +11703,13 @@ def _detect_opt25_positional_splitters(root: Path):
                 positional = _opt25_positional_use(text[assignment.end():], name)
                 if positional is None:
                     continue
-                warn, unread_ref = _opt25_sort_order(text, assignment, definitions)
-                if not warn:
+                if not _opt25_sort_order(text, assignment, definitions):
                     continue
                 line = text.count("\n", 0, assignment.end() + positional.start()) + 1
                 hit = Hit(
                     line=line, affected_jobs=[], match_text=name,
                     evidence=(f"planner file `{rel}` sorts `{name}` and assigns it by "
-                              "position, so inserting a test reshuffles existing shards"
-                              + (f"; its sort key `{unread_ref}` is defined outside "
-                                 "this file, so the scan could not show it reads "
-                                 "measured timings or weights" if unread_ref else "")),
+                              "position, so inserting a test reshuffles existing shards"),
                     facts={
                         "positional_splitter_static": True,
                         "pattern_class": "static",
