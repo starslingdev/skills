@@ -18311,8 +18311,11 @@ def _vr_bmf_held_back(finding: dict) -> bool:
 
 
 def _vr_bmf_has_held_option(finding: dict) -> bool:
-    """Independent copy of visible findings with a minute-adding option."""
-    return str(finding.get("pattern") or "") == "OPT89"
+    """Independent copy of visible findings with a minute-adding option.
+
+    A finding held back as a whole is counted once, as held."""
+    return (str(finding.get("pattern") or "") == "OPT89"
+            and not _vr_bmf_held_back(finding))
 
 
 # Log leaves whose catalog remedy adds jobs, shards or runners; mirrors

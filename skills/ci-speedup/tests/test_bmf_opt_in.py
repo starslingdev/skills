@@ -375,3 +375,25 @@ def test_default_pre_start_wait_section_omits_a_held_opt97_card(tmp_path):
     assert finding["evidence"] not in default
     assert vr.check_bmf_runner_minute_filter(default, findings_path).ok is True
     assert "<strong>OPT97 - " in _option_report(finding, bmf=True)
+
+
+def test_a_wholly_held_opt89_counts_once_in_renderer_and_verifier(tmp_path):
+    # An OPT89 whose stamped effect adds runner minutes is held as a whole;
+    # its sharding option must not be counted a second time.
+    finding = {
+        "id": "opt89-added",
+        "pattern": "OPT89",
+        "severity": "HIGH",
+        "title": "The slowest platform compiles its own tests",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["arm"],
+        "evidence": "job `arm` compiles inside an emulated linux/arm64 container run",
+        "runner_minute_effect": {"direction": "added_cost"},
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
+
+    default = _option_report(finding, bmf=False)
+
+    assert "enabled=false held=1" in default
+    assert vr.check_bmf_runner_minute_filter(default, findings_path).ok is True

@@ -15311,9 +15311,11 @@ def _bmf_has_held_option(finding: dict[str, Any]) -> bool:
     OPT89's primary build-once handoff removes duplicated compilation, so the
     finding remains useful in the default report. Its optional native-runner
     sharding route is different: each shard repeats runner setup. Count and
-    suppress that one route without suppressing the whole finding.
+    suppress that one route without suppressing the whole finding. A finding
+    held back as a whole is counted once, by `_bmf_held_back`.
     """
-    return str(finding.get("pattern") or "") == "OPT89"
+    return (str(finding.get("pattern") or "") == "OPT89"
+            and not _bmf_held_back(finding))
 
 
 def _bmf_added_cost_line(option: str, reason: str) -> str:

@@ -4,3 +4,5 @@
 - **2026-11-21** — Under `--bmf`, the OPT89 and OPT97 added-cost lines name the
   job-adding option they cost, so the rest of each finding is not read as added
   cost (#465).
+- **2026-11-21** — An OPT89 finding held back as a whole is counted once in the
+  held-back line, by the report and by `verify_report.py` alike (#465).
