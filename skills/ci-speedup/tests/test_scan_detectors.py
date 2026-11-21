@@ -913,6 +913,201 @@ jobs:
     assert "OPT16" not in _scan_one(tmp_path, neg)
 
 
+def test_opt16_finds_same_binary_built_in_separate_go_tests(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    tests = tmp_path / "internal" / "cli"
+    tests.mkdir(parents=True)
+    (tests / "contract_test.go").write_text(r'''package cli
+import ("os/exec"; "path/filepath"; "testing")
+func TestConfigContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    cmd := exec.Command("go", "build", "-o", out, "./cmd/crabbox")
+    _ = cmd.Run()
+}
+func TestHelpContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    cmd := exec.Command("go", "build", "-o", out, "./cmd/crabbox")
+    _ = cmd.Run()
+}
+func TestVersionContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    cmd := exec.Command("go", "build", "-o", out, "./cmd/crabbox")
+    _ = cmd.Run()
+}
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT16"]
+    assert findings, "expected repeated test-local binary builds"
+    finding = findings[0]
+    assert finding.get("source_test_build_repeat") is True, finding
+    assert "3 tests" in finding.get("evidence", ""), finding
+    assert "runner-minute saving: unsized" in finding.get("size_note", ""), finding
+
+
+def test_opt16_test_binary_detector_keeps_shared_or_distinct_builds_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    tests = tmp_path / "internal" / "cli"
+    tests.mkdir(parents=True)
+    (tests / "contract_test.go").write_text(r'''package cli
+import ("os/exec"; "path/filepath"; "sync"; "testing")
+var buildOnce sync.Once
+func sharedBinary(t *testing.T) string {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    buildOnce.Do(func() { _ = exec.Command("go", "build", "-o", out, "./cmd/crabbox").Run() })
+    return out
+}
+func TestConfigContract(t *testing.T) { _ = sharedBinary(t) }
+func TestHelpContract(t *testing.T) { _ = sharedBinary(t) }
+func TestDifferentTargets(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "worker")
+    _ = exec.Command("go", "build", "-o", out, "./cmd/worker").Run()
+}
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT16"
+                and row.get("source_test_build_repeat")]
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("tool, verb, output_flag, target", [
+    ("go", "build", "-o", "./cmd/tool"),
+    ("cargo", "build", "--target-dir", "--bin=tool"),
+    ("vite", "build", "--outDir", "web/tool"),
+])
+def test_opt16_test_binary_detector_covers_supported_build_tools(
+        tmp_path: Path, tool: str, verb: str, output_flag: str, target: str):
+    root = tmp_path / tool
+    _write_workflow(root, "ci.yml", "name: x\non: push\njobs: {}\n")
+    tests = root / "pkg"
+    tests.mkdir(parents=True)
+    call = f'exec.Command("{tool}", "{verb}", "{output_flag}", out, "{target}").Run()'
+    (tests / "build_test.go").write_text(f'''package pkg
+import ("os/exec"; "path/filepath"; "testing")
+func TestOne(t *testing.T) {{
+    out := filepath.Join(t.TempDir(), "tool")
+    _ = {call}
+}}
+func TestTwo(t *testing.T) {{
+    out := filepath.Join(t.TempDir(), "tool")
+    _ = {call}
+}}
+''', encoding="utf-8")
+    findings = [row for row in _scan(root)["findings"]
+                if row.get("pattern") == "OPT16"
+                and row.get("source_test_build_repeat")]
+    assert findings, f"expected repeated {tool} test build"
+
+
+_OPT16_GO_HEADER = ('package cli\nimport ("os"; "os/exec"; "path/filepath"; '
+                    '"testing")\n')
+
+
+def _opt16_source_findings(root: Path, files: dict[str, str]) -> list[dict]:
+    _write_workflow(root, "ci.yml", "name: x\non: push\njobs: {}\n")
+    pkg = root / "internal" / "cli"
+    pkg.mkdir(parents=True)
+    for name, text in files.items():
+        (pkg / name).write_text(text, encoding="utf-8")
+    return [row for row in _scan(root)["findings"]
+            if row.get("pattern") == "OPT16"
+            and row.get("source_test_build_repeat")]
+
+
+def _opt16_pair(first: str, second: str) -> str:
+    return (_OPT16_GO_HEADER
+            + "func TestA(t *testing.T) {\n" + first + "\n}\n"
+            + "func TestB(t *testing.T) {\n" + second + "\n}\n")
+
+
+_OPT16_OUT = '    out := filepath.Join(t.TempDir(), "x")\n'
+
+
+@pytest.mark.parametrize("case, first, second", [
+    # Build inputs on a continuation line are part of the identity.
+    ("multiline-tags",
+     _OPT16_OUT + '    _ = exec.Command("go", "build",\n'
+                  '        "-tags", "integration", "-o", out, "./cmd/x").Run()',
+     _OPT16_OUT + '    _ = exec.Command("go", "build",\n'
+                  '        "-tags", "e2e", "-o", out, "./cmd/x").Run()'),
+    # A different GOOS in the command environment is a different binary.
+    ("cmd-env-goos",
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, "./cmd/x")\n'
+                  '    cmd.Env = append(os.Environ(), "GOOS=linux")\n    _ = cmd.Run()',
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, "./cmd/x")\n'
+                  '    cmd.Env = append(os.Environ(), "GOOS=windows")\n    _ = cmd.Run()'),
+    # Process environment set by the test (GOARCH) changes the build.
+    ("setenv-goarch",
+     '    t.Setenv("GOARCH", "arm64")\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()',
+     '    t.Setenv("GOARCH", "amd64")\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()'),
+    # A local variable argument cannot be compared statically: withhold.
+    ("local-ldflags",
+     '    ldflags := "-X main.version=1"\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-ldflags", ldflags, "-o", out, "./cmd/x").Run()',
+     '    ldflags := "-X main.version=2"\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-ldflags", ldflags, "-o", out, "./cmd/x").Run()'),
+    # A different working directory builds a different module/package.
+    ("cmd-dir",
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, ".")\n'
+                  '    cmd.Dir = "testdata/a"\n    _ = cmd.Run()',
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, ".")\n'
+                  '    cmd.Dir = "testdata/b"\n    _ = cmd.Run()'),
+    # `go run` of a generator is not a reusable built binary.
+    ("go-run",
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("go", "run", "./cmd/gen", "-o", filepath.Join(dir, "a.json")).Run()',
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("go", "run", "./cmd/gen", "-o", filepath.Join(dir, "a.json")).Run()'),
+    # `npm run test` is not a build.
+    ("npm-run-test",
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("npm", "run", "test", "--", "--outfile", dir).Run()',
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("npm", "run", "test", "--", "--outfile", dir).Run()'),
+    # The temp dir and output flag belong to another command, not the build.
+    ("unrelated-output-flag",
+     '    dir := t.TempDir()\n    _ = exec.Command("go", "build", "./...").Run()\n'
+     '    _ = exec.Command("tar", "-o", dir).Run()',
+     '    dir := t.TempDir()\n    _ = exec.Command("go", "build", "./...").Run()\n'
+     '    _ = exec.Command("tar", "-o", dir).Run()'),
+    # Commented-out builds are not executed.
+    ("commented-out",
+     _OPT16_OUT + '    // _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()',
+     _OPT16_OUT + '    // _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()'),
+])
+def test_opt16_test_binary_detector_withholds_differing_or_unclassifiable_builds(
+        tmp_path: Path, case: str, first: str, second: str):
+    findings = _opt16_source_findings(
+        tmp_path, {"build_test.go": _opt16_pair(first, second)})
+    assert findings == [], (case, findings)
+
+
+def test_opt16_test_binary_detector_separates_exclusive_build_constraints(
+        tmp_path: Path):
+    """Tests that can never share one test process are not one finding."""
+    body = (_OPT16_OUT
+            + '    _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()\n')
+    files = {
+        "a_linux_test.go": _OPT16_GO_HEADER + "func TestA(t *testing.T) {\n" + body + "}\n",
+        "b_windows_test.go": _OPT16_GO_HEADER + "func TestB(t *testing.T) {\n" + body + "}\n",
+    }
+    assert _opt16_source_findings(tmp_path, files) == []
+
+
+def test_opt16_test_binary_detector_fires_on_multiline_call_with_same_dir(
+        tmp_path: Path):
+    """Same inputs split over lines, same package-level working dir: one finding."""
+    body = (_OPT16_OUT
+            + '    cmd := exec.Command(\n        "go", "build", "-o", out, "./cmd/x",\n    )\n'
+            + '    cmd.Dir = repoRoot\n    _ = cmd.Run()')
+    findings = _opt16_source_findings(
+        tmp_path, {"build_test.go": _opt16_pair(body, body)
+                   + 'var repoRoot = "../.."\n'})
+    assert len(findings) == 1, findings
+    assert "2 tests" in findings[0]["evidence"], findings
+
+
 def test_opt16_repeated_analysis_with_different_report_flags(tmp_path: Path):
     workflow = """name: CI
 on: pull_request
