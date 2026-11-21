@@ -13,6 +13,7 @@ Run from the repo root:
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import subprocess
@@ -33,11 +34,14 @@ def _have_yaml() -> bool:
     ).returncode == 0
 
 
-def _scan(root: Path) -> dict:
+def _scan(root: Path, default_branch: str | None = None) -> dict:
     if not _have_yaml():
         pytest.skip("PyYAML not installed in the test runner")
+    command = [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)]
+    if default_branch:
+        command.extend(["--default-branch", default_branch])
     result = subprocess.run(
-        [sys.executable, str(_SCAN_SCRIPT), "--root", str(root)],
+        command,
         capture_output=True, text=True, check=True,
     )
     return json.loads(result.stdout)
@@ -609,6 +613,280 @@ jobs:
     assert "OPT14" in _scan_one(tmp_path, pos)
 
 
+def test_opt110_upload_without_a_repository_consumer_is_unverified_waste(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build:runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-runtime-build
+          path: dist/runtime.tar.gz
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT110"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["build"]
+    assert "dist-runtime-build" in finding["evidence"]
+    assert "unverified outside this repository" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt110_matching_download_action_is_a_consumer(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: dist, path: dist}
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {name: dist}
+      - run: npm test
+"""
+    assert "OPT110" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt110_cross_workflow_gh_download_is_a_consumer(tmp_path: Path):
+    _write_workflow(tmp_path, "build.yml", """name: Build
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: worker-bundle, path: dist/worker.tgz}
+""")
+    _write_workflow(tmp_path, "deploy.yml", """name: Deploy
+on: workflow_dispatch
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh run download "$RUN_ID" --name worker-bundle
+      - run: ./deploy worker-bundle
+""")
+    assert "OPT110" not in _patterns(_scan(tmp_path))
+
+
+def test_opt110_different_download_name_does_not_confirm_consumption(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-bundle, path: dist/runtime.tgz}
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {name: coverage-report}
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT110"
+    ]
+    assert len(findings) == 1
+    assert "runtime-bundle" in findings[0]["evidence"]
+
+
+def test_opt110_release_step_using_the_uploaded_path_is_a_consumer(
+        tmp_path: Path):
+    workflow = """name: Release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build:runtime
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-bundle, path: dist/runtime.tgz}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/runtime.tgz
+"""
+    assert "OPT110" not in _scan_one(tmp_path, workflow, "release.yml")
+
+
+def test_opt110_dynamic_download_selector_holds_back_the_finding(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-bundle, path: dist/runtime.tgz}
+  consume:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {name: '${{ inputs.artifact }}'}
+"""
+    assert "OPT110" not in _scan_one(tmp_path, workflow)
+
+
+_OPT110_BUILD = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+"""
+_OPT110_UPLOAD = """      - uses: actions/upload-artifact@v4
+        with: {name: %s, path: %s}
+"""
+
+# Shapes whose artifact may have a consumer the repository scan cannot rule
+# out (a person reading diagnostics, a release or deploy, an external reusable
+# workflow or API client). Each must stay quiet: the finding is withheld.
+_OPT110_OUTSIDE_CONSUMER_SHAPES = {
+    "failure_diagnostic": _OPT110_BUILD + """      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: {name: browser-trace, path: traces/}
+""",
+    "always_logs": _OPT110_BUILD + """      - if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with: {name: e2e-logs, path: logs/}
+""",
+    "diagnostic_name": _OPT110_BUILD + _OPT110_UPLOAD % (
+        "playwright-report", "playwright-report/"),
+    "deploy_pages": _OPT110_BUILD + _OPT110_UPLOAD % ("github-pages", "site.tar")
+    + """  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/deploy-pages@v4
+""",
+    "third_party_download": _OPT110_BUILD + _OPT110_UPLOAD % ("bundle", "dist")
+    + """  use:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dawidd6/action-download-artifact@v6
+        with: {workflow: ci.yml}
+""",
+    "external_reusable_workflow": _OPT110_BUILD
+    + _OPT110_UPLOAD % ("bundle", "dist") + """  e2e:
+    needs: build
+    uses: example-org/shared/.github/workflows/e2e.yml@v1
+""",
+    "workflow_call_producer": """name: Build
+on: workflow_call
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+""" + _OPT110_UPLOAD % ("bundle", "dist"),
+    "artifact_url_output": _OPT110_BUILD + """      - id: up
+        uses: actions/upload-artifact@v4
+        with: {name: preview-build, path: dist}
+      - run: echo "${{ steps.up.outputs.artifact-url }}" >> "$GITHUB_STEP_SUMMARY"
+""",
+    "artifacts_api_client": _OPT110_BUILD + _OPT110_UPLOAD % ("bundle", "dist")
+    + """  fetch:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.listWorkflowRunArtifacts({owner: 'o', repo: 'r', run_id: 1});
+""",
+    "deploy_environment_job": """name: CI
+on: push
+jobs:
+  ship:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: npm run build
+""" + _OPT110_UPLOAD % ("site-build", "dist"),
+    "release_named_artifact": _OPT110_BUILD + _OPT110_UPLOAD % (
+        "release-binaries", "out/"),
+    "tag_release_workflow": """name: Build
+on:
+  push:
+    tags: ['v*']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+""" + _OPT110_UPLOAD % ("runtime-bundle", "dist"),
+    "local_action_downloads": _OPT110_BUILD + _OPT110_UPLOAD % ("bundle", "dist")
+    + """  use:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/fetch-build
+""",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_OPT110_OUTSIDE_CONSUMER_SHAPES))
+def test_opt110_possible_outside_consumer_withholds_the_finding(
+        tmp_path: Path, shape: str):
+    action = tmp_path / ".github" / "actions" / "fetch-build" / "action.yml"
+    action.parent.mkdir(parents=True)
+    action.write_text("""name: fetch build
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with: {path: dist}
+""")
+    _write_workflow(tmp_path, "ci.yml", _OPT110_OUTSIDE_CONSUMER_SHAPES[shape])
+    assert "OPT110" not in _patterns(_scan(tmp_path))
+
+
+def test_opt110_unrelated_local_action_keeps_the_finding(tmp_path: Path):
+    action = tmp_path / ".github" / "actions" / "setup" / "action.yml"
+    action.parent.mkdir(parents=True)
+    action.write_text("""name: setup
+runs:
+  using: composite
+  steps:
+    - run: npm ci
+      shell: bash
+""")
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/setup
+      - run: npm run build:runtime
+      - uses: actions/upload-artifact@v4
+        with: {name: dist-runtime-build, path: dist/runtime.tar.gz}
+""")
+    assert "OPT110" in _patterns(_scan(tmp_path))
+
+
 def test_opt16_within_job_duplicate(tmp_path: Path):
     pos = """name: CI
 on: push
@@ -633,6 +911,489 @@ jobs:
       - run: pnpm run test:packages
 """
     assert "OPT16" not in _scan_one(tmp_path, neg)
+
+
+def test_opt25_finds_sorted_positional_shard_splitter(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return names[shard::count]
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings, "expected sorted positional splitter guidance"
+    finding = findings[0]
+    assert "stable hash" in finding.get("fix_strategy", ""), finding
+    assert "fewer shard timeouts and reruns" in finding.get("runner_min_unsized_reason", ""), finding
+    assert "neutral" not in finding.get("size_note", ""), finding
+
+
+def test_opt25_positional_splitter_keeps_stable_hash_partition_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+import hashlib
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return [name for name in names
+            if int(hashlib.sha256(name.encode()).hexdigest(), 16) % count == shard]
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings == [], findings
+
+
+_OPT25_TIMING_SORTED_SPLITTERS = {
+    "python-key-duration": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    names = sorted(tests, key=lambda name: -durations[name])
+    return names[shard::count]
+'''),
+    "python-in-place-key": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    tests.sort(key=lambda name: durations.get(name, 0), reverse=True)
+    return tests[shard::count]
+'''),
+    "python-multiline-key": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    names = sorted(
+        tests,
+        key=lambda name: -durations[name],
+    )
+    return names[shard::count]
+'''),
+    "js-timing-comparator": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => timings[b] - timings[a]);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT25_TIMING_SORTED_SPLITTERS))
+def test_opt25_positional_splitter_keeps_timing_sorted_stride_quiet(
+        tmp_path: Path, case: str):
+    """A list sorted by measured duration and dealt round-robin is already a
+    timing-based splitter: inserting a test does not reorder by name."""
+    rel, source = _OPT25_TIMING_SORTED_SPLITTERS[case]
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert hits == [] and incomplete == [], hits
+
+
+_OPT25_NAME_SORTED_SPLITTERS = {
+    "js-default-sort": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort();
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "js-locale-compare": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => a.localeCompare(b));
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "github-scripts-python": (".github/scripts/shard.py", '''\
+def pick(listing, shard, count):
+    names = sorted(listing)
+    return names[shard::count]
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT25_NAME_SORTED_SPLITTERS))
+def test_opt25_finds_name_sorted_positional_splitter_shapes(tmp_path: Path, case: str):
+    rel, source = _OPT25_NAME_SORTED_SPLITTERS[case]
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, _incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert [(pattern, source_path) for pattern, source_path, _hit in hits] == [
+        ("OPT25", rel)]
+    facts = hits[0][2].facts
+    assert "exactly one shard" in facts["fix_strategy"], facts
+
+
+def test_opt16_finds_same_binary_built_in_separate_go_tests(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    tests = tmp_path / "internal" / "cli"
+    tests.mkdir(parents=True)
+    (tests / "contract_test.go").write_text(r'''package cli
+import ("os/exec"; "path/filepath"; "testing")
+func TestConfigContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    cmd := exec.Command("go", "build", "-o", out, "./cmd/crabbox")
+    _ = cmd.Run()
+}
+func TestHelpContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    cmd := exec.Command("go", "build", "-o", out, "./cmd/crabbox")
+    _ = cmd.Run()
+}
+func TestVersionContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    cmd := exec.Command("go", "build", "-o", out, "./cmd/crabbox")
+    _ = cmd.Run()
+}
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT16"]
+    assert findings, "expected repeated test-local binary builds"
+    finding = findings[0]
+    assert finding.get("source_test_build_repeat") is True, finding
+    assert "3 tests" in finding.get("evidence", ""), finding
+    assert "runner-minute saving: unsized" in finding.get("size_note", ""), finding
+
+
+def test_opt16_test_binary_detector_keeps_shared_or_distinct_builds_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    tests = tmp_path / "internal" / "cli"
+    tests.mkdir(parents=True)
+    (tests / "contract_test.go").write_text(r'''package cli
+import ("os/exec"; "path/filepath"; "sync"; "testing")
+var buildOnce sync.Once
+func sharedBinary(t *testing.T) string {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    buildOnce.Do(func() { _ = exec.Command("go", "build", "-o", out, "./cmd/crabbox").Run() })
+    return out
+}
+func TestConfigContract(t *testing.T) { _ = sharedBinary(t) }
+func TestHelpContract(t *testing.T) { _ = sharedBinary(t) }
+func TestDifferentTargets(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "worker")
+    _ = exec.Command("go", "build", "-o", out, "./cmd/worker").Run()
+}
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT16"
+                and row.get("source_test_build_repeat")]
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("tool, verb, output_flag, target", [
+    ("go", "build", "-o", "./cmd/tool"),
+    ("cargo", "build", "--target-dir", "--bin=tool"),
+    ("vite", "build", "--outDir", "web/tool"),
+])
+def test_opt16_test_binary_detector_covers_supported_build_tools(
+        tmp_path: Path, tool: str, verb: str, output_flag: str, target: str):
+    root = tmp_path / tool
+    _write_workflow(root, "ci.yml", "name: x\non: push\njobs: {}\n")
+    tests = root / "pkg"
+    tests.mkdir(parents=True)
+    call = f'exec.Command("{tool}", "{verb}", "{output_flag}", out, "{target}").Run()'
+    (tests / "build_test.go").write_text(f'''package pkg
+import ("os/exec"; "path/filepath"; "testing")
+func TestOne(t *testing.T) {{
+    out := filepath.Join(t.TempDir(), "tool")
+    _ = {call}
+}}
+func TestTwo(t *testing.T) {{
+    out := filepath.Join(t.TempDir(), "tool")
+    _ = {call}
+}}
+''', encoding="utf-8")
+    findings = [row for row in _scan(root)["findings"]
+                if row.get("pattern") == "OPT16"
+                and row.get("source_test_build_repeat")]
+    assert findings, f"expected repeated {tool} test build"
+
+
+_OPT16_GO_HEADER = ('package cli\nimport ("os"; "os/exec"; "path/filepath"; '
+                    '"testing")\n')
+
+
+def _opt16_source_findings(root: Path, files: dict[str, str]) -> list[dict]:
+    _write_workflow(root, "ci.yml", "name: x\non: push\njobs: {}\n")
+    pkg = root / "internal" / "cli"
+    pkg.mkdir(parents=True)
+    for name, text in files.items():
+        (pkg / name).write_text(text, encoding="utf-8")
+    return [row for row in _scan(root)["findings"]
+            if row.get("pattern") == "OPT16"
+            and row.get("source_test_build_repeat")]
+
+
+def _opt16_pair(first: str, second: str) -> str:
+    return (_OPT16_GO_HEADER
+            + "func TestA(t *testing.T) {\n" + first + "\n}\n"
+            + "func TestB(t *testing.T) {\n" + second + "\n}\n")
+
+
+_OPT16_OUT = '    out := filepath.Join(t.TempDir(), "x")\n'
+
+
+@pytest.mark.parametrize("case, first, second", [
+    # Build inputs on a continuation line are part of the identity.
+    ("multiline-tags",
+     _OPT16_OUT + '    _ = exec.Command("go", "build",\n'
+                  '        "-tags", "integration", "-o", out, "./cmd/x").Run()',
+     _OPT16_OUT + '    _ = exec.Command("go", "build",\n'
+                  '        "-tags", "e2e", "-o", out, "./cmd/x").Run()'),
+    # A different GOOS in the command environment is a different binary.
+    ("cmd-env-goos",
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, "./cmd/x")\n'
+                  '    cmd.Env = append(os.Environ(), "GOOS=linux")\n    _ = cmd.Run()',
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, "./cmd/x")\n'
+                  '    cmd.Env = append(os.Environ(), "GOOS=windows")\n    _ = cmd.Run()'),
+    # Process environment set by the test (GOARCH) changes the build.
+    ("setenv-goarch",
+     '    t.Setenv("GOARCH", "arm64")\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()',
+     '    t.Setenv("GOARCH", "amd64")\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()'),
+    # A local variable argument cannot be compared statically: withhold.
+    ("local-ldflags",
+     '    ldflags := "-X main.version=1"\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-ldflags", ldflags, "-o", out, "./cmd/x").Run()',
+     '    ldflags := "-X main.version=2"\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-ldflags", ldflags, "-o", out, "./cmd/x").Run()'),
+    # A different working directory builds a different module/package.
+    ("cmd-dir",
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, ".")\n'
+                  '    cmd.Dir = "testdata/a"\n    _ = cmd.Run()',
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, ".")\n'
+                  '    cmd.Dir = "testdata/b"\n    _ = cmd.Run()'),
+    # `go run` of a generator is not a reusable built binary.
+    ("go-run",
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("go", "run", "./cmd/gen", "-o", filepath.Join(dir, "a.json")).Run()',
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("go", "run", "./cmd/gen", "-o", filepath.Join(dir, "a.json")).Run()'),
+    # `npm run test` is not a build.
+    ("npm-run-test",
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("npm", "run", "test", "--", "--outfile", dir).Run()',
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("npm", "run", "test", "--", "--outfile", dir).Run()'),
+    # The temp dir and output flag belong to another command, not the build.
+    ("unrelated-output-flag",
+     '    dir := t.TempDir()\n    _ = exec.Command("go", "build", "./...").Run()\n'
+     '    _ = exec.Command("tar", "-o", dir).Run()',
+     '    dir := t.TempDir()\n    _ = exec.Command("go", "build", "./...").Run()\n'
+     '    _ = exec.Command("tar", "-o", dir).Run()'),
+    # Commented-out builds are not executed.
+    ("commented-out",
+     _OPT16_OUT + '    // _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()',
+     _OPT16_OUT + '    // _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()'),
+])
+def test_opt16_test_binary_detector_withholds_differing_or_unclassifiable_builds(
+        tmp_path: Path, case: str, first: str, second: str):
+    findings = _opt16_source_findings(
+        tmp_path, {"build_test.go": _opt16_pair(first, second)})
+    assert findings == [], (case, findings)
+
+
+def test_opt16_test_binary_detector_separates_exclusive_build_constraints(
+        tmp_path: Path):
+    """Tests that can never share one test process are not one finding."""
+    body = (_OPT16_OUT
+            + '    _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()\n')
+    files = {
+        "a_linux_test.go": _OPT16_GO_HEADER + "func TestA(t *testing.T) {\n" + body + "}\n",
+        "b_windows_test.go": _OPT16_GO_HEADER + "func TestB(t *testing.T) {\n" + body + "}\n",
+    }
+    assert _opt16_source_findings(tmp_path, files) == []
+
+
+def test_opt16_test_binary_detector_fires_on_multiline_call_with_same_dir(
+        tmp_path: Path):
+    """Same inputs split over lines, same package-level working dir: one finding."""
+    body = (_OPT16_OUT
+            + '    cmd := exec.Command(\n        "go", "build", "-o", out, "./cmd/x",\n    )\n'
+            + '    cmd.Dir = repoRoot\n    _ = cmd.Run()')
+    findings = _opt16_source_findings(
+        tmp_path, {"build_test.go": _opt16_pair(body, body)
+                   + 'var repoRoot = "../.."\n'})
+    assert len(findings) == 1, findings
+    assert "2 tests" in findings[0]["evidence"], findings
+
+
+def test_opt16_repeated_analysis_with_different_report_flags(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --config config/knip.config.ts --production --include dependencies
+      - run: pnpm exec knip --config config/knip.config.ts --production --include files,exports
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [finding for finding in _scan(tmp_path)["findings"]
+                if finding["pattern"] == "OPT16"]
+    assert len(findings) == 1
+    assert "run it once and split or filter the combined report" in findings[0]["evidence"]
+    assert findings[0]["opt16_analysis_repeat"] == {"tool": "knip", "runs": 2, "steps": 2}
+
+
+def _knip_scripts_repo(tmp_path: Path, json_script: str, md_script: str) -> str:
+    (tmp_path / "package.json").write_text(json.dumps({
+        "name": "fixture", "private": True,
+        "scripts": {"knip:json": json_script, "knip:md": md_script},
+    }), encoding="utf-8")
+    return """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm knip:json && pnpm knip:md
+"""
+
+
+def test_opt16_report_flag_variant_follows_package_scripts(tmp_path: Path):
+    workflow = _knip_scripts_repo(
+        tmp_path, "knip --reporter json > a.json", "knip --reporter markdown > b.md")
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [finding for finding in _scan(tmp_path)["findings"]
+                if finding["pattern"] == "OPT16"]
+    assert len(findings) == 1
+    assert findings[0]["opt16_analysis_repeat"] == {"tool": "knip", "runs": 2, "steps": 1}
+
+
+@pytest.mark.parametrize(
+    "json_script, md_script",
+    [
+        # Different workspaces are different analyses.
+        ("knip --workspace packages/api --reporter json > a.json",
+         "knip --workspace packages/web --reporter markdown > b.md"),
+        # The second report runs only when the first command fails.
+        ("knip --reporter json > a.json || knip --reporter markdown > b.md",
+         "echo done"),
+    ],
+)
+def test_opt16_report_flag_variant_package_scripts_over_other_scopes_stay_quiet(
+        tmp_path: Path, json_script: str, md_script: str):
+    workflow = _knip_scripts_repo(tmp_path, json_script, md_script)
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_report_flag_variant_reads_continued_lines(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          pnpm exec knip \\
+            --config knip.config.ts \\
+            --include dependencies
+      - run: |
+          pnpm exec knip \\
+            --config knip.config.ts \\
+            --include files,exports
+"""
+    assert "OPT16" in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_report_flag_variant_counts_report_redirection_as_output(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --reporter json > knip.json
+      - run: pnpm exec knip --reporter markdown > knip.md
+"""
+    assert "OPT16" in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "first, second",
+    [
+        # Flags after `&&` belong to another command, not to Knip.
+        ("pnpm exec knip --include files && pnpm exec eslint . --format json",
+         "pnpm exec knip --include files && pnpm exec eslint . --format stylish"),
+        # `--fix` rewrites the tree, so the next run analyzes other files.
+        ("pnpm exec knip --fix --include exports",
+         "pnpm exec knip --fix --include files"),
+    ],
+)
+def test_opt16_report_flag_variant_ignores_other_commands_and_fixes(
+        tmp_path: Path, first: str, second: str):
+    workflow = ("name: CI\non: pull_request\njobs:\n  deadcode:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n"
+                f"      - run: {first}\n      - run: {second}\n")
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "steps",
+    [
+        # Mutually exclusive conditions: only one Knip run executes per event.
+        (
+            "      - if: github.event_name == 'pull_request'\n"
+            "        run: pnpm exec knip --reporter github-actions\n"
+            "      - if: github.event_name == 'push'\n"
+            "        run: pnpm exec knip --reporter json\n"
+        ),
+        # A `cd` earlier in the step changes the project scope.
+        (
+            "      - run: |\n"
+            "          cd packages/api\n"
+            "          pnpm exec knip --include dependencies\n"
+            "      - run: |\n"
+            "          cd packages/web\n"
+            "          pnpm exec knip --include files\n"
+        ),
+    ],
+)
+def test_opt16_report_flag_variant_withholds_unproven_shared_runs(
+        tmp_path: Path, steps: str):
+    workflow = ("name: CI\non: [push, pull_request]\njobs:\n  deadcode:\n"
+                "    runs-on: ubuntu-latest\n    steps:\n" + steps)
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize(
+    "commands",
+    [
+        (
+            "pnpm exec knip --config config/knip.config.ts --production --include dependencies",
+            "pnpm exec knip --config config/knip.scripts.config.ts --production --include exports",
+        ),
+        (
+            "pnpm exec knip --config config/knip.config.ts --production --include dependencies",
+            "pnpm exec knip --config config/knip.config.ts --include files",
+        ),
+        (
+            "pnpm exec eslint packages/api --format stylish",
+            "pnpm exec eslint packages/web --format json",
+        ),
+    ],
+)
+def test_opt16_report_flag_variant_keeps_distinct_analysis_scopes_quiet(
+        tmp_path: Path, commands: tuple[str, str]):
+    first, second = commands
+    workflow = f"""name: CI
+on: pull_request
+jobs:
+  analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - run: {first}
+      - run: {second}
+"""
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt16_one_combined_analysis_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  deadcode:
+    runs-on: ubuntu-latest
+    steps:
+      - run: pnpm exec knip --config config/knip.config.ts --production --include dependencies,files,exports
+"""
+    assert "OPT16" not in _scan_one(tmp_path, workflow)
 
 
 def test_opt18_not_auto_emitted(tmp_path: Path):
@@ -1351,6 +2112,1099 @@ jobs:
     assert "OPT29" not in _scan_one(tmp_path, neg)
 
 
+def test_opt108_comment_filter_inside_step_still_starts_a_runner(tmp_path: Path):
+    workflow = """name: Comment command
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  react:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    _write_workflow(tmp_path, "comment.yml", workflow)
+
+    finding = next(
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT108"
+    )
+    assert finding["affected_jobs"] == ["react"]
+    assert "job-level `if:`" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt108_comment_filter_at_job_level_skips_the_runner(tmp_path: Path):
+    workflow = """name: Comment command
+on:
+  issue_comment:
+    types: [created]
+jobs:
+  react:
+    if: contains(github.event.comment.body, '/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt111_automated_review_runs_on_every_pr_push(tmp_path: Path):
+    workflow = """name: Automated review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    _write_workflow(tmp_path, "review.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT111"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["review"]
+    assert "synchronize" in finding["evidence"]
+    assert "quiet window" in finding["evidence"]
+    assert "explicit re-review" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+    assert (
+        "runner-minute saving: unsized (static finding: the scan samples none of "
+        "the review job's runs" in finding["evidence"]
+    )
+    assert "+" not in finding["evidence"]
+
+
+def test_opt111_review_once_with_explicit_rereview_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on:
+  pull_request:
+    types: [opened, ready_for_review]
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: >-
+      github.event_name == 'pull_request' ||
+      contains(github.event.comment.body, '@reviewer re-review')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_explicit_comment_review_job_does_not_inherit_sync_trigger(
+        tmp_path: Path):
+    workflow = """name: Automated review
+on: [pull_request, issue_comment]
+jobs:
+  review:
+    if: >-
+      github.event_name == 'issue_comment' &&
+      contains(github.event.comment.body, '@reviewer re-review')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_non_review_job_on_synchronize_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on:
+  pull_request:
+    types: [opened, synchronize]
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: npm test
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt111_review_after_a_quiet_window_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for a quiet window
+        run: sleep 10m
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_unreadable_event_guard_holds_back_the_finding(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    if: contains(fromJSON(vars.REVIEW_EVENTS), github.event.action)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Review pull request
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+@pytest.mark.parametrize("step", [
+    'run: gh pr review --approve "$PR_URL"',
+    "run: gh api repos/$REPO/pulls/$PR/reviews --jq 'length'",
+    """uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.createReview({pull_number, event: 'APPROVE'})""",
+    """uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.pulls.createReview({
+              pull_number,
+              event: 'APPROVE',
+            })""",
+])
+def test_opt111_approval_or_review_read_is_not_an_automated_review(
+        tmp_path: Path, step: str):
+    workflow = f"""name: Approvals
+on: pull_request
+jobs:
+  approvals:
+    runs-on: ubuntu-latest
+    steps:
+      - {step}
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "approve.yml")
+
+
+def test_opt111_posted_comment_review_from_a_command_fires(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          body="$(./scripts/review.sh)"
+          gh api -X POST repos/$REPO/pulls/$PR/reviews -f event=COMMENT -f body="$body"
+"""
+    assert "OPT111" in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_step_guard_reviewing_only_on_open_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - if: github.event.action == 'opened' || github.event.action == 'ready_for_review'
+        uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+@pytest.mark.parametrize("guard", [
+    "contains(github.event.comment.body, '/review')",
+    "github.event.label.name == 'ai-review'",
+    "steps.gate.outputs.review == 'true'",
+])
+def test_opt111_explicit_trigger_or_unread_gate_holds_back(
+        tmp_path: Path, guard: str):
+    workflow = f"""name: Automated review
+on:
+  pull_request:
+    types: [opened, synchronize, labeled]
+  issue_comment:
+    types: [created]
+jobs:
+  review:
+    if: {guard}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+    step_guarded = workflow.replace(f"    if: {guard}\n", "").replace(
+        "      - uses: example/automated-code-review@v2",
+        f"      - id: gate\n        run: ./gate.sh\n"
+        f"      - if: {guard}\n        uses: example/automated-code-review@v2")
+    assert "OPT111" not in _scan_one(tmp_path, step_guarded, "review.yml")
+
+
+def test_opt111_step_guard_admitting_synchronize_still_fires(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.action == 'opened' || github.event.action == 'synchronize'
+        uses: anthropics/claude-code-action@v1
+"""
+    assert "OPT111" in _scan_one(tmp_path, workflow, "review.yml")
+
+
+def test_opt111_quiet_window_in_an_upstream_job_stays_quiet(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+concurrency:
+  group: review-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  settle:
+    runs-on: ubuntu-latest
+    steps:
+      - run: sleep 300
+  prepare:
+    needs: settle
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ready
+  review:
+    needs: [prepare]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example/automated-code-review@v2
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "review.yml")
+
+
+@pytest.mark.parametrize("action", [
+    "example/auto-assign-reviewer-by-files@v1",
+    "example/reviewer-lottery@v3",
+    "example/pr-review-reminder@v1",
+])
+def test_opt111_reviewer_assignment_action_is_not_a_review(
+        tmp_path: Path, action: str):
+    workflow = f"""name: Assign reviewers
+on: pull_request
+jobs:
+  assign:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: {action}
+"""
+    assert "OPT111" not in _scan_one(tmp_path, workflow, "assign.yml")
+
+
+def test_opt111_ai_codereviewer_action_fires(tmp_path: Path):
+    workflow = """name: Automated review
+on: pull_request
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: example/ai-codereviewer@main
+"""
+    assert "OPT111" in _scan_one(tmp_path, workflow, "review.yml")
+
+
+_OPT114_LOCK = '{"lockfileVersion": 3, "packages": {}}\n'
+
+
+def _write_opt114_repo(tmp_path: Path, workflow_steps: str, files: dict[str, str], *,
+                       on: str = "pull_request", job_extra: str = "",
+                       workflow_extra: str = "") -> None:
+    """A repository with one CI job whose steps are ``workflow_steps``."""
+    for rel, text in files.items():
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text(text, encoding="utf-8")
+    _write_workflow(tmp_path, "image.yml", f"""name: Image CI
+on: {on}
+{workflow_extra}jobs:
+  image:
+    runs-on: ubuntu-latest
+{job_extra}    steps:
+      - uses: actions/checkout@v4
+{workflow_steps}""")
+
+
+def _write_opt114_fixture(tmp_path: Path, docker_commands: str, *, host: str = "npm ci") -> None:
+    """Host ``npm ci`` and the image install read the same root lockfile."""
+    _write_opt114_repo(tmp_path, f"""      - run: {host}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": ("FROM node:22\nWORKDIR /app\n"
+                       "COPY package.json package-lock.json ./\n" + docker_commands),
+    })
+
+
+def _opt114_findings(tmp_path: Path) -> list[dict]:
+    return [row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT114"]
+
+
+def test_opt114_docker_npm_audit_repeats_host_advisory_lookup(tmp_path: Path):
+    _write_opt114_fixture(
+        tmp_path,
+        "RUN npm ci\nRUN npm run build && npm prune --omit=dev\n",
+    )
+
+    findings = _opt114_findings(tmp_path)
+    assert len(findings) == 1, findings
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["image"]
+    assert "npm ci" in finding["evidence"]
+    assert "npm prune" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+    assert "unsized" in finding["evidence"]
+
+
+@pytest.mark.parametrize(
+    ("docker_commands", "host"),
+    [
+        ("RUN npm ci --no-audit\nRUN npm prune --omit=dev --no-audit\n", "npm ci"),
+        ("RUN npm ci\nRUN npm prune --omit=dev\n", "npm ci --no-audit"),
+        ("RUN npm ci\nRUN npm prune --omit=dev\n", "pnpm install"),
+        ("RUN NPM_CONFIG_AUDIT=$AUDIT npm ci\n", "npm ci"),
+        ("RUN npm ci\n", "NPM_CONFIG_AUDIT=$NPM_AUDIT npm ci"),
+    ],
+)
+def test_opt114_stays_silent_without_duplicate_audit_reporting(
+    tmp_path: Path, docker_commands: str, host: str,
+):
+    _write_opt114_fixture(tmp_path, docker_commands, host=host)
+
+    assert "OPT114" not in _patterns(_scan(tmp_path))
+
+
+def test_opt114_host_install_in_image_context_directory_fires(tmp_path: Path):
+    # The host install and the image both read worker/package-lock.json.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+        working-directory: worker
+      - uses: docker/build-push-action@v6
+        with:
+          context: worker
+""", {
+        "worker/package.json": "{}\n",
+        "worker/package-lock.json": _OPT114_LOCK,
+        "worker/Dockerfile": ("FROM node:22\nCOPY package*.json ./\nRUN npm ci\n"),
+    })
+
+    assert [row["affected_jobs"] for row in _opt114_findings(tmp_path)] == [["image"]]
+
+
+def test_opt114_inherited_working_directory_npmrc_disables_host_audit(tmp_path: Path):
+    # `defaults.run.working-directory: app` puts the bare host `npm ci` under
+    # app/.npmrc, which turns audit off: the image lookup is the only report.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+      - run: docker build -f ../Dockerfile ..
+""", {
+        "app/package.json": "{}\n",
+        "app/package-lock.json": _OPT114_LOCK,
+        "app/.npmrc": "audit=false\n",
+        "Dockerfile": ("FROM node:22\nCOPY app/package.json app/package-lock.json ./\n"
+                       "RUN npm ci\n"),
+    }, job_extra="    defaults:\n      run:\n        working-directory: app\n")
+
+    assert _opt114_findings(tmp_path) == []
+
+
+@pytest.mark.parametrize("host_step", [
+    "      - run: cd tools && npm ci\n",
+    "      - run: npm ci --prefix tools\n",
+    "      - run: npm ci\n        working-directory: ${{ matrix.dir }}\n",
+])
+def test_opt114_unresolved_host_install_directory_withholds(tmp_path: Path, host_step: str):
+    _write_opt114_repo(tmp_path, host_step + """      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "tools/package.json": "{}\n",
+        "tools/package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_conditional_host_install_does_not_cover_every_build(tmp_path: Path):
+    # Push builds run the image install but skip the host audit.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+        if: github.event_name == 'pull_request'
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    }, on="[push, pull_request]")
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_host_and_build_under_the_same_condition_fire(tmp_path: Path):
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+        if: github.event_name == 'pull_request'
+      - uses: docker/build-push-action@v6
+        if: github.event_name == 'pull_request'
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    }, on="[push, pull_request]")
+
+    assert len(_opt114_findings(tmp_path)) == 1
+
+
+def test_opt114_image_with_separate_lockfile_is_not_a_duplicate(tmp_path: Path):
+    # Host `npm ci` audits the root tools; the image installs worker's own lockfile.
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+      - uses: docker/build-push-action@v6
+        with:
+          context: worker
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "worker/package.json": "{}\n",
+        "worker/package-lock.json": _OPT114_LOCK,
+        "worker/Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_host_heredoc_text_is_not_an_install(tmp_path: Path):
+    _write_opt114_repo(tmp_path, """      - run: |
+          cat <<'EOF'
+          npm ci
+          EOF
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": "FROM node:22\nCOPY package*.json ./\nRUN npm ci\n",
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+@pytest.mark.parametrize("docker_run", [
+    "RUN cat > /usr/local/bin/setup.sh <<'EOF'\nnpm ci\nEOF\n",
+    "RUN echo 'npm ci; npm prune' > /notes.txt\n",
+])
+def test_opt114_image_text_that_is_not_run_stays_quiet(tmp_path: Path, docker_run: str):
+    _write_opt114_fixture(tmp_path, docker_run)
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_unselected_stage_install_stays_quiet(tmp_path: Path):
+    _write_opt114_repo(tmp_path, """      - run: npm ci
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+""", {
+        "package.json": "{}\n",
+        "package-lock.json": _OPT114_LOCK,
+        "Dockerfile": ("FROM node:22 AS dev\nCOPY package*.json ./\nRUN npm ci\n"
+                       "FROM node:22-slim AS runtime\nCOPY server.js ./\n"
+                       "FROM dev AS test\nRUN npm test\n"),
+    })
+
+    assert _opt114_findings(tmp_path) == []
+
+
+def test_opt114_unrelated_stage_audit_setting_does_not_hide_selected_stage(
+    tmp_path: Path,
+):
+    _write_opt114_fixture(tmp_path, (
+        "RUN npm ci\n"
+        "FROM node:22 AS tools\nENV NPM_CONFIG_AUDIT=false\nRUN npm install -g x\n"
+        "FROM node:22-slim AS runtime\nCOPY --from=0 /app /app\n"
+    ))
+
+    findings = _opt114_findings(tmp_path)
+    assert len(findings) == 1, findings
+    assert "`npm ci`" in findings[0]["evidence"]
+    assert "npm install" not in findings[0]["evidence"]
+
+
+@pytest.mark.parametrize(("docker_commands", "fires"), [
+    # A setting that reaches the image before the install turns its audit off.
+    ("COPY docker.npmrc ./.npmrc\nRUN npm ci\n", False),
+    ("ENV NPM_CONFIG_AUDIT=false\nRUN npm ci\n", False),
+    ("ARG NPM_CONFIG_AUDIT\nRUN npm ci\n", False),
+    ("RUN npm config set audit false && npm ci\n", False),
+    # A setting applied only after the install does not cover it.
+    ("RUN npm ci\nENV NPM_CONFIG_AUDIT=false\n", True),
+])
+def test_opt114_image_audit_settings_follow_docker_order(
+    tmp_path: Path, docker_commands: str, fires: bool,
+):
+    _write_opt114_fixture(tmp_path, docker_commands)
+    (tmp_path / "docker.npmrc").write_text("audit=false\n", encoding="utf-8")
+
+    assert bool(_opt114_findings(tmp_path)) is fires
+
+
+def test_opt114_context_npmrc_not_copied_into_image_does_not_reach_it(tmp_path: Path):
+    # The Dockerfile copies only the manifests, so worker/.npmrc never applies
+    # inside the image: its `npm ci` still audits.
+    (tmp_path / "worker").mkdir()
+    (tmp_path / "worker" / ".npmrc").write_text("audit=false\n", encoding="utf-8")
+    (tmp_path / "worker" / "package-lock.json").write_text(_OPT114_LOCK, encoding="utf-8")
+    dockerfile = "FROM node:22\nCOPY package-lock.json ./\nRUN npm ci\n"
+
+    commands = scan._opt114_image_npm_commands(
+        dockerfile, tmp_path / "worker", tmp_path)
+
+    assert [(verb, copied) for verb, _command, copied in commands] == [
+        ("ci", ["worker/package-lock.json"])]
+    copied_npmrc = scan._opt114_image_npm_commands(
+        "FROM node:22\nCOPY . .\nRUN npm ci\n", tmp_path / "worker", tmp_path)
+    assert copied_npmrc == []
+
+
+def test_opt109_always_failure_reporter_runs_on_healthy_prs(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci-pr-failure-report.mjs
+      - name: Classify completed PR failures
+        run: node scripts/ci-pr-failure-report.mjs
+  gate:
+    needs: [lint, test, failure-report]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.failure-report.result }}" != failure
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT109"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["failure-report"]
+    assert "failure() || cancelled()" in finding["evidence"]
+    assert "`needs.failure-report.result` of `success` or `skipped`" in finding["evidence"]
+    assert "runner-minute saving: unsized (it saves the reporter's compute" in finding["evidence"]
+
+
+def test_opt109_failure_only_reporter_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: failure() || cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert "OPT109" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt109_needs_result_guard_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: >-
+      always() && !cancelled() &&
+      (contains(needs.*.result, 'failure') ||
+      contains(needs.*.result, 'cancelled'))
+    runs-on: ubuntu-latest
+    steps:
+      - name: Summarize failures
+        run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert "OPT109" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt109_always_job_with_real_work_is_not_a_reporter(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  cleanup-and-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run cleanup-resources
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert "OPT109" not in _scan_one(tmp_path, workflow)
+
+
+_OPT109_CHECKS = """name: CI
+on: pull_request
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+"""
+
+
+def _opt109_findings(tmp_path: Path, workflow: str) -> list[dict]:
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    data = _scan(tmp_path)
+    # A quiet negative must be quiet because the waste is absent, never because
+    # the fixture failed to parse.
+    assert data["scan_incomplete"] == []
+    return [row for row in data["findings"] if row["pattern"] == "OPT109"]
+
+
+def test_opt109_mixed_run_block_with_real_work_is_not_a_reporter(tmp_path: Path):
+    # One `run:` block that cleans up and then appends a summary does real work.
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          npm run cleanup-resources
+          echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_results_reporter_without_failure_scope_stays_quiet(tmp_path: Path):
+    # A job that posts every run's results is wanted on green runs too.
+    workflow = _OPT109_CHECKS + """  results-comment:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr comment "$PR" --body "lint ${{ needs.lint.result }}, test ${{ needs.test.result }}"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_failure_gated_steps_identify_a_reporter(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  notify:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(needs.*.result, 'failure')
+        run: gh pr comment "$PR" --body "A required check failed"
+"""
+    findings = _opt109_findings(tmp_path, workflow)
+    assert [row["affected_jobs"] for row in findings] == [["notify"]]
+
+
+def test_opt109_direct_result_comparison_guard_stays_quiet(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always() && (needs.lint.result == 'failure' || needs.test.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_reporter_clearing_stale_failure_comment_stays_quiet(tmp_path: Path):
+    # On a green rerun this job edits the earlier failure comment; skipping it
+    # would leave a stale failure report behind.
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh pr comment "$PR" --edit-last --body "Checks ${{ needs.test.result }}"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_shared_setup_upstream_is_covered_transitively(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci
+  lint:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    needs: setup
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  failure-report:
+    needs: [lint, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    findings = _opt109_findings(tmp_path, workflow)
+    assert [row["affected_jobs"] for row in findings] == [["failure-report"]]
+
+
+def test_opt109_reporter_missing_an_independent_check_stays_quiet(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run docs
+  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_evidence_says_how_the_downstream_gate_accepts_the_skip(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+  gate:
+    needs: [lint, test, failure-report]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: test "${{ needs.failure-report.result }}" = success
+"""
+    [finding] = _opt109_findings(tmp_path, workflow)
+    evidence = finding["evidence"]
+    # The gate is named, keeps a status function, and accepts `skipped` from the
+    # reporter only while every workload check must still succeed.
+    assert "`gate`" in evidence
+    assert "keep `if: always()`" in evidence
+    assert "`needs.failure-report.result` of `success` or `skipped`" in evidence
+    assert "every workload check to be `success`" in evidence
+    assert "a skipped job reports success" in evidence
+    # Its current success-only comparison is called out as the line to change.
+    assert "currently compares a result against `success`" in evidence
+    # The gate waits on the reporter, so the skip also shortens the healthy path.
+    assert "healthy path to `gate`" in evidence
+    assert "runner-minute saving: unsized (" in evidence
+
+
+def test_opt109_gate_without_status_function_is_told_to_add_one(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+  gate:
+    needs: [lint, test, failure-report]
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ok
+"""
+    [finding] = _opt109_findings(tmp_path, workflow)
+    assert "`gate` needs this reporter: add `if: always()`" in finding["evidence"]
+
+
+def test_opt109_aggregate_gate_that_fails_the_run_is_not_a_reporter(tmp_path: Path):
+    # A gate that exits non-zero is the required check itself, not a reporter.
+    workflow = _OPT109_CHECKS + """  fail-if-any-check-failed:
+    needs: [lint, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          if [[ "${{ contains(needs.*.result, 'failure') }}" == "true" ]]; then
+            echo "A required check failed"
+            exit 1
+          fi
+"""
+    assert _opt109_findings(tmp_path, workflow) == []
+
+
+def test_opt109_cancelled_exclusion_is_preserved_in_the_recommendation(tmp_path: Path):
+    workflow = _OPT109_CHECKS + """  failure-report:
+    needs: [lint, test]
+    if: always() && !cancelled()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Check the failed jobs" >> "$GITHUB_STEP_SUMMARY"
+"""
+    [finding] = _opt109_findings(tmp_path, workflow)
+    assert "use `if: failure()`" in finding["evidence"]
+
+
+def test_opt108_unrelated_job_author_guard_does_not_cover_body_filter(tmp_path: Path):
+    workflow = """name: Comment command
+on: pull_request_review_comment
+jobs:
+  react:
+    if: github.actor != 'automation[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - if: contains(github.event.comment.body, '/review')
+        run: node scripts/review.mjs
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "review-comment.yml")
+
+
+def test_opt108_ordinary_return_value_is_not_a_comment_rejection(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            function commentBody() {
+              return context.payload.comment.body;
+            }
+            await record(commentBody());
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_setup_before_filtered_handler_still_fires(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  react:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm ci
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_setup_alone_with_unfiltered_work_stays_quiet(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_chained_setup_and_required_work_stays_quiet(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm ci && node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_early_return_unrelated_to_the_comment_stays_quiet(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!process.env.TOKEN) return;
+            await record(body);
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_shell_exit_on_env_aliased_comment_body_fires(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          BODY: ${{ github.event.comment.body }}
+        run: |
+          if [[ "$BODY" != /deploy* ]]; then exit 0; fi
+          ./deploy.sh
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_job_sender_guard_covers_step_author_filter(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  cmd:
+    if: github.event.sender.type != 'Bot'
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.comment.user.type != 'Bot'
+        run: node run.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_step_author_association_filter_fires(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  cmd:
+    runs-on: ubuntu-latest
+    steps:
+      - if: github.event.comment.author_association == 'MEMBER'
+        run: node run.mjs
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_unreadable_parallel_group_holds_the_finding_back(tmp_path: Path):
+    """The unread group may hold work every comment needs, so "every step is
+    filtered" cannot be known for the job."""
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - parallel:
+          run: node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    _write_workflow(tmp_path, "comment.yml", workflow)
+    data = _scan(tmp_path)
+    assert "OPT108" not in _patterns(data)
+    gaps = [g for g in data["scan_incomplete"] if g["path"] == ".github/workflows/comment.yml"]
+    assert gaps and "job_has_an_unreadable_parallel_group" in gaps[0]["reason"], gaps
+
+
+def test_opt108_optional_reaction_does_not_make_required_job_skippable(tmp_path: Path):
+    workflow = """name: Comment recorder
+on: issue_comment
+jobs:
+  record:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node scripts/record-comment.mjs
+      - if: contains(github.event.comment.body, '/react')
+        run: node scripts/react.mjs
+"""
+    assert "OPT108" not in _scan_one(tmp_path, workflow, "comment.yml")
+
+
+def test_opt108_setup_before_filtered_handler_still_reports(tmp_path: Path):
+    workflow = """name: Comment command
+on: issue_comment
+jobs:
+  react:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.comment.body;
+            if (!body.includes('/')) return;
+            await react(body);
+"""
+    assert "OPT108" in _scan_one(tmp_path, workflow, "comment.yml")
+
+
 def test_opt31_conditional_setup(tmp_path: Path):
     pos = """name: CI
 on: pull_request
@@ -1378,6 +3232,192 @@ jobs:
         run: npx playwright test smoke
 """
     assert "OPT31" not in _scan_one(tmp_path, neg)
+
+
+def test_opt31_needs_result_check_after_setup_pays_setup_on_failure(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  coverage-core:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./... -coverprofile=core.out
+  coverage-cli:
+    runs-on: ubuntu-latest
+    steps:
+      - run: go test ./cmd/... -coverprofile=cli.out
+  coverage:
+    needs: [coverage-core, coverage-cli]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with: {go-version: '1.26'}
+      - name: Require all coverage producers
+        env:
+          CORE_RESULT: ${{ needs['coverage-core'].result }}
+          CLI_RESULT: ${{ needs['coverage-cli'].result }}
+        run: |
+          printf 'core=%s cli=%s\\n' "${CORE_RESULT:-missing}" "${CLI_RESULT:-missing}"
+          [[ "${CORE_RESULT:-}" == success && "${CLI_RESULT:-}" == success ]]
+      - run: go tool cover -func=core.out
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT31"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["coverage"]
+    assert "before checkout and toolchain setup" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt31_needs_result_check_first_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  coverage:
+    needs: [coverage-core, coverage-cli]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all coverage producers
+        env:
+          CORE_RESULT: ${{ needs['coverage-core'].result }}
+          CLI_RESULT: ${{ needs['coverage-cli'].result }}
+        run: '[[ "$CORE_RESULT" == success && "$CLI_RESULT" == success ]]'
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_needs_check_that_runs_a_repository_script_stays_quiet(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: ./scripts/check-result "$TEST_RESULT"
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_needs_check_that_cannot_fail_the_job_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - continue-on-error: true
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: 'test "$TEST_RESULT" = success'
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt31_setup_already_gated_on_needs_success_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - if: needs.test.result == 'success'
+        uses: actions/checkout@v4
+      - env:
+          TEST_RESULT: ${{ needs.test.result }}
+        run: 'test "$TEST_RESULT" = success'
+"""
+    assert "OPT31" not in _scan_one(tmp_path, workflow)
+
+
+_OPT31_MOVE_UNSAFE_GATE = """name: CI
+on: pull_request
+%(wfextra)sjobs:
+  gate:
+    needs: [test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+%(jobextra)s    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+%(between)s      - name: Gate
+%(stepextra)s        env:
+          R: ${{ needs.test.result }}
+        run: |
+%(run)s
+"""
+
+_OPT31_MOVE_UNSAFE_CASES = {
+    # Each gate reads something checkout, setup or an earlier step provides,
+    # so moving it first could change the job's verdict.
+    "file-test": dict(run='          [[ "$R" == success && -f go.mod ]]'),
+    "then-runs-script": dict(run=(
+        '          if [ "$R" = success ]; then ./scripts/report.sh; fi\n'
+        '          test "$R" = success')),
+    "and-runs-tool": dict(
+        run='          test "$R" = success && go tool cover -func=c.out'),
+    "pipe-to-script": dict(run='          echo "$R" | ./check'),
+    "command-substitution": dict(
+        run='          [[ "$(cat VERSION)" == 1 && "$R" == success ]]'),
+    "input-redirect": dict(run='          test "$R" = success < input.txt'),
+    "step-working-directory": dict(
+        stepextra="        working-directory: app\n",
+        run='          test "$R" = success'),
+    "job-default-working-directory": dict(
+        jobextra="    defaults:\n      run:\n        working-directory: app\n",
+        run='          test "$R" = success'),
+    "workflow-default-shell": dict(
+        wfextra="defaults:\n  run:\n    shell: pwsh\n",
+        run='          test "$R" = success'),
+    "step-custom-shell": dict(
+        stepextra="        shell: pwsh\n", run='          test "$R" = success'),
+    "variable-from-earlier-step": dict(
+        between='      - run: echo "WANT=success" >> "$GITHUB_ENV"\n',
+        run='          test "$R" = "$WANT"'),
+}
+
+
+def _opt31_move_unsafe_workflow(**parts: str) -> str:
+    fields = {"wfextra": "", "jobextra": "", "between": "", "stepextra": ""}
+    fields.update(parts)
+    return _OPT31_MOVE_UNSAFE_GATE % fields
+
+
+def test_opt31_move_unsafe_fixture_fires_when_gate_is_builtin_only(
+        tmp_path: Path):
+    workflow = _opt31_move_unsafe_workflow(
+        stepextra="        shell: bash\n",
+        run=('          set -euo pipefail\n'
+             '          printf \'%s\\n\' "$R" >> "$GITHUB_STEP_SUMMARY"\n'
+             '          [ "$R" = success ] || { echo "test: $R" >&2; exit 1; }'))
+    assert "OPT31" in _scan_one(tmp_path, workflow)
+
+
+@pytest.mark.parametrize("case", sorted(_OPT31_MOVE_UNSAFE_CASES))
+def test_opt31_needs_check_that_reads_setup_state_stays_quiet(
+        tmp_path: Path, case: str):
+    workflow = _opt31_move_unsafe_workflow(**_OPT31_MOVE_UNSAFE_CASES[case])
+    assert "OPT31" not in _scan_one(tmp_path, workflow), case
 
 
 def test_opt33_no_draft_gate_on_matrix(tmp_path: Path):
@@ -1749,6 +3789,610 @@ jobs:
           languages: ${{ matrix.language }}
 """
     assert "OPT39" not in _scan_one(tmp_path, neg, name="codeql.yml")
+
+
+_OPT39_SINGLE_LANGUAGE_GO = """
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./...
+"""
+
+_OPT39_NODE_LANE = """
+  web-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+      - run: npm test
+"""
+
+
+def test_opt39_per_language_job_without_change_gate(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  go-contract:
+    name: Go contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+
+    assert finding is not None, (
+        "OPT39 should flag a pull-request Go job with no language-path gate")
+    assert finding["affected_jobs"] == ["go-contract"]
+    assert finding["opt39_languages"] == ["go"]
+    assert "go toolchain" in finding["evidence"]
+
+
+def _opt39_recipe_jobs_yaml() -> str:
+    text = (_SKILL_DIR / "references" / "patterns"
+            / "opt39-multi-language-matrix-without-path-filter.md").read_text(
+                encoding="utf-8")
+    fix = text[text.index("**Fix**:"):]
+    start = fix.index("```yaml\n") + len("```yaml\n")
+    return fix[start:fix.index("\n```", start)]
+
+
+def test_opt39_recipe_example_fails_open_and_counts_as_a_path_gate(tmp_path: Path):
+    """The catalog's own fix must be safe and must silence the finding.
+
+    Each lane runs unless the selector succeeded and proved it untouched, and a
+    repository that adopts the example verbatim is recognized as gated.
+    """
+    jobs = _opt39_recipe_jobs_yaml()
+    lane_conditions = re.findall(r"^    if: (.+)$", jobs, re.M)
+    lane_conditions = [c for c in lane_conditions if "needs.changes" in c]
+    assert len(lane_conditions) == 2
+    for condition in lane_conditions:
+        assert "!cancelled()" in condition
+        assert "needs.changes.result != 'success'" in condition
+        assert "!= 'false'" in condition
+    assert "|| 'true'" in jobs
+    assert "continue-on-error: true" in jobs
+
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    workflow = "name: CI\non:\n  pull_request:\n" + jobs + "\n"
+    (path / "ci.yml").write_text(workflow, encoding="utf-8")
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+    # Control: the same lanes without their gates are the waste OPT39 reports.
+    ungated = re.sub(r"^    if: \$\{\{ !cancelled\(\).*\n", "", workflow, flags=re.M)
+    assert ungated != workflow
+    (path / "ci.yml").write_text(ungated, encoding="utf-8")
+    flagged = [f for f in _scan(tmp_path)["findings"] if f.get("pattern") == "OPT39"]
+    assert sorted(j for f in flagged for j in f["affected_jobs"]) == [
+        "go-contract", "rust-contract"]
+
+
+def _opt39_run_recipe_aggregate(results: dict[str, str],
+                                outputs: dict[str, str]) -> int:
+    """Run the recipe's `ci-ok` script as GitHub would for one set of outcomes."""
+    import yaml
+
+    jobs = yaml.safe_load(_opt39_recipe_jobs_yaml())["jobs"]
+    aggregate = jobs["ci-ok"]
+    needs = aggregate["needs"]
+    needs = [needs] if isinstance(needs, str) else list(needs)
+
+    def value(expression: str) -> str:
+        expression = expression.strip()
+        if expression == "join(needs.*.result, ' ')":
+            return " ".join(results[name] for name in needs)
+        match = re.fullmatch(r"needs\.([\w-]+)\.result", expression)
+        if match and match.group(1) in needs:
+            return results[match.group(1)]
+        match = re.fullmatch(r"needs\.changes\.outputs\.(\w+)", expression)
+        if match and "changes" in needs:
+            return outputs.get(match.group(1), "")
+        if match:  # `changes` is not a need: GitHub leaves the context empty
+            return ""
+        raise AssertionError(f"unsupported expression in ci-ok: {expression}")
+
+    (step,) = aggregate["steps"]
+    env = {"PATH": "/usr/bin:/bin"}
+    for name, template in (step.get("env") or {}).items():
+        env[name] = re.sub(r"\$\{\{(.*?)\}\}", lambda m: value(m.group(1)),
+                           str(template))
+    return subprocess.run(["bash", "-e", "-c", step["run"]], env=env,
+                          capture_output=True, text=True).returncode
+
+
+@pytest.mark.parametrize(("label", "results", "outputs", "passes"), [
+    ("go untouched, rust ran", {"changes": "success", "go-contract": "skipped",
+                                "rust-contract": "success"},
+     {"go": "false", "rust": "true"}, True),
+    ("selector failed, every lane ran", {"changes": "failure",
+                                         "go-contract": "success",
+                                         "rust-contract": "success"},
+     {"go": "true", "rust": "true"}, True),
+    ("run cancelled before the lanes started", {"changes": "success",
+                                                "go-contract": "skipped",
+                                                "rust-contract": "skipped"},
+     {"go": "true", "rust": "true"}, False),
+    ("selector cancelled", {"changes": "cancelled", "go-contract": "skipped",
+                            "rust-contract": "skipped"}, {}, False),
+    ("a lane failed", {"changes": "success", "go-contract": "failure",
+                       "rust-contract": "success"},
+     {"go": "true", "rust": "true"}, False),
+])
+def test_opt39_recipe_aggregate_never_passes_an_unproven_skip(
+        label, results, outputs, passes):
+    """The required `ci-ok` check accepts a skipped lane only when the selector
+    succeeded and proved that lane untouched. A run cancelled before its lanes
+    start skips them all, and must not report Success on the head commit."""
+    assert (_opt39_run_recipe_aggregate(results, outputs) == 0) is passes, label
+
+
+def test_opt39_per_language_job_with_change_gate_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.filter.outputs.go }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go:
+              - '**/*.go'
+              - 'go.mod'
+  go-contract:
+    name: Go contracts
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+@pytest.mark.parametrize("selector_step", [
+    """      - id: files
+        uses: tj-actions/changed-files@v46
+        with:
+          files_yaml: |
+            go:
+              - '**/*.go'
+              - go.mod
+      - id: select
+        run: echo "go=${{ steps.files.outputs.go_any_changed }}" >> "$GITHUB_OUTPUT"
+""",
+    """      - id: select
+        run: |
+          changed="$(git diff --name-only "$BASE_SHA...$HEAD_SHA")"
+          if grep -qE '\\.go$|^go\\.mod$' <<<"$changed"; then
+            echo "go=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=false" >> "$GITHUB_OUTPUT"
+          fi
+""",
+])
+def test_opt39_common_changed_file_selectors_count_as_path_gates(
+        tmp_path: Path, selector_step: str):
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.select.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+""" + selector_step + """  go-test:
+    needs: changes
+    if: needs.changes.outputs.go != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+      - run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_unrelated_needs_condition_is_not_a_path_gate(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make generate
+  go-contract:
+    name: Go contracts
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is not None
+
+
+def test_opt39_unrelated_needs_output_is_not_a_path_gate(tmp_path: Path):
+    workflow = """
+name: Go contract
+on:
+  pull_request:
+jobs:
+  meta:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.value }}
+    steps:
+      - id: version
+        run: echo value=1 >> "$GITHUB_OUTPUT"
+  proof:
+    needs: meta
+    if: needs.meta.outputs.version != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "contract.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is not None
+
+
+@pytest.mark.parametrize("selector", [
+    # A repository's own composite action decides the output: unreadable here.
+    """      - id: detect
+        uses: ./.github/actions/detect-changes
+""",
+    # A repository script writes the output: its keys are not in the workflow.
+    """      - id: detect
+        run: ./scripts/ci/changed-languages.sh >> "$GITHUB_OUTPUT"
+""",
+])
+def test_opt39_unreadable_selector_withholds_the_finding(tmp_path: Path, selector: str):
+    """A lane gated on an output the scanner cannot classify may well be gated
+    by changed paths. Withhold the finding rather than call the lane ungated."""
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.detect.outputs.go }}
+    steps:
+      - uses: actions/checkout@v4
+""" + selector + """  go-test:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+      - run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_reusable_workflow_selector_withholds_the_finding(tmp_path: Path):
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  changes:
+    uses: ./.github/workflows/changes.yml
+  go-test:
+    needs: changes
+    if: needs.changes.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v5
+      - run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_step_level_changed_path_gate_stays_quiet(tmp_path: Path):
+    """The toolchain is installed only when a same-job selector saw Go change."""
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            go: ['**/*.go', 'go.mod']
+      - if: steps.filter.outputs.go == 'true'
+        uses: actions/setup-go@v5
+      - if: steps.filter.outputs.go == 'true'
+        run: go test ./...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+    # Control: a cache-hit condition on the same step is not a path gate.
+    cache_gated = workflow.replace(
+        "      - if: steps.filter.outputs.go == 'true'\n        uses: actions/setup-go@v5",
+        "      - id: cache\n        uses: actions/cache@v4\n        with:\n"
+        "          path: ~/go\n          key: go\n"
+        "      - if: steps.cache.outputs.cache-hit != 'true'\n"
+        "        uses: actions/setup-go@v5")
+    assert cache_gated != workflow
+    (path / "ci.yml").write_text(cache_gated + _OPT39_NODE_LANE, encoding="utf-8")
+    assert _finding(_scan(tmp_path), "OPT39") is not None
+
+
+def test_opt39_fail_open_github_script_path_gate_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Rust proof
+on:
+  pull_request:
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      rust_changed: ${{ steps.select.outputs.rust_changed }}
+    steps:
+      - uses: actions/github-script@v9
+        id: select
+        with:
+          script: |
+            const { data } = await github.rest.repos.compareCommitsWithBasehead({
+              ...context.repo, basehead: 'base...head'
+            });
+            const files = data.files;
+            core.setOutput('rust_changed', files.some(file => file.filename.endsWith('.rs')));
+  proof:
+    needs: scope
+    if: needs.scope.outputs.rust_changed != 'false'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "proof.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_declared_language_inputs_are_stamped_for_exact_sizing(tmp_path: Path):
+    workflow = """
+name: Runtime conformance
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/runtime.yml'
+      - 'crates/**'
+      - 'packages/**'
+jobs:
+  scope:
+    runs-on: ubuntu-latest
+    outputs:
+      rust_changed: ${{ steps.rust.outputs.changed }}
+    steps:
+      - name: Detect scheduled Rust input changes
+        id: rust
+        uses: ./.github/actions/detect-scheduled-changes
+        with:
+          proof-jobs: Rust workspace
+          paths: |
+            .github/workflows/runtime.yml
+            crates/**
+  proof:
+    needs: scope
+    if: github.event_name != 'schedule' || needs.scope.outputs.rust_changed == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "runtime.yml").write_text(workflow, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["opt39_language_inputs"] == [
+        ".github/workflows/runtime.yml", "crates/**"]
+    assert finding["opt39_workflow_inputs"] == [
+        ".github/workflows/runtime.yml", "crates/**", "packages/**"]
+
+
+def test_opt39_push_only_job_in_mixed_workflow_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Mixed CI
+on:
+  push:
+  pull_request:
+jobs:
+  go-proof:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-go@v6
+      - run: go test ./contracts/...
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "mixed.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_language_scoped_pull_request_trigger_stays_quiet(tmp_path: Path):
+    workflow = """
+name: Rust proof
+on:
+  pull_request:
+    paths:
+      - '**/*.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+jobs:
+  rust-proof:
+    name: Rust proof
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "proof.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_rust_workspace_with_rustup_install_is_detected(tmp_path: Path):
+    workflow = """
+name: Runtime conformance
+on:
+  pull_request:
+jobs:
+  rust:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal
+      - run: cargo test --workspace
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "runtime.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["opt39_languages"] == ["rust"]
+
+
+def test_opt39_neutral_contract_job_still_detects_its_language_setup(tmp_path: Path):
+    workflow = """
+name: CI
+on:
+  pull_request:
+jobs:
+  contract-proof:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v6
+      - run: pytest
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow + _OPT39_NODE_LANE, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["opt39_languages"] == ["python"]
+
+
+def test_opt39_single_language_workflow_stays_quiet(tmp_path: Path):
+    """A Go project's only test job is not a per-language lane.
+
+    Every pull request there changes Go or non-code files; the latter is the
+    missing trigger path filter (OPT32), not an unneeded language lane.
+    """
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(_OPT39_SINGLE_LANGUAGE_GO, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
+
+
+def test_opt39_language_lane_beside_another_language_lane_is_detected(tmp_path: Path):
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(
+        _OPT39_SINGLE_LANGUAGE_GO + _OPT39_NODE_LANE, encoding="utf-8")
+
+    finding = _finding(_scan(tmp_path), "OPT39")
+    assert finding is not None
+    assert finding["affected_jobs"] == ["go-test"]
+
+
+def test_opt39_generic_primary_tooling_job_stays_quiet(tmp_path: Path):
+    workflow = """
+name: CI guard
+on:
+  pull_request:
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v6
+      - run: python maintainers/scan.py
+"""
+    path = tmp_path / ".github" / "workflows"
+    path.mkdir(parents=True)
+    (path / "ci.yml").write_text(workflow, encoding="utf-8")
+
+    assert _finding(_scan(tmp_path), "OPT39") is None
 
 
 def test_opt62_clean_on_self_hosted(tmp_path: Path):
@@ -2347,6 +4991,757 @@ jobs:
       - run: pnpm test
 """
     assert "OPT45" in _scan_one(tmp_path, pos)
+
+
+def test_opt91_xcode_ci_build_writes_index_and_builds_generic_simulator(
+        tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tests
+        run: >-
+          xcodebuild -project App.xcodeproj -scheme AppTests
+          -destination 'generic/platform=iOS Simulator'
+          build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"]
+        if row["pattern"] == "OPT91" and row["affected_jobs"] == ["ios-tests"]
+    ]
+    assert len(findings) == 1
+    assert "COMPILER_INDEX_STORE_ENABLE=NO" in findings[0]["evidence"]
+    assert "host simulator architecture" in findings[0]["evidence"]
+    assert "Runner-minute effect: saving" in findings[0]["evidence"]
+
+
+def test_opt91_xcode_simulator_build_with_both_guards_stays_quiet(tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - name: Build tests
+        run: >-
+          xcodebuild -project App.xcodeproj -scheme AppTests
+          COMPILER_INDEX_STORE_ENABLE=NO ARCHS=arm64
+          -destination 'platform=iOS Simulator,name=iPhone 16'
+          build-for-testing
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_multi_arch_setting_does_not_clear_generic_simulator_waste(
+        tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO
+          ARCHS="arm64 x86_64"
+          -destination 'generic/platform=iOS Simulator'
+          build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT91"
+    ]
+    assert len(findings) == 1
+    assert "host simulator architecture" in findings[0]["evidence"]
+
+
+def test_opt91_generic_archive_destination_is_not_a_simulator_test_waste(
+        tmp_path: Path):
+    workflow = """name: Release
+on: workflow_dispatch
+jobs:
+  archive:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -project App.xcodeproj -scheme App
+          COMPILER_INDEX_STORE_ENABLE=NO
+          -destination 'generic/platform=iOS Simulator'
+          archive
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "release.yml")
+
+
+def test_opt91_xcode_version_probe_is_not_a_build(tmp_path: Path):
+    workflow = """name: Toolchain
+on: pull_request
+jobs:
+  version:
+    runs-on: macos-15
+    steps:
+      - run: xcodebuild -version
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "toolchain.yml")
+
+
+_OPT91_NEAR_MISS_RUNS = {
+    # Archive and Release builds are optimized: Xcode's `Default` index-store
+    # setting writes no index store there, so there is nothing to disable.
+    "archive-default-config": (
+        "xcodebuild -project App.xcodeproj -scheme App "
+        "-destination 'generic/platform=iOS' archive"),
+    "release-build": (
+        "xcodebuild -scheme App -configuration Release "
+        "-destination 'platform=iOS Simulator,name=iPhone 16' build"),
+    # An option value that spells an action is not the action.
+    "derived-data-named-build": (
+        "xcodebuild test-without-building -derivedDataPath build "
+        "-destination 'platform=iOS Simulator,name=iPhone 16'"),
+    "show-build-settings": "xcodebuild -scheme App -showBuildSettings build",
+    # One architecture selected by the -arch flag or by excluding the other.
+    "arch-flag": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO -arch arm64 "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "excluded-archs": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO "
+        "EXCLUDED_ARCHS=x86_64 "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "quoted-uname": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO "
+        "ARCHS=\"$(uname -m)\" "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    # Values the workflow text cannot classify withhold the finding.
+    "archs-from-variable": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO "
+        "ARCHS=\"$HOST_ARCH\" "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "index-from-variable": (
+        "xcodebuild -scheme AppTests "
+        "COMPILER_INDEX_STORE_ENABLE=\"$INDEX_STORE\" "
+        "-destination 'platform=iOS Simulator,name=iPhone 16' build-for-testing"),
+    "xcconfig-file": (
+        "xcodebuild -scheme AppTests -xcconfig ci.xcconfig "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "matrix-configuration": (
+        "xcodebuild -scheme App -configuration ${{ matrix.configuration }} "
+        "-destination 'platform=iOS Simulator,name=iPhone 16' build"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT91_NEAR_MISS_RUNS))
+def test_opt91_xcode_near_miss_shapes_stay_quiet(tmp_path: Path, case: str):
+    run = _OPT91_NEAR_MISS_RUNS[case]
+    workflow = f"""name: iOS CI
+on: pull_request
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - name: Xcode
+        run: {json.dumps(run)}
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml"), case
+
+
+def test_opt91_index_store_read_by_a_later_step_is_not_waste(tmp_path: Path):
+    """Periphery scans the index store the build wrote; disabling it would
+    break that check, so the index flavor must stay quiet."""
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  dead-code:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme App -derivedDataPath DerivedData
+          -destination 'platform=iOS Simulator,name=iPhone 16' build
+      - run: periphery scan --skip-build --index-store-path DerivedData/Index.noindex/DataStore
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_index_setting_on_one_step_is_not_an_index_consumer(
+        tmp_path: Path):
+    """The setting's own name must not read as a later step consuming the
+    index store, or one guarded step would hide an unguarded sibling."""
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - run: xcodebuild -scheme Lib COMPILER_INDEX_STORE_ENABLE=NO build
+      - run: >-
+          xcodebuild -scheme AppTests
+          -destination 'platform=iOS Simulator,name=iPhone 16' build-for-testing
+"""
+    assert "OPT91" in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_project_setting_disables_index_store(tmp_path: Path):
+    (tmp_path / "Config").mkdir()
+    (tmp_path / "Config" / "Base.xcconfig").write_text(
+        "COMPILER_INDEX_STORE_ENABLE = NO\n", encoding="utf-8")
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme App
+          -destination 'platform=iOS Simulator,name=iPhone 16' build
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_finding_states_an_unsized_saving_never_no_bill_saving(
+        tmp_path: Path):
+    import blocking_path as bp
+
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme AppTests
+          -destination 'platform=iOS Simulator,name=iPhone 16' build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+    finding = next(row for row in _scan(tmp_path)["findings"]
+                   if row["pattern"] == "OPT91")
+    assert finding["runner_min_unsized_reason"]
+    assert "runner-minute saving: unsized (" in finding["evidence"]
+    lines, n, _ = bp._also_noticed_block([finding], "https://example.invalid/c.md")
+    heading = next(line for line in lines
+                   if line.startswith("<summary><strong>OPT91 - "))
+    assert "no bill saving" not in heading
+    assert "runner-minute saving: unsized (" in heading
+
+
+def test_opt32_deploy_positive_path_also_matches_test_directory(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '.github/workflows/deploy.yml'
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+
+    findings = [
+        row for row in _scan(tmp_path, default_branch="main")["findings"]
+        if row["pattern"] == "OPT32" and row.get("opt32_deploy_test_paths")
+    ]
+    assert len(findings) == 1
+    assert "'!worker/test/**'" in findings[0]["evidence"]
+    assert "after" in findings[0]["evidence"]
+    assert "Runner-minute effect: saving" in findings[0]["evidence"]
+
+
+def test_opt32_deploy_test_exclusion_after_positive_stays_quiet(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'worker/**'
+      - '!worker/test/**'
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    assert "OPT32" not in {
+        row["pattern"] for row in _scan(tmp_path, default_branch="main")["findings"]
+    }
+
+
+def test_opt32_deploy_test_exclusion_before_positive_is_reincluded(tmp_path: Path):
+    workflow = """name: Deploy Coordinator
+on:
+  push:
+    branches: [main]
+    paths:
+      - '!worker/test/**'
+      - 'worker/**'
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    findings = _scan(tmp_path, default_branch="main")["findings"]
+    assert any(row.get("opt32_deploy_test_paths") for row in findings)
+
+
+def test_opt32_deploy_filter_on_non_default_branch_stays_quiet(tmp_path: Path):
+    workflow = """name: Deploy Preview
+on:
+  push:
+    branches: [staging]
+    paths: ['worker/**']
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+    _write_workflow(tmp_path, "deploy.yml", workflow)
+    test_dir = tmp_path / "worker" / "test"
+    test_dir.mkdir(parents=True)
+    (test_dir / "coordinator.test.ts").write_text("test('coordinator', () => {})\n")
+    assert "OPT32" not in {
+        row["pattern"] for row in _scan(tmp_path, default_branch="main")["findings"]
+    }
+
+
+_OPT32_DEPLOY_WF = """name: Deploy
+on:
+  push:
+    branches: [main]
+    paths: [{paths}]
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx wrangler deploy
+"""
+
+
+def _opt32_deploy_hits(root: Path, paths: str, files: dict[str, str]) -> list[dict]:
+    _write_workflow(root, "deploy.yml", _OPT32_DEPLOY_WF.format(paths=paths))
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if text is not None:
+            target.write_text(text)
+    return [row for row in _scan(root, default_branch="main")["findings"]
+            if row.get("opt32_deploy_test_paths")]
+
+
+@pytest.mark.parametrize("paths,files", [
+    # GitHub `*` stays inside one segment: `worker/*` never selects worker/test/.
+    ("'worker/*'", {"worker/test/a.test.ts": "test('a', () => {})\n"}),
+    # An OpenAPI `spec/` the docs deploy ships holds no test-named file.
+    ("'spec/**', 'docs/**'", {"spec/openapi.yaml": "openapi: 3.0.0\n"}),
+    # A test-dir helper imported by production code is a deploy input.
+    ("'worker/**'", {
+        "worker/test/a.test.ts": "test('a', () => {})\n",
+        "worker/test/fixtures.ts": "export const seed = 1\n",
+        "worker/src/index.ts": "import { seed } from '../test/fixtures'\n",
+    }),
+    # A Python test package imported by the service.
+    ("'svc/**'", {
+        "svc/tests/test_api.py": "def test_api(): pass\n",
+        "svc/tests/helpers.py": "SEED = 1\n",
+        "svc/app.py": "from tests.helpers import SEED\n",
+    }),
+    # A test-named package with its own manifest can ship on its own.
+    ("'packages/**'", {
+        "packages/test/package.json": '{"name": "@x/test"}\n',
+        "packages/test/src/index.test.ts": "test('a', () => {})\n",
+        "packages/test/src/index.ts": "export const x = 1\n",
+    }),
+    # Unsupported glob syntax: what the filter selects is unknown.
+    ("'worker/[a-z]*/**'", {"worker/test/a.test.ts": "test('a', () => {})\n"}),
+], ids=["single-star", "openapi-spec", "helper-imported-js",
+        "helper-imported-py", "test-named-package", "unsupported-glob"])
+def test_opt32_deploy_test_path_near_misses_stay_quiet(tmp_path: Path, paths, files):
+    assert _opt32_deploy_hits(tmp_path, paths, files) == []
+
+
+def test_opt32_deploy_test_path_fires_beside_unrelated_production_source(tmp_path: Path):
+    hits = _opt32_deploy_hits(tmp_path, "'worker/**'", {
+        "worker/test/a.test.ts": "import { x } from '../src/index'\n",
+        "worker/src/index.ts": "import { y } from './util'\nexport const x = y\n",
+        "worker/src/util.ts": "export const y = 1\n",
+    })
+    assert len(hits) == 1
+    assert "'!worker/test/**'" in hits[0]["evidence"]
+
+
+def _opt46_candidate_jobs(tmp_path: Path, content: str) -> list[str]:
+    """Jobs the OPT46 cancelled-run aggregate flavor records as candidates."""
+    _write_workflow(tmp_path, "ci.yml", content)
+    scanned = _scan(tmp_path)
+    assert "OPT46" not in _patterns(scanned), "a static scan never reports it"
+    return [job for c in scanned.get("opt46_aggregate_candidates", [])
+            for job in c["affected_jobs"]]
+
+
+def test_opt46_always_aggregate_starts_after_superseded_run_is_cancelled(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  verdict:
+    needs: [lint, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful checks
+        env:
+          LINT_RESULT: ${{ needs['lint'].result }}
+          TEST_RESULT: ${{ needs['test'].result }}
+        run: |
+          printf 'lint=%s test=%s\\n' \\
+            "${LINT_RESULT:-missing}" "${TEST_RESULT:-missing}"
+          [[ "$LINT_RESULT" == success && "$TEST_RESULT" == success ]]
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    scanned = _scan(tmp_path)
+    # A static scan cannot know whether the aggregate is a required check, so
+    # it records a candidate and reports nothing.
+    assert "OPT46" not in _patterns(scanned)
+    cands = [c for c in scanned["opt46_aggregate_candidates"]
+             if c["affected_jobs"] == ["verdict"]]
+    assert len(cands) == 1
+    assert cands[0]["pattern"] == "OPT46"
+    assert cands[0]["pattern_class"] == "static"
+    assert cands[0]["opt46_check_context"] == "verdict"
+    assert "!cancelled()" not in cands[0]["evidence"]
+
+
+def test_opt46_cancel_aware_aggregate_stays_quiet(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  verdict:
+    needs: [lint, test]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful checks
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+        run: test "$LINT_RESULT" = success -a "$TEST_RESULT" = success
+"""
+    assert not _opt46_candidate_jobs(tmp_path, workflow)
+
+
+def test_opt46_always_job_with_real_work_is_not_an_aggregate(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    needs: lint
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+"""
+    assert not _opt46_candidate_jobs(tmp_path, workflow)
+
+
+def test_opt46_result_guard_cannot_hide_real_work_in_shell_control_flow(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  verdict-and-test:
+    needs: lint
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Inspect lint result, then test
+        env:
+          LINT_RESULT: ${{ needs.lint.result }}
+        run: |
+          if npm test; then
+            test "$LINT_RESULT" = success
+          fi
+"""
+    assert not _opt46_candidate_jobs(tmp_path, workflow)
+
+
+def test_opt46_aggregate_without_cancellation_stays_with_measured_detector(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm test
+  verdict:
+    needs: [lint, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require successful checks
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+        run: test "$RESULTS" != '{}'
+"""
+    assert not _opt46_candidate_jobs(tmp_path, workflow)
+
+
+def _opt46_aggregate_workflow(run_block: str) -> str:
+    body = "\n".join(f"          {line}" for line in run_block.splitlines())
+    return f"""name: CI
+on: pull_request
+concurrency:
+  group: ${{{{ github.workflow }}}}-${{{{ github.event.pull_request.number }}}}
+  cancel-in-progress: true
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run lint
+  verdict:
+    needs: lint
+    if: ${{{{ always() }}}}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check results
+        env:
+          LINT_RESULT: ${{{{ needs.lint.result }}}}
+          RESULTS: ${{{{ toJSON(needs) }}}}
+        run: |
+{body}
+"""
+
+
+@pytest.mark.parametrize("run_block", [
+    'test "$LINT_RESULT" = success\nCI=true npm test',
+    'if test "$LINT_RESULT" = success; then npm test; fi',
+    'test "$LINT_RESULT" = success; rm -rf build',
+    'test "$LINT_RESULT" = success || echo `./notify.sh`',
+    'test "$LINT_RESULT" = success && ./scripts/deploy',
+])
+def test_opt46_real_work_after_a_result_check_is_not_an_aggregate(
+        tmp_path: Path, run_block: str):
+    """Every simple command on a line must be a result check, not just the
+    line's first word: real work chained after one stays quiet."""
+    assert not _opt46_candidate_jobs(tmp_path, _opt46_aggregate_workflow(run_block))
+
+
+@pytest.mark.parametrize("run_block", [
+    "echo \"$RESULTS\" | jq -e 'all(.[]; .result == \"success\")'",
+    'if [[ "$LINT_RESULT" == success && -n "$RESULTS" ]]; then exit 0; fi\nexit 1',
+    'echo "lint: $LINT_RESULT" >> "$GITHUB_STEP_SUMMARY"\n'
+    'test "$LINT_RESULT" = success',
+])
+def test_opt46_result_only_verdict_shapes_still_fire(
+        tmp_path: Path, run_block: str):
+    assert _opt46_candidate_jobs(tmp_path, _opt46_aggregate_workflow(run_block))
+
+
+def _opt46_scanned_aggregate(tmp_path: Path, *, job_name: str | None = None,
+                             matrix: bool = False) -> dict:
+    workflow = _opt46_aggregate_workflow('test "$LINT_RESULT" = success')
+    if job_name is not None:
+        workflow = workflow.replace(
+            "  verdict:\n", f"  verdict:\n    name: {job_name}\n", 1)
+    if matrix:
+        workflow = workflow.replace(
+            "  verdict:\n",
+            "  verdict:\n    strategy:\n      matrix:\n        os: [linux]\n", 1)
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    return _scan(tmp_path)
+
+
+def _required(names: set[str], **kwargs) -> "object":
+    import collect_runs as cr
+    return cr.RequiredChecks(frozenset(names), **kwargs)
+
+
+def test_opt46_non_required_aggregate_is_promoted_with_cancel_aware_advice(
+        tmp_path: Path):
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path)
+    promoted = cr._promote_opt46_aggregates(
+        scanned["opt46_aggregate_candidates"],
+        _required({"lint"}, complete=True))
+    assert [f["affected_jobs"] for f in promoted] == [["verdict"]]
+    evidence = promoted[0]["evidence"]
+    assert "check `verdict` is not required" in evidence
+    assert "`if: ${{ !cancelled() }}` is safe here" in evidence
+    assert "failure, cancelled or skipped" in evidence
+    assert "Runner-minute effect: saving" in evidence
+    assert promoted[0]["opt46_required_check_status"] == "not_required"
+
+
+@pytest.mark.parametrize("required", [
+    {"verdict"}, {"ci / verdict"}, {"verdict (linux)"}, {"lint", "verdict"},
+])
+def test_opt46_required_aggregate_keeps_always(tmp_path: Path, required: set):
+    """A skipped required check reads as passing, so a required aggregate is
+    never told to move to `!cancelled()`."""
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path)
+    assert cr._promote_opt46_aggregates(
+        scanned["opt46_aggregate_candidates"],
+        _required(required, complete=True)) == []
+
+
+@pytest.mark.parametrize("read", [
+    None,
+    {"complete": False},
+    {"complete": True, "classic_read": False},
+    {"complete": True, "rulesets_read": False},
+])
+def test_opt46_unknown_required_status_never_recommends_cancelled(
+        tmp_path: Path, read):
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path)
+    required = None if read is None else _required({"lint"}, **read)
+    assert cr._promote_opt46_aggregates(
+        scanned["opt46_aggregate_candidates"], required) == []
+
+
+@pytest.mark.parametrize("shape", [
+    {"job_name": "Verdict ${{ github.event_name }}"}, {"matrix": True}])
+def test_opt46_unreadable_check_name_stays_quiet(tmp_path: Path, shape: dict):
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path, **shape)
+    assert scanned["opt46_aggregate_candidates"]
+    assert cr._promote_opt46_aggregates(
+        scanned["opt46_aggregate_candidates"],
+        _required({"lint"}, complete=True)) == []
+
+
+def test_opt46_named_aggregate_matches_its_display_name(tmp_path: Path):
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path, job_name="All checks")
+    cands = scanned["opt46_aggregate_candidates"]
+    assert cands[0]["opt46_check_context"] == "All checks"
+    assert cr._promote_opt46_aggregates(
+        cands, _required({"All checks"}, complete=True)) == []
+    assert cr._promote_opt46_aggregates(
+        cands, _required({"verdict"}, complete=True))
+
+
+def test_opt46_static_only_report_never_recommends_cancelled(tmp_path: Path):
+    """Without a required-check read the report must not tell anyone to move
+    an aggregate to `!cancelled()`."""
+    import blocking_path as bp
+
+    scanned = _opt46_scanned_aggregate(tmp_path)
+    assert "OPT46" not in _patterns(scanned)
+    assert "!cancelled()" not in bp.render(scanned)
+
+
+def test_opt46_promoted_aggregate_heading_states_an_unsized_saving(
+        tmp_path: Path):
+    """The saving is real but unsized: the group heading must say so with its
+    reason, never `no bill saving`."""
+    import blocking_path as bp
+    import collect_runs as cr
+
+    scanned = _opt46_scanned_aggregate(tmp_path)
+    scanned["findings"].extend(cr._promote_opt46_aggregates(
+        scanned.pop("opt46_aggregate_candidates"),
+        _required({"lint"}, complete=True)))
+    finding = next(f for f in scanned["findings"] if f["pattern"] == "OPT46")
+    assert finding["runner_min_unsized_reason"]
+    heading = next(
+        line for line in bp.render(scanned).splitlines()
+        if line.startswith("<summary><strong>OPT46 - "))
+    assert "no bill saving" not in heading
+    assert "runner-minute saving: unsized (" in heading
+
+
+def test_opt46_and_opt32_docs_keep_required_aggregates_on_always():
+    refs = _SKILL_DIR / "references"
+    opt46 = refs / "patterns" / ("opt46-superseded-runs-not-cancelled-"
+                                 "missing-concurrency-or-cancel-.md")
+    opt32 = refs / "patterns" / ("opt32-missing-paths-paths-ignore-on-"
+                                 "expensive-workflows.md")
+    index = " ".join((refs / "optimization-patterns.md").read_text(
+        encoding="utf-8").split())
+    for doc in (opt46, opt32):
+        text = " ".join(doc.read_text(encoding="utf-8").split())
+        assert "cancel one run" not in text, doc.name
+        assert "a job skipped by its `if:` reports success" in text.lower(), doc.name
+    assert "cancel one run" not in index
+    # OPT32's verdict IS the required check, so it keeps `always()`; the index
+    # carries the same paragraph as the pattern file.
+    opt32_text = " ".join(opt32.read_text(encoding="utf-8").split())
+    fail_closed = opt32_text.split("**Fail closed:**")[1].split("**Required")[0]
+    assert "(`if: always()`)" in fail_closed
+    assert "Keep `if: always()` rather than OPT46's `!cancelled()`" in fail_closed
+    assert fail_closed in index
+    opt46_text = " ".join(opt46.read_text(encoding="utf-8").split())
+    assert "(non-required checks only)" in opt46_text
+    assert "keeps `if: always()`" in opt46_text
 
 
 def test_opt5_suppressed_when_pnpm_action_setup_caches(tmp_path: Path):
@@ -2963,6 +6358,257 @@ def test_opt19_python_time_sleep_leading_dot_float(tmp_path: Path):
 
 
 # =============================================================================
+# Phase 2e — OPT113 oversized test fixtures
+# =============================================================================
+
+def test_opt113_finds_test_executable_used_as_archive_fixture(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test -race ./...
+""")
+    source = tmp_path / "runtime" / "archive_test.go"
+    source.parent.mkdir()
+    source.write_text('''package runtime
+
+import (
+    "archive/zip"
+    "io"
+    "os"
+    "testing"
+)
+
+func controllerFixture(t *testing.T) string {
+    path, err := os.Executable()
+    if err != nil { t.Fatal(err) }
+    return path
+}
+
+func TestArchiveController(t *testing.T) {
+    input, err := os.Open(controllerFixture(t))
+    if err != nil { t.Fatal(err) }
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("controller")
+    _, _ = io.Copy(entry, input)
+}
+''', encoding="utf-8")
+
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+    assert findings, "expected oversized executable fixture guidance"
+    assert "small shared byte fixture" in findings[0]["fix_strategy"].lower()
+    assert "runner-minute saving: unsized" in findings[0]["evidence"].lower()
+
+
+def test_opt113_keeps_small_archive_fixture_and_metadata_check_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: go test -race ./...
+""")
+    small = tmp_path / "small" / "archive_test.go"
+    small.parent.mkdir()
+    small.write_text('''package small
+import ("archive/zip"; "io"; "os"; "path/filepath"; "testing")
+func TestArchiveController(t *testing.T) {
+    path := filepath.Join(t.TempDir(), "controller")
+    _ = os.WriteFile(path, []byte("fixture"), 0755)
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("controller")
+    _, _ = entry.Write([]byte("fixture"))
+}
+''', encoding="utf-8")
+    metadata = tmp_path / "metadata" / "executable_test.go"
+    metadata.parent.mkdir()
+    metadata.write_text('''package metadata
+import ("archive/zip"; "io"; "os"; "testing")
+func TestExecutableMode(t *testing.T) {
+    path, _ := os.Executable()
+    info, _ := os.Stat(path)
+    if info.Mode()&0111 == 0 { t.Fatal("not executable") }
+    writer := zip.NewWriter(io.Discard)
+    entry, _ := writer.Create("small")
+    _, _ = entry.Write([]byte("small fixture"))
+}
+''', encoding="utf-8")
+
+    assert not [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+
+
+def test_opt113_finds_explicitly_built_binary_used_as_compression_fixture(
+        tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: pull_request\njobs: {}\n")
+    source = tmp_path / "bundle" / "bundle_test.go"
+    source.parent.mkdir()
+    source.write_text('''package bundle
+import ("compress/gzip"; "io"; "os"; "os/exec"; "testing")
+func TestCompressedPayload(t *testing.T) {
+    output := t.TempDir() + "/fixture-bin"
+    if err := exec.Command("go", "build", "-o", output, "./cmd/fixture").Run(); err != nil {
+        t.Fatal(err)
+    }
+    input, _ := os.Open(output)
+    writer := gzip.NewWriter(io.Discard)
+    _, _ = io.Copy(writer, input)
+}
+''', encoding="utf-8")
+
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+    assert findings, "expected explicit build-output fixture guidance"
+    assert "binary built by the test" in findings[0]["evidence"]
+
+
+# Near-miss shapes where the real binary IS the contract (signature, ELF /
+# Mach-O header, execution), or where the executable read and the transform
+# are unrelated. OPT113 must stay quiet: a byte fixture cannot replace these.
+_OPT113_NEAR_MISSES = {
+    "signature-of-real-binary": '''package u
+import ("crypto/ed25519"; "crypto/sha256"; "os"; "testing")
+func TestSelfSignature(t *testing.T) {
+    exe, _ := os.Executable()
+    data, _ := os.ReadFile(exe)
+    sum := sha256.Sum256(data)
+    if !ed25519.Verify(pub, sum[:], sig) { t.Fatal("bad sig") }
+}
+''',
+    "elf-header-plus-unrelated-digest": '''package u
+import ("bytes"; "crypto/sha256"; "debug/elf"; "os"; "testing")
+func TestELF(t *testing.T) {
+    exe, _ := os.Executable()
+    data, _ := os.ReadFile(exe)
+    if _, err := elf.NewFile(bytes.NewReader(data)); err != nil { t.Fatal(err) }
+}
+func TestDigest(t *testing.T) { _ = sha256.Sum256([]byte("x")) }
+''',
+    "macho-header-plus-unrelated-digest": '''package u
+import ("crypto/sha256"; "debug/macho"; "os"; "testing")
+func TestMachO(t *testing.T) {
+    exe, _ := os.Executable()
+    f, _ := os.Open(exe)
+    _, _ = macho.NewFile(f)
+}
+func TestDigest(t *testing.T) { _ = sha256.Sum256([]byte("x")) }
+''',
+    "go-build-join-output-and-unrelated-read": '''package u
+import ("crypto/sha256"; "os"; "os/exec"; "path/filepath"; "testing")
+func TestBuildAndRun(t *testing.T) {
+    dir := t.TempDir()
+    _ = exec.Command("go", "build", "-o", filepath.Join(dir, "app"), ".").Run()
+    cfg, _ := os.ReadFile(filepath.Join("testdata", "config.json"))
+    _ = sha256.Sum256(cfg)
+}
+''',
+    "magic-byte-check-plus-unrelated-zip": '''package u
+import ("archive/zip"; "io"; "os"; "testing")
+func TestMagic(t *testing.T) {
+    exe, _ := os.Executable()
+    data, _ := os.ReadFile(exe)
+    if data[0] != 0x7f { t.Fatal("not elf") }
+}
+func TestZip(t *testing.T) {
+    w := zip.NewWriter(io.Discard)
+    e, _ := w.Create("small")
+    _, _ = e.Write([]byte("small"))
+}
+''',
+    "self-update-copies-and-executes-binary": '''package u
+import ("crypto/sha256"; "io"; "os"; "os/exec"; "testing")
+func TestSelfUpdate(t *testing.T) {
+    exe, _ := os.Executable()
+    src, _ := os.Open(exe)
+    dst, _ := os.Create(t.TempDir() + "/copy")
+    _, _ = io.Copy(dst, src)
+    dst.Close()
+    _ = exec.Command(dst.Name(), "-test.run=TestHelper").Run()
+    _ = sha256.Sum256([]byte("update"))
+}
+''',
+    "archived-binary-is-extracted-and-executed": '''package u
+import ("archive/zip"; "io"; "os"; "os/exec"; "testing")
+func TestArchiveRoundTripRuns(t *testing.T) {
+    exe, _ := os.Executable()
+    in, _ := os.Open(exe)
+    w := zip.NewWriter(io.Discard)
+    e, _ := w.Create("bin")
+    _, _ = io.Copy(e, in)
+    out := extract(t)
+    if err := exec.Command(out, "-test.run=TestNone").Run(); err != nil { t.Fatal(err) }
+}
+''',
+    "sidecar-next-to-binary-is-hashed": '''package u
+import ("crypto/sha256"; "os"; "testing")
+func TestSidecar(t *testing.T) {
+    exe, _ := os.Executable()
+    b, _ := os.ReadFile(exe + ".sha256")
+    _ = sha256.Sum256(b)
+}
+''',
+    "testdata-beside-binary-is-hashed": '''package u
+import ("crypto/sha256"; "os"; "path/filepath"; "testing")
+func TestData(t *testing.T) {
+    exe, _ := os.Executable()
+    b, _ := os.ReadFile(filepath.Join(filepath.Dir(exe), "testdata", "x"))
+    _ = sha256.Sum256(b)
+}
+''',
+    "archived-binary-mode-is-asserted": '''package u
+import ("archive/zip"; "io"; "os"; "testing")
+func TestArchivePreservesExecutableBit(t *testing.T) {
+    exe, _ := os.Executable()
+    info, _ := os.Stat(exe)
+    in, _ := os.Open(exe)
+    w := zip.NewWriter(io.Discard)
+    e, _ := w.Create("bin")
+    _, _ = io.Copy(e, in)
+    if info.Mode().Perm()&0o111 == 0 { t.Fatal("not executable") }
+}
+''',
+}
+
+
+@pytest.mark.parametrize("name", sorted(_OPT113_NEAR_MISSES))
+def test_opt113_near_miss_shapes_stay_quiet(tmp_path: Path, name: str):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: pull_request\njobs: {}\n")
+    source = tmp_path / "pkg" / "near_miss_test.go"
+    source.parent.mkdir()
+    source.write_text(_OPT113_NEAR_MISSES[name], encoding="utf-8")
+    assert not [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"], name
+
+
+def test_opt113_finds_executable_hashed_through_streaming_writer(tmp_path: Path):
+    """The plain shape from the issue: the test binary streamed into a hash."""
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: pull_request\njobs: {}\n")
+    source = tmp_path / "pkg" / "digest_test.go"
+    source.parent.mkdir()
+    source.write_text('''package pkg
+import ("crypto/sha256"; "io"; "os"; "testing")
+func TestBundleDigest(t *testing.T) {
+    exe, err := os.Executable()
+    if err != nil { t.Fatal(err) }
+    f, err := os.Open(exe)
+    if err != nil { t.Fatal(err) }
+    h := sha256.New()
+    if _, err := io.Copy(h, f); err != nil { t.Fatal(err) }
+}
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT113"]
+    assert findings, "expected the executable-to-hash flow to fire"
+    assert findings[0]["evidence_snippet"].strip() == "f, err := os.Open(exe)"
+
+
+# =============================================================================
 # Evidence quality — findings must carry the VERBATIM matched code, not prose
 # (regression for the "evidence doesn't let a human verify the claim" audit).
 # =============================================================================
@@ -3304,8 +6950,285 @@ def _ctx(event_name, *, ref, head_ref="", ref_name="", default_branch="main"):
     return {"github": {
         "event_name": event_name, "ref": ref, "head_ref": head_ref,
         "ref_name": ref_name or ref.rsplit("/", 1)[-1],
+        "run_id": "run-1", "workflow": "CI",
+        "event": {"repository": {"default_branch": default_branch},
+                  "pull_request": {"number": 7}},
+    }}
+
+
+def _gha_interpolate(template: str, ctx: dict) -> str:
+    def replace(match):
+        body = match.group(1).strip()
+        if "||" in body:
+            options = [part.strip() for part in body.split("||")]
+            return str(next((_gha_resolve(part, ctx) for part in options
+                             if _gha_resolve(part, ctx)), ""))
+        return str(_gha_resolve(body, ctx))
+
+    return re.sub(r"\$\{\{\s*(.*?)\s*}}", replace, template)
+
+
+def test_opt46_per_run_non_pr_group_preserves_each_required_validation():
+    yaml = pytest.importorskip("yaml")
+    recipes = []
+    for block in _yaml_blocks(_catalog_section("OPT46")):
+        conc = (yaml.safe_load(block) or {}).get("concurrency")
+        if isinstance(conc, dict) and "github.run_id" in str(conc.get("group", "")):
+            recipes.append(conc)
+
+    assert len(recipes) == 1, "OPT46 needs one copy-pasteable per-run escape hatch"
+    recipe = recipes[0]
+    combined = (
+        "${{ github.workflow }}-${{ (github.ref == "
+        "format('refs/heads/{0}', github.event.repository.default_branch) || "
+        "startsWith(github.ref, 'refs/tags/')) && github.run_id || "
+        "github.head_ref || github.ref_name }}"
+    )
+    assert recipe["group"] == combined
+    assert "github.event_name" not in recipe["group"]
+    assert "refs/tags/" in recipe["cancel-in-progress"]
+
+    body = _catalog_section("OPT46")
+    assert "mutually exclusive for the same event" not in body
+    assert "OPT47" in body
+    assert "adding `github.event_name`" in body
+
+    # The literal contract above keeps PR and feature-push groups on the same
+    # short branch key (OPT47), while default-branch and tag runs select run_id.
+    assert "github.head_ref || github.ref_name" in recipe["group"]
+
+
+# --- A real GitHub-expression evaluator for the OPT46 combined group key ------
+#
+# The cancel-predicate evaluator above only handles flat `&&` conjunctions. The
+# combined group key relies on what `&&` / `||` RETURN (an operand, not a
+# boolean), on `&&` binding tighter than `||`, and on parentheses, so it gets a
+# small recursive-descent evaluator with GitHub's semantics: `a || b` yields a
+# if truthy else b; `a && b` yields a if falsy else b; falsy = false, 0, '',
+# null; `==` / `!=` and startsWith() compare strings case-insensitively; a
+# missing property is null and interpolates as ''.
+
+_GHX_TOKEN = re.compile(
+    r"\s*(?:(?P<str>'(?:[^']|'')*')|(?P<num>\d+)|(?P<op>\|\||&&|==|!=|!|\(|\)|,)"
+    r"|(?P<name>[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*))")
+
+
+def _ghx_tokens(expr: str) -> list[tuple[str, str]]:
+    out, pos, expr = [], 0, expr.strip()
+    while pos < len(expr):
+        m = _GHX_TOKEN.match(expr, pos)
+        assert m and m.end() > pos, f"untokenizable at {expr[pos:]!r}"
+        pos = m.end()
+        kind = m.lastgroup
+        out.append((kind, m.group(kind)))
+    return out
+
+
+def _ghx_truthy(v) -> bool:
+    return v not in (None, False, 0, "")
+
+
+def _ghx_eq(a, b) -> bool:
+    if isinstance(a, str) and isinstance(b, str):
+        return a.lower() == b.lower()
+    return a == b
+
+
+def _ghx_eval(expr: str, ctx: dict):
+    """Evaluate one GitHub expression body (no `${{ }}`) and return its VALUE."""
+    toks, i = _ghx_tokens(expr), 0
+
+    def peek():
+        return toks[i] if i < len(toks) else (None, None)
+
+    def take(val=None):
+        nonlocal i
+        tok = peek()
+        assert tok[0] is not None and (val is None or tok[1] == val), (tok, val)
+        i += 1
+        return tok
+
+    def or_():
+        v = and_()
+        while peek() == ("op", "||"):
+            take()
+            rhs = and_()
+            v = v if _ghx_truthy(v) else rhs
+        return v
+
+    def and_():
+        v = cmp_()
+        while peek() == ("op", "&&"):
+            take()
+            rhs = cmp_()
+            v = rhs if _ghx_truthy(v) else v
+        return v
+
+    def cmp_():
+        v = unary()
+        while peek() in (("op", "=="), ("op", "!=")):
+            op = take()[1]
+            rhs = unary()
+            v = _ghx_eq(v, rhs) if op == "==" else not _ghx_eq(v, rhs)
+        return v
+
+    def unary():
+        if peek() == ("op", "!"):
+            take()
+            return not _ghx_truthy(unary())
+        return primary()
+
+    def primary():
+        kind, val = take()
+        if kind == "str":
+            return val[1:-1].replace("''", "'")
+        if kind == "num":
+            return int(val)
+        if (kind, val) == ("op", "("):
+            v = or_()
+            take(")")
+            return v
+        assert kind == "name", (kind, val)
+        if val in ("true", "false", "null"):
+            return {"true": True, "false": False, "null": None}[val]
+        if peek() == ("op", "("):
+            take("(")
+            args = [or_()]
+            while peek() == ("op", ","):
+                take()
+                args.append(or_())
+            take(")")
+            if val == "format":
+                fmt = args[0]
+                for n, arg in enumerate(args[1:]):
+                    fmt = fmt.replace("{%d}" % n, "" if arg is None else str(arg))
+                return fmt
+            if val == "startsWith":
+                return str(args[0] or "").lower().startswith(str(args[1] or "").lower())
+            raise AssertionError(f"unsupported function {val}")
+        cur = ctx
+        for part in val.split("."):
+            cur = cur.get(part) if isinstance(cur, dict) else None
+        return cur
+
+    v = or_()
+    assert i == len(toks), f"trailing tokens in {expr!r}: {toks[i:]}"
+    return v
+
+
+def _ghx_render(template: str, ctx: dict) -> str:
+    def one(m):
+        v = _ghx_eval(m.group(1), ctx)
+        if v is None:
+            return ""
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return str(v)
+
+    return re.sub(r"\$\{\{(.*?)}}", one, template)
+
+
+def _ghx_ctx(event_name, *, ref, head_ref="", run_id, default_branch="main"):
+    ref_name = (ref.split("/", 2)[2] if ref.startswith(("refs/heads/", "refs/tags/"))
+                else ref.split("/", 2)[-1])
+    return {"github": {
+        "event_name": event_name, "ref": ref, "head_ref": head_ref,
+        "ref_name": ref_name, "run_id": run_id, "workflow": "CI",
         "event": {"repository": {"default_branch": default_branch}},
     }}
+
+
+def test_ghx_evaluator_follows_github_operand_semantics():
+    """Fixture-test the evaluator itself, so the recipe test below cannot pass
+    because the evaluator is wrong."""
+    ctx = {"github": {"head_ref": "", "ref_name": "topic", "run_id": 42}}
+    assert _ghx_eval("github.head_ref || github.ref_name", ctx) == "topic"
+    assert _ghx_eval("true && github.run_id || 'x'", ctx) == 42
+    assert _ghx_eval("false && github.run_id || 'x'", ctx) == "x"
+    assert _ghx_eval("'' && 'a'", ctx) == ""
+    # `&&` binds tighter than `||`: true || (false && 'b') is true.
+    assert _ghx_eval("true || false && 'b'", ctx) is True
+    assert _ghx_eval("(true || false) && 'b'", ctx) == "b"
+    assert _ghx_eval("github.missing.deep", ctx) is None
+    assert _ghx_eval("'Main' == 'main'", ctx) is True
+    assert _ghx_eval("!startsWith('refs/tags/v1', 'refs/tags/')", ctx) is False
+    assert _ghx_eval("format('refs/heads/{0}', 'dev')", ctx) == "refs/heads/dev"
+    assert _ghx_render("${{ github.workflow }}-${{ github.run_id }}",
+                       {"github": {"run_id": 7}}) == "-7"
+
+
+def _opt46_combined_recipe() -> dict:
+    yaml = pytest.importorskip("yaml")
+    for block in _yaml_blocks(_catalog_section("OPT46")):
+        conc = (yaml.safe_load(block) or {}).get("concurrency")
+        if isinstance(conc, dict) and "github.run_id" in str(conc.get("group", "")):
+            return conc
+    raise AssertionError("OPT46 has no per-run combined group recipe")
+
+
+def test_opt46_combined_group_validates_every_default_branch_and_tag_run():
+    """#446: one key must give every default-branch push and every tag its own
+    group (no pending-run replacement) while feature branches and PRs share a
+    short-branch group, and the cancel predicate must still cancel only those."""
+    recipe = _opt46_combined_recipe()
+    group, cancel = recipe["group"], recipe["cancel-in-progress"]
+
+    def g(*a, **k):
+        return _ghx_render(group, _ghx_ctx(*a, **k))
+
+    def c(*a, **k):
+        return _ghx_eval(cancel.strip()[3:-2], _ghx_ctx(*a, **k))
+
+    # Three quick merges to the default branch: three distinct groups, so the
+    # third cannot replace the second's pending run. Same on a `master` repo.
+    for default in ("main", "master"):
+        merges = {g("push", ref=f"refs/heads/{default}", run_id=n,
+                    default_branch=default) for n in (101, 102, 103)}
+        assert len(merges) == 3, merges
+        assert not c("push", ref=f"refs/heads/{default}", run_id=1,
+                     default_branch=default)
+    # Tags: per run, never cancelled.
+    # (Same tag ref, three runs: a re-pushed tag or manual reruns still get
+    # their own groups, not a shared `CI-v1.1`.)
+    tags = {g("push", ref="refs/tags/v1.1", run_id=n) for n in (1, 2, 3)}
+    assert len(tags) == 3
+    assert not c("push", ref="refs/tags/v1.1", run_id=1)
+
+    # Feature branch: successive pushes share one group and cancel.
+    push_a = g("push", ref="refs/heads/feature/x", run_id=201)
+    push_b = g("push", ref="refs/heads/feature/x", run_id=202)
+    assert push_a == push_b == "CI-feature/x"
+    assert c("push", ref="refs/heads/feature/x", run_id=202) is True
+    # OPT47: the branch's pull_request run lands in the SAME group as its push.
+    pr = g("pull_request", ref="refs/pull/7/merge", head_ref="feature/x", run_id=203)
+    assert pr == push_a
+    assert c("pull_request", ref="refs/pull/7/merge", head_ref="feature/x",
+             run_id=203) is True
+    # A fork PR from its own `main` never shares the upstream default-branch
+    # push group (that run is keyed by run_id) and never cancels.
+    fork = g("pull_request", ref="refs/pull/9/merge", head_ref="main", run_id=301)
+    assert fork not in merges
+    assert c("pull_request", ref="refs/pull/9/merge", head_ref="main",
+             run_id=301) is False
+    # Merge queue entries are never cancelled.
+    assert c("merge_group", ref="refs/heads/gh-readonly-queue/main/pr-9-abc",
+             run_id=401) is False
+
+
+def test_opt46_event_name_in_the_group_splits_opt47_push_pr_dedup():
+    """The warning the catalog gives is true: put `github.event_name` into the
+    combined key and a branch's push and pull_request runs stop sharing a group."""
+    group = _opt46_combined_recipe()["group"]
+    with_event = group.replace("${{ github.workflow }}-",
+                               "${{ github.workflow }}-${{ github.event_name }}-", 1)
+    assert with_event != group
+    push = _ghx_ctx("push", ref="refs/heads/feature/x", run_id=1)
+    pr = _ghx_ctx("pull_request", ref="refs/pull/7/merge", head_ref="feature/x",
+                  run_id=2)
+    assert _ghx_render(group, push) == _ghx_render(group, pr)
+    assert _ghx_render(with_event, push) != _ghx_render(with_event, pr)
+    body = _catalog_section("OPT46")
+    assert "adding `github.event_name` to a `push` + `pull_request` workflow" in body
 
 
 def _cancel_predicates() -> dict[str, str]:
@@ -3448,7 +7371,8 @@ def test_opt45_opt46_name_the_group_key_vs_cancel_predicate_tension():
 def test_coverage_honest_with_zero_parseable_workflows(tmp_path: Path):
     """No workflows at all must NOT report full coverage — the uncovered set
     (incl. the OPT13/OPT15 judgment pair) is a property of the catalog, not of
-    what parsed."""
+    what parsed. OPT13's narrow measured exception does not make its broad
+    semantic scanner coverage complete."""
     (tmp_path / ".github" / "workflows").mkdir(parents=True)
     data = _scan(tmp_path)
     without = set(data["catalog_patterns_without_detector"])

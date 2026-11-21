@@ -516,8 +516,18 @@ Adding a new pattern is a three-part edit:
    order).
 3. **Build and commit.** Run `python3 maintainers/ci-speedup/scripts/build_catalog.py`
    and commit the new file, `INDEX.md` and the regenerated
-   `references/optimization-patterns.md` together. Never hand-edit the compiled
-   file: it is generated, and `build_catalog.py --check` in CI turns red on drift.
+   `references/optimization-patterns.md` together, with whichever of `SKILL.md`,
+   `ARCHITECTURE.md` and `evals/evals.json` it rewrote: the build also derives the
+   catalog's pattern count, its hygiene/structural split and both id lists from
+   each file's `class` frontmatter (`DOC_CLAIMS` in the script names every
+   sentence it owns). Never hand-edit the compiled file or those counts: they are
+   generated, and `build_catalog.py --check` (run by
+   `maintainers/ci-speedup/tests/test_build_catalog.py`, so on every PR and
+   merge-queue entry) turns red on drift. When two PRs each add a pattern, the
+   second can merge cleanly with a count that is now one short (both sides wrote
+   the same number) or conflict on an id list; either way it is mechanical: merge
+   `main`, take either side of a conflicted count line, rerun the build and commit.
+   The merge-queue run checks the merged result, so a stale count cannot land.
 
 Then register its detector in
 `skills/ci-speedup/scripts/scan.py` (a per-file / cross-workflow / repo-file handler or, for

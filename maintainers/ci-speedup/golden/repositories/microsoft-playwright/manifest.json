@@ -17,7 +17,6 @@
   "pole_log_note": "the public API returned no pole logs for this recording",
   "pole_logs_recorded": 0,
   "repository": "microsoft/playwright",
-  "replay_recorded_runs_only": true,
   "schema_version": 1,
   "secret_scan": "passed",
   "skipped_log_files": []

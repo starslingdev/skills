@@ -25,6 +25,7 @@ Usage:
     run.py --root REPO --out FINDINGS.json [--repo owner/repo]
            [--target N] [--with-logs] [--catalog PATH]
            [--accept-request-estimate]
+           [--account-weekly-series PATH]
            [--skill-commit-sha SHA] [--commit-sha SHA]
     # writes FINDINGS.json; then render it with `blocking_path.py --in FINDINGS.json`.
     # scan stderr flows straight through, so coverage warnings are visible.
@@ -55,7 +56,11 @@ from typing import NamedTuple
 _DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DIR))
 from summary import build_summary  # noqa: E402  (sibling module; needs _DIR on path)
-from before_after import advance_verification, GhVerificationClient  # noqa: E402
+from before_after import (  # noqa: E402
+    advance_verification,
+    GhVerificationClient,
+    summarize_account_weekly,
+)
 from pr_sample_contract import (  # noqa: E402
     PR_SAMPLE_CANDIDATE_PAGE_CAP,
     PR_SAMPLE_JOB_LIST_READ_CAP,
@@ -325,7 +330,16 @@ def main(argv: list[str] | None = None) -> int:
         "--accept-request-estimate", action="store_true",
         help="Proceed when the printed upper request estimate exceeds half of "
              "the remaining GitHub quota (required for non-interactive runs).")
+    parser.add_argument("--bmf", action="store_true",
+                        help="Show wall-clock-only recommendations that add runner "
+                             "minutes or use an unpriced larger runner.")
     parser.add_argument("--catalog", default=None, help="Override catalog path.")
+    parser.add_argument(
+        "--account-weekly-series", type=Path, default=None,
+        help="Optional JSON account export with weekly runner-hours, job counts, "
+             "merged-PR counts, workload-change notes, and explicit paired before/"
+             "after run minutes (at least 5 per side for a comparison). The skill normalizes and renders it; it never "
+             "extrapolates one repository into an account total.")
     parser.add_argument("--skill-commit-sha", default=None,
                         help="Skill provenance sha for the report footer/catalog "
                              "links; auto-derived from this skill's own git HEAD "
@@ -349,6 +363,28 @@ def main(argv: list[str] | None = None) -> int:
         help="Use three distinct default-branch pushes instead of warm reruns.")
     args = parser.parse_args(argv)
 
+    # Create the output directory up front. Without this, a fresh `--out
+    # /tmp/run/findings.json` whose parent doesn't exist tracebacks on the first
+    # write (the partial-file write below) instead of just working — a papercut that
+    # forces the caller to mkdir and retry.
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+
+    # Validate the optional account export before any scan, gh collection or
+    # verification rerun, so a malformed file never costs API reads or CI runs
+    # and never discards a verification result that already started.
+    account_weekly = None
+    if args.account_weekly_series is not None:
+        try:
+            raw_weekly = json.loads(
+                args.account_weekly_series.read_text(encoding="utf-8"))
+            account_weekly = summarize_account_weekly(raw_weekly)
+        except (OSError, json.JSONDecodeError, ValueError) as e:
+            print(f"ERROR: account weekly series is invalid ({e}); stopping.",
+                  file=sys.stderr)
+            return 1
+
+    # Price the bulk data pass only after every local input is valid, so a
+    # malformed account export never costs the user preflight API reads.
     request_estimate: _RequestEstimate | None = None
     request_probe = _RequestProbe()
     offline_replay = bool(os.environ.get("CI_SPEEDUP_GH_FIXTURES"))
@@ -382,12 +418,6 @@ def main(argv: list[str] | None = None) -> int:
                       file=sys.stderr)
                 return 1
 
-    # Create the output directory up front. Without this, a fresh `--out
-    # /tmp/run/findings.json` whose parent doesn't exist tracebacks on the first
-    # write (the partial-file write below) instead of just working — a papercut that
-    # forces the caller to mkdir and retry.
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-
     # Verification resumes the artifact produced before the fix.  Do this
     # before scan/collect so the historical baseline is never replaced with a
     # fresh post-push collection.
@@ -410,6 +440,8 @@ def main(argv: list[str] | None = None) -> int:
             changed_files=list(args.verify_changed_file),
             cache_sensitive=bool(args.verify_cache_sensitive),
         )
+        if account_weekly is not None:
+            result["account_weekly"] = account_weekly
         print("Post-fix verification: "
               + json.dumps(result, sort_keys=True, ensure_ascii=False))
         return 0
@@ -532,6 +564,8 @@ def main(argv: list[str] | None = None) -> int:
                 "remaining_before_data_pass": request_estimate.remaining,
                 "probe_requests": request_estimate.probe_requests,
             }
+        if account_weekly is not None:
+            data["account_weekly"] = account_weekly
         timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
         # `run_start_epoch` is set by scan.py (the always-runs anchor); don't
         # override it here. The driver only adds its own scripted-phase span.
@@ -563,7 +597,7 @@ def main(argv: list[str] | None = None) -> int:
         # whether --out was relative.
         try:
             print(build_summary(data, findings_path=str(args.out), out_path=report_path,
-                                root=args.root))
+                                root=args.root, bmf=args.bmf))
         except Exception as e:  # a summary failure must never fail the run
             print(f"(summary unavailable: {e}; findings at {args.out})", file=sys.stderr)
 

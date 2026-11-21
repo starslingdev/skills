@@ -868,6 +868,52 @@ def test_opt36_schedule_burn_floors():
     assert _opt36(_SCHEDULE_WF, runs, jpr=_jobs_per_run(n_runs=2)) == []
 
 
+_SCHEDULE_SCANNER_WF = {
+    "on": {"schedule": [{"cron": "0 * * * *"}]},
+    "jobs": {"scan": {"steps": [
+        {"uses": "github/codeql-action/init@v4", "with": {
+            "languages": "javascript-typescript", "config": """
+paths-ignore:
+  - tests/**
+  - docs/**
+"""}},
+        {"uses": "github/codeql-action/analyze@v4"},
+    ]}},
+}
+
+
+def test_opt36_reports_consecutive_scans_whose_inputs_did_not_change():
+    runs = _schedule_runs("base", "head")
+    for run in runs:
+        run["conclusion"] = "success"
+    out = cr._detect_opt36_schedule_burn(
+        "codeql.yml", runs, _jobs_per_run(), _SCHEDULE_SCANNER_WF, 30, 0,
+        changed_paths_by_pair={("base", "head"): ["tests/a.test.ts", "docs/api.md"]})
+
+    assert len(out) == 1
+    finding = out[0]
+    assert finding["opt36_unchanged_inputs"]["excluded_only_pairs"] == 1
+    assert finding["runner_minute_effect"]["direction"] == "saving"
+    assert "runner-minute saving" in finding["evidence"]
+    assert "last successful scan" in finding["fix_strategy_detail"]
+    assert "comparison cannot complete" in finding["fix_strategy_detail"]
+
+
+def test_opt36_keeps_a_scan_when_a_relevant_input_changed_or_diff_is_unreadable():
+    runs = _schedule_runs("base", "head")
+    for run in runs:
+        run["conclusion"] = "success"
+    relevant = cr._detect_opt36_schedule_burn(
+        "codeql.yml", runs, _jobs_per_run(), _SCHEDULE_SCANNER_WF, 30, 0,
+        changed_paths_by_pair={("base", "head"): ["src/server.ts"]})
+    unreadable = cr._detect_opt36_schedule_burn(
+        "codeql.yml", runs, _jobs_per_run(), _SCHEDULE_SCANNER_WF, 30, 0,
+        changed_paths_by_pair={("base", "head"): None})
+
+    assert relevant == []
+    assert unreadable == []
+
+
 # ========================= OPT35 fail-fast waste =========================
 
 def _ff_job(name, start_min, end_min, conclusion="success", run_id="run-1"):
@@ -1432,6 +1478,44 @@ def test_opt46_fires_only_on_overlapping_runs_with_cert():
         "feature/x-0", "feature/x-1", "feature/x-2", "feature/x-3"]
     assert "inference" in f["evidence"].lower()
     assert f["runner_min_range_s"][0] <= f["runner_min_range_s"][1]
+
+
+def test_opt46_pending_run_replacement_recipe_has_a_per_run_escape_hatch():
+    """Three racing runs expose GitHub's single pending slot; the recommendation
+    must preserve non-PR runs when every commit needs its own validation."""
+    raced = _overlapping("feature/x", 3)
+    finding = _opt46(_PUSH_WF, raced)[0]
+    guardrail = finding["measured_evidence"]["note"].split("GUARDRAIL:", 1)[1]
+
+    assert finding["runner_min_saving"] > 0
+    assert "runner-minute (bill) only" in finding["size_note"]
+    assert "one pending run" in guardrail
+    assert "combined group" in guardrail
+    # Feature-branch pushes are non-PR runs the combined key still cancels, so
+    # the condition must name the runs it actually protects.
+    assert "every non-PR commit" not in guardrail
+    assert "every default-branch commit and tag must be validated" in guardrail
+    assert ("${{ github.workflow }}-${{ (github.ref == "
+            "format('refs/heads/{0}', github.event.repository.default_branch) || "
+            "startsWith(github.ref, 'refs/tags/')) && github.run_id || "
+            "github.head_ref || github.ref_name }}") in guardrail
+    assert "github.event.repository.default_branch" in guardrail
+    assert "startsWith(github.ref, 'refs/tags/')" in guardrail
+    assert "`github.run_id`" in guardrail
+    assert "OPT47" in guardrail
+    assert "`github.event_name`" in guardrail
+
+    safe = {
+        "on": {"push": {}, "pull_request": {}},
+        "name": "CI",
+        "concurrency": {
+            "group": "${{ github.workflow }}-${{ github.event_name }}-"
+                     "${{ github.event.pull_request.number || github.run_id }}",
+            "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
+        },
+    }
+    assert _opt46(safe, raced) == []  # positive escape hatch is not re-reported
+    assert _opt46(_PUSH_WF, _sequential("feature/x", 3)) == []  # near miss: no race
 
 
 def test_opt46_does_NOT_fire_on_sequential_default_branch_runs():
@@ -2187,6 +2271,146 @@ def test_opt46_output_composes_with_pr1_stamps():
     assert f["tier2_neutrality"]["proof"] == "post_completion_waste"  # detector cert survives
 
 
+# ========================= OPT107 default-branch batching =========================
+
+def _default_push_runs(gap_minutes: int) -> list[dict]:
+    runs = []
+    for i in range(5):
+        start = _dt.datetime(2026, 11, 1, tzinfo=_dt.timezone.utc) + _dt.timedelta(
+            minutes=i * gap_minutes)
+        end = start + _dt.timedelta(minutes=10)
+        run = _run(
+            "main", f"tip{i}", "push",
+            start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            end.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            run_id=f"main-{i}")
+        run["conclusion"] = "success"
+        runs.append(run)
+    return runs
+
+
+def _opt107(runs: list[dict]) -> list[dict]:
+    detector = getattr(cr, "_detect_opt107_default_branch_batching", None)
+    if detector is None:
+        return []
+    jobs_by_run = {
+        str(run["id"]): jobs
+        for run, jobs in zip(runs, _jobs_per_run(n_runs=len(runs), secs=600))
+    }
+    return detector(
+        ".github/workflows/ci.yml", runs, jobs_by_run,
+        {"on": {"push": {"branches": ["main"]}}}, "main", 0)
+
+
+def test_opt107_reports_dense_default_branch_pushes_with_signed_sizing():
+    findings = _opt107(_default_push_runs(gap_minutes=20))
+    assert findings, "dense default-branch pushes should produce OPT107"
+    finding = findings[0]
+
+    assert finding["pattern"] == "OPT107"
+    assert finding["batchable_run_count"] == 4
+    assert finding["credited_run_count"] == 2
+    assert finding["runner_min_saving"] is None
+    assert finding["sample_runner_min_effect"] == -20.0
+    assert "−20 runner-min" in finding["evidence"]
+    assert "hourly" in finding["measured_evidence"]["note"].lower()
+    assert "repository variable" in finding["measured_evidence"]["note"].lower()
+    assert "pull-request gate" in finding["measured_evidence"]["note"].lower()
+
+
+def test_opt107_ignores_default_branch_pushes_without_batchable_waste():
+    assert _opt107(_default_push_runs(gap_minutes=120)) == []
+
+
+def test_opt107_uses_only_each_credited_runs_own_compute():
+    runs = _default_push_runs(gap_minutes=20)
+    jobs_by_run = {
+        "main-0": _jobs_per_run(n_runs=1, secs=120)[0],
+        "main-1": _jobs_per_run(n_runs=1, secs=600)[0],
+        "main-2": _jobs_per_run(n_runs=1, secs=1200)[0],
+    }
+    findings = cr._detect_opt107_default_branch_batching(
+        ".github/workflows/ci.yml", runs, jobs_by_run,
+        {"on": {"push": {"branches": ["main"]}}}, "main", 0)
+
+    assert findings[0]["credited_run_ids"] == ["main-0", "main-1"]
+    assert findings[0]["runner_min_saving"] is None
+    assert findings[0]["sample_runner_min_effect"] == -12.0
+
+
+def test_opt107_does_not_price_side_effect_jobs_in_a_mixed_workflow():
+    # A test-and-deploy workflow: the deploy job stays on its push event, so
+    # only the validation job's compute may become a batching saving.
+    runs = _default_push_runs(gap_minutes=20)
+    doc = {"on": {"push": {"branches": ["main"]}}, "jobs": {
+        "test": {"runs-on": "ubuntu-latest", "steps": [{"run": "make test"}]},
+        "ship": {"runs-on": "ubuntu-latest", "environment": "production",
+                 "steps": [{"run": "./ship.sh"}]},
+        "bundle": {"runs-on": "ubuntu-latest",
+                   "steps": [{"run": "npm publish --provenance"}]},
+    }}
+    jobs_by_run = {
+        str(run["id"]): [_span_job("test", 600), _span_job("ship", 1800),
+                         _span_job("bundle", 300)]
+        for run in runs
+    }
+    findings = cr._detect_opt107_default_branch_batching(
+        ".github/workflows/ci.yml", runs, jobs_by_run, doc, "main", 0)
+
+    assert findings
+    assert findings[0]["sample_runner_min_effect"] == -20.0  # `test` alone
+    assert findings[0]["excluded_side_effect_jobs"] == ["bundle", "ship"]
+    assert findings[0]["affected_jobs"] == ["test"]
+
+
+def test_opt107_evidence_names_one_sample_population_for_share_and_scaling():
+    # Five completed pushes plus one cancelled push: the share counts completed
+    # runs, the monthly scale counts every sampled push run, and the evidence
+    # names both so its two denominators never disagree silently.
+    runs = _default_push_runs(gap_minutes=20)
+    cancelled = dict(runs[-1], id="main-x", head_sha="tipx", conclusion="cancelled")
+    runs.append(cancelled)
+    jobs_by_run = {
+        str(run["id"]): jobs
+        for run, jobs in zip(runs, _jobs_per_run(n_runs=len(runs), secs=600))
+    }
+    findings = cr._detect_opt107_default_branch_batching(
+        ".github/workflows/ci.yml", runs, jobs_by_run,
+        {"on": {"push": {"branches": ["main"]}}}, "main", 0,
+        monthly_push_volume=60)
+    evidence = findings[0]["evidence"]
+    assert "4 of 5 completed default-branch push runs (of 6 sampled)" in evidence
+    assert "estimate from 6 sampled runs, x60/6" in evidence
+    assert findings[0]["monthly_estimate_basis"]["sampled_runs"] == 6
+
+
+def test_opt107_gives_a_true_reason_when_the_monthly_estimate_rounds_to_zero():
+    runs = _default_push_runs(gap_minutes=20)
+    jobs_by_run = {
+        str(run["id"]): [_span_job("test", 3)] for run in runs
+    }
+    findings = cr._detect_opt107_default_branch_batching(
+        ".github/workflows/ci.yml", runs, jobs_by_run,
+        {"on": {"push": {"branches": ["main"]}}}, "main", 0,
+        monthly_push_volume=1)
+    assert findings[0]["runner_min_saving"] is None
+    reason = findings[0]["runner_min_unsized_reason"]
+    assert "unknown" not in reason
+    assert reason == "monthly estimate rounds to zero runner-minutes"
+
+
+def test_opt107_never_batches_release_or_deploy_workflows():
+    runs = _default_push_runs(gap_minutes=20)
+    jobs_by_run = {
+        str(run["id"]): jobs
+        for run, jobs in zip(runs, _jobs_per_run(n_runs=len(runs), secs=600))
+    }
+    assert cr._detect_opt107_default_branch_batching(
+        ".github/workflows/deploy.yml", runs, jobs_by_run,
+        {"name": "Deploy production", "on": {"push": {"branches": ["main"]}}},
+        "main", 0) == []
+
+
 # --- the fetch-failure contract: a FAILED fetch is never served as a real answer ----
 #
 # The rule the pipeline states in `_fetch_run_jobs` and `_JobFetchMemo`: a fetch that
@@ -2315,7 +2539,7 @@ def test_collect_skips_run_elimination_when_the_page_stays_unavailable(monkeypat
     # No run-elimination finding may be emitted off an unavailable page — in particular
     # none may carry a zero denominator.
     for f in out["findings"]:
-        if f.get("pattern") in ("OPT35", "OPT46", "OPT47", "OPT57", "OPT64"):
+        if f.get("pattern") in ("OPT35", "OPT46", "OPT47", "OPT57", "OPT64", "OPT107"):
             raise AssertionError(
                 f"{f['pattern']} was emitted although the all-status page was never "
                 "fetched — it can only have been sized against a laundered empty page")
@@ -2325,7 +2549,7 @@ def test_collect_skips_run_elimination_when_the_page_stays_unavailable(monkeypat
         "the detectors were skipped but NOTHING says so — their absence from the "
         "findings is indistinguishable from 'we looked and it was clean'")
     entry = next(e for e in skipped if e["workflow"] == ".github/workflows/ci.yml")
-    assert set(entry["detectors"]) >= {"OPT46", "OPT47", "OPT64"}, (
+    assert set(entry["detectors"]) >= {"OPT46", "OPT47", "OPT64", "OPT107"}, (
         f"the skipped detectors are not named: {entry}")
     assert "run list" in entry["reason"]
 

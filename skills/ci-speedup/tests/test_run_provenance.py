@@ -294,7 +294,7 @@ def _capture_report_out(monkeypatch) -> dict[str, str]:
     command's --out) without needing a real render."""
     seen: dict[str, str] = {}
 
-    def fake_summary(data, *, findings_path, out_path, root=None):
+    def fake_summary(data, *, findings_path, out_path, root=None, bmf=False):
         seen["out_path"] = out_path
         seen["findings_path"] = findings_path
         seen["root"] = root
