@@ -174,16 +174,11 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    **auto-derived `<OUT>.data` dir** — **never pass `--data-dir`** to `run.py` (it's
    `collect_runs.py`'s internal flag, and passing it to `run.py` errors). `<OUT.json>`
    and its `.data` bundle hold raw third-party job logs, so write `--out` to a scratch
-   path outside any tracked tree (or a gitignored dir); off-path hygiene figures are
-   approximate (flagged). Before the bulk sample, `run.py` prints a GitHub API request
-   estimate (log downloads separate) beside the remaining quota and its reset. Above half
-   the remaining quota it asks before any bulk request; a non-TTY (agent) run stops and
-   prints the exact rerun command instead of blocking: tell the user the estimate and quota, and rerun with
-   `--accept-request-estimate` only on their yes; otherwise omit `--with-logs` or wait for the reset.
+   path outside any tracked tree (or a gitignored dir); off-path hygiene figures are approximate (flagged). Before the bulk sample `run.py` prints a GitHub API
+   request estimate (log downloads, a ceiling, GraphQL/search apart) beside the remaining quota; above half of it, or a ceiling above all of it, it asks (a non-TTY run stops and prints the exact rerun command): tell the user, and rerun with `--accept-request-estimate` only on their yes, else omit `--with-logs` or wait for the reset.
    `run.py` then prints a **data-pass summary** to stdout — the gating resolution (required checks, **already resolved from rulesets
-   + branch protection**: a fileless/managed check like `Claude Code Review` is flagged
-   auto-demoted, an empty set means none are declared), the addressable long poles, the actual gh
-   API call count (preflight probes included) beside the estimate, and the **exact `blocking_path.py` render command** with per-pole bindings pre-filled.
+   + branch protection**: a fileless/managed check like `Claude Code Review` is flagged auto-demoted, an empty set means none are declared), the addressable long poles, the actual gh
+   API call count (probes included) beside the estimate, and the **exact `blocking_path.py` render command** with per-pole bindings pre-filled.
    **Act on that summary.** Do NOT re-query gh for branch protection / rulesets (the
    data pass did it — read `required_checks`), manually verify a fileless check's
    gating, or hand-spelunk `findings.json` with `python -c` — it's all in the summary.

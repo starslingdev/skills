@@ -777,6 +777,11 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
                     f"; estimate was {request_low}-{request_high} JSON request(s)"
                     f" + {log_low}-{log_high} log download(s)"
                 )
+                other = sum(v for v in (estimate.get("graphql_high"),
+                                        estimate.get("search_high"))
+                            if isinstance(v, int) and not isinstance(v, bool))
+                if other:
+                    cost += f" + up to {other} GraphQL/search request(s)"
         secs = _num((doc.get("timings") or {}).get("scripted_total_s"))
         if secs:
             cost += f" in ~{_clock(secs)}"

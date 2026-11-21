@@ -262,7 +262,11 @@ def test_main_prints_estimate_then_counts_probe_calls_in_actual_total(
                  .split(" GitHub", 1)[0].split("-")]
     actual_line = next(line for line in stdout.splitlines()
                        if line.startswith("Actual gh API cost:"))
-    assert low <= 14 <= high
+    # The fake collector's ten calls are not a calibration: the recorded-corpus
+    # check lives in test_request_estimate_families.py. Here only the wiring is
+    # pinned: a parseable range, and the actual count printed beside it.
+    assert 0 < low <= high
+    assert "Actual gh API cost: 14 call(s)" in actual_line
     assert "estimate was" in actual_line
 
 
@@ -295,3 +299,30 @@ def test_failed_preflight_still_counts_each_probe_it_issued(monkeypatch, tmp_pat
     ]) == 0
     assert len(calls) == 3
     assert "Actual gh API cost: 13 call(s)" in capsys.readouterr().out
+
+
+def test_ceiling_above_the_whole_remaining_quota_asks_even_when_high_fits(monkeypatch):
+    estimate = run_mod._RequestEstimate(
+        request_low=20, request_high=40, log_low=0, log_high=5,
+        remaining=200, reset_epoch=2_000_000_000, probe_requests=4,
+        request_ceiling=180, log_ceiling=40)
+    answers: list[str] = []
+    monkeypatch.setattr(run_mod.sys, "stdin", _TTY())
+    monkeypatch.setattr("builtins.input", lambda prompt: answers.append(prompt) or "n")
+
+    assert run_mod._confirm_request_budget(estimate) is False
+    assert answers and "ceiling of 220" in answers[0]
+
+
+def test_estimate_line_names_ceiling_quota_limit_and_separate_quotas():
+    estimate = run_mod._RequestEstimate(
+        request_low=76, request_high=341, log_low=0, log_high=72,
+        remaining=4210, reset_epoch=2_000_000_000, probe_requests=4,
+        request_ceiling=1197, log_ceiling=328, limit=5000,
+        graphql_high=4, graphql_remaining=4990, search_high=1)
+    line = run_mod._estimate_line(estimate)
+    assert line.startswith("Data-pass request estimate: 76-341 GitHub API requests; "
+                           "0-72 log downloads (ceiling 1525 ")
+    assert "4210 of 5000 requests remain" in line
+    assert "up to 4 GraphQL queries, 4990 remain" in line
+    assert "up to 1 search request(s)" in line

@@ -23,3 +23,14 @@ def test_summary_names_failed_gh_calls():
 
 def test_summary_omits_the_cost_line_when_no_gh_pass_ran():
     assert "gh API cost" not in build_summary(_summary_doc())
+
+
+def test_summary_estimate_names_the_graphql_and_search_requests_it_counted():
+    doc = _summary_doc(data_sources={
+        "gh_query_count": 120, "gh_error_count": 0,
+        "request_estimate": {"request_low": 72, "request_high": 337,
+                             "log_low": 0, "log_high": 72,
+                             "graphql_high": 4, "search_high": 1}})
+    s = build_summary(doc)
+    assert ("estimate was 72-337 JSON request(s) + 0-72 log download(s)"
+            " + up to 5 GraphQL/search request(s)") in s, s

@@ -61,12 +61,7 @@ from before_after import (  # noqa: E402
     GhVerificationClient,
     summarize_account_weekly,
 )
-from pr_sample_contract import (  # noqa: E402
-    PR_SAMPLE_CANDIDATE_PAGE_CAP,
-    PR_SAMPLE_JOB_LIST_READ_CAP,
-    PR_SAMPLE_TARGET,
-    pr_sample_goal_text,
-)
+from pr_sample_contract import pr_sample_goal_text  # noqa: E402
 
 
 def _git_short_sha(repo_dir: Path, short: bool = True) -> str | None:
@@ -153,7 +148,11 @@ _STEP_TIMEOUT_S = 900
 
 
 class _RequestEstimate(NamedTuple):
-    """Cheap preflight estimate, kept separate from the measured final count."""
+    """Cheap preflight estimate, kept separate from the measured final count.
+
+    `request_*` are core-quota JSON requests (the preflight probes included),
+    `log_*` core-quota job-log downloads. `*_ceiling` is every conditional detector
+    read firing on every workflow (see `request_estimate.py`)."""
 
     request_low: int
     request_high: int
@@ -162,6 +161,12 @@ class _RequestEstimate(NamedTuple):
     remaining: int
     reset_epoch: int
     probe_requests: int
+    request_ceiling: int = 0
+    log_ceiling: int = 0
+    limit: int = 0
+    graphql_high: int = 0
+    graphql_remaining: int | None = None
+    search_high: int = 0
 
 
 class _RequestProbe:
@@ -189,8 +194,14 @@ def _gh_json(endpoint: str) -> dict:
 
 def _estimate_data_pass(
         repo: str, *, with_logs: bool, target: int = 10,
-        probe: _RequestProbe | None = None) -> _RequestEstimate:
-    """Estimate the adaptive bulk pass from four cheap, bounded probes."""
+        probe: _RequestProbe | None = None,
+        root: Path | None = None) -> _RequestEstimate:
+    """Estimate the bulk pass from four cheap, bounded probes.
+
+    Every request family the collector issues is priced in `request_estimate.py`;
+    job logs count even without `--with-logs`, because several detectors read a
+    bounded number of logs on every run."""
+    import request_estimate  # local: imports the collector's constants
     probe = probe or _RequestProbe()
     workflows = probe.json(f"repos/{repo}/actions/workflows?per_page=100")
     runs = probe.json(f"repos/{repo}/actions/runs?per_page=10")
@@ -200,65 +211,52 @@ def _estimate_data_pass(
             if run_id is not None else {"total_count": 0, "jobs": []})
     rate = probe.json("rate_limit")
 
-    workflow_count = max(1, int(workflows.get("total_count") or 0))
-    jobs_per_run = max(1, int(jobs.get("total_count") or 0))
-    job_pages = max(1, (jobs_per_run + 99) // 100)
+    facts = request_estimate.facts_from_probe(
+        workflows, runs, jobs, root=root, with_logs=with_logs)
+    totals = request_estimate.estimate(facts)
     probe_requests = probe.requests
-    request_low = probe_requests + workflow_count * (1 + 4 * job_pages)
-    # The collector can walk twelve run-list pages and targets 100 complete PR
-    # commits across every observable workflow. Price that population separately
-    # from the ordinary twenty-run detector sample, while retaining the collector's
-    # hard 1,200 job-list-read ceiling.
-    pr_sample_reads = min(
-        PR_SAMPLE_JOB_LIST_READ_CAP,
-        PR_SAMPLE_TARGET * workflow_count * job_pages,
-    )
-    request_high = (
-        probe_requests + 4
-        + workflow_count * PR_SAMPLE_CANDIDATE_PAGE_CAP
-        + pr_sample_reads
-        + workflow_count * 20 * job_pages
-    )
-    # State log downloads separately because they are the large-response part of
-    # the pass. Their REST endpoint calls still consume the same primary budget,
-    # so the confirmation gate below includes them in its upper bound.
-    if with_logs:
-        # Use the collector's own caps rather than a workflow-count proxy: a single
-        # workflow may probe several occurrences of every candidate cache/check job.
-        import collect_runs as collector  # local: avoid its startup cost without logs
-        candidate_jobs = max(1, workflow_count * jobs_per_run)
-        log_high = (
-            candidate_jobs * (
-                collector._OPT79_LOG_PROBE_MAX
-                + collector._OPT80_LOG_PROBE_MAX
-                + collector._CACHE_PUSH_PROBE_MAX
-            )
-            + max(1, target)  # one representative log per drilled pole
-        )
-    else:
-        log_high = 0
-    core = ((rate.get("resources") or {}).get("core") or {})
+    resources = rate.get("resources") or {}
+    core = resources.get("core") or {}
+    graphql = resources.get("graphql") or {}
+    graphql_remaining = graphql.get("remaining")
     return _RequestEstimate(
-        request_low=request_low, request_high=request_high,
-        log_low=0, log_high=log_high,
+        request_low=probe_requests + totals.json_low,
+        request_high=probe_requests + totals.json_high,
+        log_low=totals.log_low, log_high=totals.log_high,
         remaining=max(0, int(core.get("remaining") or 0)),
         reset_epoch=max(0, int(core.get("reset") or 0)),
         probe_requests=probe_requests,
+        request_ceiling=probe_requests + totals.json_ceiling,
+        log_ceiling=totals.log_ceiling,
+        limit=max(0, int(core.get("limit") or 0)),
+        graphql_high=totals.graphql_high,
+        graphql_remaining=(int(graphql_remaining)
+                           if isinstance(graphql_remaining, int) else None),
+        search_high=totals.search_high,
     )
 
 
 def _confirm_request_budget(
         estimate: _RequestEstimate, *, explicitly_accepted: bool = False) -> bool:
-    """Require explicit consent before a pass spends over half the quota."""
+    """Require explicit consent before a pass may spend over half the quota.
+
+    Asks when the expected upper figure exceeds half of what remains, or when the
+    ceiling (every conditional read firing everywhere) exceeds all of it."""
     quota_high = estimate.request_high + estimate.log_high
-    if quota_high <= estimate.remaining / 2 or explicitly_accepted:
+    quota_ceiling = max(quota_high, estimate.request_ceiling + estimate.log_ceiling)
+    if (quota_high <= estimate.remaining / 2 and quota_ceiling <= estimate.remaining) \
+            or explicitly_accepted:
         return True
     # An agent or redirected run must never hang on input(). Its rerun command
     # carries the explicit acceptance flag instead.
     if not sys.stdin.isatty():
         return False
-    relation = ("exceeds the remaining quota" if quota_high > estimate.remaining
-                else "exceeds half the remaining quota")
+    if quota_high > estimate.remaining:
+        relation = "exceeds the remaining quota"
+    elif quota_high > estimate.remaining / 2:
+        relation = "exceeds half the remaining quota"
+    else:
+        relation = f"has a ceiling of {quota_ceiling}, above the remaining quota"
     try:
         answer = input(
             f"The estimated data pass (up to {quota_high} API calls: "
@@ -268,6 +266,26 @@ def _confirm_request_budget(
     except EOFError:
         return False
     return answer.strip().lower() in {"y", "yes"}
+
+
+def _estimate_line(e: _RequestEstimate) -> str:
+    """The one pre-collection line: estimate, ceiling, and what is left."""
+    reset = (time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(e.reset_epoch))
+             if e.reset_epoch else "unknown")
+    left = (f"{e.remaining} of {e.limit}" if e.limit else f"{e.remaining}")
+    line = (
+        "Data-pass request estimate: "
+        f"{e.request_low}-{e.request_high} GitHub API requests; "
+        f"{e.log_low}-{e.log_high} log downloads "
+        f"(ceiling {e.request_ceiling + e.log_ceiling} if every conditional read fires); "
+        f"{left} requests remain (reset {reset}).")
+    if e.graphql_high or e.search_high:
+        gql_left = (f", {e.graphql_remaining} remain"
+                    if e.graphql_remaining is not None else "")
+        line += (f" Separate quotas: up to {e.graphql_high} GraphQL "
+                 f"quer{'y' if e.graphql_high == 1 else 'ies'}{gql_left}; "
+                 f"up to {e.search_high} search request(s).")
+    return line
 
 
 def _accepted_estimate_command(argv: list[str] | None) -> str:
@@ -392,22 +410,13 @@ def main(argv: list[str] | None = None) -> int:
         try:
             request_estimate = _estimate_data_pass(
                 args.repo, with_logs=args.with_logs, target=args.target,
-                probe=request_probe)
+                probe=request_probe, root=Path(args.root))
         except (OSError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
             # A failed cheap probe must not turn an otherwise usable collector into a
             # static-only run. Collection keeps its existing loud partial-state path.
             print(f"Data-pass request estimate unavailable ({e}).", file=sys.stderr)
         else:
-            reset = (time.strftime("%Y-%m-%d %H:%M:%S UTC",
-                                   time.gmtime(request_estimate.reset_epoch))
-                     if request_estimate.reset_epoch else "unknown")
-            print(
-                "Data-pass request estimate: "
-                f"{request_estimate.request_low}-{request_estimate.request_high} "
-                "GitHub API requests; "
-                f"{request_estimate.log_low}-{request_estimate.log_high} log downloads; "
-                f"{request_estimate.remaining} requests remain (reset {reset}).",
-                flush=True)
+            print(_estimate_line(request_estimate), flush=True)
             if not _confirm_request_budget(
                     request_estimate,
                     explicitly_accepted=args.accept_request_estimate):
@@ -563,6 +572,10 @@ def main(argv: list[str] | None = None) -> int:
                 "log_high": request_estimate.log_high,
                 "remaining_before_data_pass": request_estimate.remaining,
                 "probe_requests": request_estimate.probe_requests,
+                "request_ceiling": request_estimate.request_ceiling,
+                "log_ceiling": request_estimate.log_ceiling,
+                "graphql_high": request_estimate.graphql_high,
+                "search_high": request_estimate.search_high,
             }
         if account_weekly is not None:
             data["account_weekly"] = account_weekly
