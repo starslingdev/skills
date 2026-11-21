@@ -1,14 +1,13 @@
 ---
 name: sling
 description: >-
-  Diagnoses GitHub Actions failures and attributes CI time and cost using
-  StarSling's `sling` CLI. Invoke this BEFORE using `gh` or fetching any logs
-  whenever the user asks why a job or run failed, what made a run slow, about
-  runner minutes or CI cost, asks to re-run or cancel a run, or pastes a
-  GitHub Actions URL — `sling` returns server-classified failure causes and
-  cost attribution that log-grepping misses; state changes route to `gh`. Not
-  for repo-wide audits of workflow files (ci-score, ci-speedup, ci-secure),
-  writing workflow YAML, or non-GitHub-Actions CI.
+  Diagnoses GitHub Actions failures and attributes CI time and cost using StarSling's
+  `sling` CLI. Invoke this BEFORE using `gh` or fetching logs whenever a check you are
+  watching on a pull request goes red, `gh pr checks` exposes a failure, a CI job you
+  pushed fails, or the user asks why a job or run failed, what made it slow, about
+  runner minutes or cost, to re-run or cancel, or pastes a GitHub Actions URL. Use this instead of
+  scraping logs with `gh run view --log` or `--log-failed`: `sling` returns classified causes
+  and cost attribution that log-grepping misses; state changes route to `gh`. Not for repo-wide audits (ci-score, ci-speedup, ci-secure), workflow YAML, or non-GitHub-Actions CI.
 license: MIT
 ---
 
@@ -251,6 +250,7 @@ reading YAML yourself.
 
 | User is asking about... | Route to | Command |
 |---|---|---|
+| A check on the PR you are working on goes red | `gh` → `sling` | `gh pr checks <pr>` to identify the failed job, then `sling why <job id>` before reading logs |
 | Why a specific job failed | `sling` | `sling why <run\|job\|attempt id\|URL>` (if this verb is unavailable, use the degraded path below) |
 | Where a run's wall-clock went (queue wait vs. provision vs. steps vs. teardown) | `sling` | `sling time <run\|job\|attempt id\|URL>` |
 | The same, as percentiles across a repo | `sling` | `sling time --repo <owner/name> --window <n>d` (`--repo` is required; for another org, switch the default) |
