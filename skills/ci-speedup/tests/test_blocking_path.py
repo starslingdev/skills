@@ -4639,6 +4639,31 @@ def test_render_no_poles_but_static_findings_does_not_drop_them(tmp_path):
     assert not failures, "verify_report invariant failures:\n" + "\n".join(failures)
 
 
+def test_static_only_report_discloses_readable_empty_protection(tmp_path):
+    """A complete empty protection read must survive the no-timing renderer."""
+    doc = _doc_no_runs_with_static_findings()
+    doc.update({
+        "required_checks": [],
+        "required_checks_complete": True,
+        "required_checks_rulesets_read": True,
+        "required_checks_classic_read": True,
+        "required_checks_advice_complete": True,
+    })
+
+    md = bp.render(doc)
+    assert "No required checks are configured" in md
+
+    report = tmp_path / "blocking-path-speed.md"
+    report.write_text(md, encoding="utf-8")
+    findings = tmp_path / "findings.json"
+    findings.write_text(json.dumps(doc), encoding="utf-8")
+    vr = _load_verify_report()
+    failures = [f"{c.name}: {c.detail}"
+                for c in vr.run_checks(md, report, findings, skill_repo=None)
+                if not c.skipped and not c.ok]
+    assert not failures, "verify_report invariant failures:\n" + "\n".join(failures)
+
+
 def test_render_no_pr_gating_ci_gets_shape_banner_not_dormant_hedge(tmp_path):
     # Regression (pre-launch audit, live on simonw/sf-tree-history): a repo running CI
     # daily whose workflows never fire on a PR event (schedule/push-only git scraper)

@@ -6312,9 +6312,20 @@ def check_required_check_advice_proof(report: str, findings_path: Path | None) -
         return Check(
             name, False,
             "the report authorizes the off-PR recipe without both protection reads")
+    empty_complete = expected and data.get("required_checks") == []
+    empty_line = "No required checks are configured" in report
+    unreadable_line = "Required checks were unreadable" in report
+    if empty_complete and (not empty_line or unreadable_line):
+        return Check(
+            name, False,
+            "a complete empty protection read is not rendered as configured-empty")
+    if not empty_complete and empty_line:
+        return Check(
+            name, False,
+            "the report claims no required checks without a complete empty read")
     return Check(
         name, True,
-        "the combined advice stamp and rendered route agree with both source reads")
+        "the advice stamp and configured-empty label agree with both source reads")
 
 
 # Twin of collect_runs._OPT64_MIN_RETRIED_RUNS / blocking_path._OPT64_MIN_RETRIED_RUNS
