@@ -301,17 +301,26 @@ def test_failed_preflight_still_counts_each_probe_it_issued(monkeypatch, tmp_pat
     assert "Actual gh API cost: 13 call(s)" in capsys.readouterr().out
 
 
-def test_ceiling_above_the_whole_remaining_quota_asks_even_when_high_fits(monkeypatch):
-    estimate = run_mod._RequestEstimate(
-        request_low=20, request_high=40, log_low=0, log_high=5,
-        remaining=200, reset_epoch=2_000_000_000, probe_requests=4,
-        request_ceiling=180, log_ceiling=40)
-    answers: list[str] = []
-    monkeypatch.setattr(run_mod.sys, "stdin", _TTY())
-    monkeypatch.setattr("builtins.input", lambda prompt: answers.append(prompt) or "n")
-
-    assert run_mod._confirm_request_budget(estimate) is False
-    assert answers and "ceiling of 220" in answers[0]
+def test_ceiling_above_the_quota_never_stops_a_run_whose_high_fits(monkeypatch):
+    """The ceiling (every conditional read on every workflow) is printed, never
+    gated on: a 20-workflow repo on a fresh 5,000 quota proceeds unasked."""
+    import request_estimate as est
+    facts = est.Facts(workflows=20, job_pages=1, repo_runs=None, self_hosted=False,
+                      scanner_schedules=0, with_logs=False)
+    totals = est.estimate(facts)
+    assert totals.json_ceiling + totals.log_ceiling > 5000
+    for request_high, log_high in ((1200, 80), (4 + totals.json_high, totals.log_high)):
+        estimate = run_mod._RequestEstimate(
+            request_low=4 + totals.json_low, request_high=request_high,
+            log_low=0, log_high=log_high, remaining=5000,
+            reset_epoch=2_000_000_000, probe_requests=4,
+            request_ceiling=4 + totals.json_ceiling, log_ceiling=totals.log_ceiling,
+            limit=5000)
+        assert request_high + log_high <= 2500
+        monkeypatch.setattr(run_mod.sys, "stdin", _NotTTY())
+        monkeypatch.setattr("builtins.input", lambda _prompt: (_ for _ in ()).throw(
+            AssertionError("an estimate under half the quota must not prompt")))
+        assert run_mod._confirm_request_budget(estimate) is True
 
 
 def test_estimate_line_names_ceiling_quota_limit_and_separate_quotas():

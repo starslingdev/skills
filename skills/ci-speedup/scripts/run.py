@@ -240,23 +240,18 @@ def _confirm_request_budget(
         estimate: _RequestEstimate, *, explicitly_accepted: bool = False) -> bool:
     """Require explicit consent before a pass may spend over half the quota.
 
-    Asks when the expected upper figure exceeds half of what remains, or when the
-    ceiling (every conditional read firing everywhere) exceeds all of it."""
+    Gates on the expected upper figure only. The ceiling (every conditional read
+    firing on every workflow) is printed and recorded, never gated on: it is not
+    a realistic figure, and stopping on it would stop most mid-size scans."""
     quota_high = estimate.request_high + estimate.log_high
-    quota_ceiling = max(quota_high, estimate.request_ceiling + estimate.log_ceiling)
-    if (quota_high <= estimate.remaining / 2 and quota_ceiling <= estimate.remaining) \
-            or explicitly_accepted:
+    if quota_high <= estimate.remaining / 2 or explicitly_accepted:
         return True
     # An agent or redirected run must never hang on input(). Its rerun command
     # carries the explicit acceptance flag instead.
     if not sys.stdin.isatty():
         return False
-    if quota_high > estimate.remaining:
-        relation = "exceeds the remaining quota"
-    elif quota_high > estimate.remaining / 2:
-        relation = "exceeds half the remaining quota"
-    else:
-        relation = f"has a ceiling of {quota_ceiling}, above the remaining quota"
+    relation = ("exceeds the remaining quota" if quota_high > estimate.remaining
+                else "exceeds half the remaining quota")
     try:
         answer = input(
             f"The estimated data pass (up to {quota_high} API calls: "
@@ -347,7 +342,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--accept-request-estimate", action="store_true",
         help="Proceed when the printed upper request estimate exceeds half of "
-             "the remaining GitHub quota (required for non-interactive runs).")
+             "the remaining GitHub quota (required for non-interactive runs). "
+             "The printed ceiling is context only and never stops a run.")
     parser.add_argument("--bmf", action="store_true",
                         help="Show wall-clock-only recommendations that add runner "
                              "minutes or use an unpriced larger runner.")

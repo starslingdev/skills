@@ -15,8 +15,8 @@ Each family carries three figures:
   sample, the 100-commit PR sample, retried-run views) and each conditional
   detector read firing on ONE workflow. This is the figure the quota gate uses.
 * `ceiling`: every conditional detector firing on every workflow at the
-  collector's own caps. The gate also stops when this exceeds the whole
-  remaining quota.
+  collector's own caps. It is printed and recorded for context only; the gate
+  never stops on it.
 
 Job-log downloads use the same REST quota but are reported separately because they
 are the large responses. GraphQL and search have their own quotas and are reported
