@@ -212,6 +212,7 @@ DOC_CLAIMS = (
     ("SKILL.md",
      r"against a (?P<total>\d+)-pattern\s+catalog — (?P<hygiene>\d+) \*\*hygiene/data-driven\*\* "
      r"patterns plus (?P<structural>\d+) \*\*structural /"),
+    ("SKILL.md", r"\((?P<total>\d+) patterns\s+in \d+ categories"),
     ("SKILL.md", r"almost every hygiene hit \((?P<hygiene_ids>OPT[^()]*?) — mostly declarative\)"),
     ("SKILL.md", r"The \*\*structural track\*\* \(`class: structural`: (?P<structural_ids>OPT[^()]*?)\)"),
     ("ARCHITECTURE.md",
