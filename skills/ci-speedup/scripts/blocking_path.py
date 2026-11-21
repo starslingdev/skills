@@ -4225,14 +4225,18 @@ def _parse_log(text: str,
     # invocation, serial timestamps, and no shell control operators.
     isolation_re = re.compile(
         r"\b(?:crash[-_ ]isolation|fork[-_ ]per[-_ ]test|per[-_ ]case[-_ ]isolation|"
-        r"isolate(?:d|ion)?[-_ ](?:case|process|worker))\b", re.I)
+        r"isolate(?:d|ion)?[-_ ](?:case|process|worker))\b"
+        # Plain runner switches: `isolate: true` / `isolate=true` in printed
+        # config, vitest's `--isolate`, and pytest-forked's `--forked`.
+        r"|\bisolate\s*[:=]\s*true\b|(?<![\w-])--(?:isolate|forked)\b", re.I)
     per_image_re = re.compile(
         r"\b(?:trivy\s+image|grype\b|docker\s+scan|scan(?:ning)?[-_ ](?:an?[-_ ])?image|"
         r"container[-_ ]image[-_ ]scan)\b", re.I)
     if not isolation_re.search(joined):
-        command_rows: list[tuple[datetime, list[str], str]] = []
-        for when, message, raw in timestamped:
-            command = re.match(r"^(?:\+|>)\s*(?P<command>\S.*)$", message)
+        trace_line_re = re.compile(r"^(?:\+|>)\s*(?P<command>\S.*)$")
+        command_rows: list[tuple[int, datetime, list[str], str]] = []
+        for line_i, (when, message, raw) in enumerate(timestamped):
+            command = trace_line_re.match(message)
             if command is None:
                 continue
             try:
@@ -4242,25 +4246,45 @@ def _parse_log(text: str,
             if (len(argv) < 2 or any(token in {"&&", "||", ";", "|"}
                                      for token in argv)):
                 continue
-            command_rows.append((when, argv, raw))
-        by_prefix: dict[tuple[str, ...], list[tuple[datetime, str, str]]] = {}
-        for when, argv, raw in command_rows:
-            by_prefix.setdefault(tuple(argv[:-1]), []).append((when, argv[-1], raw))
+            command_rows.append((line_i, when, argv, raw))
+        by_prefix: dict[tuple[str, ...], list[tuple[int, datetime, str, str]]] = {}
+        for line_i, when, argv, raw in command_rows:
+            by_prefix.setdefault(tuple(argv[:-1]), []).append(
+                (line_i, when, argv[-1], raw))
         candidates = [
             (prefix, rows) for prefix, rows in by_prefix.items()
-            if len(rows) >= 10 and len({target for _when, target, _raw in rows}) == len(rows)
+            if len(rows) >= 10
+            and len({target for _i, _when, target, _raw in rows}) == len(rows)
         ]
         if candidates:
             prefix, rows = max(candidates, key=lambda item: len(item[1]))
             command_text = " ".join(prefix)
-            gaps = [(later[0] - earlier[0]).total_seconds()
+            gaps = [(later[1] - earlier[1]).total_seconds()
                     for earlier, later in zip(rows, rows[1:])]
+            # A trace line marks when a process began, not how much of the
+            # interval is startup. Measure startup as trace -> the process's own
+            # first output line (the same boundary -> first-work measure the
+            # declared profiles below use). An invocation that prints nothing
+            # leaves startup unmeasurable, so the finding is withheld rather
+            # than crediting per-item work as removable startup.
+            startups: list[float] = []
+            for pos, (line_i, started, _target, _raw) in enumerate(rows):
+                next_i = rows[pos + 1][0] if pos + 1 < len(rows) else len(timestamped)
+                first = next((when for when, message, _raw in
+                              timestamped[line_i + 1:next_i]
+                              if not trace_line_re.match(message)), None)
+                if first is None or first < started:
+                    break
+                startups.append((first - started).total_seconds())
             if (gaps and all(gap > 0 for gap in gaps)
+                    and len(startups) == len(rows)
                     and not re.search(r"\bpytest\b", command_text, re.I)
                     and not per_image_re.search(command_text)):
                 iteration_median = _median(gaps)
+                startup_median = _median(startups)
                 count = len(rows)
-                if count * iteration_median >= 20:
+                if (startup_median >= iteration_median * 0.5
+                        and count * startup_median >= 20):
                     category = (dominant_category
                                 if dominant_category in {"build", "scan"}
                                 else "build" if re.search(
@@ -4275,25 +4299,28 @@ def _parse_log(text: str,
                         cap = int(cap_match.group(1)) if cap_match else None
                         removable = ((count - math.ceil(count / cap))
                                      if cap and cap > 0 else count - 1)
-                        modeled = round(removable * iteration_median, 2)
+                        modeled = round(removable * startup_median, 2)
                         return {
                             "fix_key": f"per-item-{category}-startup",
                             "unit_label": (
                                 f"{count} serial invocations repeat `{command_text}` with a "
-                                f"different final argument; their median interval is "
-                                f"{iteration_median:g}s"),
+                                f"different final argument; median startup (trace to "
+                                f"first output) is {startup_median:g}s of a "
+                                f"{iteration_median:g}s interval"),
                             "magnitude": {
                                 "label": "modeled repeated process ceiling",
                                 "value": modeled,
                                 "unit": "s",
                             },
                             "deeper": [],
-                            "evidence": [rows[0][2], rows[1][2],
-                                         f"{count} repeated invocations; median interval "
+                            "evidence": [rows[0][3], rows[1][3],
+                                         f"{count} repeated invocations; median startup "
+                                         f"{startup_median:g}s; median interval "
                                          f"{iteration_median:g}s"],
                             "search": [command_text, "repeated invocation", "batch"],
                             "iteration_count": count,
                             "process_kind": "tool process",
+                            "startup_median_s": round(startup_median, 2),
                             "iteration_median_s": round(iteration_median, 2),
                             "modeled_saving_s": modeled,
                             **({"batch_cap": cap} if cap else {}),
