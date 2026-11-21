@@ -556,6 +556,66 @@ def test_common_suffix_jobs_keep_their_distinct_work_steps():
     assert findings[0]["legs_excluded_no_work"] == 0
 
 
+@pytest.mark.parametrize("shared_test_name", [True, False])
+def test_idle_common_suffix_legs_do_not_create_an_imbalance(shared_test_name):
+    """Name-inferred groups still drop legs whose test step was skipped."""
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for database, duration, ran in (("Postgres", 900, True), ("MySQL", 700, True),
+                                    ("SQLite", 15, False), ("Oracle", 15, False)):
+        jobs.append({
+            "name": f"{database} Integration Test",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [
+                {"number": 2, "name": "Upload test results", "conclusion": "success",
+                 "started_at": start.isoformat(),
+                 "completed_at": (start + timedelta(seconds=5)).isoformat()},
+                {"number": 3,
+                 "name": "Run tests" if shared_test_name else f"Run {database} tests",
+                 "conclusion": "success" if ran else "skipped",
+                 "started_at": ((start + timedelta(seconds=5)).isoformat()
+                                if ran else None),
+                 "completed_at": ((start + timedelta(seconds=duration)).isoformat()
+                                  if ran else None)},
+            ],
+        })
+
+    assert cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900}) == []
+
+
+def test_common_suffix_step_numbers_do_not_merge_distinct_short_tests():
+    """Separate job definitions reuse step numbers; a short per-database test
+    step is not one shared housekeeping step."""
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    jobs = []
+    for database, duration in (("Postgres", 900), ("MySQL", 40), ("SQLite", 30)):
+        jobs.append({
+            "name": f"{database} Integration Test",
+            "started_at": start.isoformat(),
+            "completed_at": (start + timedelta(seconds=duration)).isoformat(),
+            "conclusion": "success",
+            "steps": [{"number": 2, "name": f"Run {database} tests",
+                       "conclusion": "success",
+                       "started_at": start.isoformat(),
+                       "completed_at": (start + timedelta(
+                           seconds=min(duration, 40))).isoformat()}]
+            + ([{"number": 3, "name": "Run extended integration tests",
+                 "conclusion": "success",
+                 "started_at": (start + timedelta(seconds=40)).isoformat(),
+                 "completed_at": (start + timedelta(seconds=duration)).isoformat()}]
+               if database == "Postgres" else []),
+        })
+
+    findings = cr._detect_opt25_shard_imbalance(
+        "ci.yml", [jobs, jobs], 0, {"long_pole_p50": 900})
+
+    assert findings
+    assert findings[0]["legs_excluded_no_work"] == 0
+
+
 def test_a_working_leg_with_a_different_step_name_is_not_discarded():
     start = datetime(2026, 1, 1, tzinfo=timezone.utc)
     jobs = []

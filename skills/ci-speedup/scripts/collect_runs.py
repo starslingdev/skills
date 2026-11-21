@@ -11098,10 +11098,16 @@ def _detect_opt25_shard_imbalance(
 
     def _step_identity(
         step: dict[str, Any], position: int, version: VersionIdentity,
+        inferred: bool = False,
     ) -> StepIdentity:
-        """Identify a step inside its observed workflow version."""
+        """Identify a step inside its observed workflow version.
+
+        Common-suffix groups are inferred from job names and can combine
+        separate workflow job definitions, whose step numbers are local to each
+        job, so their steps are matched by what they run, never by number."""
         number = step.get("number")
-        if isinstance(number, int) and not isinstance(number, bool):
+        if (not inferred and isinstance(number, int)
+                and not isinstance(number, bool)):
             return version, "number", number
         semantic = _step_semantic_identity(step)
         if any(semantic):
@@ -11133,6 +11139,7 @@ def _detect_opt25_shard_imbalance(
                 base = suffix_base[job_name]
             else:
                 continue
+            inferred = matrix_base == job_name
             version = versions.get(base, ())
             active = [
                 (position, step)
@@ -11142,13 +11149,13 @@ def _detect_opt25_shard_imbalance(
                     and str(step.get("conclusion") or "").lower() != "skipped")
             ]
             active_steps_by_base.setdefault(base, []).append({
-                _step_identity(step, position, version): _step_seconds(step)
+                _step_identity(step, position, version, inferred): _step_seconds(step)
                 for position, step in active
             })
             # Setup actions, uploads and cleanup are housekeeping however long
             # they take; only other shared work needs the duration test.
             housekeeping_by_base.setdefault(base, []).append({
-                _step_identity(step, position, version)
+                _step_identity(step, position, version, inferred)
                 for position, step in active
                 if _is_universal_housekeeping_step(str(step.get("name") or ""))
             })
@@ -11181,6 +11188,7 @@ def _detect_opt25_shard_imbalance(
                 base = suffix_base[job_name]
             else:
                 continue
+            inferred = matrix_base == job_name
             version = versions.get(base, ())
             for position, step in enumerate(job.get("steps") or []):
                 if (not isinstance(step, dict)
@@ -11191,7 +11199,7 @@ def _detect_opt25_shard_imbalance(
                 completed = _parse_dt(step.get("completed_at"))
                 if started is None or completed is None or completed <= started:
                     continue
-                step_identity = _step_identity(step, position, version)
+                step_identity = _step_identity(step, position, version, inferred)
                 seconds = (completed - started).total_seconds()
                 by_step = step_seconds_by_base.setdefault(base, {})
                 by_step[step_identity] = by_step.get(step_identity, 0.0) + seconds
@@ -11232,21 +11240,20 @@ def _detect_opt25_shard_imbalance(
             dominant_identity = dominant_step_by_base.get(base)
             distinctive_active_steps = [
                 step for position, step in active_work_steps
-                if (_step_identity(step, position, version) == dominant_identity
-                    or _step_identity(step, position, version)
+                if (_step_identity(step, position, version, inferred_suffix_group)
+                    == dominant_identity
+                    or _step_identity(step, position, version, inferred_suffix_group)
                     not in always_run_by_base.get(base, set()))]
-            dominant_steps = [step for position, step in work_steps
-                              if _step_identity(step, position, version) == dominant_identity]
+            dominant_steps = [
+                step for position, step in work_steps
+                if _step_identity(step, position, version, inferred_suffix_group)
+                == dominant_identity]
             # An active step identity that did not run on every leg is positive
             # evidence that this leg did real work (for example platform-specific
             # test steps). Only use the dominant sibling step to confirm an
             # otherwise workless leg; never discard that alternate work.
-            # Common-suffix groups are inferred from names and can combine
-            # separate workflow job definitions. Their step numbers are local,
-            # so a matching identity cannot prove that the jobs share one step.
             skipped_dominant = (
-                not inferred_suffix_group
-                and dominant_identity is not None
+                dominant_identity is not None
                 and not distinctive_active_steps
                 and (not dominant_steps or all(
                     str(step.get("conclusion") or "").lower() == "skipped"
