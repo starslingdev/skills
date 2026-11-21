@@ -312,9 +312,16 @@ def test_opt89_native_runner_sharding_is_held_by_default_and_signed_under_bmf(
     assert "enabled=false held=1" in default
     assert "shard the test run across native runners" not in default
     assert "shard the test run across native runners" in opted_in
-    assert "Runner-minute effect: added cost, unsized" in opted_in
+    # The build-once handoff is the finding's main route; only the optional
+    # sharding adds runner minutes, so the signed cost names that option.
+    assert ("Runner-minute effect of the sharding option: added cost, unsized"
+            in opted_in)
+    assert "Runner-minute effect: added cost" not in opted_in
     assert vr.check_bmf_runner_minute_filter(default, findings_path).ok is True
     assert vr.check_bmf_runner_minute_filter(opted_in, findings_path).ok is True
+    unscoped = opted_in.replace("Runner-minute effect of the sharding option:",
+                                "Runner-minute effect:")
+    assert vr.check_bmf_runner_minute_filter(unscoped, findings_path).ok is False
 
 
 def test_opt97_bmf_own_job_recipe_states_added_runner_minute_cost(tmp_path):
@@ -333,12 +340,13 @@ def test_opt97_bmf_own_job_recipe_states_added_runner_minute_cost(tmp_path):
 
     opted_in = _option_report(finding, bmf=True)
 
-    assert "Runner-minute effect: added cost, unsized" in opted_in
+    assert ("Runner-minute effect of moving the step to its own job: added cost, "
+            "unsized" in opted_in)
     assert "No runner-minute saving" not in opted_in
     assert vr.check_bmf_runner_minute_filter(opted_in, findings_path).ok is True
 
     tampered = opted_in.replace(
-        "Runner-minute effect: added cost, unsized",
+        "Runner-minute effect of moving the step to its own job: added cost, unsized",
         "No runner-minute saving",
     )
     assert vr.check_bmf_runner_minute_filter(tampered, findings_path).ok is False

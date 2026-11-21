@@ -12081,10 +12081,12 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "runners only after the build-once handoff is working and the remaining "
             "native test phase is still the measured bottleneck.",
             _bmf_added_cost_line(
+                "the sharding option",
                 "the repeated checkout/setup floor and chosen shard count were not measured"),
         ]
     if pat == "OPT97" and _BMF_ENABLED:
         body.append(_bmf_added_cost_line(
+            "moving the step to its own job",
             "the new job's checkout and setup duration were not measured"))
     body += [saving, "",
              "Read the catalog entry (background, fix recipe, and guardrail):",
@@ -15314,9 +15316,13 @@ def _bmf_has_held_option(finding: dict[str, Any]) -> bool:
     return str(finding.get("pattern") or "") == "OPT89"
 
 
-def _bmf_added_cost_line(reason: str) -> str:
-    """Fail-closed runner-minute wording for an unmeasured added job."""
-    return f"Runner-minute effect: added cost, unsized ({reason})."
+def _bmf_added_cost_line(option: str, reason: str) -> str:
+    """Fail-closed runner-minute wording for an unmeasured added job.
+
+    The line names the one option that adds the job: the finding's other routes
+    (OPT89's build-once handoff, OPT97's narrower group) add none, so an
+    unscoped "added cost" would misstate the whole finding."""
+    return f"Runner-minute effect of {option}: added cost, unsized ({reason})."
 
 
 # Log-leaf remedies whose catalog recipe adds jobs, shards or runners. In the

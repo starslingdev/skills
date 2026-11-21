@@ -18327,7 +18327,9 @@ _VR_BMF_CROSS_JOB_RE = re.compile(
     r"(?i)\b(?:shard|split|parallelis|parallelliz|spread|move)\w*\b[^.;]*"
     r"\b(?:jobs?|runners?|matrix|emulators)\b")
 _VR_BMF_DELIVER_RE = re.compile(r"\nDELIVER & VERIFY\n((?:- .*\n?)+)")
-_VR_BMF_ADDED_COST = "Runner-minute effect: added cost"
+# The signed added cost names the option that adds a job, never the whole finding.
+_VR_BMF_ADDED_COST_RE = re.compile(r"Runner-minute effect of [^:\n]+: added cost")
+_VR_BMF_UNSCOPED_ADDED_COST = "Runner-minute effect: added cost"
 
 
 def _vr_bmf_pattern_block(report: str, pattern: str) -> str:
@@ -18409,8 +18411,10 @@ def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
             block = _vr_bmf_pattern_block(report, pattern)
             if not block:
                 continue
-            if _VR_BMF_ADDED_COST not in block:
+            if not _VR_BMF_ADDED_COST_RE.search(block):
                 bad.append(f"{pattern} --bmf recipe has no signed added runner-minute cost")
+            if _VR_BMF_UNSCOPED_ADDED_COST in block:
+                bad.append(f"{pattern} --bmf added cost is not scoped to its job-adding option")
             if "No runner-minute saving" in block:
                 bad.append(f"{pattern} --bmf recipe claims no runner-minute saving")
     return Check(name, not bad, "; ".join(bad) if bad else
