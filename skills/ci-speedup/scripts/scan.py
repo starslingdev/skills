@@ -11516,10 +11516,25 @@ _OPT25_SORT_IN_PLACE_RE = re.compile(
 # test name (`len`, `str.lower`, `a.length - b.length`) and must still warn.
 _OPT25_PY_KEY_RE = re.compile(r"\bkey\s*=")
 _OPT25_JS_COMPARATOR_RE = re.compile(r"\S")
-_OPT25_MEASURED_SORT_RE = re.compile(
-    r"\b(?:timings?|durations?|weights?|elapsed|runtimes?|seconds?|milliseconds?)\b|"
-    r"\.(?:duration|weight|elapsed|runtime|seconds|milliseconds)\b",
-    re.IGNORECASE)
+# Measured words, matched as whole parts of snake_case / camelCase identifiers
+# (`weights_map`, `test_durations`, `testTimings`, `durationMs`), never as
+# substrings (`getmtime` is a file timestamp, not a measured test time).
+_OPT25_MEASURED_WORDS = frozenset({
+    "timing", "timings", "duration", "durations", "weight", "weights",
+    "elapsed", "runtime", "runtimes", "time", "times", "second", "seconds",
+    "secs", "millisecond", "milliseconds", "ms"})
+_OPT25_IDENT_RE = re.compile(r"[A-Za-z_$][A-Za-z0-9_$]*")
+_OPT25_IDENT_PART_RE = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|[0-9]+")
+# A key or comparator passed by reference (`key=cost`, `.sort(byCost)`).
+_OPT25_PY_KEY_REF_RE = re.compile(
+    r"\bkey\s*=\s*(?P<ref>[A-Za-z_][A-Za-z0-9_.]*)\s*(?:,|$)")
+_OPT25_JS_REF_RE = re.compile(r"^\s*(?P<ref>[A-Za-z_$][A-Za-z0-9_$.]*)\s*$")
+# Library callables whose order derives from the test name or path alone.
+_OPT25_NAME_CALLABLES = frozenset({
+    "str", "len", "repr", "str.lower", "str.upper", "str.casefold",
+    "str.strip", "os.path.basename", "os.path.dirname", "os.path.normpath",
+    "os.path.normcase", "os.path.splitext", "os.path.getmtime",
+    "os.path.getsize", "Path", "pathlib.Path", "PurePath", "pathlib.PurePath"})
 
 
 def _opt25_call_args(text: str, start: int, cap: int = 600) -> str:
@@ -11536,20 +11551,87 @@ def _opt25_call_args(text: str, start: int, cap: int = 600) -> str:
     return text[start:start + cap]
 
 
-def _opt25_sorts_by_name(text: str, assignment: re.Match[str]) -> bool:
-    """True unless the sort demonstrably reads a measured timing or weight."""
+def _opt25_reads_measured(snippet: str) -> bool:
+    for ident in _OPT25_IDENT_RE.findall(snippet):
+        for chunk in re.split(r"[_$]+", ident):
+            for part in _OPT25_IDENT_PART_RE.findall(chunk):
+                if part.lower() in _OPT25_MEASURED_WORDS:
+                    return True
+    return False
+
+
+def _opt25_definition_body(text: str, ref: str) -> str | None:
+    """The same-file body of a key/comparator passed by reference, or None
+    when the file does not define it (imported, or a module attribute)."""
+    if "." in ref:
+        return None
+    name = re.escape(ref)
+    py_def = re.search(rf"(?m)^(?P<indent>[ \t]*)(?:async\s+)?def\s+{name}\s*\(",
+                       text)
+    if py_def:
+        indent = len(py_def.group("indent"))
+        body = [text[py_def.start():text.find("\n", py_def.end()) + 1 or len(text)]]
+        for line in text[py_def.end():].split("\n")[1:40]:
+            if line.strip() and len(line) - len(line.lstrip()) <= indent:
+                break
+            body.append(line)
+        return "\n".join(body)
+    js_fn = re.search(rf"\bfunction\s*\*?\s+{name}\s*\(", text)
+    if js_fn:
+        brace = text.find("{", js_fn.end())
+        if brace < 0:
+            return text[js_fn.start():js_fn.start() + 600]
+        return text[js_fn.start():brace + 1] + _opt25_call_args(text, brace + 1)
+    # `cost = lambda n: ...`, `const byCost = (a, b) => ...`, or the map a
+    # helper reads (`W = load_weights()`).
+    bound = re.search(
+        rf"(?m)^\s*(?:const\s+|let\s+|var\s+)?{name}\s*=(?!=)[^\n]*", text)
+    if bound:
+        return bound.group(0)
+    return None
+
+
+def _opt25_follows_measured(text: str, snippet: str, depth: int = 2) -> bool:
+    """True when `snippet`, or a same-file helper or map it names (followed
+    `depth` levels), reads a measured timing or weight."""
+    if _opt25_reads_measured(snippet):
+        return True
+    if depth <= 0:
+        return False
+    for ident in dict.fromkeys(_OPT25_IDENT_RE.findall(snippet)):
+        body = _opt25_definition_body(text, ident)
+        if body is not None and _opt25_follows_measured(text, body, depth - 1):
+            return True
+    return False
+
+
+def _opt25_sort_order(text: str, assignment: re.Match[str]) -> tuple[bool, str | None]:
+    """(warn, unread_ref). Warn unless the sort demonstrably reads a measured
+    timing or weight. `unread_ref` names a key/comparator defined outside the
+    file, so the warning says it was not read instead of implying name order."""
     args = _opt25_call_args(text, assignment.start("args"))
-    if assignment.groupdict().get("py_sorted"):
-        # Python `sorted(iterable, key=...)`.
-        return (not _OPT25_PY_KEY_RE.search(args)
-                or not _OPT25_MEASURED_SORT_RE.search(args))
-    if _OPT25_PY_KEY_RE.search(args):
-        # Python in-place `list.sort(key=...)`.
-        return not _OPT25_MEASURED_SORT_RE.search(args)
-    # JavaScript `.sort()` is lexical without a comparator. With one, stay
-    # quiet only when it actually reads a measured timing/weight.
-    return (not _OPT25_JS_COMPARATOR_RE.search(args)
-            or not _OPT25_MEASURED_SORT_RE.search(args))
+    if assignment.groupdict().get("py_sorted") or _OPT25_PY_KEY_RE.search(args):
+        if not _OPT25_PY_KEY_RE.search(args):
+            return True, None  # Python `sorted(iterable)`: name order.
+        # Read only the key: the iterable (`list(durations)`) says nothing
+        # about the order the key imposes.
+        args = args[_OPT25_PY_KEY_RE.search(args).start():]
+        key_ref = _OPT25_PY_KEY_REF_RE.search(args)
+        ref = key_ref.group("ref") if key_ref else None
+    elif not _OPT25_JS_COMPARATOR_RE.search(args):
+        return True, None  # JavaScript `.sort()` without a comparator is lexical.
+    else:
+        js_ref = _OPT25_JS_REF_RE.match(args)
+        ref = js_ref.group("ref") if js_ref else None
+    if ref in _OPT25_NAME_CALLABLES:
+        return True, None
+    # The key/comparator text itself, then same-file helpers and maps it names
+    # (`key=cost`, `key=lambda n: cost(n)`, `cmp_to_key(by_weight)`).
+    if _opt25_follows_measured(text, args):
+        return False, None
+    if ref is not None and ("." in ref or _opt25_definition_body(text, ref) is None):
+        return True, ref  # Imported or a module attribute: not read.
+    return True, None
 
 
 # The saving is real but unsized: passing runs cost the same, and what a stable
@@ -11609,7 +11691,8 @@ def _detect_opt25_positional_splitters(root: Path):
             assignments += list(_OPT25_SORT_IN_PLACE_RE.finditer(text))
             for assignment in assignments:
                 name = assignment.group("name")
-                if not _opt25_sorts_by_name(text, assignment):
+                warn, unread_ref = _opt25_sort_order(text, assignment)
+                if not warn:
                     continue
                 positional = _opt25_positional_use(text[assignment.end():], name)
                 if positional is None:
@@ -11618,7 +11701,10 @@ def _detect_opt25_positional_splitters(root: Path):
                 hit = Hit(
                     line=line, affected_jobs=[], match_text=name,
                     evidence=(f"planner file `{rel}` sorts `{name}` and assigns it by "
-                              "position, so inserting a test reshuffles existing shards"),
+                              "position, so inserting a test reshuffles existing shards"
+                              + (f"; its sort key `{unread_ref}` is defined outside "
+                                 "this file, so the scan could not show it reads "
+                                 "measured timings or weights" if unread_ref else "")),
                     facts={
                         "positional_splitter_static": True,
                         "pattern_class": "static",
