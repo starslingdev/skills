@@ -1196,6 +1196,24 @@ def test_evals_cover_an_agent_encountering_its_own_red_pr_check():
         "the eval must prefer classified diagnosis over raw gh log scraping")
 
 
+def test_evals_bound_the_red_check_trigger_with_a_green_pr_negative():
+    """The red-check trigger fires on the agent's own PR work with no user
+    question, so it is the clause most able to over-fire.  Pin its boundary:
+    the same agent-driving-its-PR framing with every check green must NOT
+    invoke sling."""
+    negatives = [c for c in _EVALS["evals"]
+                 if not c["should_trigger"] and "gh pr checks" in c["prompt"]]
+    assert negatives, (
+        "no should-NOT-trigger eval covers an agent on its own PR whose checks "
+        "are green, so the red-check trigger has no negative boundary")
+    for case in negatives:
+        assert "red" not in case["prompt"].lower() and "fail" not in case["prompt"].lower(), (
+            f"eval {case['id']} is meant to be the green near-miss but its prompt "
+            "describes a failure")
+        assert any("did not invoke" in a.lower() for a in case["assertions"]), (
+            f"eval {case['id']} does not assert that sling stayed out")
+
+
 def test_no_hyphenated_term_is_split_by_the_yaml_fold():
     """A `>-` block folds newlines into spaces, so a term wrapped across the fold
     silently becomes two words in the value the router actually reads.

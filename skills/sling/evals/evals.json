@@ -79,6 +79,18 @@
         "Treated the red check encountered during the agent's own PR work as a sling trigger"
       ],
       "files": []
+    },
+    {
+      "id": 7,
+      "name": "agent-owned-pr-checks-green-review-comment",
+      "should_trigger": false,
+      "prompt": "You are driving your own pull request to merge. `gh pr checks` shows every check passing. The only thing left is a review comment asking you to rename a helper function. Address it and push.",
+      "expected_output": "Edits the code to address the review comment and pushes, without invoking the sling skill: no check is red, so there is no run or job to diagnose.",
+      "assertions": [
+        "Did not invoke the sling skill or any `sling` subcommand",
+        "Addressed the review comment by editing the code"
+      ],
+      "files": []
     }
   ]
 }
