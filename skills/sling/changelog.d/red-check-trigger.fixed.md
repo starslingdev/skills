@@ -1,1 +1,1 @@
-- **2026-11-21** — Trigger sling when an agent encounters a red check while working on its own pull request, before it scrapes raw GitHub logs (#468).
+- **2026-11-21** — Trigger sling when an agent encounters a red check while working on its own pull request, before it scrapes raw GitHub logs (#472).
