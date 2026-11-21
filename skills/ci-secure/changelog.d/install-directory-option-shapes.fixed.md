@@ -1,0 +1,1 @@
+- **2026-11-21** — Resolve package-manager pins for directory options placed before the install subcommand, and disclose dynamic target directories as unverifiable (#477).

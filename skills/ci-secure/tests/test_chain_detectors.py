@@ -2105,6 +2105,55 @@ def test_p1425_install_directory_flags_select_the_nested_pin(
     assert f"which pins `{root_pin}`" in note
 
 
+@pytest.mark.parametrize(("command", "root_pin", "nested_pin"), [
+    ("npm --prefix apps/web ci", "npm@11.0.0", "npm@10.9.0"),
+    ("yarn --cwd apps/web install", "yarn@4.0.0", "yarn@1.22.22"),
+])
+def test_p1425_directory_option_before_subcommand_selects_nested_pin(
+    tmp_path, command, root_pin, nested_pin,
+):
+    _pkg(tmp_path, root_pin)
+    _nested_pkg(tmp_path, "apps/web", nested_pin)
+    hits = _install_hits(tmp_path, f"""\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: {command}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert nested_pin in note
+    assert f"this repo pins `{root_pin}`" not in note
+    assert f"which pins `{root_pin}`" in note
+
+
+def test_p1425_expression_directory_reports_target_pin_unverifiable(tmp_path):
+    _pkg(tmp_path, "pnpm@10.25.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            strategy:
+              matrix:
+                package: [web]
+            steps:
+              - run: pnpm -C ${{ matrix.package }} install
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "target packageManager pin cannot be verified" in note
+    assert "this repo pins `pnpm@10.25.0`" not in note
+
+
 @pytest.mark.parametrize(("command", "root_pin", "outside_pin"), [
     ("npm ci --prefix ../outside", "npm@11.0.0", "npm@10.9.0"),
     ("pnpm -C ../outside install", "pnpm@10.25.0", "pnpm@9.15.0"),

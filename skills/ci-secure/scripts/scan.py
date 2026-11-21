@@ -2469,14 +2469,21 @@ _CMD_PREFIX = (
 _YARN_OPT_VALUE = (
     r"(?:\"[^\"]*\"|'[^']*'|" + _NOT_ONE_QUOTED_WORD + r"[^\s;&|]+)"
 )
+_INSTALL_DIR_VALUE = (
+    r"(?:\$\{\{[^}\n]*\}\}|" + _YARN_OPT_VALUE + r")"
+)
 _INSTALL_CMD_RE = re.compile(
     _CMD_START + _CMD_PREFIX +
     r"(?<![\w./-])(?P<cmd>"
-    r"npm\s+(?:ci|install|i)(?![\w-])"
-    r"|pnpm(?:\s+(?:-C|--dir)(?:=" + _YARN_OPT_VALUE + r"|[ \t]+"
-    r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _YARN_OPT_VALUE
+    r"npm(?:\s+--prefix(?:=" + _INSTALL_DIR_VALUE + r"|[ \t]+"
+    r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _INSTALL_DIR_VALUE
+    + r")){0,1}\s+(?:ci|install|i)(?![\w-])"
+    r"|pnpm(?:\s+(?:-C|--dir)(?:=" + _INSTALL_DIR_VALUE + r"|[ \t]+"
+    r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _INSTALL_DIR_VALUE
     + r")){0,1}\s+(?:install|i)(?![\w-])"
-    r"|yarn\s+install(?![\w-])"
+    r"|yarn(?:\s+--cwd(?:=" + _INSTALL_DIR_VALUE + r"|[ \t]+"
+    r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _INSTALL_DIR_VALUE
+    + r")){0,1}\s+install(?![\w-])"
     r"|yarn(?!\s+-{0,2}(?:version|help|[vV]|h)(?![\w-]))"
     r"(?:\s+-[\w-]+(?:=" + _YARN_OPT_VALUE + r"|[ ]"
     r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _YARN_OPT_VALUE + r")?){0,32}"
@@ -2592,6 +2599,25 @@ _INSTALL_DIRECTORY_FLAGS = {
     "pnpm": {"-C", "--dir"},
     "yarn": {"--cwd"},
 }
+_UNVERIFIABLE_INSTALL_PIN_DIR = "\x00unverifiable-install-pin-dir"
+
+
+def _cli_option_value(tokens: list[str], index: int) -> tuple[str | None, int]:
+    """The separate value after an option and the next unread token index.
+
+    GitHub expressions contain spaces and ``shlex`` therefore splits them;
+    join through the closing delimiter so callers retain the fact that the
+    directory is dynamic instead of mistaking its first token for a path.
+    """
+    if index >= len(tokens) or tokens[index].startswith("-"):
+        return None, index
+    parts = [tokens[index]]
+    index += 1
+    if parts[0].startswith("${{"):
+        while index < len(tokens) and not parts[-1].endswith("}}"):
+            parts.append(tokens[index])
+            index += 1
+    return " ".join(parts), index
 
 
 def _install_directory_flag(command: str) -> tuple[bool, str | None]:
@@ -2633,12 +2659,7 @@ def _install_directory_flag(command: str) -> tuple[bool, str | None]:
             continue
         present = True
         if token == matched:
-            if i + 1 >= len(tokens) or tokens[i + 1].startswith("-"):
-                value = None
-                i += 1
-                continue
-            value = tokens[i + 1]
-            i += 2
+            value, i = _cli_option_value(tokens, i + 1)
             continue
         value = token[len(matched) + 1:]
         i += 1
@@ -2670,19 +2691,23 @@ def _is_dependency_tree_install(segment: str) -> bool:
         return False
     manager = tokens[0]
     tokens = tokens[1:]                                   # the manager itself
-    # pnpm accepts its working-directory option before the subcommand:
-    # `pnpm -C apps/web install`. Consume those option/value pairs before
-    # identifying the install subcommand, or `install` is misread as a named
-    # package and the privileged dependency-tree install disappears.
-    if manager == "pnpm":
+    # Each manager accepts its working-directory option before the subcommand,
+    # for example `pnpm -C apps/web install`. Consume those option/value pairs
+    # before identifying the install subcommand, or `install` is misread as a
+    # named package and the privileged dependency-tree install disappears.
+    if manager in _INSTALL_DIRECTORY_FLAGS:
+        directory_flags = _INSTALL_DIRECTORY_FLAGS[manager]
         while tokens:
-            if tokens[0].startswith("--dir=") or tokens[0].startswith("-C="):
+            matched = next((flag for flag in directory_flags
+                            if tokens[0] == flag
+                            or tokens[0].startswith(flag + "=")), None)
+            if matched is None:
+                break
+            if tokens[0] != matched:
                 tokens = tokens[1:]
                 continue
-            if tokens[0] in ("-C", "--dir") and len(tokens) >= 2:
-                tokens = tokens[2:]
-                continue
-            break
+            _value, next_index = _cli_option_value(tokens, 1)
+            tokens = tokens[next_index:]
     subcommand = None
     if tokens and tokens[0] in _INSTALL_SUBCOMMANDS:
         subcommand = tokens[0]
@@ -3374,8 +3399,9 @@ def _install_pin_directory(
     flag_present, flag_dir = _install_directory_flag(candidates[ordinal][2])
     if flag_present and include_flag:
         if (not flag_dir or _EXPRESSION_TOKEN_RE.search(flag_dir)
-                or "$" in flag_dir or "`" in flag_dir
-                or flag_dir.startswith("~")
+                or "$" in flag_dir or "`" in flag_dir):
+            return _UNVERIFIABLE_INSTALL_PIN_DIR
+        if (flag_dir.startswith("~")
                 or flag_dir.startswith("/")
                 or _RUNNER_ABSOLUTE_RE.match(flag_dir)):
             return None
@@ -3398,6 +3424,8 @@ def _package_manager_pin_at(
     """
     if root is None:
         return None, None
+    if rel_dir == _UNVERIFIABLE_INSTALL_PIN_DIR:
+        return None, rel_dir
     if rel_dir and rel_dir != ".":
         root_res = root.resolve()
         candidate = (root_res / rel_dir).resolve()
@@ -3748,6 +3776,7 @@ def _manager_condition_note(
     findings too, where it contradicted itself — three QA batches flagged the
     same self-contradiction.
     """
+    target_pin_unverifiable = pin_origin == _UNVERIFIABLE_INSTALL_PIN_DIR
     if manager == "npm":
         # Bounded on the left so `pnpm@10` is not read as `npm@10`.
         pinned = re.search(r"(?<![\w.-])npm@[\^~]?(\d+)", command)
@@ -3765,6 +3794,9 @@ def _manager_condition_note(
             )
         else:
             version = (
+                "the target packageManager pin cannot be verified because "
+                "its directory is dynamic, so confirm it before treating "
+                "this as closed" if target_pin_unverifiable else
                 "the npm major your runner resolves is not visible in this "
                 "YAML, so confirm it before treating this as closed"
             )
@@ -3795,6 +3827,12 @@ def _manager_condition_note(
             )
         if signals:
             return base + " — " + " ".join(signals) + "."
+        if target_pin_unverifiable:
+            return (
+                base + " — the target packageManager pin cannot be verified "
+                "because its directory is dynamic, so confirm it before "
+                "treating this as closed."
+            )
         return (
             base + " — which major your runner resolves is not visible in this "
             "YAML, so confirm it before treating this as closed."
@@ -3809,6 +3847,14 @@ def _manager_condition_note(
                 "Yarn Classic (1.x) runs dependency lifecycle scripts by "
                 "default; Yarn Berry (2+) is governed by its `enableScripts` "
                 f"setting — {_pin_phrase(pin, pin_origin)}, i.e. {era}."
+            )
+        if target_pin_unverifiable:
+            return (
+                "Yarn Classic (1.x) runs dependency lifecycle scripts by "
+                "default; Yarn Berry (2+) is governed by its `enableScripts` "
+                "setting — the target packageManager pin cannot be verified "
+                "because its directory is dynamic, so confirm it before "
+                "treating this as closed."
             )
         return (
             "Yarn Classic (1.x) runs dependency lifecycle scripts by default; "
@@ -3973,6 +4019,8 @@ def _correlation_install_scripts_in_privileged_job(
             ]
 
             def _covering_writes(install_rel: str | None) -> list:
+                if install_rel == _UNVERIFIABLE_INSTALL_PIN_DIR:
+                    return []
                 if install_rel is None or install_rel == ".":
                     # A root install reads the root config — the pre-#33
                     # semantics, where every in-job write counts.
