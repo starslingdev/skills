@@ -2473,7 +2473,9 @@ _INSTALL_CMD_RE = re.compile(
     _CMD_START + _CMD_PREFIX +
     r"(?<![\w./-])(?P<cmd>"
     r"npm\s+(?:ci|install|i)(?![\w-])"
-    r"|pnpm\s+(?:install|i)(?![\w-])"
+    r"|pnpm(?:\s+(?:-C|--dir)(?:=" + _YARN_OPT_VALUE + r"|[ \t]+"
+    r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _YARN_OPT_VALUE
+    + r")){0,1}\s+(?:install|i)(?![\w-])"
     r"|yarn\s+install(?![\w-])"
     r"|yarn(?!\s+-{0,2}(?:version|help|[vV]|h)(?![\w-]))"
     r"(?:\s+-[\w-]+(?:=" + _YARN_OPT_VALUE + r"|[ ]"
@@ -2556,9 +2558,23 @@ _PKG_SPEC_RE = re.compile(
 _INSTALL_SUBCOMMANDS = {"install", "i", "ci"}
 
 
+def _qualifying_install_segment(command: str) -> str | None:
+    """First dependency-tree install whose lifecycle scripts remain active."""
+    return next(
+        (segment for segment in _install_command_segments(command)
+         if _INSTALL_CMD_RE.search(segment)
+         and not _IGNORE_SCRIPTS_RE.search(segment)
+         and _is_dependency_tree_install(segment)),
+        None,
+    )
+
+
 def _install_manager(command: str) -> str | None:
-    """Which package manager the install command in `command` invokes."""
-    m = _INSTALL_CMD_RE.search(command)
+    """Which package manager the qualifying install in `command` invokes."""
+    segment = _qualifying_install_segment(command)
+    if segment is None:
+        return None
+    m = _INSTALL_CMD_RE.search(segment)
     if m is None:
         return None
     # `cmd`, not `group(0)`: the match now opens with the command-position
@@ -2569,6 +2585,64 @@ def _install_manager(command: str) -> str | None:
         if head.startswith(name):
             return name
     return None      # pragma: no cover - the regex has only three arms
+
+
+_INSTALL_DIRECTORY_FLAGS = {
+    "npm": {"--prefix"},
+    "pnpm": {"-C", "--dir"},
+    "yarn": {"--cwd"},
+}
+
+
+def _install_directory_flag(command: str) -> tuple[bool, str | None]:
+    """``(present, value)`` for an install's own directory option.
+
+    The value is ``None`` when the option is present but cannot be read
+    statically. That is deliberately distinct from an absent option: callers
+    fall back to the repository root for an unknowable directory rather than
+    guessing which nested manifest the package manager will load.
+    """
+    # `_install_lines` stores the joined source line so its evidence remains
+    # verbatim. Limit option parsing to the qualifying install segment: a later
+    # command on that line may carry its OWN `--dir`/`--cwd`, which cannot move
+    # an install that already ran.
+    install_segment = _qualifying_install_segment(command)
+    if install_segment is None:
+        return False, None
+    m = _INSTALL_CMD_RE.search(install_segment)
+    if m is None:
+        return False, None
+    try:
+        tokens = shlex.split(
+            install_segment[m.start("cmd"):], comments=False)
+    except ValueError:
+        tokens = install_segment[m.start("cmd"):].split()
+    if not tokens:
+        return False, None
+    manager = tokens[0]
+    flags = _INSTALL_DIRECTORY_FLAGS.get(manager, set())
+    present = False
+    value = None
+    i = 1
+    while i < len(tokens):
+        token = tokens[i]
+        matched = next((flag for flag in flags
+                        if token == flag or token.startswith(flag + "=")), None)
+        if matched is None:
+            i += 1
+            continue
+        present = True
+        if token == matched:
+            if i + 1 >= len(tokens) or tokens[i + 1].startswith("-"):
+                value = None
+                i += 1
+                continue
+            value = tokens[i + 1]
+            i += 2
+            continue
+        value = token[len(matched) + 1:]
+        i += 1
+    return present, value
 
 
 def _is_dependency_tree_install(segment: str) -> bool:
@@ -2594,7 +2668,21 @@ def _is_dependency_tree_install(segment: str) -> bool:
         tokens = tail.split()
     if not tokens:
         return False
+    manager = tokens[0]
     tokens = tokens[1:]                                   # the manager itself
+    # pnpm accepts its working-directory option before the subcommand:
+    # `pnpm -C apps/web install`. Consume those option/value pairs before
+    # identifying the install subcommand, or `install` is misread as a named
+    # package and the privileged dependency-tree install disappears.
+    if manager == "pnpm":
+        while tokens:
+            if tokens[0].startswith("--dir=") or tokens[0].startswith("-C="):
+                tokens = tokens[1:]
+                continue
+            if tokens[0] in ("-C", "--dir") and len(tokens) >= 2:
+                tokens = tokens[2:]
+                continue
+            break
     subcommand = None
     if tokens and tokens[0] in _INSTALL_SUBCOMMANDS:
         subcommand = tokens[0]
@@ -3211,6 +3299,7 @@ def _install_pin_directory(
     candidates: list[tuple[int, str, str]],
     ordinal: int,
     marks: list[Any] | None,
+    include_flag: bool = True,
 ) -> str | None:
     """The repo-relative directory the ordinal-th install runs in, or None.
 
@@ -3222,6 +3311,13 @@ def _install_pin_directory(
     leg is unknowable (an expression, an unreadable `cd`, an absolute path):
     the caller falls back to the repo root, the historical reading, which is
     right for the single-package repos the check was written against.
+
+    ``include_flag=False`` stops before the install's own directory option
+    (`--prefix`, `-C`/`--dir`, `--cwd`): that is the directory the manager is
+    LAUNCHED from, which is where Corepack resolves the version. Corepack
+    0.36 runs the root-pinned pnpm for `pnpm -C apps/web install` from the
+    root whatever `apps/web` pins, while a standalone pnpm 10 switches to the
+    target's pin, so a directory option leaves two candidate pins.
     """
     install_line = candidates[ordinal][0]
     # A step mark's end_line is the parser's node end — it can spill one line
@@ -3275,6 +3371,15 @@ def _install_pin_directory(
             if target.startswith("/") or _RUNNER_ABSOLUTE_RE.match(target):
                 return None
             base = _resolve_path(base, target)
+    flag_present, flag_dir = _install_directory_flag(candidates[ordinal][2])
+    if flag_present and include_flag:
+        if (not flag_dir or _EXPRESSION_TOKEN_RE.search(flag_dir)
+                or "$" in flag_dir or "`" in flag_dir
+                or flag_dir.startswith("~")
+                or flag_dir.startswith("/")
+                or _RUNNER_ABSOLUTE_RE.match(flag_dir)):
+            return None
+        base = _resolve_path(base, flag_dir)
     if base == ".." or base.startswith("../"):
         return None
     return base
@@ -3774,6 +3879,43 @@ def _correlation_install_scripts_in_privileged_job(
             text, doc, job, job_name, ranges.get(job_name),
             candidates, ordinal, marks)
         return _package_manager_pin_at(root, rel)
+
+    def _launch_pin_for_install(
+        job: Any,
+        job_name: str,
+        candidates: list[tuple[int, str, str]],
+        ordinal: int,
+    ) -> tuple[tuple[str, int, str] | None, str | None] | None:
+        """The pin at the directory the install is LAUNCHED from, when the
+        install carries its own directory option; None when it does not
+        (the launch directory and the install directory are then one).
+        """
+        if not _install_directory_flag(candidates[ordinal][2])[0]:
+            return None
+        rel = _install_pin_directory(
+            text, doc, job, job_name, ranges.get(job_name),
+            candidates, ordinal, marks, include_flag=False)
+        return _package_manager_pin_at(root, rel)
+
+    def _pnpm10_everywhere(
+        job: Any,
+        job_name: str,
+        candidates: list[tuple[int, str, str]],
+        ordinal: int,
+    ) -> bool:
+        """Does every pin that can pick this install's pnpm resolve >= 10?
+
+        With a directory option either the launch directory's pin (Corepack)
+        or the target's (a standalone pnpm 10 switching versions) can run
+        the install, so the pnpm-10 allowlist is the mechanism only when
+        both resolve pnpm >= 10.
+        """
+        pins = [_pin_for_install(job, job_name, candidates, ordinal)]
+        launch = _launch_pin_for_install(job, job_name, candidates, ordinal)
+        if launch is not None:
+            pins.append(launch)
+        return all(p[0] and p[0][0] == "pnpm" and p[0][1] >= 10
+                   for p in pins)
     for job_name, job in _walk_jobs(doc):
         runs = _job_run_texts(job)
         if not any(_scalar_has_unprotected_install(r) for r in runs):
@@ -3842,11 +3984,7 @@ def _correlation_install_scripts_in_privileged_job(
             exposed = next(
                 ((i, c) for i, c in enumerate(candidates)
                  if _install_manager(c[2]) != "pnpm"
-                 or not (
-                     (p := _pin_for_install(job, job_name, candidates, i))[0]
-                     and p[0][0] == "pnpm"
-                     and p[0][1] >= 10
-                 )
+                 or not _pnpm10_everywhere(job, job_name, candidates, i)
                  or _builds_disabled_at(
                      _covering_writes(_install_pin_directory(
                          text, doc, job, job_name, ranges.get(job_name),
@@ -3867,6 +4005,21 @@ def _correlation_install_scripts_in_privileged_job(
             manager = _install_manager(command)
         pin, pin_origin = _pin_for_install(job, job_name, candidates,
                                            exposed_ordinal)
+        launch = _launch_pin_for_install(job, job_name, candidates,
+                                         exposed_ordinal)
+        launch_note = ""
+        # Only when both pins name THIS install's manager: the condition note
+        # quotes no pin of another manager, so the launch clause must not.
+        if (launch is not None and launch[0] and launch[0] != pin
+                and pin is not None and pin[0] == manager
+                and launch[0][0] == manager):
+            where = f"`{launch[1]}`" if launch[1] else "the repo root"
+            launch_note = (
+                f" The install is launched from {where}, which pins "
+                f"`{launch[0][0]}@{launch[0][2]}`; Corepack resolves the "
+                "version from the launch directory, not from the install's "
+                "directory option, so confirm which of the two pins runs."
+            )
 
         payoff_parts = []
         if secrets:
@@ -3894,6 +4047,7 @@ def _correlation_install_scripts_in_privileged_job(
                 + _manager_condition_note(
                     manager, "\n".join(runs), pin, allowlist, pin_origin,
                 )
+                + launch_note
             ),
         )
 

@@ -5980,6 +5980,8 @@ _SIZING: dict[str, dict[str, Any]] = {
     # hit_rate — a modeled number here would re-create exactly the inference
     # OPT49 was cut for.
     "OPT80": {"model": "measured"},  # checkout stalls on the tail
+    # Local-hook duplication owns measured step-time sizing on both axes.
+    "OPT105": {"model": "measured"},
     # Hidden Failures and Dead Config.
     "OPT68": {"model": "runner-min-only", "hit_rate": 0.0},  # broken step masked — reliability
     "OPT69": {"model": "runner-min-only", "hit_rate": 0.0},  # dead env vars — cosmetic
@@ -7312,6 +7314,7 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
     f["runner_min_note"] = f"{existing}; {note}" if existing else note
 
 
+_JOB_EXPANDING_EFFECT_PATTERNS = frozenset(("OPT24",))
 def _unsized_runner_min(f: dict[str, Any], reason: str) -> None:
     """Record WHY this finding's runner-minute saving is unsized.
 
@@ -7342,6 +7345,22 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
     Every branch that leaves `runner_min_saving` at None (unsized) also stamps
     a literally true `runner_min_unsized_reason`; a branch that sizes the
     effect to zero sets 0.0 (`tests/test_unsized_reason_guard.py`)."""
+    if f.get("pattern") in _JOB_EXPANDING_EFFECT_PATTERNS:
+        floor = f.get("runner_minute_setup_floor_s")
+        if isinstance(floor, (int, float)) and floor > 0 and monthly_volume:
+            f["runner_minute_effect"] = {
+                "direction": "added_cost",
+                "runner_min_per_month": round(float(floor) * monthly_volume / 60.0, 3),
+                "runs_per_month": monthly_volume,
+                "setup_floor_s": round(float(floor), 1),
+                "assumed_shards": 2,
+            }
+        else:
+            f["runner_minute_effect"] = {
+                "direction": "unsized",
+                "reason": "no measured repeated setup floor or monthly run volume",
+                "assumed_shards": 2,
+            }
     if f.get("positional_splitter_static"):
         # Source proves an unstable assignment rule, not a duration or current
         # imbalance. Any runner-minute saving (fewer shard timeouts and reruns)
@@ -8441,6 +8460,9 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
     "OPT15": (_RM_DOOR_CLAMP,
               "cross-workflow repeated build — per-run modeled credit clamped to "
               "the affected jobs' measured cost-spine billable"),
+    "OPT105": (_RM_DOOR_CLAMP,
+               "repeated local-hook work — measured step-time credit clamped to "
+               "the affected jobs' measured cost-spine billable"),
     "OPT106": (_RM_DOOR_CLAMP,
                "profiled runtime TypeScript loader self time — measured per-run "
                "credit clamped to the affected job's measured cost-spine billable"),
@@ -11043,6 +11065,9 @@ def _size_opt25_next_step(finding: dict[str, Any], ctx: WallClockContext) -> Non
         "capped by the existing cross-workflow floor; this is not an extra credited saving.")
 
 
+_OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S = 60.0
+
+
 def _detect_opt25_shard_imbalance(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     crit: dict[str, Any], workflow_doc: dict[str, Any] | None = None,
@@ -11075,16 +11100,88 @@ def _detect_opt25_shard_imbalance(
             name.strip()))
 
     def _is_universal_housekeeping_step(name: str) -> bool:
+        # Anchored: "Run tests and upload coverage" is test work, not an upload.
         return not name.strip() or bool(_re.search(
-            r"(?i)(?:\b(?:artifact|cleanup|tear\s*down|upload)\b|"
-            r"^run\s+[\w.-]+/setup-[\w.-]+@)", name.strip()))
+            r"(?i)^(?:(?:upload|cleanup|clean\s*up|tear\s*down)\b|"
+            r"run\s+[\w.-]+/(?:setup-[\w.-]+|(?:upload|download)-artifact)@)",
+            name.strip()))
 
-    dominant_step_by_base: dict[str, str] = {}
-    step_seconds_by_base: dict[str, dict[str, float]] = {}
-    always_run_by_run: list[dict[str, set[str]]] = []
-    non_universal_names_by_base: dict[str, set[str]] = {}
+    def _step_semantic_identity(step: dict[str, Any]) -> tuple[str, str, str]:
+        return tuple(
+            " ".join(str(step.get(field) or "").split())
+            for field in ("name", "action", "run")
+        )
+
+    def _runner_added_step(step: dict[str, Any]) -> bool:
+        return bool(_re.search(
+            r"(?i)^(?:set up (?:job|runner)|complete (?:job|runner)|post )",
+            str(step.get("name") or "").strip()))
+
+    VersionToken = tuple[str, ...]
+    VersionIdentity = tuple[VersionToken, ...]
+    StepIdentity = tuple[Any, ...]
+
+    def _version_token(step: dict[str, Any]) -> VersionToken:
+        semantic = _step_semantic_identity(step)
+        number = step.get("number")
+        if isinstance(number, int) and not isinstance(number, bool):
+            return "number", str(number), *semantic
+        return "semantic", *semantic
+
+    version_by_run: list[dict[str, VersionIdentity]] = []
     for run_jobs in jobs_per_run:
-        active_names_by_base: dict[str, list[set[str]]] = {}
+        semantic_steps_by_base: dict[str, set[VersionToken]] = {}
+        for job in run_jobs:
+            job_name = str(job.get("name", ""))
+            matrix_base = _matrix_base_name(job_name)
+            if matrix_base != job_name:
+                base = matrix_base
+            elif job_name in suffix_base:
+                base = suffix_base[job_name]
+            else:
+                continue
+            semantic_steps_by_base.setdefault(base, set()).update(
+                _version_token(step)
+                for step in job.get("steps") or []
+                if isinstance(step, dict) and not _runner_added_step(step)
+            )
+        version_by_run.append({
+            base: tuple(sorted(steps))
+            for base, steps in semantic_steps_by_base.items()
+        })
+
+    def _step_identity(
+        step: dict[str, Any], position: int, version: VersionIdentity,
+        inferred: bool = False,
+    ) -> StepIdentity:
+        """Identify a step inside its observed workflow version.
+
+        Common-suffix groups are inferred from job names and can combine
+        separate workflow job definitions, whose step numbers are local to each
+        job, so their steps are matched by what they run, never by number."""
+        number = step.get("number")
+        if (not inferred and isinstance(number, int)
+                and not isinstance(number, bool)):
+            return version, "number", number
+        semantic = _step_semantic_identity(step)
+        if any(semantic):
+            return version, "semantic", semantic
+        return version, "position", position
+
+    def _step_seconds(step: dict[str, Any]) -> float | None:
+        started = _parse_dt(step.get("started_at"))
+        completed = _parse_dt(step.get("completed_at"))
+        if started is None or completed is None or completed < started:
+            return None
+        return (completed - started).total_seconds()
+
+    dominant_step_by_base: dict[str, StepIdentity] = {}
+    step_seconds_by_base: dict[str, dict[StepIdentity, float]] = {}
+    always_run_by_run: list[dict[str, set[StepIdentity]]] = []
+    non_universal_steps_by_base: dict[str, set[StepIdentity]] = {}
+    for run_jobs, versions in zip(jobs_per_run, version_by_run):
+        active_steps_by_base: dict[str, list[dict[StepIdentity, float | None]]] = {}
+        housekeeping_by_base: dict[str, list[set[StepIdentity]]] = {}
         for job in run_jobs:
             if str(job.get("conclusion") or "").lower() == "skipped":
                 continue
@@ -11096,23 +11193,46 @@ def _detect_opt25_shard_imbalance(
                 base = suffix_base[job_name]
             else:
                 continue
-            active_names_by_base.setdefault(base, []).append({
-                str(step.get("name") or "")
-                for step in job.get("steps") or []
+            inferred = matrix_base == job_name
+            version = versions.get(base, ())
+            active = [
+                (position, step)
+                for position, step in enumerate(job.get("steps") or [])
                 if (isinstance(step, dict)
                     and not _is_preparation_step(str(step.get("name") or ""))
                     and str(step.get("conclusion") or "").lower() != "skipped")
+            ]
+            active_steps_by_base.setdefault(base, []).append({
+                _step_identity(step, position, version, inferred): _step_seconds(step)
+                for position, step in active
             })
-        always_run_by_base: dict[str, set[str]] = {}
-        for base, active_names in active_names_by_base.items():
-            universal = set.intersection(*active_names) if active_names else set()
-            always_run_by_base[base] = universal
-            for names in active_names:
-                non_universal_names_by_base.setdefault(base, set()).update(
-                    names - universal)
+            # Setup actions, uploads and cleanup are housekeeping however long
+            # they take; only other shared work needs the duration test.
+            housekeeping_by_base.setdefault(base, []).append({
+                _step_identity(step, position, version, inferred)
+                for position, step in active
+                if _is_universal_housekeeping_step(str(step.get("name") or ""))
+            })
+        always_run_by_base: dict[str, set[StepIdentity]] = {}
+        for base, active_steps in active_steps_by_base.items():
+            universal = (set.intersection(*(set(steps) for steps in active_steps))
+                         if active_steps else set())
+            named_housekeeping = (
+                set.intersection(*housekeeping_by_base[base]) if active_steps else set())
+            short_universal = {
+                identity for identity in universal
+                if identity in named_housekeeping
+                or all((steps[identity] is not None
+                        and steps[identity] <= _OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S)
+                       for steps in active_steps)
+            }
+            always_run_by_base[base] = short_universal
+            for steps in active_steps:
+                non_universal_steps_by_base.setdefault(base, set()).update(
+                    identity for identity in steps if identity not in short_universal)
         always_run_by_run.append(always_run_by_base)
 
-    for run_jobs in jobs_per_run:
+    for run_jobs, versions in zip(jobs_per_run, version_by_run):
         for job in run_jobs:
             job_name = str(job.get("name", ""))
             matrix_base = _matrix_base_name(job_name)
@@ -11122,7 +11242,9 @@ def _detect_opt25_shard_imbalance(
                 base = suffix_base[job_name]
             else:
                 continue
-            for step in job.get("steps") or []:
+            inferred = matrix_base == job_name
+            version = versions.get(base, ())
+            for position, step in enumerate(job.get("steps") or []):
                 if (not isinstance(step, dict)
                         or _is_preparation_step(str(step.get("name") or ""))
                         or str(step.get("conclusion") or "").lower() == "skipped"):
@@ -11131,20 +11253,21 @@ def _detect_opt25_shard_imbalance(
                 completed = _parse_dt(step.get("completed_at"))
                 if started is None or completed is None or completed <= started:
                     continue
-                step_name = str(step.get("name") or "")
+                step_identity = _step_identity(step, position, version, inferred)
                 seconds = (completed - started).total_seconds()
                 by_step = step_seconds_by_base.setdefault(base, {})
-                by_step[step_name] = by_step.get(step_name, 0.0) + seconds
+                by_step[step_identity] = by_step.get(step_identity, 0.0) + seconds
     for base, totals in step_seconds_by_base.items():
         if totals:
             distinctive_totals = {
-                name: seconds for name, seconds in totals.items()
-                if name in non_universal_names_by_base.get(base, set())}
+                identity: seconds for identity, seconds in totals.items()
+                if identity in non_universal_steps_by_base.get(base, set())}
             candidates = distinctive_totals or totals
             dominant_step_by_base[base] = max(
-                candidates, key=lambda step_name: (candidates[step_name], step_name))
+                candidates, key=lambda identity: (candidates[identity], identity))
 
-    for run_jobs, always_run_by_base in zip(jobs_per_run, always_run_by_run):
+    for run_jobs, always_run_by_base, versions in zip(
+            jobs_per_run, always_run_by_run, version_by_run):
         for j in run_jobs:
             name = str(j.get("name", ""))
             mbase = _matrix_base_name(name)
@@ -11152,36 +11275,43 @@ def _detect_opt25_shard_imbalance(
                 base = mbase
                 variant = name[len(mbase):].strip().strip("()")
                 sharded = bool(_SHARD_NAME_RE.search(variant))  # explicit shard/partition axis
+                inferred_suffix_group = False
             elif name in suffix_base:
                 base = suffix_base[name]
                 sharded = False  # prefix varies → distinct packages, not shards
+                inferred_suffix_group = True
             else:
                 continue  # neither convention matched → not a matrix job
-            steps = [step for step in j.get("steps") or [] if isinstance(step, dict)]
+            version = versions.get(base, ())
+            steps = [(position, step) for position, step in enumerate(j.get("steps") or [])
+                     if isinstance(step, dict)]
             work_steps = [
-                step for step in steps
+                (position, step) for position, step in steps
                 if not _is_preparation_step(str(step.get("name") or ""))]
             active_work_steps = [
-                step for step in work_steps
+                (position, step) for position, step in work_steps
                 if str(step.get("conclusion") or "").lower() != "skipped"]
-            dominant_name = dominant_step_by_base.get(base)
+            dominant_identity = dominant_step_by_base.get(base)
             distinctive_active_steps = [
-                step for step in active_work_steps
-                if (str(step.get("name") or "") == dominant_name
-                    or str(step.get("name") or "")
-                    not in always_run_by_base.get(base, set())
-                    or not _is_universal_housekeeping_step(
-                        str(step.get("name") or "")))]
-            dominant_steps = [step for step in work_steps
-                              if str(step.get("name") or "") == dominant_name]
-            # A differently named active step is positive evidence that this
-            # leg did real work (for example platform-specific test steps).
-            # Only use the dominant sibling step to confirm an otherwise
-            # workless leg; never discard that alternate work.
-            skipped_dominant = bool(dominant_name) and not distinctive_active_steps and (
-                not dominant_steps or all(
+                step for position, step in active_work_steps
+                if (_step_identity(step, position, version, inferred_suffix_group)
+                    == dominant_identity
+                    or _step_identity(step, position, version, inferred_suffix_group)
+                    not in always_run_by_base.get(base, set()))]
+            dominant_steps = [
+                step for position, step in work_steps
+                if _step_identity(step, position, version, inferred_suffix_group)
+                == dominant_identity]
+            # An active step identity that did not run on every leg is positive
+            # evidence that this leg did real work (for example platform-specific
+            # test steps). Only use the dominant sibling step to confirm an
+            # otherwise workless leg; never discard that alternate work.
+            skipped_dominant = (
+                dominant_identity is not None
+                and not distinctive_active_steps
+                and (not dominant_steps or all(
                     str(step.get("conclusion") or "").lower() == "skipped"
-                    for step in dominant_steps))
+                    for step in dominant_steps)))
             if (str(j.get("conclusion") or "").lower() == "skipped"
                     or skipped_dominant
                     or (work_steps and not active_work_steps)):
@@ -11345,6 +11475,15 @@ def _detect_opt25_shard_imbalance(
         # move the same work between the existing legs.
         out[-1]["opt25_case"] = ("atomic-unit" if atomic
                                  else "rebalance" if is_sharded else "split-leg")
+        # Signed runner-minute effect (#379): the split slow leg adds a job that
+        # repeats setup, whose floor this detector does not measure; rebalancing
+        # moves the same work between the legs that already run.
+        out[-1]["runner_minute_effect"] = (
+            {"direction": "unsized",
+             "reason": "the added split job's repeated setup floor was not measured",
+             "assumed_shards": 2}
+            if out[-1]["opt25_case"] == "split-leg" else
+            {"direction": "neutral", "reason": _OPT25_NO_RUNNER_MIN_EFFECT})
         if family is not None:
             out[-1]["shard_family"] = family
             out[-1]["evidence"] = summary
@@ -16974,15 +17113,37 @@ _OPT82_PM_BUILTINS = frozenset({
 _OPT82_CACHE_FLAGS_WITH_VALUE = frozenset({"--cache-location", "--cache-strategy"})
 
 
-def _opt82_tokens(segment: str) -> list[str]:
+def _opt82_tokens_and_env(segment: str) -> tuple[list[str], tuple[str, ...]]:
     import shlex
     try:
         toks = shlex.split(segment)
     except ValueError:
         toks = segment.split()
+    env: list[str] = []
     while toks and _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", toks[0]):
-        toks = toks[1:]            # leading `VAR=value` assignments
+        env.append(toks.pop(0))     # leading `VAR=value` assignments
+    return toks, tuple(env)
+
+
+def _opt82_tokens(segment: str) -> list[str]:
+    toks, _env = _opt82_tokens_and_env(segment)
     return toks
+
+
+def _opt82_effective_env(
+        inherited: "tuple[str, ...] | None", local: tuple[str, ...],
+) -> "tuple[str, ...] | None":
+    """Canonical final literal values, or None when shell expansion is needed."""
+    if inherited is None:
+        return None
+    values: dict[str, str] = {}
+    for assignment in inherited + local:
+        name, separator, value = assignment.partition("=")
+        if separator:
+            if "$" in value or "`" in value or value.startswith("~"):
+                return None
+            values[name] = value
+    return tuple(f"{name}={values[name]}" for name in sorted(values))
 
 
 # Each exec prefix, and the runner the benchmark uses to run ESLint the same way.
@@ -17317,6 +17478,464 @@ def _rl_task_runner(toks: list[str]
 _RL_UNWALKED_DIRS = frozenset({"node_modules", "dist", "coverage", "__pycache__",
                                "build", "out", "vendor", "target"})
 
+# OPT105 reports hook work only when the repeated CI steps are both measurable and
+# material.  These are report-shaping defaults, mirrored in report-defaults.md and
+# its contract test.
+_OPT105_MIN_DUPLICATE_STEP_S = 20.0
+_OPT105_MIN_JOB_SHARE = 0.15
+_OPT105_YAML_MAX_NODES = 10_000
+_OPT105_YAML_MAX_DEPTH = 100
+_OPT105_HOOK_NAMES = frozenset({
+    "applypatch-msg", "pre-applypatch", "post-applypatch", "pre-commit",
+    "pre-merge-commit", "prepare-commit-msg", "commit-msg", "post-commit",
+    "pre-rebase", "post-checkout", "post-merge", "pre-push", "pre-receive",
+    "update", "proc-receive", "post-receive", "post-update",
+    "reference-transaction", "push-to-checkout", "pre-auto-gc", "post-rewrite",
+    "sendemail-validate", "fsmonitor-watchman", "p4-changelist",
+    "p4-prepare-changelist", "p4-post-changelist", "p4-pre-submit",
+    "post-index-change",
+})
+
+
+def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
+    """Literal hook commands from the supported static configuration surfaces.
+
+    Returns ``(source, command, working_directory)`` tuples.  This reader never
+    executes repository content and never follows a path outside ``root``.
+    """
+    if root is None:
+        return []
+    out: list[tuple[str, str, str]] = []
+    try:
+        resolved_root = root.resolve()
+    except OSError:
+        return []
+
+    def _read(path: Path) -> "str | None":
+        try:
+            resolved = path.resolve()
+            if (not resolved.is_relative_to(resolved_root)
+                    or not resolved.is_file()
+                    or resolved.stat().st_size > 1_000_000):
+                return None
+            return resolved.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return None
+
+    def _shell_dir(name: str) -> None:
+        folder = root / name
+        try:
+            paths = sorted(folder.iterdir()) if folder.is_dir() else []
+        except OSError:
+            paths = []
+        for path in paths:
+            if path.name not in _OPT105_HOOK_NAMES:
+                continue
+            text = _read(path)
+            if text is None:
+                continue
+            lines = []
+            for line in text.splitlines():
+                stripped = line.strip()
+                if (not stripped or stripped.startswith(("#", ". ", "source "))
+                        or stripped.startswith("#!/")):
+                    continue
+                lines.append(stripped)
+            if lines:
+                out.append((path.relative_to(root).as_posix(), "\n".join(lines), ""))
+
+    _shell_dir(".husky")
+    _shell_dir(".githooks")
+
+    def _yaml_commands(path: Path, keys: frozenset[str], *, lefthook: bool = False) -> None:
+        text = _read(path)
+        if text is None:
+            return
+        try:
+            import yaml
+            doc = yaml.safe_load(text)
+        except Exception:  # malformed config is unknown, never a finding
+            return
+
+        rows: list[tuple[str, str, str]] = []
+        seen: set[int] = set()
+        visits = 0
+        exceeded = False
+
+        def _walk(value: Any, key: str = "", working_directory: str = "",
+                  depth: int = 0) -> None:
+            nonlocal visits, exceeded
+            if exceeded:
+                return
+            if depth > _OPT105_YAML_MAX_DEPTH:
+                exceeded = True
+                return
+            if isinstance(value, (dict, list)) and id(value) in seen:
+                return
+            if visits >= _OPT105_YAML_MAX_NODES:
+                exceeded = True
+                return
+            visits += 1
+            if isinstance(value, dict):
+                identity = id(value)
+                seen.add(identity)
+                if lefthook and any(value.get(gate) not in (None, False)
+                                    for gate in ("skip", "only")):
+                    # A skipped or condition-gated command may never run from
+                    # the hook; withhold it rather than call it repeated work.
+                    return
+                local_directory = working_directory
+                if lefthook and isinstance(value.get("root"), str):
+                    raw_directory = str(value["root"])
+                    if "${{" in raw_directory:
+                        return
+                    local_directory = _opt82_norm_dir(raw_directory)
+                    local_directory = (_posixpath.normpath(local_directory)
+                                       if local_directory else "")
+                    if (local_directory == ".."
+                            or local_directory.startswith("../")):
+                        return
+                    local_directory = "" if local_directory == "." else local_directory
+                for child_key, child in value.items():
+                    if (lefthook and depth == 0
+                            and str(child_key) not in _OPT105_HOOK_NAMES):
+                        # Top-level groups that are not Git hook names run only
+                        # on an explicit `lefthook run <group>`.
+                        continue
+                    _walk(child, str(child_key), local_directory, depth + 1)
+            elif isinstance(value, list):
+                identity = id(value)
+                seen.add(identity)
+                for child in value:
+                    _walk(child, key, working_directory, depth + 1)
+            elif key in keys and isinstance(value, str) and value.strip():
+                rows.append((path.relative_to(root).as_posix(), value.strip(),
+                             working_directory))
+
+        _walk(doc)
+        if not exceeded:
+            out.extend(rows)
+
+    def _pre_commit_commands(path: Path) -> None:
+        text = _read(path)
+        if text is None:
+            return
+        try:
+            import shlex
+            import yaml
+            doc = yaml.safe_load(text)
+        except Exception:
+            return
+        repos = doc.get("repos") if isinstance(doc, dict) else None
+        if not isinstance(repos, list) or len(repos) > _OPT105_YAML_MAX_NODES:
+            return
+        def _stages(value: Any) -> "list[str] | None":
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, list) and all(isinstance(v, str) for v in value):
+                return list(value)
+            return None
+
+        default_stages: "list[str] | None" = None
+        if "default_stages" in doc:
+            default_stages = _stages(doc.get("default_stages"))
+            if default_stages is None:
+                return
+        rows: list[tuple[str, str, str]] = []
+        visits = 0
+        for repo in repos:
+            visits += 1
+            if visits > _OPT105_YAML_MAX_NODES or not isinstance(repo, dict):
+                return
+            hooks = repo.get("hooks")
+            if not isinstance(hooks, list):
+                continue
+            for hook in hooks:
+                visits += 1
+                if visits > _OPT105_YAML_MAX_NODES:
+                    return
+                if not isinstance(hook, dict) or hook.get("pass_filenames") is not False:
+                    continue
+                stages = (_stages(hook.get("stages")) if "stages" in hook
+                          else default_stages)
+                if "stages" in hook and stages is None:
+                    continue
+                if stages is not None and all(stage == "manual" for stage in stages):
+                    # Manual-stage hooks run only on `pre-commit run --hook-stage
+                    # manual`, never from a Git hook.
+                    continue
+                entry = hook.get("entry")
+                args = hook.get("args", [])
+                if (not isinstance(entry, str) or not entry.strip()
+                        or not isinstance(args, list)
+                        or not all(isinstance(arg, str) for arg in args)):
+                    continue
+                command = entry.strip()
+                if args:
+                    command += " " + shlex.join(args)
+                rows.append((path.relative_to(root).as_posix(), command, ""))
+        out.extend(rows)
+
+    _yaml_commands(root / "lefthook.yml", frozenset({"run", "command"}), lefthook=True)
+    _yaml_commands(root / "lefthook.yaml", frozenset({"run", "command"}), lefthook=True)
+    _pre_commit_commands(root / ".pre-commit-config.yaml")
+    _pre_commit_commands(root / ".pre-commit-config.yml")
+
+    package_text = _read(root / "package.json")
+    if package_text is not None:
+        try:
+            package = json.loads(package_text)
+        except (ValueError, TypeError):
+            package = None
+        hooks = package.get("simple-git-hooks") if isinstance(package, dict) else None
+        if isinstance(hooks, dict):
+            for command in hooks.values():
+                if isinstance(command, str) and command.strip():
+                    out.append(("package.json#simple-git-hooks", command.strip(), ""))
+    return out
+
+
+def _opt105_has_unproven_scope(command: str) -> bool:
+    """Whether task-runner package selection cannot be preserved by the resolver.
+
+    ``--project`` is tool-specific: Nx uses it to select workspace packages,
+    while TypeScript uses it to select a configuration file.  Identify the
+    command behind an exec wrapper before treating that spelling as package
+    scope; exact non-runner leaves retain the flag in their comparison key.
+    """
+    for segment in _OPT82_SEGMENT_SPLIT_RE.split(command or ""):
+        tokens = _opt82_tokens(segment.strip())
+        if not tokens:
+            continue
+        if any(token.split("=", 1)[0] in ("--filter", "-F")
+               for token in tokens):
+            return True
+        unwrapped, _runner, _call = _opt82_exec_call(tokens)
+        if not unwrapped:
+            continue
+        tool = unwrapped[0].rsplit("/", 1)[-1].split("@", 1)[0]
+        flags = {token.split("=", 1)[0] for token in unwrapped[1:]}
+        if tool in ("turbo", "lerna") and "--scope" in flags:
+            return True
+        if tool == "nx" and flags.intersection({"--project", "--projects"}):
+            return True
+    return False
+
+
+def _opt105_leaf_key(
+        leaf: dict[str, Any],
+) -> "tuple[str, tuple[str, ...], tuple[str, ...]] | None":
+    tokens = leaf.get("tokens")
+    env = leaf.get("env", [])
+    if not isinstance(tokens, list) or not tokens or not all(
+            isinstance(token, str) and token for token in tokens):
+        return None
+    if not isinstance(env, list) or not all(
+            isinstance(assignment, str) and assignment for assignment in env):
+        return None
+    return str(leaf.get("wd") or ""), tuple(env), tuple(tokens)
+
+
+def _detect_opt105_hook_duplication(
+    root: "Path | None",
+    wf_path: str,
+    jobs_per_run: list[list[dict[str, Any]]],
+    crit: dict[str, Any],
+    workflow_doc: dict[str, Any],
+    scan_block: "dict[str, Any] | None",
+    monthly_volume: "int | None",
+    start_idx: int,
+    is_pr: bool = True,
+) -> list[dict[str, Any]]:
+    """OPT105: measured PR steps repeat commands from a local hook.
+
+    Package-script calls on both sides go through ``_resolve_run_leaves``.  The
+    static match alone is never enough: the matched steps must clear the absolute
+    duration and job-share floors in successful sampled pull-request runs.
+    """
+    if not is_pr or not jobs_per_run or not isinstance(workflow_doc, dict):
+        return []
+    jobs = workflow_doc.get("jobs")
+    block = scan_block if isinstance(scan_block, dict) else {}
+    if not isinstance(jobs, dict) or block.get("error"):
+        return []
+    scripts_by_dir = {str(k): v for k, v in (block.get("package_scripts") or {}).items()
+                      if isinstance(v, dict)}
+    scripts_unreadable = frozenset(str(v) for v in
+                                   (block.get("package_scripts_unreadable") or []))
+    walk_complete = block.get("truncated") is False
+    hook_key_sources: dict[
+        tuple[str, tuple[str, ...], tuple[str, ...]], set[str]
+    ] = {}
+    for source, command, working_directory in _opt105_config_commands(root):
+        if _opt105_has_unproven_scope(command):
+            continue
+        resolved = _resolve_run_leaves(
+            command, working_directory, scripts_by_dir, scripts_unreadable,
+            walk_complete=walk_complete)
+        if resolved.unresolved:
+            continue
+        for leaf in resolved.leaves:
+            key = _opt105_leaf_key(leaf)
+            if key is not None:
+                hook_key_sources.setdefault(key, set()).add(source)
+    if not hook_key_sources:
+        return []
+
+    def _defaults_wd(value: Any) -> Any:
+        defaults = value.get("defaults") if isinstance(value, dict) else None
+        run = defaults.get("run") if isinstance(defaults, dict) else None
+        return run.get("working-directory") if isinstance(run, dict) else None
+
+    matched_by_job: dict[str, tuple[str, list[str], set[str]]] = {}
+    for run_jobs in jobs_per_run:
+        for job in run_jobs:
+            job_name = str(job.get("name") or "").strip()
+            if not job_name or job_name in matched_by_job:
+                continue
+            hit = _opt83_match_yaml_job(jobs, job_name)
+            if hit is None:
+                continue
+            yaml_key, spec = hit
+            matched_steps: list[str] = []
+            matched_sources: set[str] = set()
+            for leaf_step in job_walk(spec).leaves:
+                step = leaf_step.step
+                command = step.get("run") if isinstance(step, dict) else None
+                if not isinstance(command, str) or "${{" in command:
+                    continue
+                raw_wd = step.get(
+                    "working-directory",
+                    _defaults_wd(spec) if _defaults_wd(spec) is not None
+                    else _defaults_wd(workflow_doc))
+                if "${{" in str(raw_wd or ""):
+                    continue
+                wd = _opt82_norm_dir(raw_wd)
+                wd = _posixpath.normpath(wd) if wd else ""
+                if wd == ".." or wd.startswith("../"):
+                    continue
+                wd = "" if wd == "." else wd
+                resolved = _resolve_run_leaves(
+                    command, wd, scripts_by_dir, scripts_unreadable,
+                    walk_complete=walk_complete)
+                if resolved.unresolved or _opt105_has_unproven_scope(command):
+                    continue
+                keys = [_opt105_leaf_key(command_leaf) for command_leaf in resolved.leaves]
+                matching = [key for key in keys if key in hook_key_sources]
+                # The step duration is safe to credit only when every resolved
+                # command in the step is proved to run in a supported hook.
+                if keys and None not in keys and len(matching) == len(keys):
+                    display = _opt79_yaml_step_display(step)
+                    if display and display not in matched_steps:
+                        matched_steps.append(display)
+                    for key in matching:
+                        matched_sources.update(hook_key_sources[key])
+            if matched_steps:
+                matched_by_job[job_name] = (yaml_key, matched_steps, matched_sources)
+    if not matched_by_job:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for job_name, (yaml_key, matched_steps, hook_sources) in matched_by_job.items():
+        duplicate_samples: list[tuple[float, str]] = []
+        job_samples: list[float] = []
+        observed_steps: set[str] = set()
+        observed_shas: set[str] = set()
+        observed_prs: set[int] = set()
+        for run_jobs in jobs_per_run:
+            occurrence = next((job for job in run_jobs
+                               if str(job.get("name") or "").strip() == job_name), None)
+            if occurrence is None:
+                continue
+            total = _duration_s(occurrence.get("started_at"), occurrence.get("completed_at"))
+            if total is None or total <= 0:
+                continue
+            duration_rows = _step_durations(occurrence)
+            name_counts = Counter(name for name, _duration in duration_rows)
+            durations = {name: duration for name, duration in duration_rows
+                         if name_counts[name] == 1}
+            present = [name for name in matched_steps if name in durations]
+            if not present:
+                continue
+            duplicate = sum(durations[name] for name in present)
+            if duplicate <= 0:
+                continue
+            duplicate_samples.append((duplicate, str(occurrence.get("html_url") or "")))
+            job_samples.append(total)
+            observed_steps.update(present)
+            sha = str(occurrence.get("_run_head_sha") or "")
+            if sha:
+                observed_shas.add(sha)
+            pr_number = occurrence.get("_run_pr_number")
+            if isinstance(pr_number, int) and not isinstance(pr_number, bool):
+                observed_prs.add(pr_number)
+        if not duplicate_samples or not job_samples:
+            continue
+        duplicate_p50 = _percentile([value for value, _url in duplicate_samples], 50)
+        job_p50 = _percentile(job_samples, 50)
+        share = duplicate_p50 / job_p50 if job_p50 > 0 else 0.0
+        if (duplicate_p50 < _OPT105_MIN_DUPLICATE_STEP_S
+                or share < _OPT105_MIN_JOB_SHARE):
+            continue
+        wc, cap_note = _cap_wall_clock(duplicate_p50, job_name, crit)
+        effective_volume = _effective_volume(
+            monthly_volume, len(duplicate_samples), len(jobs_per_run))
+        runner_minutes = (round(duplicate_p50 * effective_volume / 60.0, 1)
+                          if effective_volume else None)
+        population_count = len(observed_prs) or len(observed_shas)
+        runs_per_pr = (len(duplicate_samples) / population_count
+                       if population_count else 1.0)
+        step_names = [name for name in matched_steps if name in observed_steps]
+        source_text = ", ".join(f"`{source}`" for source in sorted(hook_sources))
+        evidence = (
+            f"Local hook configuration {source_text} runs the same resolved commands "
+            f"as {len(step_names)} measured step(s) in PR job `{job_name}`. Those steps "
+            f"total {duplicate_p50:.0f}s at p50 ({share * 100:.0f}% of the job) over "
+            f"{len(duplicate_samples)} sampled run(s); the sample has "
+            f"{runs_per_pr:.1f} workflow run(s) per PR.")
+        slow_value, slow_url = max(duplicate_samples, key=lambda row: row[0])
+        measured = _measured_evidence(
+            ["PR job", "Repeated hook steps", "P50", "Share of job", "Samples",
+             "Slowest run (job log)"],
+            [[f"`{job_name}`", ", ".join(f"`{name}`" for name in step_names),
+              f"{duplicate_p50:.0f}s", f"{share * 100:.0f}%",
+              str(len(duplicate_samples)), _link(slow_value, slow_url)]],
+            summary=evidence,
+            note=("Commands were matched after resolving package scripts on both the "
+                  "local-hook and workflow sides; duration comes from jobs API step "
+                  "timestamps. The credited p50 is a ceiling until input-keyed reuse "
+                  "is measured after adoption."))
+        size_note = ("measured repeated-step p50; default input-keyed reuse keeps CI "
+                     "authoritative and may leave a small cache-validation floor")
+        if cap_note:
+            size_note += "; " + cap_note
+        finding = _new_finding(
+            "OPT105", "MEDIUM", "Pull-request CI repeats work already run by a local hook",
+            wf_path, job_name, evidence, "reuse-local-hook-work-by-input",
+            _catalog_anchor("OPT105", "Local Hook Work Is Repeated in Pull-Request CI"),
+            start_idx + len(out) + 1, wc_p50=wc, rm=runner_minutes,
+            size_note=size_note, realization="direct" if wc > 0 else "none",
+            measured_evidence=measured)
+        finding["sizing_basis"] = "measured"
+        if runner_minutes is None:
+            # The repeated work is measured per run; only the monthly count is
+            # missing, so the saving is real but unsized (never "no bill saving").
+            _unsized_runner_min(finding, _NO_MONTHLY_VOLUME_REASON)
+        finding["hook_duplication"] = {
+            "kind": "opt105_hook_duplication",
+            "yaml_job": yaml_key,
+            "hook_sources": sorted(hook_sources),
+            "steps": step_names,
+            "duplicate_p50_s": round(duplicate_p50, 1),
+            "job_p50_s": round(job_p50, 1),
+            "job_share": round(share, 6),
+            "sample_count": len(duplicate_samples),
+            "runs_per_pr_commit": round(runs_per_pr, 3),
+            "monthly_volume": effective_volume,
+        }
+        out.append(finding)
+    return out
+
 
 def _rl_effective_scripts(wd: str, scripts_by_dir: dict[str, dict[str, str]],
                           scripts_unreadable: "frozenset[str]",
@@ -17349,7 +17968,8 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
              stop: "Callable[..., tuple | None] | None",
              chain: "list[str] | None", depth: int, runner: str,
              acc: ResolvedLeaves, in_runner: "str | None" = None,
-             stack: "frozenset[tuple[str, str]]" = frozenset()) -> "tuple | None":
+             stack: "frozenset[tuple[str, str]]" = frozenset(),
+             inherited_env: "tuple[str, ...] | None" = ()) -> "tuple | None":
     """One level of `_resolve_run_leaves`. Control flow is OPT82's original
     resolver, verbatim, so its verdict is byte-identical (a snapshot test pins
     it); the leaves and unresolved records are collected beside it.
@@ -17413,7 +18033,8 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                 _note("expression", "a ${{ }} expression only known at run time", seg)
                 unresolvable = unresolvable or ("unresolvable", "expression", chain)
             continue
-        toks = _opt82_tokens(seg)
+        toks, local_env = _opt82_tokens_and_env(seg)
+        effective_env = _opt82_effective_env(inherited_env, local_env)
         if relevant is None:
             while toks and toks[0] in _RL_SHELL_KEYWORDS:
                 toks = toks[1:]
@@ -17421,7 +18042,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
         if call is not None:               # `npx -c '<command>'`
             sub = _rl_walk(call, wd, scripts_by_dir, scripts_unreadable, relevant,
                            stop, chain, depth + 1, seg_runner, acc,
-                           in_runner, stack)
+                           in_runner, stack, effective_env)
             if sub is not None and sub[0] != "unresolvable":
                 return _found(sub)
             if sub is not None:
@@ -17478,7 +18099,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                 _rl_walk(body + (" " + shlex.join(tr_fwd) if tr_fwd else ""), d,
                          scripts_by_dir, scripts_unreadable, relevant, stop,
                          chain + [f"{tool} run {task} ({d or '.'})"], depth + 1,
-                         pm_runner, acc, tool, stack | {(d, task)})
+                         pm_runner, acc, tool, stack | {(d, task)}, effective_env)
             continue
         dlg = _opt82_delegator(toks)
         if relevant is None and dlg in _RL_NON_JS_DELEGATORS:
@@ -17499,6 +18120,8 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                 acc.leaves.append({"command": shlex.join(rest), "tokens": list(rest),
                                    "wd": None if lost is not None else wd,
                                    "runner": seg_runner, "chain": list(chain),
+                                   "env": (list(effective_env)
+                                           if effective_env is not None else None),
                                    **({"task_runner": {"tool": in_runner}}
                                       if in_runner else {})})
             continue
@@ -17523,7 +18146,7 @@ def _rl_walk(cmd: str, wd: str, scripts_by_dir: dict[str, dict[str, str]],
                        wd, scripts_by_dir, scripts_unreadable, relevant, stop,
                        chain + [f"{toks[0]} run {name}"], depth + 1,
                        _OPT82_RUNNER_BY_PM.get(toks[0], "npx"), acc, in_runner,
-                       stack | {(wd, name)})
+                       stack | {(wd, name)}, effective_env)
         if sub is not None and sub[0] != "unresolvable":
             return _found(sub)
         if sub is not None and lint_named:
@@ -26307,8 +26930,18 @@ def _detect_opt24_long_test_no_sharding(
         if pre_test_floor is not None:
             finding["pre_test_floor_s"] = round(pre_test_floor, 1)
             finding["shardable_test_s"] = round(shardable, 1)
+            # A compile inside the test step and checkout/install/build steps
+            # outside it all repeat on every added shard.  The test-step log is
+            # deliberately sliced so these two measurements do not overlap.
+            separate_setup = (float(decomp.get("setup_build_s", 0))
+                              if decomp is not None else 0.0)
+            finding["runner_minute_setup_floor_s"] = round(
+                pre_test_floor + separate_setup, 1)
         elif measure_first:
             finding["pre_test_floor_unmeasured"] = True
+        elif decomp is not None and decomp.get("setup_build_s", 0) > 0:
+            finding["runner_minute_setup_floor_s"] = round(
+                float(decomp["setup_build_s"]), 1)
         if go_package is not None:
             finding["go_dominant_package"] = go_package["package"]
             finding["go_package_share"] = go_package["share"]
@@ -37317,6 +37950,23 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
+        # OPT105 joins supported local-hook configurations to PR workflow commands
+        # through the shared package-script resolver, then admits only steps whose
+        # jobs-API timings clear the named duration/share floors. It makes no gh call.
+        try:
+            new = _detect_opt105_hook_duplication(
+                root, wf_path, jobs_per_run, crit, _wf_docs.get(wf_path, {}),
+                findings_doc.get("type_aware_lint"), opt65_monthly, next_id,
+                is_pr=is_pr)
+        except Exception as e:  # noqa: BLE001 — never take the data pass down
+            logger.warning("OPT105 detector failed on %s: %s: %s",
+                           wf_path, type(e).__name__, e)
+            _skip_detectors(wf_path, ["OPT105"],
+                            f"the local-hook duplication check failed ({type(e).__name__})")
+            new = []
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+
         # The sibling windows come from the SAME cached all-status page the
         # run-elimination block below fetches (net zero extra gh calls); with
         # no wf_id the page is unfetchable and the attribution stays None.
@@ -38602,6 +39252,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             sum(s["prior_attempt_job_minutes"] for s in _gate_stats), 1),
         "sampled_prs": int(findings_doc["pr_critical_path"].get("sampled_pr_count") or 0),
     }
+    findings_doc["runner_minute_effect_schema"] = 1
     return findings_doc
 
 

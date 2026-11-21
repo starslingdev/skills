@@ -3174,6 +3174,8 @@ def test_builder_topology_and_foreign_only_shapes_run_through_collection(
     assert emulated["magnitude"] == {
         "label": "emulated compile/install seconds", "unit": "s", "value": 120.0}
     assert "builder_topology_unconfirmed" not in emulated
+    assert "Runner-minute effect: saving" in _report
+    assert "capped at the job's measured compute" in _report
 
     def foreign_only(log: str) -> str:
         start = log.index("#10 [linux/amd64 build 2/3]")
