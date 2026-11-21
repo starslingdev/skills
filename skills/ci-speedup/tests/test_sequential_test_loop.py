@@ -68,6 +68,9 @@ def test_cache_hit_alone_remains_a_dependency_cache_observation():
 
 _EXPECTED_PARSE_LOG_LEAF_ORDER = (
     "cache-effective-path-mismatch",
+    # An explicit runtime-loader profiler summary is a narrower measured cause
+    # than the generic test/cache leaves below it.
+    "runtime-ts-transpilation",
     "prisma-migrate-once",
     "vitest-v8-coverage",
     "vitest-isolate-pool",

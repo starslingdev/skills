@@ -1,0 +1,1 @@
+- **2026-11-20** — Resolve YAML merge-key precedence consistently across ci-secure's data and source-node walkers, including PyYAML 6.0.4 (#453).

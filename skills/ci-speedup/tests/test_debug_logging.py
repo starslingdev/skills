@@ -28,6 +28,9 @@ _FIXTURES = Path(__file__).resolve().parent / "fixtures" / "gh_replay"
 # Every script SKILL.md / run.py launches as a program.
 _ENTRY_POINTS = ("run.py", "scan.py", "collect_runs.py", "blocking_path.py",
                  "summary.py", "record_timing.py")
+_ISOLATED_ENTRY_POINTS = tuple(_SCRIPTS / script for script in _ENTRY_POINTS) + (
+    Path(__file__).resolve().parent / "verify_report.py",
+)
 
 
 def _env(level: str | None) -> dict:
@@ -172,6 +175,26 @@ def test_every_entry_point_starts_with_a_safe_sys_path(script, tmp_path):
                        env=env, cwd=tmp_path, capture_output=True, text=True,
                        timeout=120)
     assert r.returncode == 0, f"{script} under PYTHONSAFEPATH=1:\n{r.stderr}"
+    assert "ModuleNotFoundError" not in r.stderr, r.stderr
+
+
+@pytest.mark.parametrize(
+    "script", _ISOLATED_ENTRY_POINTS,
+    ids=lambda path: path.name,
+)
+def test_every_entry_point_imports_under_isolated_python(script, tmp_path):
+    """Every installed CLI can resolve its shipped siblings under ``-I``.
+
+    Isolated mode is the hardened invocation for processing untrusted workflow
+    and log data. It removes the script directory from ``sys.path``, so each
+    entry point must restore that one trusted directory before sibling imports.
+    """
+    r = subprocess.run(
+        [sys.executable, "-I", str(script), "--help"],
+        env=_env(None), cwd=tmp_path, capture_output=True, text=True, timeout=120,
+    )
+    assert r.returncode == 0, (
+        f"{script.name} under python -I exited {r.returncode}:\n{r.stderr}")
     assert "ModuleNotFoundError" not in r.stderr, r.stderr
 
 

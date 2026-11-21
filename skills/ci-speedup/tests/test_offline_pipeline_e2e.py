@@ -1450,7 +1450,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
 
     render = subprocess.run(
         [sys.executable, str(_SCRIPTS / "blocking_path.py"),
-         "--in", str(findings_path), "--out", str(report_path)],
+         "--in", str(findings_path), "--out", str(report_path), "--bmf"],
         capture_output=True, text=True, env=env, timeout=60,
     )
     assert render.returncode == 0, f"blocking_path.py failed:\n{render.stderr}"
@@ -1800,7 +1800,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     _o81_report = tmp_path / "report_opt81_with_log.md"
     _r = subprocess.run(
         [sys.executable, str(_SCRIPTS / "blocking_path.py"), "--in", str(findings_path),
-         "--out", str(_o81_report), "--log", f"ci.yml={_o81_log}"],
+         "--out", str(_o81_report), "--log", f"ci.yml={_o81_log}", "--bmf"],
         capture_output=True, text=True, env=env, timeout=60)
     assert _r.returncode == 0, _r.stderr
     _logged = _o81_report.read_text(encoding="utf-8")
@@ -2667,10 +2667,14 @@ def _strip_tier2_stamps(doc: dict) -> dict:
     return d
 
 
-def _render(scripts: Path, findings_path: Path, out_path: Path, env: dict) -> str:
+def _render(scripts: Path, findings_path: Path, out_path: Path, env: dict,
+            *, bmf: bool = False) -> str:
+    argv = [sys.executable, str(scripts / "blocking_path.py"),
+            "--in", str(findings_path), "--out", str(out_path)]
+    if bmf:
+        argv.append("--bmf")
     r = subprocess.run(
-        [sys.executable, str(scripts / "blocking_path.py"),
-         "--in", str(findings_path), "--out", str(out_path)],
+        argv,
         capture_output=True, text=True, env=env, timeout=60)
     assert r.returncode == 0, f"render failed: {r.stderr}"
     return out_path.read_text(encoding="utf-8")
@@ -3517,7 +3521,7 @@ def test_opt83_two_findings_and_its_order_before_opt81_a2_through_collect(tmp_pa
     assert (data.get("opt81_withheld_by_gate") or {}).get(
         "a2_cheaper_structural_lever_on_the_pole") == 1, data.get("opt81_withheld_by_gate")
 
-    report = _render(_SCRIPTS, findings_path, report_path, env)
+    report = _render(_SCRIPTS, findings_path, report_path, env, bmf=True)
     anchors = re.findall(r'<a id="(opt83-[^"]+)"></a>', report)
     assert sorted(anchors) == sorted(f"opt83-{i}" for i in ids), anchors
     for f in o83:

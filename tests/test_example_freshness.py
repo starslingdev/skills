@@ -72,8 +72,16 @@ _UNSPLIT = ("that may include timed-out, cancelled or killed job runs (a pre-spl
             "sampled from all run conclusions, or from a job marked continue-on-error) — measured "
             "compute counts completed job runs; re-run the collector so each row stamps "
             "`completed_billable_equiv_min_per_month`")
+# - microsoft-playwright, unsized OPT33 heading (2026-11-20, #459): the default runner-minute
+#   policy holds back the example's split-the-slow-leg OPT25 cards, which brings its OPT33
+#   group into view. That finding was collected before the collector stamped
+#   `runner_min_unsized_reason`, so its heading reads `no bill saving`; a fresh collection
+#   stamps the reason, and needs live GitHub data (the same follow-up regeneration as above).
 _KNOWN_DRIFT: dict[str, dict[str, str]] = {
     "microsoft-playwright": {
+        "an unsized runner-minute saving never reads `no bill saving` or neutral": (
+            "OPT33 group heading reads `no bill saving` but finding f11 is unsized and "
+            "carries no runner_min_unsized_reason"),
         "each finding's runner-minute saving is within its jobs' measured compute": (
             "3 refused: finding `OPT73` is bounded by measured compute for "
             "['test_linux_docker / Docker noble arm64', 'test_linux_docker / Docker jammy arm64', "

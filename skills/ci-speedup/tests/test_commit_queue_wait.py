@@ -450,6 +450,35 @@ def test_partial_only_stamp_skips_and_static_report_uses_full_wait(tmp_path):
     assert static_check.ok, static_check.detail
 
 
+def test_unrepresentative_complete_subset_does_not_cap_population_savings(
+        tmp_path):
+    complete = [_commit_fact(f"complete-{index}", index) for index in range(2)]
+    partial = [_commit_fact(f"partial-{index}", 10 + index) for index in range(3)]
+    for fact in partial:
+        fact.update(partial=True, commit_wall_s=None)
+    clock = cr._stamp_commit_queue_work({
+        "commits": complete + partial,
+        "p50_s": None,
+        "p90_s": None,
+        "representative": False,
+    })
+    doc = {
+        "repo": "o/r",
+        "findings": [{
+            "id": "partial-population-finding",
+            "pattern": "OPT24",
+            "wall_clock_p50_s": 500.0,
+        }],
+        "pr_critical_path": {"commit_wall_clock": clock},
+    }
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+
+    check = vr.check_commit_queue_work_credit(
+        report, findings_path, report_path)
+
+    assert check.ok, check.detail
+
+
 def _producer_fact(sha: str) -> dict:
     """The per-commit wall-clock producer's own fact shape: `facts`, `wall_s`,
     the first run's `created_at`, and job intervals whose queued time is the

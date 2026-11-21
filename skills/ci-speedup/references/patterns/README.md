@@ -24,7 +24,10 @@ One file per ci-speedup catalog pattern. Agents: find the pattern in
 2. Add its line to `INDEX.md` under its category, where it should sit in the
    compiled catalog: `- OPT<N> — Title (IMPACT, class) — short clause`.
 3. Run `python3 maintainers/ci-speedup/scripts/build_catalog.py` and commit
-   the file, `INDEX.md` and the regenerated `../optimization-patterns.md`.
+   the file, `INDEX.md`, the regenerated `../optimization-patterns.md`, and any
+   of `SKILL.md`, `ARCHITECTURE.md` and `evals/evals.json` whose pattern count
+   or id list it rewrote. Never edit those counts by hand: they come from each
+   file's `class` (`structural`, or hygiene/data-driven for any other class).
 
 `../optimization-patterns.md` is generated (it keeps every published report
 link and anchor working); never edit it by hand. `_frame.md` holds its

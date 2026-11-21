@@ -243,13 +243,13 @@ def test_opt81_render_holds_an_a2_back_on_a_matched_leaf_and_never_an_a1():
     doc = _doc_one_pole()
     wf = ".github/workflows/pipeline.yml"
     doc["findings"] = [_a2_on(wf, "tests-web")]
-    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {}, "2026-06-08")
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {}, "2026-06-08", bmf=True)
     block = _opt81_block(md, "f9")
     assert "advisory held back" in block and "vitest-isolate-pool" in block, block
     assert "Option 1" not in block
     # R03: the same matched leaf never holds back a measured A1 card.
     doc["findings"] = [_a1_on(wf, "tests-web")]
-    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {}, "2026-06-08")
+    md = bp.render(doc, {"pipeline": _IMPORT_BOUND_LOG}, {}, {}, "2026-06-08", bmf=True)
     block = _opt81_block(md, "f7")
     assert "held back" not in block
     assert "measured from runs this repository already made" in block
@@ -261,7 +261,7 @@ def test_opt81_render_holds_an_a2_back_on_an_off_category_leaf():
     from test_blocking_path import _nx_offcategory_doc
     doc, logs = _nx_offcategory_doc()
     doc["findings"] = [_a2_on("ci.yml", "Run Checks")]
-    md = bp.render(doc, logs)
+    md = bp.render(doc, logs, bmf=True)
     block = _opt81_block(md, "f9")
     assert "advisory held back" in block and "eslint-no-cache" in block, block
     assert "Option 1" not in block
@@ -344,7 +344,7 @@ def test_opt81_only_doc_with_no_measured_pole_renders_the_runner_class_section(t
                             "workflows_analyzed": 1},
            "pr_critical_path": {"poles": []},
            "findings": [a1, a2]}
-    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    md = bp.render(doc, {}, {}, {}, "2026-06-08", bmf=True)
     assert md.strip() != "_No measured critical path in this findings JSON._"
     assert "## 🏎️ Runner class comparisons" in md
     assert "measured from runs this repository already made" in _opt81_block(md, "f7")

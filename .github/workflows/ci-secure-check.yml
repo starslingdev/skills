@@ -24,14 +24,16 @@
 # whatever arrives. Recommending it in the header of our own security gate was
 # advice this scanner would flag in anyone else's workflow.
 #
-# A note for whoever adds a merge queue here. `ci-secure` is produced by the
-# verdict job below, whose predicate reasons about two mutually exclusive scans,
-# and neither scan's condition was written with `merge_group` in mind. If
-# `ci-secure` is required in the queue while this workflow does not trigger on
-# `merge_group`, the check never reports and the queue waits forever; and if the
-# verdict job greens while the scan it needs was SKIPPED for that event, the
-# skipped-check bypass reopens one event over. Trace both before adding it.
-#
+# Merge queue. `ci-secure` is a required check, so this workflow triggers on
+# `merge_group`: without it the check never reports for a queue entry and the
+# queue waits forever. A merge_group event carries no pull_request, so the scan
+# guards below route it by event name: `scan` runs (its guard is true for every
+# event that is not a pull_request, and queue entries are same-repo commits that
+# already passed review) and `scan-fork` does not (it requires a pull_request),
+# so the verdict reads success/skipped exactly as on a same-repo PR.
+# tests/test_ci_required_check_verdict.py and tests/test_ci_secure_gate_workflow.py
+# evaluate both guards for every event, merge_group included.
+
 # Run the GATE, never scan.py directly: scan.py exits non-zero only on
 # OPERATIONAL errors (no workflows to scan, unreadable catalog, bad arguments)
 # and exits 0 for every security outcome it reports, so a step that calls it
@@ -45,6 +47,7 @@ on:
   pull_request:
   push:
     branches: [main]
+  merge_group:
   # Every other trigger judges a proposed change. This one re-judges what
   # already merged, which is the only way a pin that ROTS is ever noticed: an
   # action SHA that is legitimate today can be deleted or orphaned tomorrow in

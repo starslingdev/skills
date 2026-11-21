@@ -497,12 +497,103 @@ def test_merge_keys_resolve_the_same_way_in_both_walkers() -> None:
                 run: own
               - <<: [*a, *b]
         """)
-    leaves = [s.step["run"] for s in scan._iter_job_steps(
-        yaml.safe_load(text)["jobs"]["j"])]
+    doc = scan._parse_yaml_text(text, Path("merge-keys.yml"))
+    leaves = [s.step["run"] for s in scan._iter_job_steps(doc["jobs"]["j"])]
     assert leaves == ["own", "from-a"]
     steps_node = scan._node_keys(scan._job_nodes(text)["j"])["steps"]
     assert [scan._node_keys(n)["run"].value
             for n in scan._iter_step_nodes(steps_node)] == leaves
+
+
+def _walker_leaves(text: str) -> tuple[dict, dict]:
+    """Each job's leaf `run:` values, from the loaded data and from the
+    composed nodes; line attribution needs the two to be equal."""
+    doc = scan._parse_yaml_text(text, Path("merge-keys.yml"), quiet=True)
+    data = {name: [s.step.get("run") for s in scan._iter_job_steps(job)]
+            for name, job in doc["jobs"].items()}
+    nodes = {}
+    for name, job_node in scan._job_nodes(text).items():
+        steps_node = scan._node_keys(job_node).get("steps")
+        nodes[name] = [getattr(scan._node_keys(n).get("run"), "value", None)
+                       for n in scan._iter_step_nodes(steps_node)]
+    return data, nodes
+
+
+def test_merge_precedence_does_not_come_from_the_installed_pyyaml(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """PyYAML 6.0.4 lets the LATER source of `<<: [*a, *b]` win. Simulate
+    that release on whatever PyYAML is installed: ci-secure's own merge rule
+    (earlier source wins) must still hold, so CI proves version independence
+    on a single PyYAML version."""
+    import yaml
+
+    def later_source_wins(self, node):          # 6.0.4's precedence
+        merge, index = [], 0
+        while index < len(node.value):
+            key_node, value_node = node.value[index]
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                del node.value[index]
+                subs = (value_node.value
+                        if isinstance(value_node, yaml.SequenceNode)
+                        else [value_node])
+                for sub in subs:
+                    self.flatten_mapping(sub)
+                    merge.extend(sub.value)
+            else:
+                index += 1
+        if merge:
+            node.value = merge + node.value
+
+    monkeypatch.setattr(yaml.SafeLoader, "flatten_mapping", later_source_wins)
+    assert yaml.safe_load("a: &a {k: a}\nb: &b {k: b}\nc: {<<: [*a, *b]}\n"
+                          )["c"]["k"] == "b"    # the simulation bites
+    data, nodes = _walker_leaves(textwrap.dedent("""\
+        x-a: &a {run: from-a}
+        x-b: &b {run: from-b}
+        jobs:
+          j:
+            steps:
+              - <<: [*a, *b]
+        """))
+    assert data == nodes == {"j": ["from-a"]}
+
+
+def test_job_level_merge_keys_resolve_like_the_loader() -> None:
+    """A `<<:` under `jobs:` follows the same rule as one in a step: a chained
+    merge inside a source is followed, a duplicate key inside a source takes
+    its last value, and own jobs win. Otherwise a merged-in job has no nodes
+    (its runs go unanchored) or the wrong ones (its findings get the wrong
+    lines)."""
+    data, nodes = _walker_leaves(textwrap.dedent("""\
+        x-jobs: &jobs
+          j: {steps: [{run: first-j}]}
+          j: {steps: [{run: last-j}]}
+        x-more: &more
+          k: {steps: [{run: chained-k}]}
+        x-jobs2: &jobs2
+          <<: *more
+          m: {steps: [{run: m}]}
+          j: {steps: [{run: later-source-j}]}
+        jobs:
+          <<: [*jobs, *jobs2]
+          own: {steps: [{run: own}]}
+        """))
+    assert data == {"j": ["last-j"], "k": ["chained-k"], "m": ["m"],
+                    "own": ["own"]}
+    assert nodes == data
+
+
+def test_self_referencing_merge_is_walked_not_recursed_forever() -> None:
+    """`&s {run: a, <<: *s}` merges a mapping into itself. The loader keeps
+    its own keys; the node walker must do the same instead of raising
+    RecursionError out of the scan."""
+    data, nodes = _walker_leaves(textwrap.dedent("""\
+        jobs:
+          j:
+            steps:
+              - &s {run: self, <<: *s}
+        """))
+    assert data == nodes == {"j": ["self"]}
 
 
 @pytest.mark.parametrize("steps", _lockstep_shapes())
@@ -1527,3 +1618,25 @@ def test_a_repo_without_the_syntax_renders_no_parallel_steps_row(
                                       "background_steps": 0, "workflows": []}
     md = load_script("ci_secure_report", "report.py").render(data)
     assert "Parallel steps" not in md, md
+
+
+def test_stable_loader_is_called_without_a_generic_yaml_load() -> None:
+    """`yaml.load(..., Loader=<subclass>)` reads, to a reviewer or a registry
+    scanner, like the unsafe loader; ci-score settled on constructing the
+    SafeLoader subclass directly (#165). Same rule here."""
+    import ast
+    tree = ast.parse(_SCAN_SCRIPT.read_text(encoding="utf-8"))
+    calls = [node.lineno for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and isinstance(node.func.value, ast.Name)
+             and node.func.value.id == "yaml" and node.func.attr == "load"]
+    assert calls == []
+
+
+@pytest.mark.parametrize("tag", ["python/tuple", "python/object:builtins.object"])
+def test_stable_loader_keeps_the_safe_loader_boundary(tag: str) -> None:
+    import yaml
+    # Inert tags only; never an executable payload in a fixture.
+    with pytest.raises(yaml.constructor.ConstructorError):
+        scan._stable_safe_load("!!" + tag + " []")

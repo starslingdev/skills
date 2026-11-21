@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import base64
 import copy
 import json
 import re
@@ -151,6 +152,54 @@ class _PushLaneClient:
         return ""
 
 
+class _DenseValidationClient(_PushLaneClient):
+    """Public-API-shaped dense pushes with readable per-run job compute."""
+
+    def __init__(self, *, many_pushes: bool = False) -> None:
+        super().__init__()
+        self.many_pushes = many_pushes
+        self.push_count = 99 if many_pushes else len(_PUSH_SHAS)
+        self.spacing_s = 600 if many_pushes else 1200
+        self.jobs = {100: [_job("merge-gate", 100, 0, 120)]}
+        for index in range(self.push_count):
+            base = 10000 + index * self.spacing_s
+            self.jobs[1000 + index] = [
+                _job("verify", 1000 + index, base, base + 300)]
+            self.jobs[2000 + index] = [
+                _job("publish-image", 2000 + index, base, base + 2100)]
+
+    def _runs(self, workflow_id: int) -> list[dict]:
+        pull_request = {
+            "id": 100, "event": "pull_request", "head_branch": "feature",
+            "head_sha": "pr-sha", "status": "completed", "conclusion": "success",
+            "created_at": _iso(0), "run_started_at": _iso(0), "updated_at": _iso(120),
+        }
+        pushes = []
+        for index in range(self.push_count):
+            sha = f"push-{index}"
+            base = 10000 + index * self.spacing_s
+            run_id = (1000 if workflow_id == 1 else 2000) + index
+            duration = 300 if workflow_id == 1 else 2100
+            pushes.append(_push_run(run_id, sha, base, base + duration))
+        return [*reversed(pushes), *([pull_request] if workflow_id == 1 else [])]
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        if (self.many_pushes and "per_page=1&event=push&branch=main" in endpoint):
+            self.queries += 1
+            return {"total_count": 150}
+        prefix = "repos/o/r/contents/"
+        if endpoint.startswith(prefix):
+            path = endpoint[len(prefix):]
+            name = "Deploy production" if path == _PUBLISH else "CI"
+            body = (
+                f"name: {name}\n"
+                "on:\n  push:\n    branches: [main]\n  pull_request:\n"
+                "jobs:\n  verify:\n    runs-on: ubuntu-latest\n"
+                "    steps:\n      - run: npm test\n")
+            return {"content": base64.b64encode(body.encode()).decode()}
+        return super().json(endpoint, allow_missing=allow_missing)
+
+
 def _doc() -> dict:
     return {
         "repo": "o/r",
@@ -245,6 +294,48 @@ def test_collect_renders_a_capped_default_branch_push_lane_and_verifies(
             isolation_mutant, findings_path)
         assert not check.ok
 
+
+def test_dense_default_branch_validation_collects_opt107_and_fully_verifies(
+        monkeypatch, tmp_path: Path):
+    client = _DenseValidationClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(
+        _doc(), "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+
+    matches = [finding for finding in doc["findings"]
+               if finding.get("pattern") == "OPT107"]
+    assert len(matches) == 1
+    finding = matches[0]
+    assert finding["workflow_file"] == _GATE
+    assert finding["credited_run_count"] > 0
+    assert finding["credited_run_ids"]
+    assert finding["runner_min_saving"] > 0  # monthly estimate from the sample
+    assert finding["sample_runner_min_effect"] < 0
+    assert not any(item.get("workflow_file") == _PUBLISH for item in matches)
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def test_opt107_keeps_bounded_timing_when_monthly_frequency_is_incomplete(
+        monkeypatch):
+    client = _DenseValidationClient(many_pushes=True)
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(
+        _doc(), "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+
+    assert doc["default_branch_push_lane"]["status"] == "frequency_incomplete"
+    assert doc["default_branch_push_lane"]["facts"] == []
+    assert "drill" not in doc["default_branch_push_lane"]
+    assert doc["default_branch_push_lane"]["opt107_job_fetch_count"] > 0
+    matches = [finding for finding in doc["findings"]
+               if finding.get("pattern") == "OPT107"]
+    assert len(matches) == 1
+    assert matches[0]["sample_runner_min_effect"] < 0
 
 def test_push_lane_reports_the_30_day_frequency_and_rare_window(
         monkeypatch, tmp_path: Path):
@@ -762,3 +853,69 @@ def test_branch_not_protected_is_a_readable_empty_required_check_configuration(
         checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
         failures = [check for check in checks if not check.skipped and not check.ok]
         assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+def _opt107_group_heading(report: str) -> str:
+    return next(line for line in report.splitlines()
+                if line.startswith("<summary><strong>OPT107 - "))
+
+
+def test_opt107_scales_the_sample_saving_to_a_labelled_monthly_estimate(
+        monkeypatch, tmp_path: Path):
+    client = _DenseValidationClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(
+        _doc(), "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT107")
+    sampled = len(_PUSH_SHAS)
+    # The fake's 30-day default-branch push count is 30 runs.
+    assert finding["monthly_estimate_basis"]["runs_30d"] == 30
+    assert finding["monthly_estimate_basis"]["sampled_runs"] == sampled
+    expected = round(finding["sample_runner_min_saving"] * 30 / sampled, 1)
+    assert finding["runner_min_saving"] == expected > 0
+    assert f"estimate from {sampled} sampled runs" in finding["size_note"]
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    heading = _opt107_group_heading(report)
+    assert "no bill saving" not in heading
+    assert "min/mo" in heading
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+
+
+class _UnknownVolumeClient(_DenseValidationClient):
+    def json(self, endpoint: str, allow_missing: bool = False):
+        if "per_page=1&event=push&branch=main" in endpoint:
+            self.queries += 1
+            return {"message": "rate limited"}
+        return super().json(endpoint, allow_missing=allow_missing)
+
+
+def test_opt107_renders_an_unsized_saving_when_the_30_day_count_is_unknown(
+        monkeypatch, tmp_path: Path):
+    client = _UnknownVolumeClient()
+    monkeypatch.setattr(cr, "GhClient", lambda *args, **kwargs: client)
+    doc = cr.collect(
+        _doc(), "o/r", max_runs=20, shallow_runs=20,
+        created_before="2026-01-02T00:00:00Z")
+
+    finding = next(f for f in doc["findings"] if f.get("pattern") == "OPT107")
+    assert finding["runner_min_saving"] is None
+    assert finding["runner_min_unsized_reason"]
+
+    report, findings_path, report_path = _write_artifacts(tmp_path, doc)
+    heading = _opt107_group_heading(report)
+    assert "no bill saving" not in heading
+    assert "runner-minute saving: unsized (" in heading
+    checks = vr.run_checks(report, report_path, findings_path, skill_repo=None)
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    mutant = report.replace(heading, heading.replace(
+        heading[heading.index("runner-minute saving: unsized ("):].split(" · ")[0],
+        "no bill saving"), 1)
+    check = vr.check_default_branch_push_lane_isolated(mutant, findings_path)
+    assert not check.ok
+    assert "no bill saving" in check.detail

@@ -149,10 +149,19 @@ def test_the_template_differs_from_ours_only_where_declared(
                        fork and non-fork pull requests
       - drift check    the template verifies its vendored copy; we have no
                        vendored copy to verify
+      - merge queue    we trigger on `merge_group` because `ci-secure` is
+                       required in this repository's merge queue; the template
+                       omits it deliberately, as its header explains, because
+                       an adopter's queue routing is theirs to trace
     """
-    assert set(_triggers(template)) == set(_triggers(ours)), (
-        "the trigger sets are NOT part of the declared delta: an adopter gets "
-        "the same weekly rot check we do")
+    assert "merge_group" in _triggers(ours), (
+        "ci-secure is required on main; without merge_group the merge queue waits forever")
+    assert "merge_group" not in _triggers(template), (
+        "the template documents merge_group as deliberately absent; adding it is "
+        "a shipped-skill decision, not part of this parity check")
+    assert set(_triggers(template)) == set(_triggers(ours)) - {"merge_group"}, (
+        "the trigger sets are NOT part of the declared delta beyond merge_group: "
+        "an adopter gets the same weekly rot check we do")
     assert _triggers(template)["push"]["branches"] == ["main"]
     assert [e["cron"] for e in _triggers(template)["schedule"]], "no cron expression"
 
