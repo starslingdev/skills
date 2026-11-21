@@ -4632,23 +4632,29 @@ concurrency:
 **A non-cancelled group does not preserve every pending run.** GitHub keeps at
 most one running and one pending run in a concurrency group. If a third run
 joins while one is running and another is pending, the new run replaces the
-older pending run even when `cancel-in-progress` is false. When every non-PR
-commit must receive its own validation, keep the default cancellation predicate
-but give non-PR events a per-run group:
+older pending run even when `cancel-in-progress` is false. When every
+default-branch commit and tag must receive its own validation *and* superseded
+feature-branch runs should still cancel, use one combined group: default-branch
+and tag runs select their unique `run_id`; feature-branch push and PR runs keep
+the shared short branch name that cancellation and OPT47 dedup require.
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.run_id }}
+  group: ${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && github.run_id || github.head_ref || github.ref_name }}
   cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request'
-    && github.head_ref != github.event.repository.default_branch }}
+    ${{ github.event_name != 'merge_group'
+    && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+    && github.head_ref != github.event.repository.default_branch
+    && !startsWith(github.ref, 'refs/tags/') }}
 ```
 
-This preserves PR supersession by pull-request number while making each `push`,
-`merge_group`, `schedule`, tag, and manual run independent. Do not use this key
-for the widened feature-branch-push recipe below: unique push groups cannot
-cancel superseded feature-branch runs, so that recipe and an every-commit
-validation requirement are mutually exclusive for the same event.
+Do not add `github.event_name` to this group when the same workflow handles
+both events: adding `github.event_name` to a `push` + `pull_request` workflow
+splits one branch into separate event groups,
+so the OPT47 push+PR duplicate runs can no longer supersede or cancel one
+another. The key above deliberately omits it. If every event truly must be
+independent, adding the event name is an explicit trade: it preserves those
+event-specific runs but gives up OPT47 dedup.
 
 **The tension you must not "simplify" away.** The group key uses `github.head_ref || github.ref_name` — both are the **short** branch name (`head_ref` is set only on `pull_request`; `ref_name` is the short form on `push`, where `github.ref` would be the fully-formed `refs/heads/…`). That is deliberate: it lands a branch's `push` and `pull_request` runs in the **same** group, which is the whole point of the push+PR double-trigger dedup (OPT47). Writing `github.head_ref || github.ref` instead yields two different strings for one branch, the runs never share a group, and that saving is zero.
 
@@ -4681,9 +4687,8 @@ Keep the continuation lines at the **same indent** as `${{` (as above). YAML fol
 **Real-world example (2026-05)**: a `Pre-merge` workflow triggered on `push` with `branches-ignore: [main]` and had no top-level concurrency block. 62% of branches had ≥2 runs in a 30-day window. Adding the **widened** block above (this is a Flavor A / push-triggered case) saved an estimated 70-125 min/mo of runner compute.
 
 **Public evidence**: [OpenClaw Crabbox pull request #2286](https://github.com/openclaw/crabbox/pull/2286)
-groups by event and pull-request number, with the run ID as the fallback for
-non-PR events, so default-branch and manual validations cannot replace one
-another in the pending slot. [OpenClaw Crabbox pull request #2868](https://github.com/openclaw/crabbox/pull/2868)
+cancelled pull-request runs on a newer push while keeping main runs per commit.
+[OpenClaw Crabbox pull request #2868](https://github.com/openclaw/crabbox/pull/2868)
 replaced `if: always()` on result-aggregating jobs with `if: !cancelled()`; on a
 superseded run, all old work was cancelled and the aggregate jobs acquired no
 runner.

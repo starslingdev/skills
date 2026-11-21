@@ -6978,20 +6978,257 @@ def test_opt46_per_run_non_pr_group_preserves_each_required_validation():
 
     assert len(recipes) == 1, "OPT46 needs one copy-pasteable per-run escape hatch"
     recipe = recipes[0]
-    assert "github.event_name == 'pull_request'" in recipe["cancel-in-progress"]
+    combined = (
+        "${{ github.workflow }}-${{ (github.ref == "
+        "format('refs/heads/{0}', github.event.repository.default_branch) || "
+        "startsWith(github.ref, 'refs/tags/')) && github.run_id || "
+        "github.head_ref || github.ref_name }}"
+    )
+    assert recipe["group"] == combined
+    assert "github.event_name" not in recipe["group"]
+    assert "refs/tags/" in recipe["cancel-in-progress"]
 
-    pr_a = _ctx("pull_request", ref="refs/pull/7/merge", head_ref="topic")
-    pr_b = _ctx("pull_request", ref="refs/pull/7/merge", head_ref="topic")
-    pr_b["github"]["run_id"] = "run-2"
-    assert _gha_interpolate(recipe["group"], pr_a) == _gha_interpolate(
-        recipe["group"], pr_b)
+    body = _catalog_section("OPT46")
+    assert "mutually exclusive for the same event" not in body
+    assert "OPT47" in body
+    assert "adding `github.event_name`" in body
 
-    push_a = _ctx("push", ref="refs/heads/main", ref_name="main")
-    push_a["github"]["event"]["pull_request"] = {}
-    push_b = copy.deepcopy(push_a)
-    push_b["github"]["run_id"] = "run-2"
-    assert _gha_interpolate(recipe["group"], push_a) != _gha_interpolate(
-        recipe["group"], push_b)
+    # The literal contract above keeps PR and feature-push groups on the same
+    # short branch key (OPT47), while default-branch and tag runs select run_id.
+    assert "github.head_ref || github.ref_name" in recipe["group"]
+
+
+# --- A real GitHub-expression evaluator for the OPT46 combined group key ------
+#
+# The cancel-predicate evaluator above only handles flat `&&` conjunctions. The
+# combined group key relies on what `&&` / `||` RETURN (an operand, not a
+# boolean), on `&&` binding tighter than `||`, and on parentheses, so it gets a
+# small recursive-descent evaluator with GitHub's semantics: `a || b` yields a
+# if truthy else b; `a && b` yields a if falsy else b; falsy = false, 0, '',
+# null; `==` / `!=` and startsWith() compare strings case-insensitively; a
+# missing property is null and interpolates as ''.
+
+_GHX_TOKEN = re.compile(
+    r"\s*(?:(?P<str>'(?:[^']|'')*')|(?P<num>\d+)|(?P<op>\|\||&&|==|!=|!|\(|\)|,)"
+    r"|(?P<name>[A-Za-z_][A-Za-z0-9_-]*(?:\.[A-Za-z_][A-Za-z0-9_-]*)*))")
+
+
+def _ghx_tokens(expr: str) -> list[tuple[str, str]]:
+    out, pos, expr = [], 0, expr.strip()
+    while pos < len(expr):
+        m = _GHX_TOKEN.match(expr, pos)
+        assert m and m.end() > pos, f"untokenizable at {expr[pos:]!r}"
+        pos = m.end()
+        kind = m.lastgroup
+        out.append((kind, m.group(kind)))
+    return out
+
+
+def _ghx_truthy(v) -> bool:
+    return v not in (None, False, 0, "")
+
+
+def _ghx_eq(a, b) -> bool:
+    if isinstance(a, str) and isinstance(b, str):
+        return a.lower() == b.lower()
+    return a == b
+
+
+def _ghx_eval(expr: str, ctx: dict):
+    """Evaluate one GitHub expression body (no `${{ }}`) and return its VALUE."""
+    toks, i = _ghx_tokens(expr), 0
+
+    def peek():
+        return toks[i] if i < len(toks) else (None, None)
+
+    def take(val=None):
+        nonlocal i
+        tok = peek()
+        assert tok[0] is not None and (val is None or tok[1] == val), (tok, val)
+        i += 1
+        return tok
+
+    def or_():
+        v = and_()
+        while peek() == ("op", "||"):
+            take()
+            rhs = and_()
+            v = v if _ghx_truthy(v) else rhs
+        return v
+
+    def and_():
+        v = cmp_()
+        while peek() == ("op", "&&"):
+            take()
+            rhs = cmp_()
+            v = rhs if _ghx_truthy(v) else v
+        return v
+
+    def cmp_():
+        v = unary()
+        while peek() in (("op", "=="), ("op", "!=")):
+            op = take()[1]
+            rhs = unary()
+            v = _ghx_eq(v, rhs) if op == "==" else not _ghx_eq(v, rhs)
+        return v
+
+    def unary():
+        if peek() == ("op", "!"):
+            take()
+            return not _ghx_truthy(unary())
+        return primary()
+
+    def primary():
+        kind, val = take()
+        if kind == "str":
+            return val[1:-1].replace("''", "'")
+        if kind == "num":
+            return int(val)
+        if (kind, val) == ("op", "("):
+            v = or_()
+            take(")")
+            return v
+        assert kind == "name", (kind, val)
+        if val in ("true", "false", "null"):
+            return {"true": True, "false": False, "null": None}[val]
+        if peek() == ("op", "("):
+            take("(")
+            args = [or_()]
+            while peek() == ("op", ","):
+                take()
+                args.append(or_())
+            take(")")
+            if val == "format":
+                fmt = args[0]
+                for n, arg in enumerate(args[1:]):
+                    fmt = fmt.replace("{%d}" % n, "" if arg is None else str(arg))
+                return fmt
+            if val == "startsWith":
+                return str(args[0] or "").lower().startswith(str(args[1] or "").lower())
+            raise AssertionError(f"unsupported function {val}")
+        cur = ctx
+        for part in val.split("."):
+            cur = cur.get(part) if isinstance(cur, dict) else None
+        return cur
+
+    v = or_()
+    assert i == len(toks), f"trailing tokens in {expr!r}: {toks[i:]}"
+    return v
+
+
+def _ghx_render(template: str, ctx: dict) -> str:
+    def one(m):
+        v = _ghx_eval(m.group(1), ctx)
+        if v is None:
+            return ""
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        return str(v)
+
+    return re.sub(r"\$\{\{(.*?)}}", one, template)
+
+
+def _ghx_ctx(event_name, *, ref, head_ref="", run_id, default_branch="main"):
+    ref_name = (ref.split("/", 2)[2] if ref.startswith(("refs/heads/", "refs/tags/"))
+                else ref.split("/", 2)[-1])
+    return {"github": {
+        "event_name": event_name, "ref": ref, "head_ref": head_ref,
+        "ref_name": ref_name, "run_id": run_id, "workflow": "CI",
+        "event": {"repository": {"default_branch": default_branch}},
+    }}
+
+
+def test_ghx_evaluator_follows_github_operand_semantics():
+    """Fixture-test the evaluator itself, so the recipe test below cannot pass
+    because the evaluator is wrong."""
+    ctx = {"github": {"head_ref": "", "ref_name": "topic", "run_id": 42}}
+    assert _ghx_eval("github.head_ref || github.ref_name", ctx) == "topic"
+    assert _ghx_eval("true && github.run_id || 'x'", ctx) == 42
+    assert _ghx_eval("false && github.run_id || 'x'", ctx) == "x"
+    assert _ghx_eval("'' && 'a'", ctx) == ""
+    # `&&` binds tighter than `||`: true || (false && 'b') is true.
+    assert _ghx_eval("true || false && 'b'", ctx) is True
+    assert _ghx_eval("(true || false) && 'b'", ctx) == "b"
+    assert _ghx_eval("github.missing.deep", ctx) is None
+    assert _ghx_eval("'Main' == 'main'", ctx) is True
+    assert _ghx_eval("!startsWith('refs/tags/v1', 'refs/tags/')", ctx) is False
+    assert _ghx_eval("format('refs/heads/{0}', 'dev')", ctx) == "refs/heads/dev"
+    assert _ghx_render("${{ github.workflow }}-${{ github.run_id }}",
+                       {"github": {"run_id": 7}}) == "-7"
+
+
+def _opt46_combined_recipe() -> dict:
+    yaml = pytest.importorskip("yaml")
+    for block in _yaml_blocks(_catalog_section("OPT46")):
+        conc = (yaml.safe_load(block) or {}).get("concurrency")
+        if isinstance(conc, dict) and "github.run_id" in str(conc.get("group", "")):
+            return conc
+    raise AssertionError("OPT46 has no per-run combined group recipe")
+
+
+def test_opt46_combined_group_validates_every_default_branch_and_tag_run():
+    """#446: one key must give every default-branch push and every tag its own
+    group (no pending-run replacement) while feature branches and PRs share a
+    short-branch group, and the cancel predicate must still cancel only those."""
+    recipe = _opt46_combined_recipe()
+    group, cancel = recipe["group"], recipe["cancel-in-progress"]
+
+    def g(*a, **k):
+        return _ghx_render(group, _ghx_ctx(*a, **k))
+
+    def c(*a, **k):
+        return _ghx_eval(cancel.strip()[3:-2], _ghx_ctx(*a, **k))
+
+    # Three quick merges to the default branch: three distinct groups, so the
+    # third cannot replace the second's pending run. Same on a `master` repo.
+    for default in ("main", "master"):
+        merges = {g("push", ref=f"refs/heads/{default}", run_id=n,
+                    default_branch=default) for n in (101, 102, 103)}
+        assert len(merges) == 3, merges
+        assert not c("push", ref=f"refs/heads/{default}", run_id=1,
+                     default_branch=default)
+    # Tags: per run, never cancelled.
+    # (Same tag ref, three runs: a re-pushed tag or manual reruns still get
+    # their own groups, not a shared `CI-v1.1`.)
+    tags = {g("push", ref="refs/tags/v1.1", run_id=n) for n in (1, 2, 3)}
+    assert len(tags) == 3
+    assert not c("push", ref="refs/tags/v1.1", run_id=1)
+
+    # Feature branch: successive pushes share one group and cancel.
+    push_a = g("push", ref="refs/heads/feature/x", run_id=201)
+    push_b = g("push", ref="refs/heads/feature/x", run_id=202)
+    assert push_a == push_b == "CI-feature/x"
+    assert c("push", ref="refs/heads/feature/x", run_id=202) is True
+    # OPT47: the branch's pull_request run lands in the SAME group as its push.
+    pr = g("pull_request", ref="refs/pull/7/merge", head_ref="feature/x", run_id=203)
+    assert pr == push_a
+    assert c("pull_request", ref="refs/pull/7/merge", head_ref="feature/x",
+             run_id=203) is True
+    # A fork PR from its own `main` never shares the upstream default-branch
+    # push group (that run is keyed by run_id) and never cancels.
+    fork = g("pull_request", ref="refs/pull/9/merge", head_ref="main", run_id=301)
+    assert fork not in merges
+    assert c("pull_request", ref="refs/pull/9/merge", head_ref="main",
+             run_id=301) is False
+    # Merge queue entries are never cancelled.
+    assert c("merge_group", ref="refs/heads/gh-readonly-queue/main/pr-9-abc",
+             run_id=401) is False
+
+
+def test_opt46_event_name_in_the_group_splits_opt47_push_pr_dedup():
+    """The warning the catalog gives is true: put `github.event_name` into the
+    combined key and a branch's push and pull_request runs stop sharing a group."""
+    group = _opt46_combined_recipe()["group"]
+    with_event = group.replace("${{ github.workflow }}-",
+                               "${{ github.workflow }}-${{ github.event_name }}-", 1)
+    assert with_event != group
+    push = _ghx_ctx("push", ref="refs/heads/feature/x", run_id=1)
+    pr = _ghx_ctx("pull_request", ref="refs/pull/7/merge", head_ref="feature/x",
+                  run_id=2)
+    assert _ghx_render(group, push) == _ghx_render(group, pr)
+    assert _ghx_render(with_event, push) != _ghx_render(with_event, pr)
+    body = _catalog_section("OPT46")
+    assert "adding `github.event_name` to a `push` + `pull_request` workflow" in body
 
 
 def _cancel_predicates() -> dict[str, str]:

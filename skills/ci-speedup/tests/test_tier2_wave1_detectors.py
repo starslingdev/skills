@@ -1490,8 +1490,20 @@ def test_opt46_pending_run_replacement_recipe_has_a_per_run_escape_hatch():
     assert finding["runner_min_saving"] > 0
     assert "runner-minute (bill) only" in finding["size_note"]
     assert "one pending run" in guardrail
-    assert "event-and-PR-number" in guardrail
+    assert "combined group" in guardrail
+    # Feature-branch pushes are non-PR runs the combined key still cancels, so
+    # the condition must name the runs it actually protects.
+    assert "every non-PR commit" not in guardrail
+    assert "every default-branch commit and tag must be validated" in guardrail
+    assert ("${{ github.workflow }}-${{ (github.ref == "
+            "format('refs/heads/{0}', github.event.repository.default_branch) || "
+            "startsWith(github.ref, 'refs/tags/')) && github.run_id || "
+            "github.head_ref || github.ref_name }}") in guardrail
+    assert "github.event.repository.default_branch" in guardrail
+    assert "startsWith(github.ref, 'refs/tags/')" in guardrail
     assert "`github.run_id`" in guardrail
+    assert "OPT47" in guardrail
+    assert "`github.event_name`" in guardrail
 
     safe = {
         "on": {"push": {}, "pull_request": {}},

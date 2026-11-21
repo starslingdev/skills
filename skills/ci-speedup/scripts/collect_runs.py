@@ -19268,10 +19268,18 @@ def _detect_opt46_superseded_runs(
               "true and saves nothing, so use the catalog's WIDENED predicate. "
               "PENDING-RUN SAFETY: GitHub keeps at most one pending run in a "
               "concurrency group, so a third arrival replaces the second pending run "
-              "even when cancellation is disabled. If every non-PR commit must be "
-              "validated, use the catalog's event-and-PR-number group with "
-              "`github.run_id` as the non-PR fallback; do not use the widened "
-              "cancellation recipe for those protected runs."))
+              "even when cancellation is disabled. If every default-branch commit "
+              "and tag must be validated, use the catalog's combined group "
+              "`${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', "
+              "github.event.repository.default_branch) || startsWith(github.ref, "
+              "'refs/tags/')) && github.run_id || github.head_ref || "
+              "github.ref_name }}`: default-branch and tag "
+              "runs (selected with `github.event.repository.default_branch` and "
+              "`startsWith(github.ref, 'refs/tags/')`) use `github.run_id`, while "
+              "feature-branch push and PR runs share `github.head_ref || "
+              "github.ref_name`. Do not add `github.event_name` when the same workflow "
+              "handles push and pull_request: it separates those branch groups and "
+              "breaks OPT47 push+PR dedup."))
     f = _new_finding(
         "OPT46", "MEDIUM", title, wf_path, "", evidence,
         "superseded-runs-not-cancelled-missing-concurrency-or-cancel-",
