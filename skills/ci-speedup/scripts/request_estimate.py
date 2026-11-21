@@ -291,6 +291,11 @@ def facts_from_probe(workflows: dict, runs: dict, jobs: dict, *, root: Path | No
                     if isinstance(w, dict) and str(w.get("state") or "active") == "active")
     else:
         count = int(workflows.get("total_count") or 0)
+    # The probe reads one 100-workflow page; the collector reads them all. Count
+    # the workflows past that page as sampled too.
+    total = workflows.get("total_count")
+    if listed and isinstance(total, int) and total > len(listed):
+        count += total - len(listed)
     job_rows = jobs.get("jobs") if isinstance(jobs.get("jobs"), list) else []
     job_count = int(jobs.get("total_count") or len(job_rows) or 0)
     total_runs = runs.get("total_count")

@@ -157,3 +157,18 @@ def test_distinct_run_reads_never_exceed_the_repos_run_count():
                                  self_hosted=False, scanner_schedules=0,
                                  with_logs=False))
     assert small.json_high < big.json_high
+
+
+def test_workflows_beyond_the_first_listed_page_are_still_counted(tmp_path):
+    wf = tmp_path / ".github" / "workflows"
+    wf.mkdir(parents=True)
+    listed = []
+    for i in range(100):
+        (wf / f"w{i}.yml").write_text("on: push\n")
+        listed.append({"path": f".github/workflows/w{i}.yml", "state": "active"})
+    for i in range(100, 130):
+        (wf / f"w{i}.yml").write_text("on: push\n")
+    facts = est.facts_from_probe({"total_count": 130, "workflows": listed},
+                                 {"total_count": 5000}, {"total_count": 3},
+                                 root=tmp_path, with_logs=False)
+    assert facts.workflows == 130
