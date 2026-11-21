@@ -13,10 +13,14 @@ category: 9
 
 **Anti-pattern**: A workflow that triggers on `push` (or `pull_request`) for branches where developers commonly push multiple times in quick succession, but the workflow either (a) has **no top-level `concurrency:` block at all**, or (b) has a concurrency group with `cancel-in-progress: false`. In either case, every superseded push run continues to occupy a runner — wasting the entire wall-clock duration of the run for the obsolete commit.
 
-This pattern has two flavors that share the same fix mechanism:
+This pattern has three flavors around the same supersession mechanism:
 
 - **Flavor A — no concurrency block**: workflow triggers on `push` (often with `branches-ignore: [main]` or similar) but has no `concurrency:` block. Common because authors use `concurrency:` for `pull_request` workflows but forget that `push` workflows on branches need it just as much.
 - **Flavor B — `cancel-in-progress: false`**: concurrency group is set but explicitly does not cancel. Stale runs aren't cancelled when a new push arrives.
+- **Flavor C — aggregate runs after cancellation**: cancellation is already on,
+  but an aggregate job uses `if: always()` only to evaluate dependency results.
+  The superseded run still allocates a runner for that aggregate after its useful
+  jobs have been cancelled.
 
 **Detection heuristic**:
 
@@ -34,6 +38,15 @@ This pattern has two flavors that share the same fix mechanism:
    grep -rn 'cancel-in-progress: *false' .github/workflows/
    ```
 
+   When cancellation is enabled, also find `if: always()` jobs that `needs:`
+   other checks and whose executable steps do nothing except inspect
+   `needs.<job>.result`, `needs.*.result` or `toJSON(needs)`. Fail closed on an
+   opaque helper, ordinary action, or any build, test, cleanup or deployment
+   command: it is not proven to be an aggregate. Report it only when a complete
+   required-check read shows the aggregate is not a required status check; stay
+   quiet when it is required, when its check name is templated or carries a
+   matrix suffix, or when the read is partial or unreadable.
+
 2. **Quantify wasted compute** — a structural match alone is not enough, and neither is "a branch had ≥2 runs" (sequential commits on a long-lived / default branch each test a distinct commit and were never superseded — cancelling them saves nothing). Measure the runs that ACTUALLY RACED:
    - List runs (all statuses) via `gh api repos/{owner}/{repo}/actions/workflows/{wf}/runs?created=<30d-window>`; group by `head_branch`; within each branch, count a run as **superseded** iff a later-created run **started before it finished** (timestamp overlap of `run_started_at`…`updated_at`). Sequential, non-overlapping runs count 0.
 
@@ -43,6 +56,25 @@ This pattern has two flavors that share the same fix mechanism:
    Per-run compute is the **mean** job-minutes of the sampled successful runs (needs ≥3 timed runs to be stable). Extrapolate the sampled count to the 30-day volume by `monthly_volume / sampled_n` in **both** directions (a low-frequency workflow's recent slice spans >30 days and must scale down); compute the remainder ratio on the sampled window and apply it before scaling. Skip dormant workflows (`monthly_volume` 0); a run missing either timestamp contributes nothing and is disclosed as a skip. Report as a range; the superseded attribution is **inference** (the API marks no run "cancelled-by-concurrency").
 
 **Fix**: Add a top-level concurrency block, and make the *cancellation* conditional — **never** a bare `cancel-in-progress: true`. This pattern fires on workflows that trigger on `push`, and a bare `true` cancels the in-flight run on `main` or on a release tag the moment the next commit lands — a deploy, a publish, or a migration killed halfway. `cancel-in-progress` accepts an expression ([workflow syntax: `concurrency`](https://docs.github.com/en/actions/reference/workflow-syntax-for-github-actions#concurrency)), so scope it to the events where a superseded run is genuinely worthless.
+
+**Flavor C fix — cancellation-aware aggregate (non-required checks only)**:
+when the aggregate is not a required status check, use
+`if: ${{ !cancelled() }}` on it and leave its step-level result check
+unchanged: the job still runs when a dependency ends `failure`, `cancelled` or
+`skipped`, so the check still rejects every result it rejects today. Test both
+halves independently: an
+ordinary failed dependency still makes the aggregate fail, while cancellation
+of the whole superseded run leaves the aggregate without a runner. A required
+aggregate, or one whose required status cannot be read, keeps `if: always()`.
+A job skipped by its `if:` reports success, and a skipped required check does
+not block merging, so on a required aggregate `!cancelled()` would let a head
+run cancelled without a replacement (a manual cancel, or a concurrency group
+shared with another event) pass with nothing validated. The runner time of a
+seconds-long aggregate on cancelled runs is the price of a cancelled head run
+never passing. Runner-minute effect is a **saving**: that aggregate job's
+compute on cancelled runs. Leave it unsized until matched cancelled runs show
+that the runner was allocated and measure its compute; do not infer a number
+from the YAML.
 
 **Default (PR-scoped)** — correct whenever the racing runs are PR runs:
 
@@ -55,6 +87,33 @@ concurrency:
 ```
 
 `push`, `merge_group`, `schedule`, and tag builds evaluate to `false` and run to completion. `merge_group` needs no separate carve-out here — cancelling a queued merge-group run can eject the PR from the merge queue, and this predicate already excludes it.
+
+**A non-cancelled group does not preserve every pending run.** GitHub keeps at
+most one running and one pending run in a concurrency group. If a third run
+joins while one is running and another is pending, the new run replaces the
+older pending run even when `cancel-in-progress` is false. When every
+default-branch commit and tag must receive its own validation *and* superseded
+feature-branch runs should still cancel, use one combined group: default-branch
+and tag runs select their unique `run_id`; feature-branch push and PR runs keep
+the shared short branch name that cancellation and OPT47 dedup require.
+
+```yaml
+concurrency:
+  group: ${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && github.run_id || github.head_ref || github.ref_name }}
+  cancel-in-progress: >-
+    ${{ github.event_name != 'merge_group'
+    && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
+    && github.head_ref != github.event.repository.default_branch
+    && !startsWith(github.ref, 'refs/tags/') }}
+```
+
+Do not add `github.event_name` to this group when the same workflow handles
+both events: adding `github.event_name` to a `push` + `pull_request` workflow
+splits one branch into separate event groups,
+so the OPT47 push+PR duplicate runs can no longer supersede or cancel one
+another. The key above deliberately omits it. If every event truly must be
+independent, adding the event name is an explicit trade: it preserves those
+event-specific runs but gives up OPT47 dedup.
 
 **The tension you must not "simplify" away.** The group key uses `github.head_ref || github.ref_name` — both are the **short** branch name (`head_ref` is set only on `pull_request`; `ref_name` is the short form on `push`, where `github.ref` would be the fully-formed `refs/heads/…`). That is deliberate: it lands a branch's `push` and `pull_request` runs in the **same** group, which is the whole point of the push+PR double-trigger dedup (OPT47). Writing `github.head_ref || github.ref` instead yields two different strings for one branch, the runs never share a group, and that saving is zero.
 
@@ -86,6 +145,13 @@ Keep the continuation lines at the **same indent** as `${{` (as above). YAML fol
 
 **Real-world example (2026-05)**: a `Pre-merge` workflow triggered on `push` with `branches-ignore: [main]` and had no top-level concurrency block. 62% of branches had ≥2 runs in a 30-day window. Adding the **widened** block above (this is a Flavor A / push-triggered case) saved an estimated 70-125 min/mo of runner compute.
 
-**Tier-2 render note**: When the detector can prove overlap from real run timestamps, OPT46 is eligible for the first-class runner-minute section only if the finding is stamped `sizing_basis=measured` and carries a `tier2_neutrality` certificate. Modeled or uncertified instances stay in the residual "Also noticed" appendix.
+**Public evidence**: [OpenClaw Crabbox pull request #2286](https://github.com/openclaw/crabbox/pull/2286)
+cancelled pull-request runs on a newer push while keeping main runs per commit.
+[OpenClaw Crabbox pull request #2868](https://github.com/openclaw/crabbox/pull/2868)
+replaced `if: always()` on result-aggregating jobs with `if: !cancelled()`; on a
+superseded run, all old work was cancelled and the aggregate jobs acquired no
+runner.
+
+**Tier-2 render note**: When the detector can prove overlap from real run timestamps, OPT46 is eligible for the first-class runner-minute section only if the finding is stamped `sizing_basis=measured` and carries a `tier2_neutrality` certificate. Modeled or uncertified instances, including the static Flavor C candidate before matched cancelled-run measurement, stay in the residual "Also noticed" appendix.
 
 ---

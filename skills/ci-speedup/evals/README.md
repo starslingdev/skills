@@ -110,7 +110,7 @@ per check). Re-running it: `maintainers/ci-speedup/MAINTAINERS.md`.
     python3 maintainers/scripts/run_skill_evals.py --skill ci-speedup --all --id 11   # the measure tier
 
 Needs `claude` and an authenticated `gh` (the skill's phase 1 checks it).
-The skill is mounted as a copy without `evals/`, `CHANGELOG.md`,
+The skill is mounted as a copy without `evals/`, `CHANGELOG.md`, `changelog.d/`,
 `tests/test_*.py`, `tests/conftest.py` or `tests/fixtures/` (the answer key); `tests/verify_report.py`
 stays because the skill runs it. The `ci-speedup skill evals` job in
 `.github/workflows/skill-evals.yml` runs on a schedule or by dispatch because

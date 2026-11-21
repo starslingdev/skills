@@ -37,6 +37,10 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Literal, NamedTuple
 
+_DIR = Path(__file__).resolve().parent
+if str(_DIR) not in sys.path:
+    sys.path.insert(0, str(_DIR))
+
 import pr_lifecycle
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
@@ -3043,9 +3047,81 @@ def _emulated_image_compile_leaf(lines: list[str]) -> dict[str, Any] | None:
     return leaf
 
 
+_RUNTIME_TS_LOADER_COMMAND_RE = re.compile(
+    r"^(?:##\[group\]Run\s+|##\[command\]|[>$+]\s+)?(?:"
+    r"(?:npx\s+|pnpm\s+(?:exec\s+)?|yarn\s+|bunx\s+)?(?:tsx|ts-node(?:-esm)?)(?=\s|$)|"
+    r"node\b[^\n]*(?:--loader(?:=|\s+)|--import(?:=|\s+))"
+    r"(?:tsx|ts-node(?:/esm)?|jiti)\b)",
+    re.IGNORECASE,
+)
+_RUNTIME_TS_LOADER_PROFILE_RE = re.compile(
+    r"^CI_SPEEDUP_RUNTIME_TS_PROFILE_V1\s+"
+    r"loader=(?P<loader>jiti|tsx|ts-node)\s+"
+    r"self_ms=(?P<value>\d+(?:\.\d+)?)\s+"
+    r"profile=(?P<profile>\S+\.cpuprofile)\s+"
+    r"sha256=(?P<sha256>[0-9a-f]{64})$",
+    re.IGNORECASE,
+)
+_OPT106_MIN_PROFILE_S = 30.0
+_OPT106_MIN_JOB_SHARE = 0.2
+
+
+def _runtime_ts_loader_leaf(
+    lines: list[str], job_duration_s: float | None,
+) -> dict[str, Any] | None:
+    """A same-step runtime TS command plus a structured profile summary."""
+    if not isinstance(job_duration_s, (int, float)) or job_duration_s <= 0:
+        return None
+    # GitHub's `##[group]Run ...` starts a step. Keep command and measurement in
+    # that same step so an unrelated later profile cannot be borrowed.
+    segments: list[list[str]] = []
+    segment: list[str] = []
+    for line in lines:
+        if line.startswith("##[group]Run ") and segment:
+            segments.append(segment)
+            segment = []
+        segment.append(line)
+    if segment:
+        segments.append(segment)
+    pair: tuple[str, re.Match[str]] | None = None
+    for rows in segments:
+        command = next((line.strip() for line in rows
+                        if _RUNTIME_TS_LOADER_COMMAND_RE.match(line.strip())), None)
+        match = next((_RUNTIME_TS_LOADER_PROFILE_RE.match(line.strip()) for line in rows
+                      if _RUNTIME_TS_LOADER_PROFILE_RE.match(line.strip())), None)
+        if command is not None and match is not None:
+            pair = (command, match)
+            break
+    if pair is None:
+        return None
+    command, match = pair
+    value = float(match.group("value"))
+    seconds = value / 1000.0
+    if (seconds < _OPT106_MIN_PROFILE_S
+            or seconds > float(job_duration_s)
+            or seconds / float(job_duration_s) < _OPT106_MIN_JOB_SHARE):
+        return None
+    return {
+        "fix_key": "runtime-ts-transpilation",
+        "unit_label": (f"the runtime TypeScript loader accounts for "
+                       f"{seconds:g}s of profiled self time"),
+        "magnitude": {"label": "profiled runtime TypeScript loader self time",
+                      "value": round(seconds, 2), "unit": "s"},
+        "deeper": [],
+        "evidence": [command, match.group(0)],
+        "search": ["--loader", "--import", "CI_SPEEDUP_RUNTIME_TS_PROFILE_V1"],
+        "loader": match.group("loader").lower(),
+        "profile_s": round(seconds, 2),
+        "profile_artifact": match.group("profile"),
+        "profile_sha256": match.group("sha256").lower(),
+    }
+
+
 def _parse_log(text: str,
                iso: dict[str, Any] | None = None,
-               cache_path_sample: dict[str, Any] | None = None) -> dict[str, Any] | None:
+               cache_path_sample: dict[str, Any] | None = None,
+               job_duration_s: float | None = None,
+               dominant_category: str | None = None) -> dict[str, Any] | None:
     """Detect the leaf root cause in a captured job log. `iso` is `scan.py`'s
     `test_runner_isolation` block — the config corroboration the OPT78
     (`vitest-isolate-pool`) leaf needs; omitted ⇒ an import-bound vitest run
@@ -3063,6 +3139,10 @@ def _parse_log(text: str,
         return cache_leaf
     lines = _clean_log(text)
     joined = "\n".join(lines)
+
+    runtime_ts_loader = _runtime_ts_loader_leaf(lines, job_duration_s)
+    if runtime_ts_loader is not None:
+        return runtime_ts_loader
 
     # --- A: per-DB-engine test files + repeated schema migrations (Prisma) ---
     # Track LINE INDICES so migrations can be attributed to a specific file's log
@@ -4066,6 +4146,10 @@ def _parse_log(text: str,
                 re.I,
             ),
             False,
+            None,
+            "test process",
+            None,
+            "per-invocation-startup",
         ),
         (
             "cargo test binary",
@@ -4077,6 +4161,10 @@ def _parse_log(text: str,
             re.compile(r"^running\s+\d+\s+tests?\b", re.I),
             re.compile(r"^test result:\s+(?:ok|FAILED)\.", re.I),
             False,
+            None,
+            "test binary",
+            None,
+            "per-invocation-startup",
         ),
         (
             "verification script",
@@ -4086,6 +4174,41 @@ def _parse_log(text: str,
             re.compile(
                 r"^Verification (?:passed|failed):\s*(?P<id>\S.+?)\s*$", re.I),
             True,
+            None,
+            "verification process",
+            None,
+            "per-invocation-startup",
+        ),
+        (
+            "tool",
+            re.compile(r"^Tool process started:\s*(?P<owner>[\w.-]+)\s+"
+                       r"category=(?P<category>build|scan)\s+"
+                       r"item=(?P<id>\S+)\s*$", re.I),
+            re.compile(r"^Tool ready:\s*(?P<owner>[\w.-]+)\s+"
+                       r"category=(?P<category>build|scan)\s+"
+                       r"item=(?P<id>\S+)\s*$", re.I),
+            re.compile(r"^Tool process finished:\s*(?P<owner>[\w.-]+)\s+"
+                       r"category=(?P<category>build|scan)\s+"
+                       r"item=(?P<id>\S+)\s*$", re.I),
+            True,
+            "owner",
+            "tool process",
+            "category",
+            "per-item-{category}-startup",
+        ),
+        (
+            "worker-pool case",
+            re.compile(r"^Worker pool started:\s*(?P<owner>[\w.-]+)\s+"
+                       r"case=(?P<id>\S+)\s*$", re.I),
+            re.compile(r"^Worker pool ready:\s*(?P<owner>[\w.-]+)\s+"
+                       r"case=(?P<id>\S+)\s*$", re.I),
+            re.compile(r"^Worker pool stopped:\s*(?P<owner>[\w.-]+)\s+"
+                       r"case=(?P<id>\S+)\s*$", re.I),
+            True,
+            "owner",
+            "worker pool",
+            None,
+            "per-case-worker-pool-startup",
         ),
     )
     timestamped: list[tuple[datetime, str, str]] = []
@@ -4094,21 +4217,208 @@ def _parse_log(text: str,
         when = _cache_path_stamp(stamp)
         if sep and when is not None:
             timestamped.append((when, message.strip(), raw.strip()))
+
+    # Real workflow output does not carry ci-speedup's old synthetic
+    # ``Tool process started: ... category=...`` markers.  A shell trace does,
+    # however, expose the boundary between identical invocations.  Keep this
+    # deliberately narrow: one argv prefix, a distinct final argument per
+    # invocation, serial timestamps, and no shell control operators.
+    isolation_re = re.compile(
+        r"\b(?:crash[-_ ]isolation|fork[-_ ]per[-_ ]test|per[-_ ]case[-_ ]isolation|"
+        r"isolate(?:d|ion)?[-_ ](?:case|process|worker))\b"
+        # Plain runner switches: `isolate: true` / `isolate=true` in printed
+        # config, vitest's `--isolate`, and pytest-forked's `--forked`.
+        r"|\bisolate\s*[:=]\s*true\b|(?<![\w-])--(?:isolate|forked)\b", re.I)
+    per_image_re = re.compile(
+        r"\b(?:trivy\s+image|grype\b|docker\s+scan|scan(?:ning)?[-_ ](?:an?[-_ ])?image|"
+        r"container[-_ ]image[-_ ]scan)\b", re.I)
+    if not isolation_re.search(joined):
+        trace_line_re = re.compile(r"^(?:\+|>)\s*(?P<command>\S.*)$")
+        command_rows: list[tuple[int, datetime, list[str], str]] = []
+        for line_i, (when, message, raw) in enumerate(timestamped):
+            command = trace_line_re.match(message)
+            if command is None:
+                continue
+            try:
+                argv = shlex.split(command.group("command"), posix=True)
+            except ValueError:
+                continue
+            if (len(argv) < 2 or any(token in {"&&", "||", ";", "|"}
+                                     for token in argv)):
+                continue
+            command_rows.append((line_i, when, argv, raw))
+        by_prefix: dict[tuple[str, ...], list[tuple[int, datetime, str, str]]] = {}
+        for line_i, when, argv, raw in command_rows:
+            by_prefix.setdefault(tuple(argv[:-1]), []).append(
+                (line_i, when, argv[-1], raw))
+        candidates = [
+            (prefix, rows) for prefix, rows in by_prefix.items()
+            if len(rows) >= 10
+            and len({target for _i, _when, target, _raw in rows}) == len(rows)
+        ]
+        if candidates:
+            prefix, rows = max(candidates, key=lambda item: len(item[1]))
+            command_text = " ".join(prefix)
+            gaps = [(later[1] - earlier[1]).total_seconds()
+                    for earlier, later in zip(rows, rows[1:])]
+            # A trace line marks when a process began, not how much of the
+            # interval is startup. Measure startup as trace -> the process's own
+            # first output line (the same boundary -> first-work measure the
+            # declared profiles below use). An invocation that prints nothing
+            # leaves startup unmeasurable, so the finding is withheld rather
+            # than crediting per-item work as removable startup.
+            startups: list[float] = []
+            for pos, (line_i, started, _target, _raw) in enumerate(rows):
+                next_i = rows[pos + 1][0] if pos + 1 < len(rows) else len(timestamped)
+                first = next((when for when, message, _raw in
+                              timestamped[line_i + 1:next_i]
+                              if not trace_line_re.match(message)), None)
+                if first is None or first < started:
+                    break
+                startups.append((first - started).total_seconds())
+            if (gaps and all(gap > 0 for gap in gaps)
+                    and len(startups) == len(rows)
+                    and not re.search(r"\bpytest\b", command_text, re.I)
+                    and not per_image_re.search(command_text)):
+                iteration_median = _median(gaps)
+                startup_median = _median(startups)
+                count = len(rows)
+                if (startup_median >= iteration_median * 0.5
+                        and count * startup_median >= 20):
+                    category = (dominant_category
+                                if dominant_category in {"build", "scan"}
+                                else "build" if re.search(
+                                    r"\b(?:build|compile|package|bundle)\b", command_text, re.I)
+                                else "scan" if re.search(
+                                    r"\b(?:scan|lint|check|analy[sz]e)\b", command_text, re.I)
+                                else None)
+                    if category is not None:
+                        cap_match = re.search(
+                            r"\bbatch(?:[-_ ](?:size|cap))?\s*[:=]\s*(\d+)\b", joined,
+                            re.I)
+                        cap = int(cap_match.group(1)) if cap_match else None
+                        removable = ((count - math.ceil(count / cap))
+                                     if cap and cap > 0 else count - 1)
+                        modeled = round(removable * startup_median, 2)
+                        return {
+                            "fix_key": f"per-item-{category}-startup",
+                            "unit_label": (
+                                # Skill-authored text only: the argv is log content,
+                                # so it stays in the evidence (wrapped as untrusted
+                                # run output) and in fence-safe search terms.
+                                f"{count} serial invocations repeat one command with a "
+                                f"different final argument; median startup (trace to "
+                                f"first output) is {startup_median:g}s of a "
+                                f"{iteration_median:g}s interval"),
+                            "magnitude": {
+                                "label": "modeled repeated process ceiling",
+                                "value": modeled,
+                                "unit": "s",
+                            },
+                            "deeper": [],
+                            "evidence": [rows[0][3], rows[1][3],
+                                         f"{count} repeated invocations; median startup "
+                                         f"{startup_median:g}s; median interval "
+                                         f"{iteration_median:g}s"],
+                            "search": [_fence_safe(command_text), "repeated invocation",
+                                       "batch"],
+                            "iteration_count": count,
+                            "process_kind": "tool process",
+                            "startup_median_s": round(startup_median, 2),
+                            "iteration_median_s": round(iteration_median, 2),
+                            "modeled_saving_s": modeled,
+                            **({"batch_cap": cap} if cap else {}),
+                        }
+
+    # Common test runners describe pool creation and teardown in plain prose.
+    # Bind all three lifecycle lines to the same pool and case, and fail closed
+    # when the suite explicitly requires a fresh process for each case.
+    pool_start_re = re.compile(
+        r"^(?:Starting\s+worker\s+pool|Worker\s+pool\s+(?:starting|started))"
+        r"(?:\s+(?P<owner>[\w.-]+))?\s+for\s+(?:test\s+)?case\s+(?P<id>\S+)\s*$",
+        re.I)
+    pool_ready_re = re.compile(
+        r"^Worker\s+pool\s+ready(?:\s+(?P<owner>[\w.-]+))?\s+for\s+"
+        r"(?:test\s+)?case\s+(?P<id>\S+)\s*$",
+        re.I)
+    pool_done_re = re.compile(
+        r"^(?:(?:Closing|Stopping|Stopped)\s+worker\s+pool|"
+        r"Worker\s+pool\s+(?:closed|stopped))(?:\s+(?P<owner>[\w.-]+))?\s+"
+        r"for\s+(?:test\s+)?case\s+(?P<id>\S+)\s*$", re.I)
+    if not isolation_re.search(joined):
+        starts = [(i, when, m.group("owner") or "worker-pool", m.group("id"), raw)
+                  for i, (when, message, raw) in enumerate(timestamped)
+                  if (m := pool_start_re.match(message))]
+        if (len(starts) >= 10 and len({row[3] for row in starts}) == len(starts)
+                and len({row[2] for row in starts}) == 1):
+            startups: list[float] = []
+            iterations: list[float] = []
+            measurements: list[tuple[str, str, str]] = []
+            for pos, (line_i, started, owner, identity, boundary_raw) in enumerate(starts):
+                next_i = starts[pos + 1][0] if pos + 1 < len(starts) else len(timestamped)
+                window = timestamped[line_i + 1:next_i]
+                ready = next(((when, raw) for when, message, raw in window
+                              if ((m := pool_ready_re.match(message))
+                                  and (m.group("owner") or "worker-pool") == owner
+                                  and m.group("id") == identity)), None)
+                done = next(((when, raw) for when, message, raw in window
+                             if ((m := pool_done_re.match(message))
+                                 and (m.group("owner") or "worker-pool") == owner
+                                 and m.group("id") == identity)), None)
+                if ready is None or done is None or not (started < ready[0] <= done[0]):
+                    break
+                startups.append((ready[0] - started).total_seconds())
+                iterations.append((done[0] - started).total_seconds())
+                measurements.append((boundary_raw, ready[1], done[1]))
+            if len(measurements) == len(starts):
+                startup_median = _median(startups)
+                iteration_median = _median(iterations)
+                count = len(iterations)
+                if (startup_median >= iteration_median * 0.5
+                        and count * startup_median >= 20):
+                    modeled = round((count - 1) * startup_median, 2)
+                    pool_fix_key = "per-case-worker-pool-startup"
+                    return {
+                        "fix_key": pool_fix_key,
+                        "unit_label": (
+                            f"{count} serial cases each start and close `{starts[0][2]}`; "
+                            f"median pool startup is {startup_median:g}s"),
+                        "magnitude": {"label": "modeled repeated pool startup ceiling",
+                                      "value": modeled, "unit": "s"},
+                        "deeper": [],
+                        "evidence": [*measurements[0],
+                                     f"{count} measured pool lifecycles; median startup "
+                                     f"{startup_median:g}s"],
+                        "search": ["worker pool", "startup", "final teardown"],
+                        "iteration_count": count,
+                        "process_kind": "worker pool",
+                        "startup_median_s": round(startup_median, 2),
+                        "iteration_median_s": round(iteration_median, 2),
+                        "modeled_saving_s": modeled,
+                    }
     startup_leaf: dict[str, Any] | None = None
-    for profile_name, boundary_re, work_re, done_re, bind_identity in startup_profiles:
+    for (profile_name, boundary_re, work_re, done_re, bind_identity,
+         owner_group, process_kind, category_group, fix_key_template) in startup_profiles:
         boundaries = [
-            (line_i, when, match.group("id"), raw)
+            (line_i, when, match.group("id"),
+             match.group(owner_group) if owner_group else None,
+             match.group(category_group).lower() if category_group else None, raw)
             for line_i, (when, message, raw) in enumerate(timestamped)
             if (match := boundary_re.match(message))
         ]
         if len(boundaries) < 10 or len({row[2] for row in boundaries}) != len(boundaries):
+            continue
+        if owner_group and len({row[3] for row in boundaries}) != 1:
+            continue
+        if category_group and len({row[4] for row in boundaries}) != 1:
             continue
         startups: list[float] = []
         iterations: list[float] = []
         measurements: list[tuple[str, str, str]] = []
         work_messages: list[str] = []
         complete = True
-        for pos, (line_i, started, identity, boundary_raw) in enumerate(boundaries):
+        for pos, (line_i, started, identity, owner, category,
+                  boundary_raw) in enumerate(boundaries):
             next_line = (boundaries[pos + 1][0]
                          if pos + 1 < len(boundaries) else len(timestamped))
             next_started = (boundaries[pos + 1][1]
@@ -4127,6 +4437,16 @@ def _parse_log(text: str,
             if (bind_identity
                     and (work_match.group("id") != identity
                          or done_match.group("id") != identity)):
+                complete = False
+                break
+            if (owner_group
+                    and (work_match.group(owner_group) != owner
+                         or done_match.group(owner_group) != owner)):
+                complete = False
+                break
+            if (category_group
+                    and (work_match.group(category_group).lower() != category
+                         or done_match.group(category_group).lower() != category)):
                 complete = False
                 break
             if (not (started < work <= done)
@@ -4152,6 +4472,9 @@ def _parse_log(text: str,
             for message in work_messages
         )
         startup_leaf = {
+            # Keep OPT85's family in one precedence slot. The literal default lets the
+            # closed-world leaf-order guard identify that slot; the profile-specific
+            # identity below narrows category reconciliation without another detector.
             "fix_key": "per-invocation-startup",
             "unit_label": ((
                 f"{count} serial {profile_name} iterations each launch a fresh "
@@ -4174,10 +4497,14 @@ def _parse_log(text: str,
             ],
             "search": ["process boundary", "startup", "run concurrently"],
             "iteration_count": count,
+            "process_kind": process_kind,
             "startup_median_s": round(startup_median, 2),
             "iteration_median_s": round(iteration_median, 2),
             "modeled_saving_s": None if collection_completion_only else modeled,
         }
+        resolved_fix_key = fix_key_template.format(category=category or "")
+        if resolved_fix_key != startup_leaf["fix_key"]:
+            startup_leaf["fix_key"] = resolved_fix_key
         break
     if startup_leaf is not None:
         return startup_leaf
@@ -4577,6 +4904,16 @@ def _runner_minute_amount(value: float) -> str:
 def _finding_runner_minute_effect_line(finding: dict[str, Any]) -> str:
     """Render a signed compute effect for a job-expanding wall-clock lever."""
     effect = finding.get("runner_minute_effect")
+    if (not isinstance(effect, dict) and str(finding.get("pattern") or "") == "OPT25"
+            and not _bmf_held_back(finding)):
+        # Unstamped (pre-schema) OPT25 whose remedy keeps the same legs.
+        effect = {"direction": "neutral",
+                  "reason": "rebalancing moves the same test work between the legs "
+                            "that already run"}
+    if isinstance(effect, dict) and effect.get("direction") == "neutral":
+        reason = str(effect.get("reason") or "").strip()
+        return ("Runner-minute effect: roughly level"
+                + (f"; {reason}" if reason else "") + ".")
     if not isinstance(effect, dict) or effect.get("direction") == "unsized":
         reason = (effect or {}).get("reason") if isinstance(effect, dict) else None
         tail = f" ({reason})" if reason else ""
@@ -4597,10 +4934,20 @@ def _finding_runner_minute_effect_line(finding: dict[str, Any]) -> str:
 
 
 def _group_runner_minute_effect_line(findings: list[dict[str, Any]]) -> str:
+    # A static positional-splitter OPT25 changes only how tests are assigned to
+    # the shard jobs that already run; it adds no job, and its unsized saving is
+    # stated by its own `runner_min_unsized_reason`.
+    splitters = [f for f in findings if f.get("positional_splitter_static")]
     shard_findings = [
         finding for finding in findings
         if finding.get("pattern") in {"OPT24", "OPT25"}
+        and not finding.get("positional_splitter_static")
     ]
+    if not shard_findings and splitters:
+        reason = _flatten_cell(str(splitters[0].get("runner_min_unsized_reason")
+                                   or "not measured"))
+        return (f"Runner-minute effect: saving not sized ({reason}); the fix keeps "
+                "the existing shard jobs and adds none.")
     if shard_findings:
         findings = shard_findings
     sized = [f for f in findings
@@ -4614,7 +4961,10 @@ def _group_runner_minute_effect_line(findings: list[dict[str, Any]]) -> str:
                    for f in sized})
     floors = sorted({_num(f["runner_minute_effect"].get("setup_floor_s")) or 0.0
                      for f in sized})
-    unsized = [f for f in findings if f not in sized]
+    # Only an explicitly unsized (or unstamped) split is an unknown cost; a
+    # rebalance that keeps the same legs is level and adds nothing to the subtotal.
+    unsized = [f for f in findings if f not in sized
+               and _as_dict(f.get("runner_minute_effect")).get("direction") != "neutral"]
     detail = (f"a measured {floors[0]:g}s repeated setup floor across {runs[0]} runs/month"
               if len(floors) == len(runs) == 1
               else f"{len(sized)} measured repeated setup floors")
@@ -4679,6 +5029,48 @@ _VERIFICATION_BAR_LINES = [
 
 
 _FIX_META: dict[str, dict[str, Any]] = {
+    "xcode-ci-build-shape": {
+        "cause": "The CI Xcode build writes an index store no later step reads, or a generic simulator destination leaves more than one architecture in the build.",
+        "look": "Inspect the exact xcodebuild action, destination, runner architecture and whether any later step consumes the index store. Separate simulator test builds from archive/release builds.",
+        "constraints": "Keep the same project, scheme, configuration, test selection, signing behavior and archive output. Generic destinations remain appropriate for archive/release builds. An architecture setting must match the runner host; do not hardcode one architecture across mixed Intel and Apple Silicon runners.",
+        "docs": ["https://developer.apple.com/documentation/xcode/build-settings-reference"],
+        "deliver": "For CI build/test work, set COMPILER_INDEX_STORE_ENABLE=NO and restrict ARCHS to the runner host when using a generic simulator destination. Keep generic archive destinations. Compare matched builds on the same runner and cache state, preserve the test/archive outputs, and roll back either setting if output parity changes.",
+    },
+    "remove-or-reuse-unused-artifact": {
+        "cause": "A job uploads an Actions artifact that no repository workflow downloads and no release or deploy step consumes.",
+        "look": "Search every workflow and release/deploy path for the exact artifact name and uploaded path, then check documented human or external API consumers before treating the repository-local absence as proof.",
+        "constraints": "The repository scan cannot prove that a person or external system never downloads the artifact. Preserve diagnostics, release assets, retention policy and failure evidence; do not remove an upload until those consumers are checked.",
+        "docs": ["https://docs.github.com/en/actions/using-workflows/storing-workflow-data-as-artifacts"],
+        "deliver": "After confirming there is no external consumer, remove the unused upload; otherwise reuse it in jobs that rebuild the same output. Preserve every retained consumer and measure the upload step before claiming a numeric runner-minute saving.",
+    },
+    "review-once-after-quiet-window": {
+        "cause": "An automated reviewer runs on every pull-request head update, so nearby fix-up pushes repeat the whole review.",
+        "look": "Inspect the workflow's pull-request activity types, the review job, and any explicit re-review command or external quiet-window admission before changing when reviews run.",
+        "constraints": "Preserve the repository's review policy and required status. Do not hold a hosted runner merely to debounce. A manual re-review route must retain its current authorization and exact-head checks.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#pull_request"],
+        "deliver": "Review once when a pull request opens or becomes ready, debounce later head updates before runner allocation, or require an authorized explicit re-review command. Exercise open, ready, synchronize and explicit re-review paths, then measure the avoided review-job compute before claiming a numeric saving.",
+    },
+    "deploy-path-test-exclusion": {
+        "cause": "A default-branch deploy or release workflow's positive path glob also selects files under a test directory, so a test-only merge can trigger production work.",
+        "look": "Inspect the push trigger's ordered paths list, the matched test directory, and every runtime, configuration, workflow and deployment-helper path the deploy must retain.",
+        "constraints": "Keep the deploy/release trigger on the default branch and retain every production input. GitHub evaluates paths patterns in order; the test exclusion must follow the broader positive glob. Do not add paths-ignore beside paths because one event cannot use both.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#example-including-and-excluding-paths"],
+        "deliver": "Add the narrow negated test-directory pattern immediately after the broader positive glob, preserve the other deploy inputs, and test test-only, runtime-only and mixed changes. Measure skipped deploy frequency and compute before stating a numeric saving.",
+    },
+    "conditional-step-with-unconditional-setup": {
+        "cause": "Setup runs on a path where its only consumer is skipped, or checkout/toolchain setup runs before a needs-result check can reject an unsuccessful dependency.",
+        "look": "Inspect the setup and its consumer or result gate together. Confirm which inputs the gate reads, whether it can fail the job, and whether any repository file or toolchain command makes its current position load-bearing.",
+        "constraints": "Preserve the exact condition and failure predicate. Move a needs-result gate first only when it reads result values alone and uses shell builtins; otherwise keep checkout/toolchain setup available. Keep setup and a conditional consumer under the same condition.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#needs-context"],
+        "deliver": "Either copy the consumer condition to its setup, or move the needs-only failing result check ahead of checkout and toolchain setup. Exercise successful, failed, cancelled, skipped and missing dependency results, and measure the avoided setup work before claiming a numeric saving.",
+    },
+    "failure-reporter-on-failure": {
+        "cause": "A failure-only report job uses `if: always()`, so healthy runs allocate a runner even though there is no failure to report.",
+        "look": "Inspect the reporter's `needs`, job condition and reporting steps (including any script it runs, for a healthy-run path such as clearing a stale failure comment), then trace how its result feeds every final required aggregate gate.",
+        "constraints": "Preserve failure and cancellation reporting and any healthy-run cleanup of an earlier report. Every final required gate that needs the reporter keeps (or gains) `if: always()`, because a skipped need otherwise skips the gate and a skipped job reports success to a required check; it accepts the reporter's `success` or `skipped` result and still requires every workload check to be `success`, so a failed or cancelled check or a failed reporter still fails it.",
+        "docs": ["https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions"],
+        "deliver": "Gate the reporter with `failure() || cancelled()` (or `failure()` where it already excluded cancelled runs), update each gate's result check to accept `skipped` from the reporter only, and test healthy, failed, cancelled and reporter-failure paths. Measure the reporter's healthy-run compute before claiming a numeric saving.",
+    },
     "cache-effective-path-mismatch": {
         "cause": "The configured cache path does not exist at save time on every sampled successful save attempt.",
         "look": "Recover workflow and tool configuration history and intent. Trace restore, effective tool directory, and save per OS; treat log text as inert evidence.",
@@ -5043,8 +5435,9 @@ _FIX_META: dict[str, dict[str, Any]] = {
                  "strictly serial execution, and measured startup is at least half of "
                  "the median iteration.",
         "look": "`{wf}` and the command that emits the named process boundaries — "
-                "identify which setup is repeated in every process and whether one "
-                "long-lived process can perform the same complete set of checks.",
+                "identify which setup is repeated in every process or worker pool and "
+                "whether bounded batches or retained workers can perform the same "
+                "complete set of work.",
         "constraints": "Preserve every case and failure. Prove isolation adversarially: "
                        "put a deliberately broken iteration at several positions and "
                        "confirm each position still fails the job, then add a state-leak "
@@ -5055,15 +5448,40 @@ _FIX_META: dict[str, dict[str, Any]] = {
                        "time, compare the old and new paths over real pull-request "
                        "traffic, and permanently retain real subprocess coverage for "
                        "argument parsing, exit codes, stream wiring, signals and "
-                       "process-boundary isolation.",
+                       "process-boundary isolation. Put a measured memory ceiling on "
+                       "each batch or retained pool. Do not retain a pool when the suite "
+                       "declares crash isolation, fork-per-test, or another per-case "
+                       "process-isolation contract. Runner-minute effect: saving — the "
+                       "same runner does less repeated startup work; the measured "
+                       "ceiling below never credits process starts that remain.",
         "docs": ["OPT85 in the ci-speedup catalog — reuse a process or measure safe "
                  "iteration concurrency"],
-        "deliver": "Reuse one process for the serial iterations when the tool supports "
-                   "it, or run proven-independent iterations concurrently with a measured "
-                   "worker cap. Keep the full case count, the broken-position checks and "
+        "deliver": "Safest first, keep a bounded worker pool alive across cases or batch "
+                   "several items per tool process with a measured memory cap; otherwise "
+                   "run proven-independent iterations concurrently with a measured worker "
+                   "cap. Keep the full case count, the broken-position checks and "
                    "the state-leak canary. Roll out one suite at a time, compare old and "
                    "new paths on real pull requests, keep boundary-dependent subprocess "
                    "tests permanently, then re-measure startup and total iteration wall.",
+    },
+    "runtime-ts-transpilation": {
+        "cause": "The long-pole job runs TypeScript through a runtime loader, and an "
+                 "explicit profiler summary attributes a material share of the job to "
+                 "that loader's self time.",
+        "look": "`{wf}` and the profiled loader command — identify the exact TypeScript "
+                "entry surfaces it transforms and every fallback path that can invoke "
+                "the loader again.",
+        "constraints": "Preserve the generated bytes, test/tool behavior, module format, "
+                       "source-map behavior and failure propagation. Do not replace the "
+                       "loader with stale output or skip entry surfaces. The profiled "
+                       "self time is a ceiling until the precompiled or preloaded path is "
+                       "benchmarked on the same runner.",
+        "docs": ["Runtime TypeScript loader example and measured fix: "
+                 "https://github.com/openclaw/openclaw/pull/109757"],
+        "deliver": "Precompile the exact tool/test surfaces once, or preload a cached "
+                   "transform through the existing module graph. Add a guard that fails "
+                   "if any exercised path falls back to the runtime loader, compare "
+                   "outputs byte-for-byte where applicable, and re-profile the same step.",
     },
     "test-isolated-serial": {
         "cause": "Four or more tests in the same file run strictly one after another "
@@ -5442,6 +5860,9 @@ _FIX_META: dict[str, dict[str, Any]] = {
 # one kind crown the other's measured pole.
 _FIX_META["within-job-duplicate-test"] = _FIX_META["within-job-duplicate-work"]
 _FIX_META["within-job-duplicate-build"] = _FIX_META["within-job-duplicate-work"]
+_FIX_META["per-item-build-startup"] = _FIX_META["per-invocation-startup"]
+_FIX_META["per-item-scan-startup"] = _FIX_META["per-invocation-startup"]
+_FIX_META["per-case-worker-pool-startup"] = _FIX_META["per-invocation-startup"]
 
 
 def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -5450,6 +5871,8 @@ def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
     if not meta:
         return None
     resolved = dict(meta)
+    if not _BMF_ENABLED:
+        resolved.update(_BMF_LEAF_DEFAULTS.get(str((leaf or {}).get("fix_key", "")), {}))
     if (str((leaf or {}).get("fix_key") or "") == "emulated-image-compile"
             and (leaf or {}).get("builder_topology_unconfirmed") is True):
         resolved.update({
@@ -5870,7 +6293,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
 
     fix_key = str((leaf or {}).get("fix_key", ""))
     if fix_key in _JOB_EXPANDING_LEAVES:
-        out += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE, ""]
+        out += [*_bmf_concurrency_lines(), ""]
     elif structural and not leaf.get("runner_minute_effect_line"):
         out += ["Structural cost context: This pole also matched a structural catalog "
                 "pattern; account for its job or machine movement separately.",
@@ -5923,12 +6346,31 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
                 f"- {addr}", ""]
 
     constraints = [f"- {meta['constraints']}"]
+    if fix_key in {
+        "per-invocation-startup", "per-item-build-startup",
+        "per-item-scan-startup", "per-case-worker-pool-startup",
+    }:
+        modeled = _num(leaf.get("modeled_saving_s"))
+        runs = pole.get("workflow_runs_30d")
+        if modeled is not None and isinstance(runs, int) and not isinstance(runs, bool):
+            monthly = modeled * runs / 60.0
+            leaf.pop("runner_min_unsized_reason", None)
+            constraints.append(
+                f"- runner-minute saving: at most {monthly:.1f}/month "
+                f"({modeled:g}s measured ceiling x {runs} workflow runs in 30 days).")
+        else:
+            reason = ("the repeated-startup interval is not separately measurable"
+                      if modeled is None else
+                      "the workflow's 30-day run count is unavailable")
+            leaf["runner_min_unsized_reason"] = reason
+            constraints.append(f"- runner-minute saving: unsized ({reason}).")
     if fix_key == "cargo-test-shard" and _num(leaf.get("pre_test_floor_s")) is not None:
         _floor = float(leaf["pre_test_floor_s"])
         constraints.append(
             f"- Measured pre-test compile floor: {_clock(_floor)}. Every added shard "
-            "repeats that floor; partition only the test work after it and include the "
-            "repeated compile in the runner-minute comparison.")
+            + ("repeats that floor; partition only the test work after it and include "
+               "the repeated compile in the runner-minute comparison." if _BMF_ENABLED
+               else "repeats that floor."))
     # A cache pole whose measured distribution demotes it (miss-tail / mostly-warm) carries
     # the context the agent must not re-derive wrong: the cache mostly hits, so the win is on
     # the miss-heavy tail, and a fork/cold benchmark would overstate it.
@@ -6089,7 +6531,7 @@ def _build_generic_agent_prompt(pole: dict[str, Any],
            *_shard_floor_prompt_lines(pole),
            ""]
     if "OPT24" in dd_pats or "OPT25" in dd_pats:
-        out += [_CONCURRENCY_ORDER_LINE,
+        out += [_bmf_concurrency_lines()[0],
                 _group_runner_minute_effect_line(list(data_driven or [])), ""]
     elif struct_pats:
         out += [_RELOCATION_RUNNER_MINUTE_LINE, ""]
@@ -7734,6 +8176,9 @@ _LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
     "per-invocation-startup": "test",
+    "per-item-build-startup": "build",
+    "per-item-scan-startup": "scan",
+    "per-case-worker-pool-startup": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
@@ -7747,6 +8192,7 @@ _LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "gradle-test-parallelism": "test",
     # `scan` by tool name; `test` when the step name also says so ("Lighthouse tests").
     "lighthouse-serial-audits": frozenset({"scan", "test"}),
+    "runtime-ts-transpilation": frozenset({"scan", "test"}),
     "eslint-no-cache": "scan",
     "turbo-remote-cache": "build",
     "turbo-partial-cache": "build",
@@ -7822,6 +8268,7 @@ def _demote_offcategory_leaf(
 def _derive_pole_leaf(
     pole: dict[str, Any], owner_key: str | None, logs: dict[str, str],
     iso: dict[str, Any] | None = None,
+    job_duration_s: float | None = None,
 ) -> "tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]":
     """The ONE leaf-derivation pipeline a pole's log runs through — captured here so the
     Long pole map (which drills the descent pole = pole 1 up top) and the per-pole loop
@@ -7830,7 +8277,9 @@ def _derive_pole_leaf(
     pole owns none → no log), parse, reconcile the cache-hit distribution, then split off an
     off-category leaf. Pure over its inputs, so calling it twice on the same pole is exact."""
     log_text = logs.get(owner_key) if owner_key is not None else None
-    leaf = _parse_log(log_text, iso) if log_text else None
+    leaf = (_parse_log(log_text, iso, job_duration_s=job_duration_s,
+                       dominant_category=str(pole.get("dominant_category") or ""))
+            if log_text else None)
     # A restore line sits in nearly every job log. The dependency-cache leaf is
     # evidence only where the OPT96-gated sampling ran on this pole.
     if (leaf is not None and leaf.get("fix_key") == "dependency-cache"
@@ -8788,6 +9237,18 @@ _OPT83_WITHHOLD_PHRASES: dict[str, str] = {
     "job_starts_a_container_or_background_server":
         "the job starts a container or a background server that the steps "
         "would all use at once",
+    "separate_job_matrix_job":
+        "the steps cannot share one runner, and the job is a matrix, so a sibling "
+        "job would repeat its setup in every cell and its added cost per run could "
+        "not be stated",
+    "separate_job_later_step_may_read_moved_output":
+        "the steps cannot share one runner, and a later step or a job output may "
+        "read what a moved step writes, so moving it to its own job could drop "
+        "that check",
+    "separate_job_prerequisite_unclassified":
+        "the steps cannot share one runner, and a step before them is not setup, "
+        "checkout or install, so what a sibling job would have to repeat is "
+        "unmeasured",
 }
 # OPT84: a slow step on a long pole whose command could not be followed to the
 # tool it runs, or whose fit could not be decided. Every gate in
@@ -11399,6 +11860,12 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                       f"(~{_clock(wc)}) is below the long-pole threshold, so it is NOT "
                       "credited as a merge-gating long pole - treat it as a minor cleanup, "
                       "not a merge-wait win.")
+        elif pat in {"OPT24", "OPT25"} and not rmin:
+            # Sharding never cuts the bill: extra legs add runner minutes (the
+            # runner-minute effect line above), so do not call this a bill cut.
+            saving = ("Saving: none credited - off the merge-gating critical path, so "
+                      "~0 developer wall-clock, and the split adds runner minutes "
+                      "rather than cutting the bill.")
         else:
             saving = (f"Saving: {bill} - off the merge-gating critical path, so ~0 developer "
                       "wall-clock (a cloud-bill cut, not a merge-wait cut).")
@@ -11447,8 +11914,47 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "crediting seconds."
         )
     if pat in {"OPT24", "OPT25"}:
-        body += [_CONCURRENCY_ORDER_LINE,
-                 _group_runner_minute_effect_line(members)]
+        body.append(_bmf_concurrency_lines()[0])
+        go_member = next(
+            (member for member in members if member.get("go_dominant_package")),
+            None,
+        )
+        if pat == "OPT24" and go_member is not None:
+            package = str(go_member["go_dominant_package"])
+            extra = _num(go_member.get("go_shard_extra_runner_s"))
+            body.append(
+                f"Go list-then-run recipe: List the tests in `{package}` with "
+                "`go test -list` using the same build tags and flags (`-race`, "
+                "`-tags`) as the run, partition every listed test exactly once, and "
+                f"run each part against `{package}` only with an anchored `-run` "
+                "regex in two matrix legs. Run every other package the step tests in "
+                "exactly one leg, unfiltered. Keep the required check name on an "
+                "`always()` aggregate job that rejects every non-success result. For "
+                "coverage, write and upload one atomic profile per shard, merge only "
+                "after every shard succeeds, and apply the unchanged threshold."
+            )
+            if extra is not None:
+                body.append(
+                    f"Runner-minute effect: added cost of ~{_clock(extra)} per run for "
+                    "the assumed two-shard split. Extra shard jobs repeat checkout and "
+                    "setup and bill each job; here the second runner repeats the "
+                    "measured pre-test floor."
+                )
+            else:
+                reason = str(go_member.get("go_shard_extra_runner_unsized_reason")
+                             or "the repeated floor is not measured")
+                body.append(
+                    "Runner-minute effect: added cost per run for the assumed "
+                    f"two-shard split, unsized ({reason}). Extra shard jobs repeat "
+                    "checkout and setup and bill each job; the second runner also "
+                    "repeats compilation."
+                )
+        elif _BMF_ENABLED:
+            # Under --bmf the job-adding option is shown, so it carries its signed
+            # runner-minute effect (#379); the default view holds it back.
+            body.append(_group_runner_minute_effect_line(members))
+        else:
+            body.append(_bmf_concurrency_lines()[1])
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.
@@ -11459,6 +11965,19 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             note = str((member.get("measured_evidence") or {}).get("note") or "").strip()
             if note:
                 body.append(f"Investigate this measured shard diagnosis: {note}")
+        # A static positional-splitter member (scan.py) proves an unstable
+        # assignment rule, not a measured duration: carry its recipe and its
+        # literal cost note, never the generic off-path bill-cut framing.
+        positional = [m for m in members if m.get("positional_splitter_static")]
+        if positional:
+            recipe = str(positional[0].get("fix_strategy") or "").strip()
+            if recipe:
+                body.append(f"Fix recipe (safest first): {recipe}")
+            if len(positional) == len(members):
+                # The note already reads "runner-minute saving: unsized (<what
+                # is unmeasured>)"; state it as is, never beside a neutral claim.
+                note = str(positional[0].get("size_note") or "").strip()
+                saving = f"Saving: {note}." if note else "Saving: unsized."
     body += [saving, "",
              "Read the catalog entry (background, fix recipe, and guardrail):",
              f"  {url}", ""]
@@ -11726,6 +12245,12 @@ def _commit_wall_disclosure_lines(commit_clock: dict[str, Any]) -> list[str]:
             f"> {len(partial)} sampled commit(s) were partial"
             + (f" ({'; '.join(reasons)})" if reasons else "")
             + "; their observed spans were excluded from these percentiles.")
+    if commit_clock.get("representative") is False and facts:
+        complete_count = sum(_num(f.get("wall_s")) is not None for f in facts)
+        lines.append(
+            f"> **Typical wait withheld:** {complete_count} of {len(facts)} sampled "
+            "commits were complete. Because the complete subset is a minority, it "
+            "is not representative enough to publish a typical per-commit wait.")
     return lines
 
 
@@ -11979,6 +12504,15 @@ _OPT81_DISCLOSURE = (
     "The publisher of this skill sells CI runners. This finding compares your own "
     "runs on runner classes you already use (A1), or names a class of lever and asks "
     "you to benchmark before believing any number (A2); it never prices a runner.")
+# A measured downsize (OPT81 A1, `faster_runner.kind == "opt81_downsize"`). A STRING
+# CONTRACT: equal to collect_runs' copies and re-checked by verify_report. The skill
+# never prices a runner, so the runner-cost saving is stated and left unsized.
+_OPT81_DOWNSIZE_SAME_SPEED = (
+    "same speed on a smaller runner size: about the same runner-minutes, billed at "
+    "the smaller size's lower rate")
+_OPT81_DOWNSIZE_COST_EFFECT = (
+    "runner-cost saving: unsized (ci-speedup does not price runners; the smaller size "
+    "bills at a lower per-minute rate)")
 _OPT81_RUNNER_MIN_UNKNOWN = (
     "unknown: a different runner class bills differently and this audit carries no "
     "rate table")
@@ -12023,7 +12557,7 @@ def _opt81_half(f: dict[str, Any]) -> str:
 
 def _opt81_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [f for f in findings if str(f.get("pattern", "")) == "OPT81"
-            and _opt81_half(f) in ("A1", "A2")]
+            and _opt81_half(f) in ("A1", "A2") and not f.get("_bmf_held_back")]
 
 
 def _opt81_for_pole(pole: dict[str, Any],
@@ -12112,7 +12646,13 @@ def _opt81_prompt(f: dict[str, Any], url: str,
             f"Where: {wf} ({job}).",
             f"What ci-speedup saw: {_opt81_evidence(f)}"]
     body += ["", _MACHINE_RUNNER_MINUTE_LINE]
-    if half == "A1":
+    if half == "A1" and fr.get("kind") == "opt81_downsize":
+        body += ["", "Do: downsize only the ordinary routes for this job to the "
+                 "smaller label already measured here, keeping every step and all "
+                 "work coverage. Retain pinned, frozen, compatibility and release "
+                 "routes on their required runner. Before switching, verify memory "
+                 "headroom, reliability and latency on the same workload."]
+    elif half == "A1":
         body += ["", "Do: find out why some runs of this job use the slower label (a fork "
                  "pull request, an event or a matrix condition can select it on "
                  "purpose); if nothing requires it, move the job to the faster label it "
@@ -12176,31 +12716,47 @@ def _opt81_card(f: dict[str, Any], catalog_url: str,
     if half == "A1":
         out += [f"**🏎️ OPT81 · {title}** - measured from runs this repository already "
                 "made", ""]
-        # `n` counts SUCCESSFUL runs only (A1 compares success-only populations).
-        s, q = fr.get("slow") or {}, fr.get("fast") or {}
-        out += [f"- **Measured:** `{job}` ran {s.get('n')} time(s) on "
-                f"`{_flatten_cell(str(s.get('label')))}` at p50 "
-                f"{_num(s.get('p50_s')) or 0:.0f}s and {q.get('n')} time(s) on "
-                f"`{_flatten_cell(str(q.get('label')))}` at p50 "
-                f"{_num(q.get('p50_s')) or 0:.0f}s, with the same steps on both: "
-                f"{_num(fr.get('gap_s')) or 0:.0f}s faster at the median on "
-                f"`{_flatten_cell(str(q.get('label')))}`.",
-                f"- **Runner-minute effect:** {_OPT81_RUNNER_MIN_UNKNOWN}."]
-        wc = _num(f.get("wall_clock_p50_s")) or 0.0
-        if wc > 0:
-            out.append(f"- **Merge wait:** this job is on the merge-gating path; the "
-                       f"credited wall-clock is {_clock(wc)} after the critical-path "
-                       "floors.")
+        if fr.get("kind") == "opt81_downsize":
+            large, small = fr.get("large") or {}, fr.get("small") or {}
+            out += [f"- **Finding:** {_OPT81_DOWNSIZE_SAME_SPEED}.",
+                    f"- **Measured:** `{job}` ran {large.get('n')} time(s) on "
+                    f"`{_flatten_cell(str(large.get('label')))}` at p50 "
+                    f"{_num(large.get('p50_s')) or 0:.0f}s and {small.get('n')} "
+                    f"time(s) on the smaller `{_flatten_cell(str(small.get('label')))}` "
+                    f"at p50 {_num(small.get('p50_s')) or 0:.0f}s, with the same "
+                    "steps on both.",
+                    f"- **Runner-cost effect:** {_OPT81_DOWNSIZE_COST_EFFECT}.",
+                    "- **Merge wait:** not credited; no wall-clock credit for a "
+                    "same-speed downsize.",
+                    "- **Guardrail:** downsize only ordinary routes; retain pinned, "
+                    "frozen, compatibility and release routes, and verify memory, "
+                    "reliability, work coverage and latency."]
         else:
-            derivation = [d for d in (f.get("wall_clock_derivation") or [])
-                          if isinstance(d, dict) and d.get("reason")]
-            why = (str(derivation[-1]["reason"]) if derivation
-                   else str(fr.get("credit_reason") or ""))
-            # The generic developer-facing bound ends its reason with a bill-saving
-            # clause; OPT81's runner-minute effect is unknown (stated above), so
-            # that clause would contradict the card.
-            why = re.sub(r";\s*runner-minute \(bill\) saving only\s*$", "", why)
-            out.append(f"- **Merge wait:** not credited ({_flatten_cell(why)}).")
+        # `n` counts SUCCESSFUL runs only (A1 compares success-only populations).
+            s, q = fr.get("slow") or {}, fr.get("fast") or {}
+            out += [f"- **Measured:** `{job}` ran {s.get('n')} time(s) on "
+                    f"`{_flatten_cell(str(s.get('label')))}` at p50 "
+                    f"{_num(s.get('p50_s')) or 0:.0f}s and {q.get('n')} time(s) on "
+                    f"`{_flatten_cell(str(q.get('label')))}` at p50 "
+                    f"{_num(q.get('p50_s')) or 0:.0f}s, with the same steps on both: "
+                    f"{_num(fr.get('gap_s')) or 0:.0f}s faster at the median on "
+                    f"`{_flatten_cell(str(q.get('label')))}`.",
+                    f"- **Runner-minute effect:** {_OPT81_RUNNER_MIN_UNKNOWN}."]
+            wc = _num(f.get("wall_clock_p50_s")) or 0.0
+            if wc > 0:
+                out.append(f"- **Merge wait:** this job is on the merge-gating path; the "
+                           f"credited wall-clock is {_clock(wc)} after the critical-path "
+                           "floors.")
+            else:
+                derivation = [d for d in (f.get("wall_clock_derivation") or [])
+                              if isinstance(d, dict) and d.get("reason")]
+                why = (str(derivation[-1]["reason"]) if derivation
+                       else str(fr.get("credit_reason") or ""))
+                # The generic developer-facing bound ends its reason with a bill-saving
+                # clause; OPT81's runner-minute effect is unknown (stated above), so
+                # that clause would contradict the card.
+                why = re.sub(r";\s*runner-minute \(bill\) saving only\s*$", "", why)
+                out.append(f"- **Merge wait:** not credited ({_flatten_cell(why)}).")
     else:
         out += ["**🏎️ OPT81 · a different or larger runner class, the last lever this "
                 "audit can name for this pole** - advisory, benchmark required, no "
@@ -12277,7 +12833,8 @@ _OPT83_SUMMARY = "uncredited, benchmark first"
 
 def _opt83_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [f for f in findings if str(f.get("pattern", "")) == "OPT83"
-            and isinstance(f.get("independent_steps"), dict)]
+            and isinstance(f.get("independent_steps"), dict)
+            and not f.get("_bmf_held_back")]
 
 
 def _opt83_for_pole(pole: dict[str, Any],
@@ -12300,6 +12857,30 @@ def _opt83_prompt(f: dict[str, Any], url: str) -> list[str]:
     steps = [s for s in st.get("steps") or [] if isinstance(s, dict)]
     names = ", ".join(f"`{s.get('step')}`" for s in steps)
     ceiling = _num(st.get("ceiling_s")) or 0.0
+    if st.get("kind") == "opt83_separate_jobs":
+        effect = f.get("runner_minute_effect") or {}
+        added = _num(effect.get("runner_min_per_run")) or 0.0
+        moved = _flatten_cell(str(st.get("moved_step") or ""))
+        body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
+                "investigate it in the repo and apply a safe change.", "",
+                f"Where: {wf} (job `{job}`, YAML job `{st.get('yaml_job')}`).",
+                f"What ci-speedup saw: {_flatten_cell(str(f.get('evidence') or ''))}", "",
+                f"Move `{moved}` unchanged into its own sibling job so it runs beside "
+                "the remaining work. Keep every setup and verification command.",
+                "Add one final aggregator job with `if: always()` and `needs:` on every "
+                "sibling. It must fail unless every upstream `result` is `success`, and "
+                "it must keep the required check name that branch protection expects.",
+                f"Merge-wait reduction (re-derived from measured p50s): up to "
+                f"{ceiling:.0f}s; the aggregator job's own pickup comes off it. "
+                f"Runner-minute effect: added cost, at least +{added:.2f} runner-min "
+                "per run (duplicated-setup floor; the aggregator job and per-job "
+                "minute rounding add more), with one additional concurrent runner.",
+                "Roll out on the same commits and keep the split only if the measured "
+                "wall-clock gain holds and the added runner cost is accepted.", "",
+                "Read the catalog entry (background, fix recipe, and guardrail):",
+                f"  {url}", "", *_NO_WEAKENING_LINES, "", *_VERIFICATION_BAR_LINES]
+        return ["#### 🤖 Prompt for your coding agent (OPT83)", "", "```text",
+                *[_fence_safe(line) for line in body], "```"]
     body = ["ci-speedup measured the pattern below but does NOT prescribe the fix -",
             "investigate it in the repo and apply a safe change.", "",
             f"Pattern: OPT83 - {_flatten_cell(str(f.get('title') or 'OPT83'))} "
@@ -12353,6 +12934,32 @@ def _opt83_card(f: dict[str, Any], catalog_url: str) -> list[str]:
     listing = " · ".join(f"`{_flatten_cell(str(s.get('step')))}` "
                          f"{_num(s.get('p50_s')) or 0:.0f}s" for s in steps)
     ceiling = _num(st.get("ceiling_s")) or 0.0
+    if st.get("kind") == "opt83_separate_jobs":
+        setup = _num(st.get("setup_s")) or 0.0
+        moved = _flatten_cell(str(st.get("moved_step") or ""))
+        effect = f.get("runner_minute_effect") or {}
+        added = _num(effect.get("runner_min_per_run")) or 0.0
+        out = [f'<a id="opt83-{fid}"></a>', "",
+               f"**🔀 OPT83 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**",
+               "", f"- **Where:** `{wf}` ▸ `{job}`",
+               f"- **Steps that run one after another** (workflow order, p50): {listing}",
+               f"- **Change:** move `{moved}` unchanged to one sibling job and run it "
+               "beside the remaining work; add an `always()` aggregator that requires "
+               "every upstream result to be `success` and keeps the required check name.",
+               f"- **Merge-wait reduction (re-derived from measured p50s):** up to "
+               f"{ceiling:.0f}s (serial candidate sum minus the slower of the remaining "
+               f"job and the moved step plus {setup:.0f}s measured setup; the "
+               "aggregator job's own pickup comes off it).",
+               f"- **Runner-minute effect:** added cost, at least +{added:.2f} "
+               "runner-min per run (duplicated-setup floor; the aggregator job and "
+               "per-job minute rounding add more); one additional concurrent runner."]
+        if f.get("guardrail"):
+            out.append(f"- **Guardrail:** {_flatten_cell(str(f['guardrail']))}")
+        if f.get("rollout"):
+            out.append(f"- **Rollout:** {_flatten_cell(str(f['rollout']))}")
+        out += [f"- **Catalog (background + fix recipe):** {url}", "",
+                *_opt83_prompt(f, url), ""]
+        return out
     out = [f'<a id="opt83-{fid}"></a>', "",
            f"**🔀 OPT83 · {title}** - risk **{_flatten_cell(str(f.get('risk') or 'MEDIUM'))}**"
            f" · {_OPT83_SUMMARY}", "",
@@ -12715,6 +13322,8 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     # without changing the source finding `_data_driven_for_pole` reads later.
     render_findings: list[dict[str, Any]] = []
     for source in findings:
+        if source.get("_bmf_held_back"):
+            continue
         finding = dict(source)
         jobs = finding.get("affected_jobs") or (
             [finding.get("job")] if finding.get("job") else [])
@@ -12806,8 +13415,9 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         # OPT82 is numberless BY DESIGN (uncredited, benchmark first), not
         # valueless: its card is the only place its rules and its ledger
         # requirement reach the reader, so a lint job that is also a drilled
-        # pole keeps it.
-        if str(f.get("pattern", "")) == "OPT82":
+        # pole keeps it. OPT106's unprofiled form is the same: unsized until
+        # the loader's share is measured, and its card says how to measure it.
+        if str(f.get("pattern", "")) in {"OPT13", "OPT82", "OPT106"}:
             return False
         jobs = f.get("affected_jobs") or ([f.get("job")] if f.get("job") else [])
         if not jobs:
@@ -12834,13 +13444,15 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     # `_group_by_pattern_ranked`, so they survive this slice (they'd only be cut if there
     # were >_ALSO_NOTICED_CAP of them — not a case that arises today; see that docstring).
     shown, rest = ranked[:_ALSO_NOTICED_CAP], ranked[_ALSO_NOTICED_CAP:]
-    # OPT82 and unmeasured OPT32 are exempt from the cap. OPT82 carries no bill saving
-    # BY DESIGN, while an unmeasured OPT32 has no number because GitHub did not return
-    # enough evidence to calculate one. In both cases the card is the only place the
-    # reader sees the substance that a numeric ranking cannot represent.
+    # OPT82, unmeasured OPT32, and non-PR-only groups are exempt from the cap.
+    # OPT82 carries no bill saving BY DESIGN, while an unmeasured OPT32 has no
+    # number because GitHub did not return enough evidence to calculate one.
+    # A non-PR group must retain its lane tag: dropping that disclosure can make
+    # the remaining report surface look like merge-gate work. In all three cases
+    # the card carries substance that a numeric ranking cannot represent.
     def _uncapped_group(group: tuple[str, list[dict[str, Any]]]) -> bool:
         pat, members = group
-        return pat == "OPT82" or (
+        return any(m.get("non_pr_lane") is True for m in members) or pat == "OPT82" or (
             pat == "OPT32" and any(
                 isinstance(m.get("path_filter_measurement"), dict)
                 and m["path_filter_measurement"].get("status") == "unmeasured"
@@ -12889,7 +13501,11 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     for pat, ms in shown:
         title = _flatten_cell(ms[0].get("title") or pat)
         rmin = _rmin_of(ms)
-        bill = _fmt_runner_min(rmin) if rmin else "no bill saving"
+        unsized = next((str(m.get("runner_min_unsized_reason")) for m in ms
+                        if m.get("runner_min_unsized_reason")), "")
+        bill = (_fmt_runner_min(rmin) if rmin
+                else f"runner-minute saving: unsized ({_flatten_cell(unsized)})"
+                if unsized else "no bill saving")
         n = len(ms)
         wfs = len({m.get("workflow_file", "") for m in ms if m.get("workflow_file")})
         occ = f"{n} across {wfs} wf" if wfs else f"{n} occurrence"
@@ -12919,13 +13535,16 @@ def _also_noticed_block(findings: list[dict[str, Any]],
             wc = _num(driver.get("wall_clock_p50_s")) or 0.0
             summary_metric = f"~{_clock(wc)} wall-clock"
             ev = _group_evidence(ms, prefer=driver)
-        elif pat == "OPT82":
+        elif pat in {"OPT13", "OPT82"}:
             summary_metric = "uncredited, benchmark first"
+            ev = _group_evidence(ms, compose=True)
+        elif pat == "OPT106":
+            summary_metric = "unsized, measure the loader share first"
             ev = _group_evidence(ms, compose=True)
         elif pat == "OPT32":
             modeled = sum(_num(m.get("runner_min_unrealizable_s")) or 0.0 for m in ms)
             summary_metric = (f"{_fmt_runner_min(modeled)} modeled upper bound"
-                              if modeled > 0 else "no bill saving")
+                              if modeled > 0 else bill)
             ev = _group_evidence(ms, compose=True)
         else:
             summary_metric = bill
@@ -13440,6 +14059,8 @@ def _data_driven_for_pole(pole: dict[str, Any],
 
     out: list[dict[str, Any]] = []
     for f in findings:
+        if f.get("_bmf_held_back"):
+            continue
         if f.get("advisory"):
             continue
         if _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
@@ -14147,6 +14768,8 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
     incomplete = doc.get("scan_incomplete")
     cp = doc.get("pr_critical_path") or {}
     ds = doc.get("data_sources") or {}
+    commit_clock = cp.get("commit_wall_clock") or {}
+    commit_lines = _commit_wall_disclosure_lines(commit_clock)
     # A BROKEN measurement is itself the news, even with zero static findings. Without
     # this, a run whose every run-list fetch failed and which happens to have no static
     # findings rendered as the bare one-line "_No measured critical path in this
@@ -14182,7 +14805,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
             and not incomplete and not broken and not uncredited_lines
             and not cache_guard_lines
             and not withheld_n and not opt79_off_pole and not opt81_n
-            and not parallel_n and not jest_coverage_n):
+            and not parallel_n and not jest_coverage_n and not commit_lines):
         return ""  # nothing static to say — caller keeps the one-line note
 
     sampled = cp.get("sampled_pr_count")
@@ -14213,7 +14836,7 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
                           str(e) for e in evs)]
     no_pr_gating = bool(_wt) and not _pr_gating_wfs
     gh_never_started = ds.get("partial_kind") == "gh_unavailable"
-    _static_commit_wall = _num((cp.get("commit_wall_clock") or {}).get("p50_s")) or 0.0
+    _static_commit_wall = _num(commit_clock.get("p50_s")) or 0.0
 
     # Machine-readable static-only marker (an HTML comment, invisible in rendered
     # markdown). `verify_report._is_static_only` keys off THIS, not the human banner
@@ -14285,14 +14908,25 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         # no scoped population. Do not follow it with the generic no-run-history banner,
         # which would falsely say that no PR-gating timing exists.
         pass
-    elif _static_commit_wall > 0:
-        out += ["> [!IMPORTANT]",
+    elif _static_commit_wall > 0 or commit_lines:
+        if commit_clock.get("representative") is False:
+            _commit_banner = (
+                "> **Commit timing was sampled, but the typical wait was withheld.** "
+                "Too few sampled commits had complete workflow job data to publish a "
+                "representative typical wait. The disclosure below keeps the incomplete "
+                "sample visible without turning its minority into a headline."
+            )
+        else:
+            _commit_banner = (
                 "> **Commit-level developer wait was measured, but no per-check spine "
                 "could be ranked.** The supplied commit timing still covers workflow "
                 "creation through the last completed job, including runner-pickup "
                 "queue. The sections below show that full wait and any static findings; "
                 "individual long poles remain unavailable because no file-backed pole "
-                "was resolved.", ""]
+                "was resolved."
+            )
+        out += ["> [!IMPORTANT]",
+                _commit_banner, ""]
     elif no_pr_gating:
         # Third shape (issue: false dormant banner on live shapes) — the repo may be
         # perfectly active; its CI just never gates a PR. Say THAT, own any timing we
@@ -14370,6 +15004,9 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         bottom = ["> **Bottom line.** The gh data pass never started, so this report "
                   "can't rank what a PR waits on before the merge — a gap in this run, "
                   "not a verdict on your CI."]
+    elif commit_clock.get("representative") is False and commit_lines:
+        bottom = ["> **Bottom line.** Commit timing was sampled, but the complete "
+                  "subset was not representative enough to publish a typical wait."]
     else:
         bottom = ["> **Bottom line.** No PR run timing was available, so this report "
                   "can't rank what a PR waits on before the merge."]
@@ -14401,10 +15038,8 @@ def _render_static_only(doc: dict[str, Any], captured_at: str = "",
         out += ["---", "", *queue_lines]
     if tier2_lines:
         out += ["---", "", *tier2_lines]
-    _commit_lines = _commit_wall_disclosure_lines(
-        cp.get("commit_wall_clock") or {})
-    if _commit_lines:
-        out += ["---", "", *_commit_lines]
+    if commit_lines:
+        out += ["---", "", *commit_lines]
     # No pole is drilled here, so every OPT80 tail line renders in the off-pole
     # section, after the runner-minute cards and before Also noticed. This is
     # the static-only path (no measured poles); the block is empty unless some
@@ -14468,12 +15103,301 @@ def _unresolved_gate_lines(cp: dict[str, Any]) -> list[str]:
     return ["> **Merge gate unresolved:** " + _clean_label(str(cp["unresolved_reason"])), ""]
 
 
-def render(doc: dict[str, Any], *args, **kwargs) -> str:
-    """Include lifecycle context on every report path, including static-only."""
-    report = _render_core(doc, *args, **kwargs)
+def _account_weekly_block(value: Any) -> list[str]:
+    """Render caller-supplied account observations without inventing coverage."""
+    if not isinstance(value, dict):
+        return []
+    weeks = [row for row in _as_list(value.get("weeks"))
+             if isinstance(row, dict)]
+    if not weeks:
+        return []
+    lines = [
+        "## Account-level weekly CI",
+        "",
+        "> Optional account export. These totals are descriptive context, not "
+        "repository-sample extrapolations.",
+        "",
+        "| Week starting | Runner-hours | Jobs | Merged PRs | Runner-hours / merged PR | Workload change |",
+        "| :--- | ---: | ---: | ---: | ---: | :--- |",
+    ]
+    for row in weeks:
+        per_pr = _num(row.get("runner_hours_per_merged_pr"))
+        lines.append(
+            f"| {_flatten_cell(str(row.get('week_start') or 'unknown'))} "
+            f"| {float(_num(row.get('runner_hours')) or 0):.1f} "
+            f"| {int(_num(row.get('jobs')) or 0)} "
+            f"| {int(_num(row.get('merged_pull_requests')) or 0)} "
+            f"| {f'{per_pr:.2f}' if per_pr is not None else 'unavailable'} "
+            f"| {_flatten_cell(str(row.get('workload_change') or 'unavailable'))} |")
+    lines.append("")
+    paired = _as_dict(value.get("paired_comparison"))
+    if paired.get("available") is True:
+        effect = str(paired.get("runner_minute_effect") or "unsized")
+        delta = float(_num(paired.get("runner_minute_delta")) or 0)
+        before_n = int(_num(paired.get("before_n")) or 0)
+        after_n = int(_num(paired.get("after_n")) or 0)
+        workload = _flatten_cell(str(paired.get("workload_change") or "unstated"))
+        lines += [
+            "**Supplied paired-run comparison (from your export, not a "
+            "ci-speedup finding, and not counted in this report's savings):** "
+            f"runner-minute {effect}: {delta:.1f} per paired run, comparing "
+            f"the median of {before_n} before and {after_n} after runs. "
+            f"Workload change: {workload}.",
+            "",
+        ]
+    else:
+        reason = _flatten_cell(str(paired.get("reason") or "paired observations unavailable"))
+        lines += [f"**Supplied paired-run comparison withheld:** {reason}.", ""]
+    return lines
+
+
+def _bmf_held_back(finding: dict[str, Any]) -> bool:
+    """Whether this wall-clock lever can add runner use or unpriced runner cost.
+
+    The catalog's minute-adding mechanisms are enumerated, never guessed from a
+    title: OPT24 sharding (every variant), OPT83's sibling-job split, an OPT81
+    move to another runner size (except a same-speed downsize), OPT25's
+    split-the-slow-leg case, OPT97's own-job move, and an OPT21 edge whose
+    measured dependency failures make downstream work start anyway. Levers that
+    only remove work keep their treatment whatever their sizing."""
+    effect = finding.get("runner_minute_effect")
+    effect = effect if isinstance(effect, dict) else {}
+    direction = str(effect.get("direction") or "").lower()
+    per_run = _num(effect.get("runner_min_per_run"))
+    per_month = _num(effect.get("runner_min_per_month"))
+    if direction in {"added", "added_cost", "cost", "increase"}:
+        return True
+    if (per_run is not None and per_run > 0) or (per_month is not None and per_month > 0):
+        return direction not in {"saving", "saved", "neutral"}
+    pattern = str(finding.get("pattern") or "")
+    if pattern in {"OPT24", "OPT97"}:
+        return True
+    if pattern == "OPT83":
+        stamp = finding.get("independent_steps")
+        return (isinstance(stamp, dict)
+                and stamp.get("kind") == "opt83_separate_jobs")
+    if pattern == "OPT81":
+        runner = finding.get("faster_runner")
+        runner = runner if isinstance(runner, dict) else {}
+        return runner.get("kind") != "opt81_downsize"
+    if pattern == "OPT25":
+        case = finding.get("opt25_case")
+        if case is None:  # collected before the case was stamped: the title names it
+            return str(finding.get("title") or "") == "Matrix Leg Imbalance"
+        return case == "split-leg"
+    if pattern == "OPT21":
+        edge = finding.get("opt21_edge_sizing")
+        extra = _num(edge.get("extra_runner_min_per_run")) if isinstance(edge, dict) else None
+        return extra is not None and extra > 0
+    return False
+
+
+# Log-leaf remedies whose catalog recipe adds jobs, shards or runners. In the
+# default mode the cross-job option is held back: a leaf with an in-job route
+# keeps only that route, and a shard-only leaf keeps its measured drill with the
+# remedy held. Keys mirror verify_report's `_VR_BMF_HELD_LEAVES`.
+_BMF_HELD_REMEDY = (
+    "Hold this remedy: its catalog fix adds jobs, shards or runners that repeat "
+    "checkout and setup and add runner minutes, this report recommends only changes "
+    "that save or preserve runner minutes, and a rerun with `--bmf` includes it. "
+    "Report the measured cause to the owner and change nothing for it.")
+_BMF_LEAF_DEFAULTS: dict[str, dict[str, str]] = {
+    "cargo-test-shard": {
+        "constraints": (
+            "Every added shard repeats compilation, checkout and setup, adding roughly "
+            "(N−1) × that floor in runner minutes. Keep the suite in its current job "
+            "and keep the full test count."),
+        "deliver": _BMF_HELD_REMEDY,
+    },
+    "android-emulator-shard": {
+        "constraints": (
+            "Every added emulator shard repeats checkout, setup and the AVD boot, adding "
+            "runner minutes. Keep the suite in its current job and keep the full "
+            "module and test count."),
+        "deliver": _BMF_HELD_REMEDY,
+    },
+    "playwright-parallel": {
+        "constraints": (
+            "If the invocations do run serially, restructure so specs run concurrently "
+            "in this job without dropping any project coverage or overrunning the "
+            "runner. Note CI's default worker count (often = CPU cores). Sharding across "
+            "separate CI jobs adds runner minutes and is held back in this report "
+            "(`--bmf` includes it)."),
+        "deliver": (
+            "Once you've confirmed the invocations run serially, run the specs in one "
+            "parallel invocation in this job without losing project coverage; "
+            "re-measure the e2e step."),
+    },
+    "pytest-no-xdist": {
+        "constraints": (
+            "These may be integration tests kept serial ON PURPOSE: parallel workers can "
+            "collide on fixed ports or a shared sqlite/Postgres DB, or interleave stdout "
+            "under `-s`. Recover the intent from git history before flipping it on. "
+            "Before adding `-n logical`, prove per-worker isolation (a unique "
+            "port/DB/tmp per `gw` worker); if coverage is collected (`--cov`), merge it "
+            "across workers (`coverage combine`) or the report goes partial. If "
+            "in-process isolation isn't feasible, stop: sharding across jobs adds runner "
+            "minutes and is held back in this report (`--bmf` includes it). Keep "
+            "deadline-bound or process-global tests in a serial pre-step, and record "
+            "the worker count that actually started rather than only the requested "
+            "setting."),
+        "deliver": (
+            "Run the suite across workers — add `-n logical` (xdist is already a dep) "
+            "once per-worker isolation is proven. Keep the full test count and (if "
+            "present) a complete merged coverage report; re-measure the step."),
+    },
+    "benchmark-serial-reruns": {
+        "constraints": (
+            "The reruns exist to produce stable medians - dropping N or skipping warm "
+            "passes REDUCES measurement coverage and can let a real perf regression "
+            "slip through. This is a measurement-policy change needing the owner's "
+            "sign-off, not a free win: keep a full-sample fallback and, before "
+            "lowering N, confirm the gate's medians still match (run old and new side "
+            "by side). Parallelising across runners adds runner minutes and is held "
+            "back in this report (`--bmf` includes it)."),
+        "deliver": (
+            "Cut the warm-rerun cost without weakening the regression signal: lower N "
+            "only to what the gate's statistics need. Verify the medians match the old "
+            "layout and re-measure the step."),
+    },
+    "gradle-test-parallelism": {
+        "constraints": (
+            "Tests run in parallel forks must stay ISOLATED: if they share one mutable "
+            "working dir (a single TestKit project dir), DB, or fixed port, forks "
+            "collide and flake or false-pass. Each fork needs its OWN fresh fixture, "
+            "the full test count must be preserved, and this is a test-infra change "
+            "needing the owner's sign-off - roll it out alongside the existing serial "
+            "task until pass/fail parity holds across several runs. Splitting the "
+            "suite across CI jobs adds runner minutes and is held back in this report "
+            "(`--bmf` includes it)."),
+        "deliver": (
+            "Parallelise the suite in this task - set `maxParallelForks` for in-task "
+            "fork parallelism, each fork with an isolated fixture; keep a full-suite "
+            "fallback, confirm pass/fail parity, and re-measure the step."),
+    },
+    "lighthouse-serial-audits": {
+        "constraints": (
+            "Lighthouse scores are noisy. `numberOfRuns` exists so the assertions gate "
+            "on a median, not on one jittery run, so cutting it toward 1 trades speed "
+            "for a flakier or falsely green budget. Lower it only to what the assertion "
+            "aggregation needs, and compare old and new medians side by side first. "
+            "The device passes may be deliberate (mobile and desktop budgets differ), "
+            "and every URL that carries a budget must keep one. Do NOT run two "
+            "Lighthouse passes at the same time on one runner: concurrent audits "
+            "compete for the same cores, which skews the scores the budget gates on, "
+            "and each `lhci collect` clears the shared `.lighthouseci/` report folder "
+            "when it starts. Moving passes onto separate runners repeats checkout, "
+            "install and build, so it adds runner minutes and is held back in this "
+            "report (`--bmf` includes it)."),
+        "deliver": (
+            "Cut the audit count to what the budget check needs: fewer runs per URL "
+            "only where the assertion aggregation still holds (medians compared old "
+            "against new), and a representative URL set per preset. Keep every budget "
+            "and assertion gating, confirm a deliberately regressed page still fails "
+            "the check, and re-measure the step."),
+    },
+}
+_BMF_ENABLED = True  # set per render(); True outside a render keeps helpers unchanged
+
+_CONCURRENCY_ORDER_LINE_DEFAULT = (
+    "Concurrency order: Use OPT88 to measure and fill the existing job's idle cores. "
+    "Before adding workers, confirm that they cannot interfere through a shared "
+    "external server."
+)
+_SHARD_RUNNER_MINUTE_LINE_DEFAULT = (
+    "Runner-minute effect: With safe in-job concurrency, runner minutes go down because "
+    "the same job finishes sooner. Extra shard jobs repeat checkout and setup and bill "
+    "each job, so this report holds that option back; rerun with `--bmf` to include it."
+)
+# OPT25's collector notes offer a raised shard count beside the neutral remedy.
+_OPT25_SHARD_COUNT_ALTERNATIVES = (
+    re.compile(r" or raise the shard count(?= —)"),
+    re.compile(r" Then raise this family's shard count\..*$", re.S),
+)
+
+
+def _bmf_default_view(finding: dict[str, Any]) -> dict[str, Any]:
+    """A non-held finding as the default mode renders it: OPT25's raise-the-shard-
+    count alternative is dropped, so only its neutral remedy is recommended."""
+    if str(finding.get("pattern") or "") != "OPT25":
+        return finding
+    me = finding.get("measured_evidence")
+    if not isinstance(me, dict) or not isinstance(me.get("note"), str):
+        return finding
+    note = me["note"]
+    for pattern in _OPT25_SHARD_COUNT_ALTERNATIVES:
+        note = pattern.sub("", note)
+    if note == me["note"]:
+        return finding
+    view = dict(finding)
+    view["measured_evidence"] = {**me, "note": note}
+    return view
+
+
+def _bmf_concurrency_lines() -> list[str]:
+    if _BMF_ENABLED:
+        return [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE]
+    return [_CONCURRENCY_ORDER_LINE_DEFAULT, _SHARD_RUNNER_MINUTE_LINE_DEFAULT]
+
+
+_LEAF_CROWN_RE = re.compile(r"<!-- ci-speedup:leaf-crown fix_key=(\S+) -->")
+
+
+def render(doc: dict[str, Any], *args, bmf: bool = False, **kwargs) -> str:
+    """Include lifecycle context and apply the runner-minute recommendation policy."""
+    global _BMF_ENABLED
+    findings = []
+    held = 0
+    for source in doc.get("findings") or []:
+        finding = source
+        if isinstance(source, dict) and not bmf:
+            if _bmf_held_back(source):
+                finding = dict(source)
+                finding["_bmf_held_back"] = True
+                held += 1
+            else:
+                finding = _bmf_default_view(source)
+        findings.append(finding)
+    original_findings = doc.get("findings")
+    doc["findings"] = findings
+    previous_mode = _BMF_ENABLED
+    _BMF_ENABLED = bmf
+    try:
+        report = _render_core(doc, *args, **kwargs)
+    finally:
+        _BMF_ENABLED = previous_mode
+        if original_findings is None:
+            doc.pop("findings", None)
+        else:
+            doc["findings"] = original_findings
+    if not bmf:
+        held += sum(1 for key in _LEAF_CROWN_RE.findall(report)
+                    if key in _BMF_LEAF_DEFAULTS)
+    marker = f"<!-- ci-speedup:bmf enabled={'true' if bmf else 'false'} held={held} -->"
+    disclosure = []
+    if held:
+        disclosure = [
+            f"{held} wall-clock lever held back because it adds runner minutes or "
+            "changes to an unpriced runner; rerun with `--bmf` to show it."
+            if held == 1 else
+            f"{held} wall-clock levers held back because they add runner minutes or "
+            "change to an unpriced runner; rerun with `--bmf` to show them."
+        ]
+    first, separator, rest = report.partition("\n\n")
+    report = ("\n\n".join([first, marker, *disclosure, rest])
+              if separator else "\n\n".join([report, marker, *disclosure]))
     block = pr_lifecycle.render(doc.get("pr_lifecycle"))
     first, separator, rest = report.partition("\n\n")
-    return first + "\n\n" + block + "\n" + rest if separator else report + "\n\n" + block
+    report = (first + "\n\n" + block + "\n" + rest
+              if separator else report + "\n\n" + block)
+    weekly = _account_weekly_block(doc.get("account_weekly"))
+    if weekly:
+        footer = "\n\n---\n\nGenerated by"
+        head, marker, tail = report.rpartition(footer)
+        addition = "\n\n---\n\n" + "\n".join(weekly).rstrip()
+        report = (head + addition + marker + tail
+                  if marker else report + addition)
+    return report
 
 
 def _minority_gate_tail_block(cp: dict[str, Any]) -> list[str]:
@@ -15790,6 +16714,14 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
             f"> {len(_partial_commit_facts)} sampled commit(s) were partial"
             + (f" ({'; '.join(_partial_reasons)})" if _partial_reasons else "")
             + "; their observed spans were excluded from these percentiles.")
+    if _commit_wall.get("representative") is False and _commit_facts:
+        _complete_count = sum(
+            _num(f.get("wall_s")) is not None for f in _commit_facts)
+        _commit_wall_block.append(
+            f"> **Typical wait withheld:** {_complete_count} of "
+            f"{len(_commit_facts)} sampled commits were complete. Because the "
+            "complete subset is a minority, it is not representative enough to "
+            "publish a typical per-commit wait.")
     _fold_bottom_line(
         out,
         _lead_block,
@@ -15884,12 +16816,22 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     _supplied_keys = (set(logs) | set(samples) | set(log_runs) | set(steps)
                       | set(mags) | set(analyses))
     pole_owner_keys = _pole_owner_keys(doc, poles, _supplied_keys)
+    # Duration belongs to the SAME captured representative job as its log. It
+    # gates share-based leaves; a hand-supplied log has no trustworthy wall
+    # denominator and therefore cannot crown one.
+    pole_log_durations: dict[int, float] = {}
+    for entry in (doc.get("data_bundle") or {}).get("logs") or []:
+        _p = _pole_for_entry(poles, entry)
+        _d = _num(entry.get("duration_s"))
+        if _p is not None and _d is not None and _d > 0:
+            pole_log_durations[id(_p)] = _d
     # (log_text, leaf, offcat_leaf) for every rendered pole, derived ONCE. The map reads the
     # descent pole's entry; the loop reads its own pole's — the SAME object, so the map's
     # Level 3 and the pole's Level 3 can never disagree.
     _pole_leaves: dict[int, tuple[str | None, dict[str, Any] | None, dict[str, Any] | None]] = {
         id(p): _derive_pole_leaf(p, pole_owner_keys.get(id(p)), logs,
-                                  doc.get("test_runner_isolation"))
+                                  doc.get("test_runner_isolation"),
+                                  pole_log_durations.get(id(p)))
         for p in pole_wfs}
 
     # ── Long pole map (owner UX edit 2026-07-19) ─────────────────────────────────────────
@@ -16869,8 +17811,13 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
         if analysis and str(analysis.get("prompt", "")).strip():
             out += [_llm_agent_prompt(analysis["prompt"], p), ""]
         else:
+            _prompt_pole = dict(p)
+            _volume = _as_dict(doc.get("per_workflow_monthly_volume")).get(
+                str(p.get("workflow_file") or ""))
+            if isinstance(_volume, int) and not isinstance(_volume, bool):
+                _prompt_pole["workflow_runs_30d"] = _volume
             out += [_build_agent_prompt(
-                leaf, p, floor_pool, run_url, repo, doc.get("commit_sha"),
+                leaf, _prompt_pole, floor_pool, run_url, repo, doc.get("commit_sha"),
                 wf_gate.get(str(p.get("workflow_file", "")), 0), npop, timeline,
                 structural=structural, data_driven=data_driven, cs=cs,
                 cross_run_rendered=cross_run_rendered, opt79=opt79_pole,
@@ -17339,7 +18286,10 @@ def _gap_poles(doc: dict[str, Any],
                 if "=" in key:
                     continue  # an un-bindable key (summary flags it) — never borrow
                 log_text = logs.get(key)
-                if not log_text or _catalog_leaf(_parse_log(log_text, _iso)) is not None:
+                if (not log_text
+                        or _catalog_leaf(_parse_log(
+                            log_text, _iso,
+                            job_duration_s=_num(entry.get("duration_s")))) is not None):
                     continue
                 base = _pole_for_entry(poles, entry) or dict(entry)
                 if _catalog_covers(base):
@@ -17542,6 +18492,9 @@ def main(argv: list[str] | None = None) -> int:
                          "coverage-gap dead-end. See SKILL.md's gap-fill phase.")
     ap.add_argument("--captured-at", dest="captured_at", default="",
                     help="Date the --log/--sample data was fetched (provenance note).")
+    ap.add_argument("--bmf", action="store_true",
+                    help="Show wall-clock levers that add runner minutes or use an "
+                         "unpriced larger runner (hidden by default).")
     args = ap.parse_args(argv)
 
     def _split(spec: str, flag: str) -> tuple[str, str] | None:
@@ -17618,7 +18571,7 @@ def main(argv: list[str] | None = None) -> int:
                 "__analysis_parse_error__": f"the analysis JSON could not be read or parsed: {e}"
             }
     md = render(doc, logs, samples, log_runs, args.captured_at, steps, mags,
-                analyses=analyses)
+                analyses=analyses, bmf=args.bmf)
     _report_unmatched_analysis_dispositions(doc, analyses)
     if args.out_path:
         args.out_path.write_text(md + "\n", encoding="utf-8")

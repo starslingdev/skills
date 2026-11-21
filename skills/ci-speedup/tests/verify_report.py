@@ -841,7 +841,10 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
                 "report lacks the re-derived partial-commit count/workflow disclosure")
 
     walls = [row[1] for row in complete]
-    if walls:
+    representative = bool(walls and len(walls) * 2 >= len(facts))
+    if representative:
+        if stamp.get("representative") is False:
+            failures.append("representative complete-commit population is marked withheld")
         expected_p50 = round(percentile(walls, 50), 3)
         expected_p90 = round(percentile(walls, 90), 3)
         if _num(stamp.get("p50_s")) != expected_p50:
@@ -930,6 +933,22 @@ def check_commit_wall_clock_projection(report: str, findings_path: Path | None) 
             + projection_clause)
         if report.splitlines().count(expected_line) != 1:
             failures.append("report lacks the re-derived per-commit wait/projection line")
+    elif walls:
+        if stamp.get("representative") is not False:
+            failures.append("minority complete-commit population is not marked unrepresentative")
+        if _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
+            failures.append("minority complete-commit population publishes percentiles")
+        if (_num(stamp.get("median_projection_multiple")) is not None
+                or stamp.get("worst_commit")):
+            failures.append("minority complete-commit population publishes projections")
+        expected_withheld = (
+            f"> **Typical wait withheld:** {len(walls)} of {len(facts)} sampled "
+            "commits were complete. Because the complete subset is a minority, it "
+            "is not representative enough to publish a typical per-commit wait.")
+        if report.splitlines().count(expected_withheld) != 1:
+            failures.append("report lacks the unrepresentative-population disclosure")
+        if "> **Per-commit PR wait:**" in report:
+            failures.append("report publishes a per-commit wait from an unrepresentative subset")
     elif _num(stamp.get("p50_s")) is not None or _num(stamp.get("p90_s")) is not None:
         failures.append("empty complete population publishes commit percentiles")
 
@@ -1741,6 +1760,18 @@ _VR_OPT83_WITHHOLD_PHRASES = {
     "job_starts_a_container_or_background_server":
         "the job starts a container or a background server that the steps "
         "would all use at once",
+    "separate_job_matrix_job":
+        "the steps cannot share one runner, and the job is a matrix, so a sibling "
+        "job would repeat its setup in every cell and its added cost per run could "
+        "not be stated",
+    "separate_job_later_step_may_read_moved_output":
+        "the steps cannot share one runner, and a later step or a job output may "
+        "read what a moved step writes, so moving it to its own job could drop "
+        "that check",
+    "separate_job_prerequisite_unclassified":
+        "the steps cannot share one runner, and a step before them is not setup, "
+        "checkout or install, so what a sibling job would have to repeat is "
+        "unmeasured",
 }
 # OPT84's held-back gates (the renderer's `_OPT84_WITHHOLD_PHRASES`, copied).
 _VR_OPT84_WITHHOLD_PHRASES = {
@@ -2956,8 +2987,9 @@ def check_windows_setup_guidance(report: str, findings_path: Path | None) -> Che
 def check_rendered_patterns_exist(report: str, findings_path: Path | None) -> Check:
     """Every OPT-id rendered as a finding (the Also-noticed appendix) must be a real
     pattern in the findings JSON - the report never invents a finding. The
-    manual-review checklist (OPT13/15/18) is static guidance, not a finding, so it's
-    excluded."""
+    manual-review checklist (including OPT13's general judgment and OPT15/18) is
+    static guidance, not a finding, so it's excluded. OPT13's narrow measured
+    exception may also render as a real finding and is checked separately."""
     name = "every rendered finding pattern exists in the findings JSON"
     if findings_path is None:
         return Check(name, True, "no --findings to compare", skipped=True)
@@ -6348,6 +6380,82 @@ def check_opt64_minimum_sample(report: str, findings_path: Path | None) -> Check
                  else f"{len(ranked)} ranked OPT64 row(s) meet the minimum sample")
 
 
+_VR_OPT108_SHORT_RUN_S = 30.0
+_VR_OPT108_MIN_PRICED_RUNS = 3
+
+
+def _vr_opt108_problems(f: dict) -> list[str]:
+    """Re-derive one OPT108 finding's comment-run saving from its stamped
+    measurement (`collect_runs._size_opt108_comment_runs`)."""
+    fid = str(f.get("id") or "OPT108")
+    m = _as_dict(f.get("comment_runner_measurement"))
+    saving = _num(f.get("runner_min_saving"))
+    wall = _num(f.get("wall_clock_p50_s"))
+    if wall:
+        return [f"{fid}: comment runs do not gate a merge, but wall_clock_p50_s={wall}"]
+    if m.get("status") != "measured":
+        if saving is not None:
+            return [f"{fid}: runner_min_saving={saving} without a measured "
+                    "comment-run sample"]
+        return []
+    sampled = _num(m.get("sampled_runs")) or 0
+    comment = _num(m.get("comment_runs")) or 0
+    short = _num(m.get("short_success_runs")) or 0
+    monthly = _num(m.get("workflow_runs_30d")) or 0
+    mean_short = _num(m.get("mean_short_billable_min")) or 0
+    mean_affected = _num(m.get("affected_mean_billable_min")) or 0
+    cap = _num(m.get("affected_compute_min_30d"))
+    bad = []
+    if _num(m.get("short_floor_s")) != _VR_OPT108_SHORT_RUN_S:
+        bad.append(f"{fid}: short_floor_s={m.get('short_floor_s')}, expected "
+                   f"{_VR_OPT108_SHORT_RUN_S}")
+    if (_num(m.get("priced_runs")) or 0) < _VR_OPT108_MIN_PRICED_RUNS:
+        bad.append(f"{fid}: priced_runs={m.get('priced_runs')} is below "
+                   f"{_VR_OPT108_MIN_PRICED_RUNS}")
+    affected = {
+        str(name) for name in _as_list(f.get("affected_jobs")) if str(name).strip()
+    }
+    sized = {
+        str(name) for name in _as_list(m.get("sized_affected_jobs"))
+        if str(name).strip()
+    }
+    if not sized or not sized.issubset(affected):
+        bad.append(
+            f"{fid}: sized_affected_jobs={sorted(sized)} is not a non-empty "
+            f"subset of affected_jobs={sorted(affected)}")
+    if not (0 < short <= comment <= sampled):
+        bad.append(f"{fid}: short={short}, comment={comment}, sampled={sampled} "
+                   "is not 0 < short <= comment <= sampled")
+        return bad
+    want_cap = round(monthly * mean_affected, 1)
+    if cap is None or abs(cap - want_cap) > max(0.11, 0.001 * want_cap):
+        bad.append(f"{fid}: affected_compute_min_30d={cap}, re-derived {want_cap}")
+    want = round(min(monthly * short / sampled * mean_short, want_cap), 1)
+    if saving is None or abs(saving - want) > max(0.11, 0.001 * want):
+        bad.append(f"{fid}: runner_min_saving={saving}, re-derived {want}")
+    elif cap is not None and saving > cap + 0.11:
+        bad.append(f"{fid}: runner_min_saving={saving} exceeds the affected jobs' "
+                   f"measured {cap} runner-min per 30 days")
+    return bad
+
+
+def check_opt108_comment_saving_rederived(report: str, findings_path: Path | None) -> Check:
+    """OPT108's runner-minute saving is re-derived from the stamped comment-run
+    sample, never exceeds the affected jobs' measured compute, carries no
+    wall-clock credit, and is absent when the sample was not measured."""
+    name = "OPT108 comment-run saving re-derives and stays within measured compute"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    rows = [f for f in _as_list(data.get("findings"))
+            if isinstance(f, dict) and f.get("pattern") == "OPT108"]
+    if not rows:
+        return Check(name, True, "no OPT108 finding", skipped=True)
+    bad = [msg for f in rows for msg in _vr_opt108_problems(f)]
+    return Check(name, not bad, "; ".join(bad) if bad
+                 else f"{len(rows)} OPT108 finding(s) re-derived")
+
+
 def _tier2_findings(data: dict) -> list[dict]:
     return [f for f in _as_list(data.get("findings"))
             if isinstance(f, dict)
@@ -7433,6 +7541,78 @@ def _post_completion_waste_corroborated(f: dict) -> bool:
     return False
 
 
+def _vr_opt36_glob_matches(path: str, pattern: str) -> bool:
+    """Independent conservative matcher for OPT36's stamped exclusions."""
+    path, pattern = path.lstrip("/"), pattern.strip().lstrip("/")
+    if not path or not pattern or any(char in pattern for char in "{}["):
+        return False
+    out: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*":
+            if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                index += 2
+                if index < len(pattern) and pattern[index] == "/":
+                    out.append("(?:.*/)?")
+                    index += 1
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(char))
+        index += 1
+    return re.fullmatch("".join(out), path) is not None
+
+
+def _vr_opt36_ignored(path: str, patterns: list[str]) -> bool:
+    ignored = False
+    for raw in patterns:
+        pattern = raw.strip()
+        negated = pattern.startswith("!")
+        if negated:
+            pattern = pattern[1:]
+        if _vr_opt36_glob_matches(path, pattern):
+            ignored = not negated
+    return ignored
+
+
+def _vr_opt36_unchanged_inputs_valid(f: dict) -> bool:
+    stamp = _as_dict(f.get("opt36_unchanged_inputs"))
+    pairs = [row for row in _as_list(stamp.get("pairs")) if isinstance(row, dict)]
+    patterns = [str(value) for value in _as_list(stamp.get("paths_ignore"))
+                if isinstance(value, str) and value]
+    if not pairs:
+        return False
+    same_head = excluded_only = 0
+    for row in pairs:
+        base, head = str(row.get("base") or ""), str(row.get("head") or "")
+        paths = row.get("changed_paths")
+        if not base or not head or not isinstance(paths, list):
+            return False
+        if row.get("kind") == "same_head":
+            same_head += 1
+            if base != head or paths:
+                return False
+        elif row.get("kind") == "excluded_only":
+            excluded_only += 1
+            if base == head or not patterns or not all(
+                    isinstance(path, str) and _vr_opt36_ignored(path, patterns)
+                    for path in paths):
+                return False
+        else:
+            return False
+    effect = _as_dict(f.get("runner_minute_effect"))
+    return (stamp.get("same_head_pairs") == same_head
+            and stamp.get("excluded_only_pairs") == excluded_only
+            and effect.get("direction") == "saving"
+            and abs((_num(effect.get("runner_min_per_month")) or -1.0)
+                    - (_num(f.get("runner_min_saving")) or -2.0)) < 0.001)
+
+
 def _non_pr_event_corroborated(f: dict, data: dict) -> bool:
     cert = _as_dict(f.get("tier2_neutrality"))
     subset = {str(e) for e in _as_list(f.get("tier2_run_subset_events")) if str(e)}
@@ -7451,17 +7631,20 @@ def _non_pr_event_corroborated(f: dict, data: dict) -> bool:
     evidence_text = _text_from_json(me).lower()
     table = _as_dict(me.get("table"))
     rows = _as_list(table.get("rows"))
-    # Currently only OPT36 emits a measured non_pr_event certificate. Pin the
-    # schedule/same-head-sha evidence shape so a future detector cannot promote a
-    # generic "non-PR" claim without its own corroboration.
+    # Currently only OPT36 emits a measured non_pr_event certificate. Preserve
+    # legacy same-head evidence and independently validate the newer stamped
+    # unchanged-input pairs so a generic non-PR claim cannot promote itself.
+    has_unchanged_stamp = isinstance(f.get("opt36_unchanged_inputs"), dict)
+    legacy_same_head = (not has_unchanged_stamp and "same-head_sha" in signal
+                        and "same-head_sha" in evidence_text)
+    unchanged_inputs = has_unchanged_stamp and _vr_opt36_unchanged_inputs_valid(f)
     return (
         str(f.get("pattern")) == "OPT36"
         and subset == {"schedule"}
         and "event=schedule" in signal
-        and "same-head_sha" in signal
         and "event=schedule" in ref
         and "schedule" in ref
-        and "same-head_sha" in evidence_text
+        and (legacy_same_head or unchanged_inputs)
         and bool(rows))
 
 
@@ -10892,6 +11075,10 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
         return Check(name, True, err, skipped=True)
     found = [f for f in _as_list(_as_dict(data).get("findings"))
              if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT83"]
+    if "<!-- ci-speedup:bmf enabled=false " in report:
+        found = [f for f in found
+                 if _as_dict(f.get("independent_steps")).get("kind")
+                 != "opt83_separate_jobs"]
     cards = _vr_opt83_card_bodies(report)
     bad: list[str] = []
     # Every held-back gate is counted once AND listed once: the counter and the
@@ -10920,23 +11107,26 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
         fid = str(f.get("id") or "?")
         cid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", fid)
         ids.add(cid)
+        st = _as_dict(f.get("independent_steps"))
+        separate = st.get("kind") == "opt83_separate_jobs"
         wc = _num(f.get("wall_clock_p50_s"))
-        if wc:
+        if wc and not separate:
             bad.append(f"{fid}: OPT83 carries wall_clock_p50_s {wc} - it is uncredited")
         if f.get("runner_min_saving") is not None:
             bad.append(f"{fid}: OPT83 carries runner_min_saving "
                        f"{f.get('runner_min_saving')!r} - it is uncredited")
-        if f.get("sizing_basis") != "uncredited":
+        expected_basis = "measured" if separate else "uncredited"
+        if f.get("sizing_basis") != expected_basis:
             bad.append(f"{fid}: OPT83 sizing_basis {f.get('sizing_basis')!r}, "
-                       "not 'uncredited'")
-        st = _as_dict(f.get("independent_steps"))
-        if st.get("kind") != "opt83_independent_steps":
+                       f"not {expected_basis!r}")
+        if st.get("kind") not in {"opt83_independent_steps", "opt83_separate_jobs"}:
             bad.append(f"{fid}: missing its opt83_independent_steps block")
             continue
-        ind = _as_dict(st.get("independence"))
-        missing = [k for k in _VR_OPT83_INDEPENDENCE_KEYS if ind.get(k) is not True]
-        if missing:
-            bad.append(f"{fid}: independence facts not stamped true: {missing}")
+        if not separate:
+            ind = _as_dict(st.get("independence"))
+            missing = [k for k in _VR_OPT83_INDEPENDENCE_KEYS if ind.get(k) is not True]
+            if missing:
+                bad.append(f"{fid}: independence facts not stamped true: {missing}")
         wfb = Path(str(f.get("workflow_file") or "")).name
         job = str(st.get("job") or "")
         pole = next((p for p in poles if Path(str(p.get("workflow_file") or "")).name
@@ -10973,7 +11163,29 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
                 bad.append(f"{fid}: step `{sn}` ({ps.get('category')}, {d}s of "
                            f"{job_p50}s) does not qualify as a candidate")
             p50s.append(d)
-        want = round(sum(p50s) - max(p50s), 1) if len(p50s) >= 2 else 0.0
+        if separate and len(p50s) >= 2:
+            moved = str(st.get("moved_step") or "")
+            moved_s = next((d for name, d in zip(names, p50s) if name == moved), None)
+            setup_s = _num(st.get("setup_s"))
+            if moved_s is None or setup_s is None or setup_s < 0:
+                bad.append(f"{fid}: separate-job moved_step/setup_s is incomplete")
+                want = 0.0
+            else:
+                finish = round(max(sum(p50s) - moved_s, moved_s + setup_s), 1)
+                want = round(sum(p50s) - finish, 1)
+                if _num(st.get("parallel_finish_s")) != finish:
+                    bad.append(f"{fid}: parallel_finish_s does not re-derive ({finish})")
+                effect = _as_dict(f.get("runner_minute_effect"))
+                expected_added = round(setup_s / 60.0, 4)
+                if (effect.get("direction") != "added_cost"
+                        or _num(effect.get("runner_min_per_run")) != expected_added
+                        or effect.get("additional_concurrent_runners") != 1):
+                    bad.append(f"{fid}: separate-job runner-minute effect does not "
+                               f"re-derive (added cost {expected_added} per run)")
+                if wc != want:
+                    bad.append(f"{fid}: wall_clock_p50_s {wc!r} != re-derived {want}")
+        else:
+            want = round(sum(p50s) - max(p50s), 1) if len(p50s) >= 2 else 0.0
         if _num(st.get("ceiling_s")) != want:
             bad.append(f"{fid}: ceiling_s {st.get('ceiling_s')!r} != re-derived "
                        f"{want} (sum of the steps' p50s minus the slowest)")
@@ -11008,6 +11220,23 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
                 bad.append(f"{fid}: its anchor is named outside its own section")
                 break
         flat = " ".join(body.split())
+        if separate:
+            effect = _as_dict(f.get("runner_minute_effect"))
+            added = _num(effect.get("runner_min_per_run")) or 0.0
+            for need, what in (
+                    (f"re-derived from measured p50s):** up to {want:.0f}s",
+                     "re-derived saving"),
+                    ("aggregator job's own pickup", "aggregator-pickup caveat"),
+                    (f"added cost, at least +{added:.2f} runner-min per run",
+                     "signed runner-minute effect"),
+                    ("duplicated-setup floor", "runner-minute floor label"),
+                    ("one additional concurrent runner", "runner-count effect"),
+                    ("always()", "aggregator condition"),
+                    ("every upstream result to be `success`", "aggregator success guard"),
+                    ("keeps the required check name", "required-check guard")):
+                if need not in flat:
+                    bad.append(f"{fid}: separate-job card is missing {what}")
+            continue
         # The label sits on the line that states the bound: the prompt's copy of
         # it does not label a bare number on the card.
         bound_line = next((" ".join(ln.split()) for ln in body.splitlines()
@@ -12744,14 +12973,25 @@ def _cooccurrence_floor_s(per_pr: list[list[tuple[str, float]]], pole_name: str,
         return None, None, len(gating)
     co: dict[str, int] = {}
     for pr in gating:
-        for nm in {_cmp_name(n) for n, _p in pr[1:]}:   # de-dupe within a PR
+        # Keep the population's slowest-first order while de-duplicating within
+        # this PR.  The renderer selects the first check when effective floors
+        # tie; iterating a set here made the verifier's winner hash-seed dependent.
+        seen: set[str] = set()
+        for name, _p in pr[1:]:
+            nm = _cmp_name(name)
+            if nm in seen:
+                continue
+            seen.add(nm)
             co[nm] = co.get(nm, 0) + 1
     floor_s, floor_name = 0.0, None
     majority = len(gating) * 0.5
-    for nm, count in co.items():
+    # `p50_by` retains checks[] order, which is also the renderer's candidate
+    # order.  Iterating it makes an equal-p50 tie choose the same first check
+    # even when one gating PR happened to measure the tied checks in reverse.
+    for nm, v in p50_by.items():
+        count = co.get(nm, 0)
         if count <= majority:               # strict majority of the pole's OWN gating PRs
             continue
-        v = p50_by.get(nm) or 0.0
         if v > floor_s:
             floor_s, floor_name = v, nm
     return floor_s, floor_name, len(gating)
@@ -12978,11 +13218,12 @@ def check_pole_not_reframed_as_hygiene(report: str, findings_path: Path | None) 
             # job name matches, and the lane-isolation check independently
             # requires zero merge-gate wall-clock credit and a rendered tag.
             continue
-        if pat == "OPT82":
+        if pat in {"OPT13", "OPT82", "OPT106"}:
             # Numberless BY DESIGN, not valueless: the engine's `_on_pole_job`
-            # keeps an OPT82 card on a drilled-pole lint job (its card is the only
-            # place the rules and ledger reach the reader), so it is no
-            # contradiction of the pole headline. Mirror that exemption.
+            # keeps these benchmark-first cards on their drilled-pole jobs (the
+            # card is the only place the measured ceiling and safety proof reach
+            # the reader), so they do not contradict the pole headline. Mirror
+            # that narrow exemption.
             continue
         if pat == "OPT32":
             measurement = f.get("path_filter_measurement")
@@ -15134,6 +15375,193 @@ def check_step_cited_within_job_window(findings_path: Path | None) -> Check:
                     if sums else ""))
 
 
+def check_opt13_build_in_script_provenance(findings_path: Path | None) -> Check:
+    """OPT13's automatic path is bound to one conservative pole-log fact.
+
+    General OPT13 judgment stays manual.  A measured finding is admitted only
+    when its build interval agrees with the captured manifest, a separate full
+    validation job is named, and the source-output guard completed cleanly.
+    """
+    name = "OPT13 build-in-script findings retain measured safety provenance"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    findings = [f for f in _as_list(data.get("findings"))
+                if isinstance(f, dict) and f.get("pattern") == "OPT13"
+                and f.get("pattern_class") == "data-driven"]
+    if not findings:
+        return Check(name, True, "no automatic OPT13 finding")
+    entries = _as_list(_as_dict(data.get("data_bundle")).get("logs"))
+    failures: list[str] = []
+    allowed_labels = {
+        "vite build", "next build", "nuxt build", "framework build",
+        "bundle build", "TypeScript declaration emit", "Maven package build",
+        "Gradle assemble build",
+    }
+    for finding in findings:
+        fid = str(finding.get("id") or "OPT13")
+        jobs = [str(job) for job in _as_list(finding.get("affected_jobs")) if str(job)]
+        matches = [entry for entry in entries if isinstance(entry, dict)
+                   and str(entry.get("workflow_file") or "")
+                   == str(finding.get("workflow_file") or "")
+                   and jobs and str(entry.get("job") or "") == jobs[0]
+                   and isinstance(entry.get("opt13_build_in_script"), dict)]
+        if len(matches) != 1:
+            failures.append(f"{fid} has {len(matches)} matching pole-log facts")
+            continue
+        fact = _as_dict(matches[0].get("opt13_build_in_script"))
+        seconds = _num(fact.get("build_s"))
+        if (seconds is None or seconds <= 0
+                or seconds != _num(finding.get("opt13_wall_clock_ceiling_s"))):
+            failures.append(f"{fid} build seconds differ from its pole-log fact")
+        if str(fact.get("build_command") or "") not in allowed_labels:
+            failures.append(f"{fid} carries an unrecognized build label")
+        validation = _as_dict(finding.get("opt13_validation_build"))
+        if not validation.get("workflow_file") or not validation.get("job"):
+            failures.append(f"{fid} names no separate full validation build")
+        elif (str(validation.get("workflow_file"))
+              == str(finding.get("workflow_file"))
+              and jobs and str(validation.get("job")) == jobs[0]):
+            failures.append(f"{fid} treats its affected job as the validation build")
+        guard = _as_dict(finding.get("opt13_source_guard"))
+        if guard.get("safe") is not True or not isinstance(
+                guard.get("source_files_checked"), int) or guard["source_files_checked"] <= 0:
+            failures.append(f"{fid} lacks a completed compiled-output source guard")
+        if (_as_dict(matches[0].get("opt13_validation_build")) != validation
+                or _as_dict(matches[0].get("opt13_source_guard")) != guard):
+            failures.append(f"{fid} safety facts differ from its pole-log manifest")
+        graph = _as_dict(_as_dict(data.get("workflow_job_graph")).get(
+            str(validation.get("workflow_file") or "")))
+        graph_jobs = [spec for key, spec in graph.items() if isinstance(spec, dict)
+                      and str(validation.get("job") or "")
+                      in {str(key), str(spec.get("name") or key)}]
+        if len(graph_jobs) != 1 or graph_jobs[0].get("continue_on_error") is True:
+            failures.append(f"{fid} validation job is absent or non-gating in the workflow graph")
+        runs = finding.get("workflow_runs_30d")
+        if (_num(finding.get("wall_clock_p50_s")) is not None
+                or _num(finding.get("runner_min_saving")) is not None
+                or "not sized" not in str(finding.get("size_note") or "")):
+            failures.append(f"{fid} credits an unbenchmarked runtime-only replacement")
+        runner_min = _num(finding.get("opt13_runner_min_ceiling"))
+        if isinstance(runs, int) and runs > 0 and seconds is not None:
+            expected = round(seconds * runs / 60.0, 1)
+            if runner_min != expected:
+                failures.append(f"{fid} runner-minute ceiling is {runner_min}, expected {expected}")
+    return Check(name, not failures,
+                 f"{len(findings)} automatic OPT13 finding(s) retain their log and safety facts"
+                 if not failures else "; ".join(failures[:8]))
+
+
+_VR_OPT106_MIN_PROFILE_S = 30.0
+_VR_OPT106_MIN_JOB_SHARE = 0.2
+
+
+_VR_OPT106_MIN_STEP_S = 20.0
+_VR_OPT106_MIN_STEP_SHARE = 0.15
+
+
+def _vr_opt106_unprofiled_failures(fid: str, finding: dict, jobs: list[str],
+                                   poles: list) -> list[str]:
+    """An OPT106 finding without a loader profile is unsized on both axes, names
+    its true reason, leads its fix with measuring, and sits on a drilled pole
+    step above the step floors with the p50 it states."""
+    failures: list[str] = []
+    step = str(finding.get("runtime_loader_step") or "")
+    p50 = _num(finding.get("runtime_loader_step_p50_s"))
+    job_p50 = _num(finding.get("runtime_loader_job_p50_s"))
+    if finding.get("wall_clock_p50_s") is not None or finding.get("runner_min_saving") is not None:
+        failures.append(f"{fid} credits a saving without a measured loader share")
+    if p50 is None or job_p50 is None or job_p50 <= 0:
+        return failures + [f"{fid} lacks its step and job p50"]
+    reason = (f"loader share not measured; the step's measured p50 of "
+              f"{p50:.1f}s is an upper bound")
+    note = str(finding.get("size_note") or "")
+    if (f"wall-clock saving: unsized ({reason})" not in note
+            or f"runner-minute saving: unsized ({reason})" not in note):
+        failures.append(f"{fid} does not state both axes as unsized with its reason")
+    if not str(finding.get("fix_strategy") or "").startswith("Measure first"):
+        failures.append(f"{fid} fix does not lead with measuring the loader share")
+    if (not str(finding.get("runtime_loader") or "")
+            or not str(finding.get("runtime_loader_command") or "")):
+        failures.append(f"{fid} lacks the loader it resolved")
+    if p50 < _VR_OPT106_MIN_STEP_S or p50 < _VR_OPT106_MIN_STEP_SHARE * job_p50:
+        failures.append(f"{fid} step is below the long-pole step floors")
+    pole = next((p for p in poles if isinstance(p, dict)
+                 and str(p.get("workflow_file") or "")
+                 == str(finding.get("workflow_file") or "")
+                 and jobs and str(p.get("job") or "") == jobs[0]), None)
+    row = next((s for s in _as_list((pole or {}).get("steps"))
+                if isinstance(s, dict) and str(s.get("step") or "").strip() == step),
+               None)
+    pole_p50 = _num((row or {}).get("p50_s"))
+    pole_job = _num((pole or {}).get("job_p50_s"))
+    if (pole_p50 is None or pole_job is None
+            or round(pole_p50, 1) != round(p50, 1)
+            or round(pole_job, 1) != round(job_p50, 1)):
+        failures.append(f"{fid} step p50 is not its drilled pole's measured step")
+    return failures
+
+
+def check_opt106_runtime_loader_provenance(findings_path: Path | None) -> Check:
+    """OPT106 credit remains bound to its captured structured pole fact."""
+    name = "OPT106 runtime-loader findings retain measured pole provenance"
+    data, err = _load_findings_doc(findings_path)
+    if err:
+        return Check(name, True, err, skipped=True)
+    findings = [f for f in _as_list(data.get("findings"))
+                if isinstance(f, dict) and f.get("pattern") == "OPT106"]
+    if not findings:
+        return Check(name, True, "no OPT106 finding")
+    entries = _as_list(_as_dict(data.get("data_bundle")).get("logs"))
+    poles = _as_list(_as_dict(data.get("pr_critical_path")).get("poles"))
+    failures: list[str] = []
+    for finding in findings:
+        fid = str(finding.get("id") or "OPT106")
+        jobs = [str(job) for job in _as_list(finding.get("affected_jobs")) if str(job)]
+        if finding.get("sizing_basis") == "unmeasured_loader_share":
+            failures += _vr_opt106_unprofiled_failures(fid, finding, jobs, poles)
+            continue
+        matches = [entry for entry in entries if isinstance(entry, dict)
+                   and str(entry.get("workflow_file") or "")
+                   == str(finding.get("workflow_file") or "")
+                   and jobs and str(entry.get("job") or "") == jobs[0]
+                   and isinstance(entry.get("runtime_ts_loader"), dict)]
+        if len(matches) != 1:
+            failures.append(f"{fid} has {len(matches)} matching pole-log facts")
+            continue
+        entry = matches[0]
+        fact = _as_dict(entry.get("runtime_ts_loader"))
+        seconds = _num(fact.get("profile_s"))
+        job_seconds = _num(entry.get("duration_s"))
+        if (seconds is None or seconds < _VR_OPT106_MIN_PROFILE_S
+                or seconds != _num(finding.get("runtime_loader_profile_s"))):
+            failures.append(f"{fid} loader seconds differ from its qualifying pole-log fact")
+        if (job_seconds is None or job_seconds <= 0
+                or job_seconds != _num(finding.get("runtime_loader_job_s"))
+                or seconds is None
+                or seconds > job_seconds
+                or seconds / job_seconds < _VR_OPT106_MIN_JOB_SHARE):
+            failures.append(f"{fid} does not retain a qualifying share of its measured job wall")
+        if (str(fact.get("fix_key") or "") != "runtime-ts-transpilation"
+                or not str(fact.get("loader") or "")
+                or not str(fact.get("profile_artifact") or "").endswith(".cpuprofile")
+                or not re.fullmatch(r"[0-9a-f]{64}",
+                                    str(fact.get("profile_sha256") or ""))):
+            failures.append(f"{fid} lacks the runtime-loader leaf identity")
+        wall = _num(finding.get("wall_clock_p50_s"))
+        if seconds is not None and (wall is None or wall < 0 or wall > seconds):
+            failures.append(f"{fid} wall-clock credit exceeds its profiled loader ceiling")
+        runs = finding.get("workflow_runs_30d")
+        runner_min = _num(finding.get("runner_min_saving"))
+        if (isinstance(runs, int) and runs > 0 and seconds is not None
+                and (runner_min is None or runner_min < 0
+                     or runner_min > round(seconds * runs / 60.0, 1))):
+            failures.append(f"{fid} runner-minute credit exceeds its profiled loader ceiling")
+    return Check(name, not failures,
+                 f"{len(findings)} OPT106 finding(s) retain measured loader provenance"
+                 if not failures else "; ".join(failures[:8]))
+
+
 def _vr_declared_timelines(data: dict, findings_path: Path | None
                            ) -> tuple[bool, list[Path], list[tuple[str, dict | None, str]]]:
     """`(bundle_present, dirs_tried, [(who, timeline | None, why_unreadable)])` for every
@@ -15493,6 +15921,9 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "playwright-parallel": "test",
     "pytest-no-xdist": "test",
     "per-invocation-startup": "test",
+    "per-item-build-startup": "build",
+    "per-item-scan-startup": "scan",
+    "per-case-worker-pool-startup": "test",
     "test-isolated-serial": "test",
     "test-loop-serial": "test",
     "vendored-lib-build": "build",
@@ -15505,6 +15936,7 @@ _VR_LEAF_STEP_CATEGORY: dict[str, str | frozenset[str]] = {
     "android-emulator-shard": "test",
     "gradle-test-parallelism": "test",
     "lighthouse-serial-audits": frozenset({"scan", "test"}),
+    "runtime-ts-transpilation": frozenset({"scan", "test"}),
     "eslint-no-cache": "scan",
     "turbo-remote-cache": "build",
     "turbo-partial-cache": "build",
@@ -16103,6 +16535,23 @@ _BACKTICK_SPAN_RE = re.compile(r"`[^`]*`")
 _VR_OPT81_MIN_SAMPLES_PER_LABEL = 8
 _VR_OPT81_MIN_GAP_S = 30.0
 _VR_OPT81_MIN_GAP_FRAC = 0.25
+_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL = 5
+_VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC = 0.05
+# The 2026-07-20 rule: ci-speedup never prices a runner. A measured downsize states
+# its runner-cost saving unsized, with this reason (mirrors collect_runs and
+# blocking_path, pinned by a coupling test), and no surface of it may carry a
+# price ratio, a rate source or a currency figure.
+_VR_OPT81_DOWNSIZE_SAME_SPEED = (
+    "same speed on a smaller runner size: about the same runner-minutes, billed at "
+    "the smaller size's lower rate")
+_VR_OPT81_DOWNSIZE_UNSIZED_REASON = (
+    "ci-speedup does not price runners; the smaller size bills at a lower "
+    "per-minute rate")
+_VR_OPT81_DOWNSIZE_COST_EFFECT = (
+    f"runner-cost saving: unsized ({_VR_OPT81_DOWNSIZE_UNSIZED_REASON})")
+_VR_OPT81_PRICING_RE = re.compile(
+    r"price[ _]ratio|rate ratio|rate card|runner_cost_frac|price_source|price_read|"
+    r"actions-runner-pricing|docs\.github\.com/en/billing|\$\s?\d|\d\s?USD", re.I)
 _VR_OPT81_COVERED_FRAC = 0.5
 _VR_OPT81_CACHE_LEVER_MIN_S = 30.0
 _VR_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
@@ -16151,6 +16600,9 @@ _VR_OPT81_LOG_CHECKED = "no log-level lever matched this pole's log"
 # The A1 card's runner-minute line may state only that the effect is unknown: a
 # different runner class bills differently and the audit carries no rate table.
 _VR_OPT81_RUNNER_MIN_LINE = "**Runner-minute effect:**"
+_VR_OPT81_RUNNER_COST_LINE = "**Runner-cost effect:**"
+
+
 _VR_OPT81_RUNNER_MIN_UNKNOWN = (
     "unknown: a different runner class bills differently and this audit carries no "
     "rate table")
@@ -16169,6 +16621,31 @@ def _vr_opt81_label_arch(tok: str) -> str:
         if rx.search(tok):
             return arch
     return "x64"
+
+
+def _vr_opt81_numeric_size_rank(rc: "tuple[str, str, str, str] | None") -> "int | None":
+    if rc is None or not str(rc[3]).isdigit():
+        return None
+    value = int(rc[3])
+    return value if value > 0 else None
+
+
+_VR_OPT81_DOWNSIZE_PINNED_ROUTE_RE = re.compile(
+    r"(?<![a-z0-9])(pin(ned)?|frozen|freeze|compat(ibility)?|legacy|release[sd]?|"
+    r"publish(ing)?|deploy(s|ment)?)(?![a-z0-9])", re.I)
+
+
+def _vr_opt81_size_stripped_label(label: object) -> "str | None":
+    out: list[str] = []
+    for tok in str(label or "").split():
+        for rx, _cls, _os in _VR_OPT81_RUNNER_CLASSES:
+            m = rx.match(tok)
+            if m:
+                if m.groupdict().get("size"):
+                    tok = tok[:m.start("size")] + "<size>" + tok[m.end("size"):]
+                break
+        out.append(tok.lower())
+    return " ".join(sorted(out)) or None
 
 
 def _vr_opt81_runner_class(label: object) -> "tuple[str, str, str, str] | None":
@@ -16218,6 +16695,8 @@ def _opt81_a1_rederived(f: dict, data: "dict | None" = None) -> list[str]:
     given and carries it) `per_workflow_timing[wf].job_runner[job]`."""
     fid = str(f.get("id") or "?")
     fr = _as_dict(f.get("faster_runner"))
+    if fr.get("kind") == "opt81_downsize":
+        return _opt81_downsize_rederived(f)
     out: list[str] = []
     rows = [r for r in _as_list(fr.get("rows")) if isinstance(r, dict)]
     by_label: dict[str, list[dict]] = {}
@@ -16349,6 +16828,119 @@ def _opt81_a1_rederived(f: dict, data: "dict | None" = None) -> list[str]:
     return out
 
 
+def _opt81_downsize_rederived(f: dict) -> list[str]:
+    """Re-derive the measured smaller-runner comparison from its stamped rows."""
+    fid = str(f.get("id") or "?")
+    fr = _as_dict(f.get("faster_runner"))
+    out: list[str] = []
+    rows = [r for r in _as_list(fr.get("rows")) if isinstance(r, dict)]
+    by_label: dict[str, list[dict]] = {}
+    for row in rows:
+        by_label.setdefault(str(row.get("label") or ""), []).append(row)
+    large, small = _as_dict(fr.get("large")), _as_dict(fr.get("small"))
+    ll, sl = str(large.get("label") or ""), str(small.get("label") or "")
+    if set(by_label) != {ll, sl} or ll == sl:
+        return [f"OPT81 {fid}: the stamped rows carry labels {sorted(by_label)}, not "
+                f"the large and small labels `{ll}` and `{sl}`"]
+
+    stats: dict[str, tuple[float, tuple]] = {}
+    for side, label, stamp in (("large", ll, large), ("small", sl, small)):
+        durations = [_num(row.get("duration_s")) for row in by_label[label]]
+        if any(value is None or value <= 0 for value in durations):
+            out.append(f"OPT81 {fid}: a `{label}` row has no positive duration")
+            continue
+        n = len(durations)
+        if n < _VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL:
+            out.append(f"OPT81 {fid}: `{label}` has {n} sample(s), below the "
+                       f"{_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL} required")
+        if stamp.get("n") != n:
+            out.append(f"OPT81 {fid}: {side} n is {stamp.get('n')!r}, rows give {n}")
+        median = round(_vr_percentile([float(value) for value in durations], 50), 1)
+        if abs((_num(stamp.get("p50_s")) or -1.0) - median) > 0.05:
+            out.append(f"OPT81 {fid}: {side} p50_s does not re-derive ({median})")
+        rc = _vr_opt81_runner_class(label)
+        if rc is None:
+            out.append(f"OPT81 {fid}: `{label}` cannot be classified")
+            continue
+        if (stamp.get("class"), stamp.get("os"), stamp.get("arch"),
+                stamp.get("size")) != rc:
+            out.append(f"OPT81 {fid}: {side} runner classification does not re-derive")
+        stats[side] = (median, rc)
+    if out or set(stats) != {"large", "small"}:
+        return out
+
+    large_p50, large_rc = stats["large"]
+    small_p50, small_rc = stats["small"]
+    large_rank, small_rank = (_vr_opt81_numeric_size_rank(large_rc),
+                              _vr_opt81_numeric_size_rank(small_rc))
+    if (large_rc[:3] != small_rc[:3] or large_rank is None or small_rank is None
+            or small_rank >= large_rank):
+        out.append(f"OPT81 {fid}: labels are not two explicit ascending sizes of one "
+                   "runner class and platform")
+    if fr.get("runner_matrix"):
+        out.append(f"OPT81 {fid}: a size matrix (both sizes in every run) is never a "
+                   "downsize candidate")
+    if _vr_opt81_size_stripped_label(ll) != _vr_opt81_size_stripped_label(sl):
+        out.append(f"OPT81 {fid}: `{ll}` and `{sl}` are two images, not two sizes of "
+                   "one image")
+    if _VR_OPT81_DOWNSIZE_PINNED_ROUTE_RE.search(str(fr.get("job") or "")) or \
+            _VR_OPT81_DOWNSIZE_PINNED_ROUTE_RE.search(
+                str(fr.get("workflow_file") or "").rsplit("/", 1)[-1]):
+        out.append(f"OPT81 {fid}: a pinned, frozen, compatibility or release route "
+                   "is never a downsize candidate")
+    if fr.get("large_size_rank") != large_rank or fr.get("small_size_rank") != small_rank:
+        out.append(f"OPT81 {fid}: stamped runner size ranks do not re-derive")
+    delta_frac = ((small_p50 - large_p50) / large_p50
+                  if large_p50 > 0 else float("inf"))
+    if abs(delta_frac) > _VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC + 0.00005:
+        out.append(f"OPT81 {fid}: the smaller runner is {delta_frac:.1%} apart, above "
+                   f"the {_VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC:.0%} limit")
+    if abs((_num(fr.get("slowdown_frac")) or 0.0) - round(delta_frac, 4)) > 0.00005:
+        out.append(f"OPT81 {fid}: slowdown_frac does not re-derive")
+    if _num(fr.get("max_abs_delta_frac")) != _VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC:
+        out.append(f"OPT81 {fid}: max_abs_delta_frac is not the verifier's limit")
+    if _num(fr.get("min_samples_per_label")) != \
+            float(_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL):
+        out.append(f"OPT81 {fid}: min_samples_per_label is not the verifier's limit")
+
+    names = [str(name) for name in _as_list(fr.get("step_names"))]
+    sha = _vr_opt81_step_sha(names)
+    if fr.get("step_list_sha") != sha or any(
+            row.get("step_list_sha") != sha for row in rows):
+        out.append(f"OPT81 {fid}: compared runs did not execute the same stamped steps")
+
+    effect = _as_dict(f.get("runner_cost_effect"))
+    if effect != {"direction": "unsized", "reason": _VR_OPT81_DOWNSIZE_UNSIZED_REASON}:
+        out.append(f"OPT81 {fid}: a downsize's runner-cost effect must be unsized "
+                   f"(\"{_VR_OPT81_DOWNSIZE_UNSIZED_REASON}\"), never a price or a "
+                   f"sized fraction ({effect!r})")
+    if f.get("runner_min_unsized_reason") != _VR_OPT81_DOWNSIZE_UNSIZED_REASON:
+        out.append(f"OPT81 {fid}: runner_min_unsized_reason is missing or altered, so "
+                   "the group heading would read `no bill saving`")
+    for field in ("evidence", "size_note"):
+        text = str(f.get(field) or "")
+        if _VR_OPT81_DOWNSIZE_COST_EFFECT not in text:
+            out.append(f"OPT81 {fid}: its {field} does not state "
+                       f"\"{_VR_OPT81_DOWNSIZE_COST_EFFECT}\"")
+    if _VR_OPT81_DOWNSIZE_SAME_SPEED not in str(f.get("evidence") or "").lower():
+        out.append(f"OPT81 {fid}: its evidence does not state "
+                   f"\"{_VR_OPT81_DOWNSIZE_SAME_SPEED}\"")
+    m = _VR_OPT81_PRICING_RE.search(json.dumps(f, sort_keys=True, default=str))
+    if m:
+        out.append(f"OPT81 {fid}: a downsize finding carries a price (`{m.group(0)}`); "
+                   "ci-speedup never prices a runner")
+    if _as_dict(fr.get("runner_cost_effect")) != effect:
+        out.append(f"OPT81 {fid}: the stamped runner-cost effects disagree")
+    if "runner_minute_effect" in f or "runner_minute_effect" in fr:
+        out.append(f"OPT81 {fid}: downsize advice states a runner-minute effect; its "
+                   "saving is a runner-cost (price) difference")
+    if (_num(f.get("wall_clock_p50_s")) or 0.0) != 0.0:
+        out.append(f"OPT81 {fid}: downsize advice must not credit merge wait")
+    if f.get("runner_min_saving") is not None:
+        out.append(f"OPT81 {fid}: downsize advice carries a monthly runner-minute claim")
+    return out
+
+
 def _opt81_a2_rederived(f: dict, data: dict) -> list[str]:
     """An A2 advisory carries no number, and gate (d) holds on the findings doc."""
     fid = str(f.get("id") or "?")
@@ -16433,6 +17025,9 @@ def check_opt81_runner_comparison_rederived(report: str,
         return Check(name, True, err, skipped=True)
     found = [f for f in _as_list(data.get("findings"))
              if isinstance(f, dict) and f.get("pattern") == "OPT81"]
+    if "<!-- ci-speedup:bmf enabled=false " in report:
+        found = [f for f in found
+                 if _as_dict(f.get("faster_runner")).get("kind") == "opt81_downsize"]
     if not found:
         if '<a id="opt81-' in report:
             return Check(name, False, "the report renders an OPT81 card, but the run "
@@ -16465,17 +17060,37 @@ def check_opt81_runner_comparison_rederived(report: str,
         if not held and _VR_OPT81_DISCLOSURE not in fence:
             bad.append(f"OPT81 {fid}: its agent prompt does not carry the disclosure line")
         if half == "A1":
-            s, q = _as_dict(fr.get("slow")), _as_dict(fr.get("fast"))
+            downsize = fr.get("kind") == "opt81_downsize"
+            s = _as_dict(fr.get("large") if downsize else fr.get("slow"))
+            q = _as_dict(fr.get("small") if downsize else fr.get("fast"))
             for st in (s, q):
                 want = f"at p50 {(_num(st.get('p50_s')) or 0):.0f}s"
                 if want not in block:
                     bad.append(f"OPT81 {fid}: the card does not state `{want}` for "
                                f"`{st.get('label')}`")
-            rm_lines = [ln for ln in card.splitlines() if _VR_OPT81_RUNNER_MIN_LINE in ln]
-            if len(rm_lines) != 1 or rm_lines[0].split(_VR_OPT81_RUNNER_MIN_LINE, 1)[1] \
-                    .strip() != f"{_VR_OPT81_RUNNER_MIN_UNKNOWN}.":
-                bad.append(f"OPT81 {fid}: the A1 card's runner-minute line must say only "
-                           f"\"{_VR_OPT81_RUNNER_MIN_UNKNOWN}\" ({rm_lines!r})")
+            line_key = (_VR_OPT81_RUNNER_COST_LINE if downsize
+                        else _VR_OPT81_RUNNER_MIN_LINE)
+            rm_lines = [ln for ln in card.splitlines() if line_key in ln]
+            if downsize:
+                want_effect = f"{_VR_OPT81_DOWNSIZE_COST_EFFECT}."
+                pm = _VR_OPT81_PRICING_RE.search(block)
+                if pm:
+                    bad.append(f"OPT81 {fid}: the downsize card or prompt carries a "
+                               f"price (`{pm.group(0)}`); ci-speedup never prices a "
+                               "runner")
+                if _VR_OPT81_DOWNSIZE_SAME_SPEED not in card.lower():
+                    bad.append(f"OPT81 {fid}: the downsize card does not state "
+                               f"\"{_VR_OPT81_DOWNSIZE_SAME_SPEED}\"")
+                if any(_VR_OPT81_RUNNER_MIN_LINE in ln for ln in card.splitlines()):
+                    bad.append(f"OPT81 {fid}: the downsize card states a runner-minute "
+                               "effect; its saving is a runner-cost difference")
+            else:
+                want_effect = f"{_VR_OPT81_RUNNER_MIN_UNKNOWN}."
+            if len(rm_lines) != 1 or rm_lines[0].split(line_key, 1)[1] \
+                    .strip() != want_effect:
+                bad.append(f"OPT81 {fid}: the A1 card's "
+                           f"{'runner-cost' if downsize else 'runner-minute'} line must say only "
+                           f"\"{want_effect}\" ({rm_lines!r})")
         elif not held:
             if _VR_OPT81_INSTALL_SENTENCE not in block:
                 bad.append(f"OPT81 {fid}: the A2 recipe omits the app-install prerequisite")
@@ -16637,6 +17252,24 @@ def check_default_branch_push_lane_isolated(
                 and not (push_route and f"**Catalog route:** {pattern}." in block)):
             failures.append(
                 f"report omits the static finding group's {label} tag")
+
+    # A post-merge finding whose saving is real but its monthly figure unsized
+    # (OPT107 without a readable 30-day push count) says so; its group heading
+    # never reads as "no bill saving".
+    # A default report holds minute-adding levers back, so their group never renders.
+    held_back = "<!-- ci-speedup:bmf enabled=false " in report
+    unsized_patterns = sorted({
+        str(f.get("pattern") or "")
+        for f in _as_list(data.get("findings"))
+        if isinstance(f, dict) and f.get("runner_min_unsized_reason")
+        and not _num(f.get("runner_min_saving"))
+        and not (held_back and _vr_bmf_held_back(f))
+    } - {""})
+    for pattern in unsized_patterns:
+        if any(line.startswith(f"<summary><strong>{pattern} - ")
+               and "no bill saving" in line for line in report.splitlines()):
+            failures.append(f"{pattern} group heading reads `no bill saving` for an "
+                            "unsized saving")
 
     cap = int(_num(lane.get("sample_cap")) or 0)
     sampled = int(_num(lane.get("sampled_push_count")) or 0)
@@ -17082,10 +17715,20 @@ def check_wall_clock_runner_minute_effects(
         pattern = str(finding.get("pattern") or "")
         if pattern not in {"OPT24", "OPT25"}:
             continue
+        if finding.get("positional_splitter_static"):
+            continue  # reassigns tests within existing shard jobs; adds no job
         effect = _as_dict(finding.get("runner_minute_effect"))
         if not effect and not effect_schema:
             continue  # legacy recorded artifact predating signed-effect stamps
         direction = effect.get("direction")
+        if direction == "neutral" and pattern == "OPT25":
+            # Rebalancing moves work between the legs that already run; only the
+            # split-the-slow-leg case adds a job (`opt25_case`).
+            if finding.get("opt25_case") == "split-leg":
+                failures.append("OPT25 split-leg adds a job but is stamped neutral")
+            elif not str(effect.get("reason") or "").strip():
+                failures.append("OPT25 neutral effect has no reason")
+            continue
         if direction not in {"added_cost", "unsized"}:
             failures.append(f"{pattern} has no signed or explicitly unsized effect")
             continue
@@ -17288,11 +17931,14 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
     share_p50 = statistics.median(share_values) if share_values else 0.0
     displayed_work = max(wall_p50 - min(queue_p50, wall_p50), 0.0)
     credited_work = min(work_p50, displayed_work)
-    for key, expected in (("work_p50_s", work_p50),
-                          ("queue_p50_s", queue_p50),
-                          ("p50_s", wall_p50),
-                          ("queue_share_p50", share_p50),
-                          ("n", float(len(work_values)))):
+    expected_aggregates = (() if clock.get("representative") is False else (
+        ("work_p50_s", work_p50),
+        ("queue_p50_s", queue_p50),
+        ("p50_s", wall_p50),
+        ("queue_share_p50", share_p50),
+        ("n", float(len(work_values))),
+    ))
+    for key, expected in expected_aggregates:
         try:
             stamped = float(clock.get(key))
         except (TypeError, ValueError):
@@ -17315,13 +17961,14 @@ def check_commit_queue_work_credit(report: str, findings_path: Path | None,
         if (saving > 0 and not finding.get("off_spine")
                 and not finding.get("advisory") and not finding.get("spine_rare")):
             code_savings.append(saving)
-        if saving > credited_work + 0.11:
+        if (clock.get("representative") is not False
+                and saving > credited_work + 0.11):
             bad_credit.append(
                 f"{finding.get('id') or finding.get('pattern') or '?'} credits "
                 f"{saving:g}s above {credited_work:g}s work on the typical full wait")
 
     text_failures: list[str] = []
-    if queue_p50 > 0:
+    if queue_p50 > 0 and clock.get("representative") is not False:
         bottom = next((line for line in report.splitlines()
                        if line.startswith("> **Bottom line.**")), "")
         if _fmt_clock(wall_p50) not in bottom:
@@ -17510,6 +18157,203 @@ def check_queue_runner_label_evidence(report: str,
         else f"{len(findings)} OPT43 runner-label finding(s) match their stamps")
 
 
+# ---- Unsized runner-minute saving vs the "no bill saving" heading ----------
+#
+# The rule. A finding's runner-minute effect is in exactly one of three states:
+#
+#   * SIZED: `runner_min_saving` is a number. A positive number renders as the
+#     monthly figure; zero means the sizing concluded the fix removes no compute.
+#   * NO EFFECT: `runner_min_saving` is None but the finding carries a non-empty
+#     `runner_min_no_effect_reason` naming why the fix removes no compute (moving
+#     the same work between shards, removing a `needs:` edge, a measured zero
+#     path-filter hit rate).
+#   * UNSIZED: anything else. The saving may be real, but nothing measured it, so
+#     the finding must carry a literally true `runner_min_unsized_reason` and its
+#     group heading reads `runner-minute saving: unsized (<reason>)`.
+#
+# "no bill saving" is a claim that the fix removes no compute. It is true only for
+# a SIZED-to-zero or NO-EFFECT finding, so a group heading that says it while any
+# member is UNSIZED misstates a real but unsized saving. The converse holds for the
+# rendered unsized statement itself: "runner-minute saving: unsized (...)" followed
+# by "roughly neutral" (or "no bill saving") tells the reader both that a saving
+# exists and that it does not. A finding whose effect is neutral is NO EFFECT and
+# says so plainly; an UNSIZED one names what is unmeasured.
+_VR_NO_BILL_SAVING = "no bill saving"
+_VR_GROUP_HEADING_RE = re.compile(r"^<summary><strong>(OPT\d+) - ")
+_VR_UNSIZED_STATEMENT_RE = re.compile(r"runner-minute saving:? unsized\b(?P<rest>.*)$",
+                                      re.IGNORECASE)
+_VR_NO_EFFECT_CLAIM_RE = re.compile(
+    r"\bneutral\b|\bno bill saving\b|\bno runner-minute saving\b", re.IGNORECASE)
+
+
+def runner_min_effect_unsized(finding: dict) -> bool:
+    """True when the finding's runner-minute effect is UNSIZED (see the rule)."""
+    rm = finding.get("runner_min_saving")
+    if isinstance(rm, (int, float)) and not isinstance(rm, bool):
+        return False
+    return not str(finding.get("runner_min_no_effect_reason") or "").strip()
+
+
+def no_bill_heading_violations(findings: list, report: str) -> list[str]:
+    """Every rendered group heading that reads "no bill saving" while a non-advisory
+    finding of that pattern is UNSIZED. Pure: findings + report text in, problems out."""
+    by_pattern: dict[str, list[dict]] = {}
+    for f in findings:
+        if isinstance(f, dict) and not f.get("advisory"):
+            by_pattern.setdefault(str(f.get("pattern") or ""), []).append(f)
+    out: list[str] = []
+    for line in report.splitlines():
+        m = _VR_GROUP_HEADING_RE.match(line)
+        if not m or _VR_NO_BILL_SAVING not in line:
+            continue
+        unsized = [f for f in by_pattern.get(m.group(1), [])
+                   if runner_min_effect_unsized(f)]
+        if unsized:
+            fid = unsized[0].get("id") or "?"
+            reason = str(unsized[0].get("runner_min_unsized_reason") or "").strip()
+            out.append(f"{m.group(1)} group heading reads `no bill saving` but "
+                       f"finding {fid} is unsized "
+                       + (f"({reason})" if reason else
+                          "and carries no runner_min_unsized_reason"))
+    return out
+
+
+def unsized_statement_violations(report: str) -> list[str]:
+    """Every rendered "runner-minute saving: unsized" statement that, on the same
+    line, also claims the effect is neutral or absent. Pure: report text in."""
+    out: list[str] = []
+    for line in report.splitlines():
+        m = _VR_UNSIZED_STATEMENT_RE.search(line)
+        if m and _VR_NO_EFFECT_CLAIM_RE.search(m.group("rest")):
+            out.append("an unsized runner-minute saving is also described as neutral "
+                       f"or absent: {line.strip()[:160]}")
+    return out
+
+
+def check_no_bill_heading_for_unsized_saving(report: str, findings_path) -> Check:
+    name = "an unsized runner-minute saving never reads `no bill saving` or neutral"
+    try:
+        data = json.loads(Path(findings_path).read_text())
+    except (OSError, TypeError, ValueError):
+        return Check(name, True, "findings JSON unavailable", skipped=True)
+    findings = _as_list(_as_dict(data).get("findings"))
+    problems = (no_bill_heading_violations(findings, report)
+                + unsized_statement_violations(report))
+    return Check(name, not problems, "; ".join(problems[:8]) if problems
+                 else f"{len(findings)} finding(s): no unsized saving reads `no bill saving`")
+
+
+_VR_BMF_MARKER_RE = re.compile(
+    r"<!-- ci-speedup:bmf enabled=(true|false) held=(\d+) -->")
+
+
+def _vr_bmf_held_back(finding: dict) -> bool:
+    """Independent copy of the engine's enumerated minute-adding mechanisms."""
+    effect = _as_dict(finding.get("runner_minute_effect"))
+    direction = str(effect.get("direction") or "").lower()
+    per_run = _num(effect.get("runner_min_per_run"))
+    per_month = _num(effect.get("runner_min_per_month"))
+    if direction in {"added", "added_cost", "cost", "increase"}:
+        return True
+    if ((per_run is not None and per_run > 0)
+            or (per_month is not None and per_month > 0)):
+        return direction not in {"saving", "saved", "neutral"}
+    pattern = str(finding.get("pattern") or "")
+    if pattern in {"OPT24", "OPT97"}:
+        return True
+    if pattern == "OPT83":
+        return _as_dict(finding.get("independent_steps")).get("kind") == "opt83_separate_jobs"
+    if pattern == "OPT81":
+        return _as_dict(finding.get("faster_runner")).get("kind") != "opt81_downsize"
+    if pattern == "OPT25":
+        case = finding.get("opt25_case")
+        if case is None:
+            return str(finding.get("title") or "") == "Matrix Leg Imbalance"
+        return case == "split-leg"
+    if pattern == "OPT21":
+        extra = _num(_as_dict(finding.get("opt21_edge_sizing")).get(
+            "extra_runner_min_per_run"))
+        return extra is not None and extra > 0
+    return False
+
+
+# Log leaves whose catalog remedy adds jobs, shards or runners; mirrors
+# blocking_path's `_BMF_LEAF_DEFAULTS` keys. In a default report their prompt's
+# DELIVER line may not split the work across jobs, runners or a matrix.
+_VR_BMF_HELD_LEAVES = frozenset({
+    "cargo-test-shard", "android-emulator-shard", "playwright-parallel",
+    "pytest-no-xdist", "benchmark-serial-reruns", "gradle-test-parallelism",
+    "lighthouse-serial-audits",
+})
+_VR_BMF_CROSS_JOB_RE = re.compile(
+    r"(?i)\b(?:shard|split|parallelis|parallelliz|spread|move)\w*\b[^.;]*"
+    r"\b(?:jobs?|runners?|matrix|emulators)\b")
+_VR_BMF_DELIVER_RE = re.compile(r"\nDELIVER & VERIFY\n((?:- .*\n?)+)")
+
+
+def _vr_bmf_disclosure(count: int) -> str:
+    if count == 1:
+        return ("1 wall-clock lever held back because it adds runner minutes or "
+                "changes to an unpriced runner; rerun with `--bmf` to show it.")
+    return (f"{count} wall-clock levers held back because they add runner minutes or "
+            "change to an unpriced runner; rerun with `--bmf` to show them.")
+
+
+def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
+    name = "default report holds back runner-minute-adding wall-clock levers"
+    markers = list(_VR_BMF_MARKER_RE.finditer(report))
+    try:
+        data = json.loads(Path(findings_path).read_text())
+    except (OSError, TypeError, ValueError):
+        data = None
+    held = ([f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and _vr_bmf_held_back(f)]
+            if data is not None else [])
+    if not markers:
+        if held:
+            return Check(name, False, f"{len(held)} lever(s) the default mode holds back, "
+                         "but the report carries no bmf mode marker")
+        return Check(name, True, "legacy report has no bmf mode marker", skipped=True)
+    if len(markers) != 1:
+        return Check(name, False, f"expected one bmf mode marker, found {len(markers)}")
+    if data is None:
+        return Check(name, True, "findings JSON unavailable", skipped=True)
+    enabled = markers[0].group(1) == "true"
+    stamped = int(markers[0].group(2))
+    leaves = [key for key in _VR_LEAF_CROWN_RE.findall(report)
+              if key in _VR_BMF_HELD_LEAVES]
+    expected = 0 if enabled else len(held) + len(leaves)
+    bad = []
+    if stamped != expected:
+        bad.append(f"marker says {stamped} held, expected {expected}")
+    if expected and report.count(_vr_bmf_disclosure(expected)) != 1:
+        bad.append("the one-line held-back disclosure is missing or duplicated")
+    if not enabled:
+        for f in held:
+            fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(f.get("id") or "x"))
+            pattern = str(f.get("pattern") or "")
+            if pattern == "OPT83" and f'<a id="opt83-{fid}"></a>' in report:
+                bad.append(f"held OPT83 {fid} still renders a recommendation card")
+            if pattern == "OPT81" and f'<a id="opt81-{fid}"></a>' in report:
+                bad.append(f"held OPT81 {fid} still renders a recommendation card")
+            evidence = str(f.get("evidence") or "").strip()
+            if len(evidence) >= 40 and evidence in report:
+                bad.append(f"held {pattern} {fid} still renders its evidence")
+        for pattern in ("OPT24", "OPT97"):
+            if (any(str(f.get("pattern")) == pattern for f in held)
+                    and f"<strong>{pattern} - " in report):
+                bad.append(f"held {pattern} still renders a recommendation card")
+        for match in _VR_BMF_DELIVER_RE.finditer(report):
+            # A sentence that names `--bmf` is the held-back notice itself.
+            for sentence in re.split(r"(?<=[.;])\s+", match.group(1)):
+                if _VR_BMF_CROSS_JOB_RE.search(sentence) and "`--bmf`" not in sentence:
+                    bad.append("a default prompt delivers a cross-job split: "
+                               + sentence.strip()[:80])
+    return Check(name, not bad, "; ".join(bad) if bad else
+                 ("--bmf recommendations enabled" if enabled
+                  else f"{expected} runner-minute-adding lever(s) held back"))
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -17524,6 +18368,8 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_measured_cause_matches_rendered_timeline(report),
         check_skip_family_prompts_carry_pending_caveat(report),
         check_also_noticed_count_honest(report),
+        check_no_bill_heading_for_unsized_saving(report, findings_path),
+        check_bmf_runner_minute_filter(report, findings_path),
         check_coverage_disclosed(report, findings_path),
         check_pr_sample_stop_reason(report, findings_path),
         check_run_list_gaps_named(report, findings_path),
@@ -17539,6 +18385,8 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_rendered_patterns_exist(report, findings_path),
         check_windows_setup_guidance(report, findings_path),
         check_data_driven_have_signal(findings_path),
+        check_opt13_build_in_script_provenance(findings_path),
+        check_opt106_runtime_loader_provenance(findings_path),
         check_speed_poles_complete(report, findings_path),
         check_aggregation_gate_poles_never_prescribe(report, findings_path),
         check_pole_drill_belongs_to_its_job(report, findings_path),
@@ -17576,6 +18424,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_tier2_headline_matches_stamp(report, findings_path, report_path),
         check_tier2_savings_rows_backed_by_cost_spine(report, findings_path),
         check_opt64_minimum_sample(report, findings_path),
+        check_opt108_comment_saving_rederived(report, findings_path),
         check_runner_minute_spine_contract(report, findings_path),
         check_cost_spine_contents_count_matches_table(report, findings_path),
         check_cost_spine_runner_host_split(report, findings_path),

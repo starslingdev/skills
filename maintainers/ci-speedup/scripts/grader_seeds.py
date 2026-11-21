@@ -56,7 +56,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 94 AUTO_SEED / 1 EXCLUDE /
+# name is in the trailing comment for cross-reference with spec §2-A. 101 AUTO_SEED / 1 EXCLUDE /
 # 3 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
@@ -72,6 +72,8 @@ TRIAGE_ALLOWLIST = {
     "wall-clock fixes state a signed runner-minute effect": AUTO_SEED,                             # check_wall_clock_runner_minute_effects
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": AUTO_SEED,  # check_measured_cause_matches_rendered_timeline
     "TOC 'Also noticed' count == appendix rows + hidden pointer": AUTO_SEED,                        # check_also_noticed_count_honest
+    "an unsized runner-minute saving never reads `no bill saving` or neutral": AUTO_SEED,  # check_no_bill_heading_for_unsized_saving
+    "default report holds back runner-minute-adding wall-clock levers": AUTO_SEED,
     "data basis disclosed; coverage gaps named, not silent": AUTO_SEED,                             # check_coverage_disclosed
     "PR gate sample stop reason matches its bounded collection facts": AUTO_SEED,                  # check_pr_sample_stop_reason
     "workflows missing from the sample are NAMED in the report": AUTO_SEED,                         # check_run_list_gaps_named
@@ -82,6 +84,8 @@ TRIAGE_ALLOWLIST = {
     "every rendered finding pattern exists in the findings JSON": AUTO_SEED,                        # check_rendered_patterns_exist
     "Windows setup benchmark pointers match their measured OPT72 card": AUTO_SEED,
     "every data-driven finding carries a measured signal (no unsupported claims)": AUTO_SEED,       # check_data_driven_have_signal
+    "OPT13 build-in-script findings retain measured safety provenance": AUTO_SEED,
+    "OPT106 runtime-loader findings retain measured pole provenance": AUTO_SEED,
     "report drills every gating pole, each with a hand-off prompt": AUTO_SEED,                      # check_speed_poles_complete
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": AUTO_SEED,    # check_aggregation_gate_poles_never_prescribe
     "each rendered pole's drill belongs to its own job (no cross-job log leak)": AUTO_SEED,         # check_pole_drill_belongs_to_its_job
@@ -149,6 +153,7 @@ TRIAGE_ALLOWLIST = {
     "Tier-2 headline claim names the top stamped finding": AUTO_SEED,                             # check_tier2_headline_matches_stamp
     "Tier-2 savings rows are backed by runner-minute cost spine": AUTO_SEED,                      # check_tier2_savings_rows_backed_by_cost_spine
     "OPT64 is ranked only on enough retried runs": AUTO_SEED,                                     # check_opt64_minimum_sample
+    "OPT108 comment-run saving re-derives and stays within measured compute": AUTO_SEED,       # check_opt108_comment_saving_rederived
     "runner-minute cost spine source block is re-derivable": AUTO_SEED,                           # check_runner_minute_spine_contract
     "cost-spine Contents count matches the rows the table shows": AUTO_SEED,                      # check_cost_spine_contents_count_matches_table
     "cost spine names the minutes on runners GitHub does not host": AUTO_SEED,                    # check_cost_spine_runner_host_split
@@ -203,6 +208,8 @@ CHECK_CLASS = {
     "wall-clock fixes state a signed runner-minute effect": "fabricated-or-unsupported-finding",  # a signed cost/saving fails to re-derive, or the axis silently reads as zero
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": "fabricated-or-unsupported-finding",  # a canned cause asserts a timeline shape the report contradicts
     "TOC 'Also noticed' count == appendix rows + hidden pointer": "fabricated-or-unsupported-finding",  # a rendered count not backed by the data
+    "an unsized runner-minute saving never reads `no bill saving` or neutral": "fabricated-or-unsupported-finding",  # a "no bill saving" claim the finding's own sizing does not support
+    "default report holds back runner-minute-adding wall-clock levers": "fabricated-or-unsupported-finding",
     "data basis disclosed; coverage gaps named, not silent": "coverage-gap-dead-end",     # exact match (the spec's own no-silent-drop framing)
     "PR gate sample stop reason matches its bounded collection facts": "coverage-gap-dead-end",  # the stated sampling boundary disagrees with its collection facts
     "workflows missing from the sample are NAMED in the report": "coverage-gap-dead-end",  # a workflow that vanished from the sample rendering as measured
@@ -213,6 +220,8 @@ CHECK_CLASS = {
     "every rendered finding pattern exists in the findings JSON": "fabricated-or-unsupported-finding",  # rendered claim not backed by findings
     "Windows setup benchmark pointers match their measured OPT72 card": "fabricated-or-unsupported-finding",
     "every data-driven finding carries a measured signal (no unsupported claims)": "estimated-not-measured",  # exact match
+    "OPT13 build-in-script findings retain measured safety provenance": "fabricated-or-unsupported-finding",
+    "OPT106 runtime-loader findings retain measured pole provenance": "fabricated-or-unsupported-finding",
     "report drills every gating pole, each with a hand-off prompt": "missing-second-pole-or-finding",  # a required pole/finding is missing
     "aggregation-gate poles tell the upstream story, never an optimize-this prompt": "prescribed-a-fix",  # an "optimize this step" prompt over a `needs:`-only success sink that runs no work
     "each rendered pole's drill belongs to its own job (no cross-job log leak)": "fabricated-or-unsupported-finding",  # a drill misattributed to the wrong job's evidence
@@ -279,6 +288,7 @@ CHECK_CLASS = {
     "Tier-2 headline claim names the top stamped finding": "mis-ranked-lever",  # top bill-axis claim names the wrong ranked row
     "Tier-2 savings rows are backed by runner-minute cost spine": "fabricated-or-unsupported-finding",  # rendered savings rows not backed by cost-spine rows
     "OPT64 is ranked only on enough retried runs": "fabricated-or-unsupported-finding",  # a ranked retry saving resting on too few retried runs, or on a flaky retry
+    "OPT108 comment-run saving re-derives and stays within measured compute": "fabricated-or-unsupported-finding",  # a comment-run saving the stamped short-run sample does not re-derive, above the workflow's measured compute, or carrying wall-clock credit
     "runner-minute cost spine source block is re-derivable": "fabricated-or-unsupported-finding",  # cost-spine source rows/totals not backed by rates/stamps
     "cost-spine Contents count matches the rows the table shows": "fabricated-or-unsupported-finding",  # a Contents row count the rendered table does not show
     "cost spine names the minutes on runners GitHub does not host": "unscrubbed-or-disclosure-risk",  # minutes on non-GitHub runners presented as GitHub-billable without the disclosure

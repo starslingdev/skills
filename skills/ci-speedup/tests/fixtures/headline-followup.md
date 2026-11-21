@@ -4,6 +4,8 @@
 
 not measured: lifecycle data was not collected
 
+<!-- ci-speedup:bmf enabled=false held=0 -->
+
 | Repository | `example/project` |
 | :--- | :--- |
 | **Audited commit** | [`abcdef1`](https://github.com/example/project/commit/abcdef1234567890) - file & line references are anchored to this tree |
@@ -76,8 +78,8 @@ THE GATE
 - Workflow `test.yml`, job `tests`.
 - Slowest check a typical PR waits on: P50 10m 00s; its workflow `test.yml` gates 4/4 sampled PRs.
 
-Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
-Runner-minute effect: not sized; extra shard jobs repeat checkout and setup and bill each job.
+Concurrency order: Use OPT88 to measure and fill the existing job's idle cores. Before adding workers, confirm that they cannot interfere through a shared external server.
+Runner-minute effect: roughly level; rebalancing moves the same test work between the legs that already run.
 
 WHERE THE TIME GOES
 - No per-step breakdown was captured for this job; profile its slowest step in the repo.
@@ -134,7 +136,7 @@ DELIVER & VERIFY
 **Where:** `test.yml` (tests)
 **Activity:** not measured.
 **Wall-clock:** unlike the other findings in this section, this one **sits ON the merge-gating critical path** (a long pole) - its catalog fix **cuts developer wall-clock**, it is not a bill-only cleanup. See the spine above and this pattern's catalog recipe below for the remedy.
-**Runner-minute effect: not sized; extra shard jobs repeat checkout and setup and bill each job.**
+**Runner-minute effect: roughly level; rebalancing moves the same test work between the legs that already run.**
 **Evidence:** One shard gates the matrix.
 **Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/abcdef1234567890/skills/ci-speedup/references/optimization-patterns.md
 
@@ -147,8 +149,8 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT25 - Shard imbalance.
 Where: test.yml (tests).
 What ci-speedup saw: One shard gates the matrix.
-Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
-Runner-minute effect: not sized; extra shard jobs repeat checkout and setup and bill each job.
+Concurrency order: Use OPT88 to measure and fill the existing job's idle cores. Before adding workers, confirm that they cannot interfere through a shared external server.
+Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner. Extra shard jobs repeat checkout and setup and bill each job, so this report holds that option back; rerun with `--bmf` to include it.
 Saving: developer WALL-CLOCK (~4m 10s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):

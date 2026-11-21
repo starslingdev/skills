@@ -24,6 +24,7 @@ import copy
 import importlib.util
 import inspect
 import json
+import os
 import re
 import subprocess
 import sys
@@ -821,6 +822,57 @@ def test_spine_heavy_check_disclosure_discriminator(tmp_path: Path):
     # SKIP — no binding floor (the heavy check co-occurs on only a minority of gating PRs).
     sparse = _ceiling_findings(pole="deploy", floor="heavy", n_gating=6, floor_on=2)
     assert _tag_for(rep + _bare_pole_section("deploy"), F, tmp_path, findings=sparse) == "SKIP"
+
+
+def test_spine_floor_tie_verifies_identically_across_hash_seeds(tmp_path: Path):
+    """One byte-identical report must have one verdict under every hash seed.
+
+    The renderer keeps the first equal-duration floor in checks[] order.  The
+    verifier must make the same choice instead of letting set iteration or one
+    PR's measured order decide whether that rendered disclosure passes.
+    """
+    report = _good() + _ceil_floor_note(
+        "deploy", "1m 00s", floor_name="lint", floor_dur="12s")
+    findings = {
+        "pr_critical_path": {
+            "checks": [
+                {"name": "deploy", "p50_s": 600.0,
+                 "workflow_file": ".github/workflows/deploy.yml"},
+                {"name": "lint", "p50_s": 12.0,
+                 "workflow_file": ".github/workflows/lint.yml"},
+                {"name": "tests", "p50_s": 12.0,
+                 "workflow_file": ".github/workflows/tests.yml"},
+            ],
+            "populations": [
+                # This PR's local measurements order the tied-global-p50 floors
+                # opposite to checks[]; the renderer still uses checks[] order.
+                [0.125, [["deploy", 600.0], ["tests", 13.0], ["lint", 11.0]]],
+                *[
+                    [0.125, [["deploy", 600.0], ["lint", 12.0], ["tests", 12.0]]]
+                    for _ in range(7)
+                ],
+            ],
+        }
+    }
+    report_path = tmp_path / "report-2026-11-18.md"
+    findings_path = tmp_path / "findings.json"
+    report_path.write_text(report, encoding="utf-8")
+    findings_path.write_text(json.dumps(findings), encoding="utf-8")
+
+    verdicts = []
+    for seed in range(8):
+        env = dict(os.environ, PYTHONHASHSEED=str(seed))
+        proc = subprocess.run(
+            [sys.executable, str(_VERIFY), "--report", str(report_path),
+             "--findings", str(findings_path)],
+            capture_output=True, text=True, env=env,
+        )
+        matching = [line.split(None, 1)[0] for line in proc.stdout.splitlines()
+                    if _SPINE_DROP in line]
+        assert len(matching) == 1, proc.stdout + proc.stderr
+        verdicts.append(matching[0])
+
+    assert verdicts == ["PASS"] * 8, verdicts
 
 
 def _tag_for(report: str, check_substr: str, tmp_path: Path,
@@ -1841,6 +1893,32 @@ def test_verify_report_does_not_mutate_sys_path_on_import():
     assert [p for p in sys.path if p not in before] == [], (
         "importing verify_report mutated sys.path - a by-path load leaves it alone")
     assert vr.uw is not None, "the sibling untrusted_wrap should still load in a checkout"
+
+
+def test_verify_report_does_not_mutate_an_isolated_process_sys_path():
+    """The import-path invariant must hold without pytest's configured path."""
+    probe = """
+import importlib.util
+import json
+import sys
+
+before = list(sys.path)
+spec = importlib.util.spec_from_file_location("isolated_verify_report", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+print(json.dumps({"before": before, "after": sys.path}))
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(_VERIFY)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    paths = json.loads(result.stdout)
+    assert paths["after"] == paths["before"], (
+        "importing verify_report under -I mutated sys.path")
 
 
 def test_gap_fill_grounding_skips_loudly_without_the_sibling_module(tmp_path: Path):

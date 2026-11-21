@@ -16,31 +16,45 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1] / "golden"
 _REPOSITORIES = {
     "home-assistant-core": (
-        "issue #305 remains open after PR #318's ordering fix",
+        "PR #318 covers the headline; #365 tracks hassfest share; #381 tracks pylint gates",
         (
+            # Issue #365 tracks the independent engine/oracle hassfest share mismatch.
+            "gate share differs for 'CI / Check hassfest'",
+            # Issue #381 tracks this independently recorded missing pylint gate.
+            "frequent gate absent: 'CI / Check pylint'",
+            # Issue #381 tracks this independently recorded missing test-lint gate.
+            "frequent gate absent: 'CI / Check pylint on tests'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
     ),
     "vercel-nextjs": (
-        "issue #305 remains open after PR #318's ordering fix",
+        "PR #318 covers the headline follow-up; issue #363 tracks gate comparison",
         (
+            # Issue #363 tracks the independently recorded missing prod gate.
+            "frequent gate absent: 'build-and-test / test prod (4/10) / build'",
+            # Issue #363 tracks the independently recorded missing dev gate.
+            "frequent gate absent: 'build-and-test / test dev (4/10) / build'",
+            # Issue #363 tracks the independently recorded missing optimizer gate.
+            "frequent gate absent: 'build-and-test / optimize-ci / PR Stack CI Gate'",
+            # Issue #363 tracks the 0.250 versus 0.036 turbopack share mismatch.
+            "gate share differs for 'build-and-test / test turbopack production (7/7) / build'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
     ),
     "ethereum-go-ethereum": (
-        "a true predecessor is misclassified; issue #305 remains after PR #318",
+        "a true predecessor is misclassified; issue #305 tracks the remaining OPT21 row",
         (
             # The workflow's real dependency edge is still classified as OPT21.
             "forbidden finding present: OPT21",
-            # Owner-reviewed headline text waits for that classification fix.
-            "Bottom line does not contain reviewed text",
         ),
     ),
     "microsoft-playwright": (
-        "issue #305 remains open after PR #318's ordering fix",
+        "PR #318 covers the headline follow-up; issue #364 tracks the MCP gate",
         (
+            # Issue #364 tracks the independently recorded missing MCP gate.
+            "frequent gate absent: 'MCP / ubuntu-latest - chrome'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -126,10 +140,36 @@ def test_reference_oracle_does_not_import_the_engine() -> None:
 
 
 def test_known_red_reasons_name_the_public_issue_and_fix_pr() -> None:
-    for name in ("home-assistant-core", "vercel-nextjs", "microsoft-playwright"):
+    issue_by_name = {
+        "home-assistant-core": "#365",
+        "vercel-nextjs": "#363",
+        "microsoft-playwright": "#364",
+    }
+    for name, issue in issue_by_name.items():
         reason, _markers = _REPOSITORIES[name]
-        assert "#305" in reason
+        assert issue in reason
         assert "#318" in reason
+
+
+def test_home_assistant_pylint_gaps_name_their_own_issue() -> None:
+    reason, markers = _REPOSITORIES["home-assistant-core"]
+
+    assert "#381" in reason
+    assert "frequent gate absent: 'CI / Check pylint'" in markers
+    assert "frequent gate absent: 'CI / Check pylint on tests'" in markers
+
+
+def test_go_ethereum_review_expectation_names_the_required_gate() -> None:
+    expected = json.loads((
+        _ROOT / "repositories" / "ethereum-go-ethereum" / "expected.json"
+    ).read_text(encoding="utf-8"))
+    review = expected["human_review"]
+
+    assert review["bottom_line_must_contain"] == "Lint"
+    assert review["rendered_pole_order"] == ["Lint"]
+    assert "required gate" in review["review_notes"]
+    assert "32bit tests" in review["review_notes"]
+    assert "downstream" in review["review_notes"]
 
 
 def test_reference_oracle_uses_month_wide_last_job_facts_and_ignores_bookkeeping() -> None:
@@ -448,7 +488,352 @@ def test_engine_span_oracle_derives_population_and_gates_without_chain_facts(
     assert oracle["gate_order"] == ["CI / test", "Lint / lint"]
 
 
-def test_engine_span_oracle_matches_the_most_specific_nested_gate_cap(
+def test_comparison_uses_recorded_jobs_when_engine_omits_the_slow_gate(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
+    with gzip.open(
+        api / "repos_public_example.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({"default_branch": "main"}, stream)
+    with gzip.open(
+        api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["refs/heads/main"]}},
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [
+                    {"context": "lint"}, {"context": "slow tests"},
+                ]},
+            }],
+        }, stream)
+    with gzip.open(
+        api / "repos_public_example_rulesets_2.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["refs/heads/release"]}},
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {
+                    "required_status_checks": [{"context": "release-only"}]
+                },
+            }],
+        }, stream)
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({
+            "schema_version": 1,
+            "pr_commits": [{
+                "sha": "commit-1",
+                "created_at": "2026-11-01T00:00:00Z",
+                "completed": True,
+                "jobs": [
+                    {
+                        "workflow": "CI", "name": "lint", "status": "completed",
+                        "started_at": "2026-11-01T00:00:00Z",
+                        "completed_at": "2026-11-01T00:01:00Z",
+                    },
+                    {
+                        "workflow": "CI", "name": "slow tests", "status": "completed",
+                        "started_at": "2026-11-01T00:00:00Z",
+                        "completed_at": "2026-11-01T00:10:00Z",
+                    },
+                    {
+                        "workflow": "CI", "name": "unrelated", "status": "completed",
+                        "started_at": "2026-11-01T00:00:00Z",
+                        "completed_at": "2026-11-01T00:20:00Z",
+                    },
+                ],
+            }],
+        }, stream)
+    findings = {
+        "required_checks": ["lint"],
+        "pr_critical_path": {
+            "sample_span_first": "2026-11-01T00:00:00Z",
+            "sample_span_last": "2026-11-01T00:00:00Z",
+            "sampled_pr_count": 1,
+            "check_present_n_pr": 1,
+            "chain_summary": {"makespan_p50_s": 60},
+            "checks": [{
+                "name": "CI / lint", "required_reachable": True,
+                "pole_n": 1, "present_on": 1, "p50_s": 60,
+            }],
+        },
+    }
+
+    assert compare._recorded_required_checks(recording) == {"lint", "slow tests"}
+    differences = compare.compare(
+        findings,
+        {"human_review": {}},
+        recording=recording,
+    )
+
+    assert any("independent leading gate absent: 'CI / slow tests'" in row
+               for row in differences), differences
+
+
+def test_engine_span_oracle_includes_recorded_required_predecessors(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    checkout = recording / "checkout" / ".github" / "workflows"
+    checkout.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
+    (checkout / "ci.yml").write_text(
+        "name: CI\njobs:\n"
+        "  lint:\n    name: lint\n"
+        "  slow:\n    name: slow tests\n"
+        "  verdict:\n    name: verdict\n    needs: [lint, slow]\n"
+        "  unrelated:\n    name: unrelated\n",
+        encoding="utf-8",
+    )
+    with gzip.open(
+        api / "repos_public_example.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({"default_branch": "main"}, stream)
+    with gzip.open(
+        api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {
+                    "required_status_checks": [{"context": "verdict"}]
+                },
+            }],
+        }, stream)
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({
+            "schema_version": 1,
+            "pr_commits": [{
+                "sha": "commit-1", "created_at": "2026-11-01T00:00:00Z",
+                "completed": True,
+                "jobs": [
+                    {"workflow": "CI", "name": "lint", "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:01:00Z"},
+                    {"workflow": "CI", "name": "slow tests", "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:10:00Z"},
+                    {"workflow": "CI", "name": "verdict", "status": "completed",
+                     "started_at": "2026-11-01T00:10:00Z",
+                     "completed_at": "2026-11-01T00:10:10Z"},
+                    {"workflow": "CI", "name": "unrelated", "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:20:00Z"},
+                ],
+            }],
+        }, stream)
+    findings = {"pr_critical_path": {
+        "sample_span_first": "2026-11-01T00:00:00Z",
+        "sample_span_last": "2026-11-01T00:00:00Z",
+        "sampled_pr_count": 1,
+    }}
+
+    oracle = compare._oracle_for_engine_span(recording, findings)
+
+    assert oracle["gate_order"][0] == "CI / slow tests"
+    assert all(row["check"] != "CI / unrelated" for row in oracle["gates"])
+
+
+def test_recorded_required_checks_read_classic_protection_response(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    with gzip.open(
+        api / "repos_public_example_branches_main_protection_required_status_checks.json.gz",
+        "wt",
+        encoding="utf-8",
+    ) as stream:
+        json.dump({
+            "contexts": ["lint"],
+            "checks": [{"context": "tests", "app_id": 15368}],
+        }, stream)
+
+    assert compare._recorded_required_checks(recording) == {"lint", "tests"}
+
+
+def test_recorded_required_checks_apply_all_branch_rulesets(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
+    with gzip.open(
+        api / "repos_public_example.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({"default_branch": "main"}, stream)
+    for page, refs, context in (
+        (1, {"include": ["~ALL"]}, "tests"),
+        (2, {"include": ["~DEFAULT_BRANCH"], "exclude": ["~ALL"]},
+         "excluded"),
+    ):
+        with gzip.open(
+            api / f"repos_public_example_rulesets_{page}.json.gz",
+            "wt", encoding="utf-8",
+        ) as stream:
+            json.dump({
+                "enforcement": "active",
+                "conditions": {"ref_name": refs},
+                "rules": [{
+                    "type": "required_status_checks",
+                    "parameters": {"required_status_checks": [
+                        {"context": context},
+                    ]},
+                }],
+            }, stream)
+
+    assert compare._recorded_required_checks(recording) == {"tests"}
+
+
+def test_engine_span_oracle_keeps_expanded_required_matrix_jobs(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    workflows = recording / "checkout" / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
+    (workflows / "ci.yml").write_text(
+        "name: CI\njobs:\n"
+        "  lint:\n    name: lint\n"
+        "  tests:\n    name: tests (${{ matrix.os }})\n"
+        "  unrelated:\n    name: unrelated\n",
+        encoding="utf-8",
+    )
+    with gzip.open(
+        api / "repos_public_example.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({"default_branch": "main"}, stream)
+    with gzip.open(
+        api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [
+                    {"context": "lint"},
+                    {"context": "tests (ubuntu-latest)"},
+                ]},
+            }],
+        }, stream)
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({
+            "schema_version": 1,
+            "pr_commits": [{
+                "sha": "commit-1",
+                "created_at": "2026-11-01T00:00:00Z",
+                "completed": True,
+                "jobs": [
+                    {"workflow": "CI", "name": "lint", "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:01:00Z"},
+                    {"workflow": "CI", "name": "tests (ubuntu-latest)",
+                     "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:10:00Z"},
+                    {"workflow": "CI", "name": "unrelated", "status": "completed",
+                     "started_at": "2026-11-01T00:00:00Z",
+                     "completed_at": "2026-11-01T00:20:00Z"},
+                ],
+            }],
+        }, stream)
+    findings = {"pr_critical_path": {
+        "sample_span_first": "2026-11-01T00:00:00Z",
+        "sample_span_last": "2026-11-01T00:00:00Z",
+        "sampled_pr_count": 1,
+    }}
+
+    oracle = compare._oracle_for_engine_span(recording, findings)
+
+    assert oracle["gate_order"][0] == "CI / tests (ubuntu-latest)"
+    assert all(row["check"] != "CI / unrelated" for row in oracle["gates"])
+
+
+def test_engine_span_oracle_prefers_a_complete_required_suite(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    recording = tmp_path / "recording"
+    api = recording / "api"
+    api.mkdir(parents=True)
+    (recording / "manifest.json").write_text(
+        json.dumps({"repository": "public/example"}), encoding="utf-8"
+    )
+    with gzip.open(
+        api / "repos_public_example.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({"default_branch": "main"}, stream)
+    with gzip.open(
+        api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"]}},
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [
+                    {"context": "lint"}, {"context": "tests"},
+                ]},
+            }],
+        }, stream)
+    commits = []
+    for index in range(3):
+        jobs = [{
+            "workflow": "CI", "name": "lint", "status": "completed",
+            "started_at": f"2026-11-0{index + 1}T00:00:00Z",
+            "completed_at": f"2026-11-0{index + 1}T00:01:00Z",
+        }]
+        if index < 2:
+            jobs.append({
+                "workflow": "CI", "name": "tests", "status": "completed",
+                "started_at": f"2026-11-0{index + 1}T00:00:00Z",
+                "completed_at": f"2026-11-0{index + 1}T00:10:00Z",
+            })
+        commits.append({
+            "sha": f"commit-{index}",
+            "created_at": f"2026-11-0{index + 1}T00:00:00Z",
+            "completed": True,
+            "jobs": jobs,
+        })
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"schema_version": 1, "pr_commits": commits}, stream)
+    findings = {"pr_critical_path": {
+        "sample_span_first": "2026-11-01T00:00:00Z",
+        "sample_span_last": "2026-11-03T00:00:00Z",
+        "sampled_pr_count": 2,
+    }}
+
+    oracle = compare._oracle_for_engine_span(recording, findings)
+
+    assert oracle["sample"]["completed_with_eligible_jobs"] == 2
+    assert oracle["gate_order"][0] == "CI / tests"
+    assert oracle["gates"][0]["last_on"] == 2
+
+
+def test_engine_span_oracle_ignores_engine_nested_gate_caps(
         tmp_path: Path) -> None:
     compare = _load("compare")
     recording = tmp_path / "recording"
@@ -483,14 +868,28 @@ def test_engine_span_oracle_matches_the_most_specific_nested_gate_cap(
 
     oracle = compare._oracle_for_engine_span(recording, findings)
 
-    assert oracle["gate_order"][0] == "CI / lint"
+    assert oracle["gate_order"][0] == "CI / test / build"
 
 
 def test_engine_span_oracle_rederives_the_representative_required_pr_type(
         tmp_path: Path) -> None:
     compare = _load("compare")
     recording = tmp_path / "recording"
-    recording.mkdir()
+    api = recording / "api"
+    api.mkdir(parents=True)
+    with gzip.open(
+        api / "repos_public_example_rulesets_1.json.gz", "wt", encoding="utf-8"
+    ) as stream:
+        json.dump({
+            "enforcement": "active",
+            "rules": [{
+                "type": "required_status_checks",
+                "parameters": {"required_status_checks": [
+                    {"context": "common gate"},
+                    {"context": "release gate"},
+                ]},
+            }],
+        }, stream)
     commits = []
     for index in range(4):
         jobs = [
@@ -513,7 +912,7 @@ def test_engine_span_oracle_rederives_the_representative_required_pr_type(
     with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
         json.dump({"schema_version": 1, "pr_commits": commits}, stream)
     findings = {
-        "required_checks": ["common gate", "release gate"],
+        "required_checks": ["engine-only gate"],
         "pr_critical_path": {
             "sample_span_first": "2026-11-01T00:00:00Z",
             "sample_span_last": "2026-11-04T00:00:00Z",
@@ -541,7 +940,10 @@ def test_replay_preserves_run_identity_timestamps_and_missing_job_lists(
     api = recording / "api"
     api.mkdir(parents=True)
     (recording / "manifest.json").write_text(
-        json.dumps({"repository": "public/example"}), encoding="utf-8")
+        json.dumps({
+            "repository": "public/example",
+            "replay_recorded_runs_only": True,
+        }), encoding="utf-8")
 
     def fixture(endpoint: str, payload: dict[str, object]) -> None:
         target = api / (compare._fixture_name(endpoint) + ".gz")
@@ -602,6 +1004,7 @@ def test_replay_preserves_run_identity_timestamps_and_missing_job_lists(
     )).read_text(encoding="utf-8"))["workflow_runs"][1:]
     assert [row["created_at"] for row in ci_page] == [
         "2026-11-01T01:00:00Z", "2026-11-01T00:00:00Z"]
+    assert len(docs_page) == 1
     assert {row["head_sha"] for row in ci_page + docs_page} == {"commit-000001"}
     first_jobs = json.loads((replay / compare._fixture_name(
         f"repos/public/example/actions/runs/{ci_page[0]['id']}/jobs?per_page=100"
@@ -1209,8 +1612,9 @@ def test_real_repository_report_matches_independent_expectation(
         critical = findings.get("pr_critical_path") or {}
         sampled = int(critical.get("sampled_pr_count") or 0)
         partial = int(critical.get("sample_partial_count") or 0)
-        assert sampled and partial * 2 < sampled, (
-            f"{recording_name} replay remains mostly partial: {partial}/{sampled}"
+        assert sampled and partial > 0, (
+            f"{recording_name} replay dropped its missing-job runs instead of "
+            f"preserving them as partial: {partial}/{sampled}"
         )
     differences = compare.compare(
         findings, expected, report, recording=recording)
