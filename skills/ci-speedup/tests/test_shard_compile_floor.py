@@ -143,7 +143,7 @@ jobs:
                 "test result: ok. 42 passed; 0 failed; finished in 7.05s",
             ])
         if ordinal == 2:
-            return "$ go test ./...\nok example/project 2900.0s"
+            return "$ go test ./...\nok example/project 2000.0s"
         return "$ npx jest\nTests: 42 passed, 42 total"
 
 
@@ -218,6 +218,22 @@ class _SeparateBuildClient(_Client):
         ])
 
 
+class _BalancedGoPackagesClient(_Client):
+    """A long Go step whose time is spread across packages is not shard advice."""
+
+    def text(self, endpoint: str, allow_missing: bool = False):
+        job_id = int(endpoint.split("/")[-2])
+        if job_id % 10 != 2:
+            return super().text(endpoint, allow_missing)
+        self.queries += 1
+        return "\n".join([
+            "$ go test ./...",
+            "ok example/project/api 960.0s",
+            "ok example/project/store 950.0s",
+            "ok example/project/cli 940.0s",
+        ])
+
+
 def _finding(doc: dict, job: str) -> dict:
     return next(
         finding for finding in doc["findings"]
@@ -247,13 +263,14 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
     assert "49m 50s" in cargo["measured_evidence"]["note"]
 
     go = _finding(doc, "go tests")
-    assert go["wall_clock_p50_s"] == 0.0
-    assert "measure" in go["size_note"].lower()
+    assert go["go_dominant_package"] == "example/project"
+    assert go["wall_clock_p50_s"] == 1000.0
+    assert go["go_shard_extra_runner_s"] == 900.0
 
     jest = _finding(doc, "jest tests")
     assert jest["wall_clock_p50_s"] == 1400.0
 
-    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z", bmf=True)
     assert "| test compile log probe | 3 job log(s) read |" in report
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"
@@ -266,6 +283,15 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
         report, report_path, findings_path, skill_repo=None)
         if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
+    assert "List the tests in `example/project` with `go test -list`" in report
+    assert "Runner-minute effect: added cost of ~15m 00s per run" in report
+    opt24 = report.split("<summary><strong>OPT24", 1)[1].split("</details>", 1)[0]
+    # The partition covers only the dominant package; every other package the
+    # step tested must still run, exactly once, or the split drops validation.
+    assert "every other package the step tests in exactly one leg" in opt24
+    assert "same build tags and flags" in opt24
+    # Sharding adds runner minutes; the prompt must not call it a bill cut.
+    assert "a cloud-bill cut" not in opt24
 
     missing_probe_row = report.replace(
         "| test compile log probe | 3 job log(s) read | "
@@ -290,7 +316,7 @@ def _collect_and_verify(monkeypatch, tmp_path: Path, client_type: type[_Client])
         },
         "findings": [],
     }, "o/r", max_runs=2, shallow_runs=2)
-    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z", bmf=True)
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"
     findings_path.write_text(json.dumps(doc), encoding="utf-8")
@@ -319,6 +345,149 @@ def test_separate_build_compile_is_not_subtracted_from_test_payload_twice(
     cargo = _finding(doc, "cargo tests")
     assert cargo["wall_clock_p50_s"] == 0.0
     assert cargo["pre_test_floor_s"] == 1790.0
+
+
+def test_long_go_step_without_one_dominant_package_stays_quiet(
+        monkeypatch, tmp_path: Path) -> None:
+    doc = _collect_and_verify(monkeypatch, tmp_path, _BalancedGoPackagesClient)
+    assert not [
+        finding for finding in doc["findings"]
+        if finding.get("pattern") == "OPT24"
+        and "go tests" in finding.get("affected_jobs", [])
+    ]
+
+
+class _OverlappingGoPackagesClient(_Client):
+    """Parallel packages: summed package time exceeds the job's wall time."""
+
+    def text(self, endpoint: str, allow_missing: bool = False):
+        job_id = int(endpoint.split("/")[-2])
+        if job_id % 10 != 2:
+            return super().text(endpoint, allow_missing)
+        self.queries += 1
+        return "\n".join([
+            "$ go test ./...",
+            "ok example/project/api 500.0s",
+            "ok example/project/store 500.0s",
+            "ok example/project/cli 2000.0s",
+        ])
+
+
+def test_overlapping_go_package_times_leave_the_added_cost_unsized(
+        monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(cr, "GhClient", _OverlappingGoPackagesClient)
+    doc = cr.collect({
+        "repo": "o/r",
+        "skill_commit_sha": "installed:unversioned",
+        "workflow_job_graph": {
+            _WORKFLOW: {
+                "cargo-tests": {"name": "cargo tests", "needs": []},
+                "go-tests": {"name": "go tests", "needs": ["cargo-tests"]},
+                "jest-tests": {"name": "jest tests", "needs": ["go-tests"]},
+            },
+        },
+        "findings": [],
+    }, "o/r", max_runs=2, shallow_runs=2)
+    go = _finding(doc, "go tests")
+    assert go["go_dominant_package"] == "example/project/cli"
+    assert go["wall_clock_p50_s"] == 1000.0
+    # 3000s of package time inside a 2900s job: the packages overlapped, so
+    # job time minus package time is not the floor the second leg repeats.
+    assert "go_shard_extra_runner_s" not in go
+    assert "overlap" in go["go_shard_extra_runner_unsized_reason"]
+    assert "adds about 0s" not in go["evidence"]
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z", bmf=True)
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    assert bp._LAST_CLAIMS is not None
+    report_path.with_name(report_path.name + ".claims.json").write_text(
+        json.dumps(bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failures = [check for check in vr.run_checks(
+        report, report_path, findings_path, skill_repo=None)
+        if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    assert "List the tests in `example/project/cli` with `go test -list`" in report
+    assert ("Runner-minute effect: added cost per run for the assumed two-shard "
+            "split, unsized (") in report
+    assert "added cost of ~0s" not in report
+
+
+_PRESHARDED_GO_WORKFLOWS = {
+    "matrix-index": """\
+on: pull_request
+jobs:
+  go-tests:
+    name: go tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        part: [0, 1]
+    steps:
+      - run: go test -race -run "$(cat parts/${{ matrix.part }}.txt)" ./internal/cli
+""",
+    "matrix-pattern-env": """\
+on: pull_request
+jobs:
+  go-tests:
+    name: go tests
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - tests: '^(TestA|TestB)$'
+          - tests: '^(TestC|TestD)$'
+    steps:
+      - env:
+          TESTS: ${{ matrix.tests }}
+        run: go test -race -run "$TESTS" ./internal/cli
+""",
+}
+
+
+def _presharded_go_client(workflow: str) -> type[_Client]:
+    class _PreshardedGoClient(_Client):
+        def json(self, endpoint: str, allow_missing: bool = False):
+            match = re.match(r"repos/o/r/actions/runs/(101|102)/jobs", endpoint)
+            if match:
+                self.queries += 1
+                run_id = int(match.group(1))
+                return {"jobs": [
+                    _job("go tests (0)", run_id, 1900, 1),
+                    _job("go tests (1)", run_id, 1900, 2),
+                ]}
+            if re.match(r"repos/o/r/commits/[^/]+/check-runs", endpoint):
+                self.queries += 1
+                return {"check_runs": []}
+            if endpoint == f"repos/o/r/contents/{_WORKFLOW}":
+                self.queries += 1
+                return {"content": base64.b64encode(workflow.encode()).decode()}
+            return super().json(endpoint, allow_missing)
+
+        def text(self, endpoint: str, allow_missing: bool = False):
+            self.queries += 1
+            return "$ go test -race ./internal/cli\nok example/project/internal/cli 1500.0s"
+
+    return _PreshardedGoClient
+
+
+def test_go_job_already_split_by_matrix_run_expression_stays_quiet(
+        monkeypatch, tmp_path: Path) -> None:
+    for shape, workflow in _PRESHARDED_GO_WORKFLOWS.items():
+        monkeypatch.setattr(cr, "GhClient", _presharded_go_client(workflow))
+        doc = cr.collect({
+            "repo": "o/r",
+            "skill_commit_sha": "installed:unversioned",
+            "workflow_job_graph": {
+                _WORKFLOW: {"go-tests": {"name": "go tests", "needs": []}},
+            },
+            "findings": [],
+        }, "o/r", max_runs=2, shallow_runs=2)
+        assert not [
+            finding for finding in doc["findings"]
+            if finding.get("pattern") == "OPT24"
+        ], shape
 
 
 def test_shard_guidance_names_the_repeated_runner_minute_floor() -> None:

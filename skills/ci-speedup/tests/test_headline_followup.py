@@ -55,7 +55,7 @@ def normalized(report):
 def test_headline_followup_golden_report():
     report = render()
     assert "After this fix, CI is gated by `quality.yml / lint` at ~350 s." in report
-    assert normalized(report) == (HERE / "fixtures/headline-followup.md").read_text()
+    assert normalized(report) == (HERE / "fixtures/headline-followup.md").read_text().rstrip("\n")
 
 
 def test_headline_followup_verifier_is_registered_and_rejects_missing_content(tmp_path):

@@ -4,6 +4,8 @@
 
 not measured: lifecycle data was not collected
 
+<!-- ci-speedup:bmf enabled=false held=0 -->
+
 | Repository | `example/project` |
 | :--- | :--- |
 | **Audited commit** | [`abcdef1`](https://github.com/example/project/commit/abcdef1234567890) - file & line references are anchored to this tree |
@@ -143,8 +145,8 @@ investigate it in the repo and apply a safe change.
 Pattern: OPT25 - Shard imbalance.
 Where: test.yml (tests).
 What ci-speedup saw: One shard gates the matrix.
-Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
-Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner. Extra shard jobs repeat checkout and setup and bill each job; N shards also add roughly (N-1) × the measured pre-test floor in runner minutes. Measure compile and setup before adding jobs.
+Concurrency order: Use OPT88 to measure and fill the existing job's idle cores. Before adding workers, confirm that they cannot interfere through a shared external server.
+Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner. Extra shard jobs repeat checkout and setup and bill each job, so this report holds that option back; rerun with `--bmf` to include it.
 Saving: developer WALL-CLOCK (~4m 10s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
 
 Read the catalog entry (background, fix recipe, and guardrail):

@@ -17,8 +17,8 @@ license: MIT
 
 # ci-speedup — CI Optimization Audit for GitHub Actions
 
-Audits a repository's GitHub Actions workflows against a 100-pattern
-catalog — 88 **hygiene/data-driven** patterns plus 12 **structural /
+Audits a repository's GitHub Actions workflows against a 109-pattern
+catalog — 97 **hygiene/data-driven** patterns plus 12 **structural /
 critical-path** patterns routed from the measured long pole — and
 produces a **root-cause-analysis** report with measured impact on two
 axes — developer wall-clock wait and runner-minutes (cloud bill). The
@@ -90,17 +90,17 @@ docstring); it never invents a *new* pattern or OPT-id. A catalog entry with no
 registered detector is reported honestly in `catalog_patterns_without_detector` —
 the scanner never fabricates a finding to fill the gap.
 
-**Irreducibly-semantic patterns are NOT auto-detected.** OPT13 (build step in jobs
-that don't need it) and OPT15 (cross-workflow build redundancy) require judgment
-that has produced confident-but-wrong findings before; they surface as a
-**manual-review checklist appendix**, never as findings — omit rather than fake.
+**Irreducibly-semantic patterns are NOT auto-detected.** OPT15 and broad OPT13
+judgment stay disclosed as uncovered catalog judgments. OPT13's sole exception requires a
+timed build then quality command, a separate non-optional full build for the same package, and a
+clean repository-wide JS/TS Node-output backstop; its interval stays uncredited until benchmarked.
 
 ## Structural / critical-path findings (the high-leverage track)
 
-On real repos almost every hygiene hit (OPT1–OPT69, OPT76, OPT77, OPT79–OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96–OPT98, OPT100–OPT103 — mostly declarative)
+On real repos almost every hygiene hit (OPT1–OPT9, OPT11–OPT66, OPT68, OPT69, OPT76, OPT77, OPT79–OPT82, OPT86, OPT88–OPT91, OPT93, OPT94, OPT96–OPT98, OPT100–OPT103, OPT105–OPT114 — mostly declarative)
 moves **~0 developer wall-clock** — the true bottleneck is usually a check working
 as intended that is simply the slowest thing gating the merge, with no catalog
-match. The **structural track** (category 14, OPT70–OPT75, OPT78, OPT83–OPT85, OPT87) attacks that: a second
+match. The **structural track** (`class: structural`: OPT70–OPT75, OPT78, OPT83–OPT85, OPT87, OPT104) attacks that: a second
 finding class **routed from the measured critical path** in `collect_runs.py` (the
 long-pole job decomposed to steps, required checks cross-referenced, shared cluster
 work detected; OPT78 via a config-gated vitest log leaf; OPT74/85/87 have no router yet), not a YAML match — still
@@ -166,16 +166,16 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    cluster-floor model from `references/wall-clock-methodology.md`). You don't invoke
    it yourself — **`run.py` orchestrates phases 2–3**:
    `python3 scripts/run.py --root <ROOT> --out <OUT.json> --repo <owner/repo>
-   --with-logs` (`run.py --help` lists its flags). `--with-logs` fetches the gating
+   --with-logs` (`run.py --help` lists its flags; add `--bmf` only if the user puts
+   wall-clock before runner minutes, and offer it when the report's held-back line
+   appears). `--with-logs` fetches the gating
    jobs' logs and captures the **drill bundle** (`data_bundle`: per pole, the
    nearest-P50 run's log + step timeline + cross-run magnitude sample) into an
    **auto-derived `<OUT>.data` dir** — **never pass `--data-dir`** to `run.py` (it's
    `collect_runs.py`'s internal flag, and passing it to `run.py` errors). `<OUT.json>`
    and its `.data` bundle hold raw third-party job logs, so write `--out` to a scratch
-   path outside any tracked tree (or a gitignored dir). gh calls are frugal and the
-   sampling adaptive (ARCHITECTURE §2.1): the gate/poles/floor are exact, off-path
-   hygiene figures approximate (flagged). `run.py` then prints a **data-pass summary**
-   to stdout — the gating resolution (required checks, **already resolved from rulesets
+   path outside any tracked tree (or a gitignored dir); off-path hygiene figures are
+   approximate (flagged). `run.py` then prints a **data-pass summary** to stdout — the gating resolution (required checks, **already resolved from rulesets
    + branch protection**: a fileless/managed check like `Claude Code Review` is flagged
    auto-demoted, an empty set means none are declared), the addressable long poles, the gh
    API call count, and the **exact `blocking_path.py` render command** with per-pole bindings pre-filled.
@@ -368,7 +368,7 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    Re-run `run.py` with `--verify-branch <branch>` and one `--verify-changed-file <path>` per changed file; it resumes beside the scratch findings, counts the first cohort as sample one, prints wall-clock and runner-minute cost before rerunning, reuses completed samples, and discards samples when the head moves.
    For cache configuration, key, or image-layer changes, add `--verify-cache-sensitive`: warm reruns are invalid, so it waits for three distinct consecutive default-branch pushes. `CI_SPEEDUP_VERIFY_RUNS=0` disables the phase and verdict.
    Reruns start CI on the user's branch but never change repository contents, create branches, commit, or push.
-   Full rules: [before/after verification](references/before-after-verification-spec.md).
+   Full rules, including the optional `--account-weekly-series` account export: [before/after verification](references/before-after-verification-spec.md).
 
 `scripts/run.py` orchestrates the deterministic phases 2–3; the agent then calls
 `blocking_path.py` to render phase 4 and grounds any catalog gap from the log in
@@ -417,7 +417,7 @@ severity calibration, ≥2-pass agreement; a one-pass-only finding is cut or esc
 
 ## Pattern catalog
 
-Patterns live one per file in `references/patterns/opt<N>-*.md` (100 patterns
+Patterns live one per file in `references/patterns/opt<N>-*.md` (109 patterns
 in 14 categories, from Caching to **Structural / Critical-Path Levers**). Each
 file's frontmatter declares the id, impact tier, finding class (`static` /
 `data-driven` / `structural`), detector and fix strategy slug; structural
@@ -505,8 +505,8 @@ The scannable rule list; each is detailed in the section named in parentheses.
 - **Present a structural change as a safe quick win** — each states its `risk`,
   `guardrail`, and `rollout`; scoping to "only what changed" (OPT70) is the canonical
   danger, never shipped without the full-suite fallback + parallel-run rollout.
-- **Fake a confident finding for a judgment-needed pattern** — OPT13/OPT15 are a
-  manual-review checklist, not auto-emitted.
+- **Fake a confident finding for a judgment-needed pattern** — OPT15 and broad OPT13 stay manual;
+  OPT13's narrow exception must pass every proof and stays uncredited until benchmarked.
 - **Drop the intent check from the prompt** — every prompt instructs the user's agent to
   read the file's git history/intent and flag an intent-contradicting fix as a policy
   change needing sign-off ("Interrogate the target file's history & intent").

@@ -45,7 +45,8 @@
       "workflow_runs_30d": 39,
       "pr_critical_path_s": 33.5,
       "pr_critical_path_check": "Windows",
-      "sizing_basis": "modeled"
+      "sizing_basis": "modeled",
+      "runner_min_unsized_reason": "the workflow's monthly run count was not measured"
     },
     {
       "id": "f2",
@@ -93,7 +94,8 @@
       "workflow_runs_30d": 0,
       "pr_critical_path_s": 33.5,
       "pr_critical_path_check": "Windows",
-      "sizing_basis": "modeled"
+      "sizing_basis": "modeled",
+      "runner_min_unsized_reason": "the workflow's monthly run count was not measured"
     },
     {
       "id": "f3",
@@ -137,7 +139,8 @@
       "workflow_runs_30d": 37,
       "pr_critical_path_s": 33.5,
       "pr_critical_path_check": "Windows",
-      "sizing_basis": "modeled"
+      "sizing_basis": "modeled",
+      "runner_min_unsized_reason": "the skipped job's duration could not be resolved from sampled run timings"
     },
     {
       "id": "f4",

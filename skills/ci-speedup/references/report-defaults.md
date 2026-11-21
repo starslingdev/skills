@@ -390,6 +390,24 @@ variation.
 
 **Proposed decision:** **Keep 3.** The value remains awaiting owner approval.
 
+### `account-weekly-paired-minimum`
+
+**Current value:** at least 5 explicit paired run observations per side
+(`before_after.py::_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS`), with equal before and
+after counts, before an account weekly export states a runner-minute effect.
+
+**Report statements:** the paired before/after median runner-minute effect in
+the optional account-level weekly section, or the reason that comparison is
+withheld.
+
+**Reason:** A handful of runs per side cannot show ordinary run-to-run
+variation. Five per side is enough for each side's median to be meaningful and
+matches OPT81's minimum of 5 runs per runner size.
+
+**Proposed decision:** **Require 5 paired observations per side.**
+
+**Approval status:** owner-approved 2026-11-20 (5).
+
 ### `rare-push-lane`
 
 **Current value:** fewer than 8 default-branch push runs in 30 days is treated
@@ -524,6 +542,30 @@ relanded by #333, remains awaiting owner approval.
 
 ## Finding thresholds and caps
 
+### `default-branch-batching-window`
+
+**Current value:** one hour
+(`collect_runs.py:_OPT107_BATCH_WINDOW_S`), with at least two batchable runs
+(`_OPT107_MIN_BATCHABLE_RUNS`) comprising at least 25% of the readable
+default-branch push sample (`_OPT107_MIN_BATCHABLE_SHARE`).
+
+**Report statements:** whether dense post-merge validation is a measured
+runner-minute opportunity, which observed runs contribute to its signed
+sample-window saving, and its monthly estimate (the sample saving scaled by the
+workflow's 30-day default-branch push-run count over the sampled runs, capped at
+its measured 30-day validation compute) or, when that count is unreadable, that
+the monthly saving is unsized and why.
+
+**Reason:** the proposed replacement is an hourly current-tip validation, so a
+successor inside that interval is evidence that a schedule can coalesce work.
+The count/share gates keep isolated busy periods quiet; the detector also
+requires three completed timed push runs, reserves conservative hourly
+replacement slots, and credits only removable runs with their own readable
+completed-job compute.
+
+**Proposed decision:** **Keep one hour, two runs, and 25%.** This remains
+awaiting owner approval.
+
 ### `magnitude-noise-band`
 
 **Current value:** a magnitude range wider than 25% of its median triggers a
@@ -580,9 +622,17 @@ runs; OPT79: 3 hits, 3 misses, 5 seconds and 20% waste, a 25% tail share, and
 `max(3 × P50, P50 + 30 seconds)`, 2 tail runs, 2 proven tail runs, a 20-second
 gap, and at most 4 log probes;
 OPT81: 8 samples per label, a 30-second and 25% gap, 50% covered time, and a
-30-second cache-lever floor; OPT82: 60 seconds; OPT83: 15% and 20 seconds;
+30-second cache-lever floor; its same-class downsize half needs 5 samples per
+size and allows at most a 5% absolute median-duration difference, and is never
+priced (its runner-cost saving is unsized); OPT82: 60 seconds; OPT83: 15% and 20
+seconds;
 OPT84: 0% minimum share and 20 seconds, and 15% of the pole for its
-install row (npm, pnpm or Yarn install to `bun install`).
+install row (npm, pnpm or Yarn install to `bun install`); OPT106: OPT83's
+15% and 20 seconds for a runtime-loader step on the default (unsized) path, and
+30 seconds and 20% of the job wall for a profiled loader; OPT108: a successful
+comment-triggered run under 30 seconds counts as a rejected comment (the drill's
+self-skip floor, `_NOOP_FLOOR_S`), and at least 3 such runs must be priced
+before its runner-minute saving is credited.
 
 **Report statements:** whether each named pattern is promoted, withheld, or
 uncredited, plus its evidence and saving.
@@ -595,6 +645,45 @@ pattern must add its own named minimum and contract entry rather than borrowing
 an unrelated global threshold.
 
 **Approval status:** awaiting owner approval.
+
+### `go-package-dominance`
+
+**Current value:** OPT24 classifies a long `go test` step for list-then-run
+sharding only when one package accounts for at least 60% of the package time
+printed by the sampled command (`_OPT24_GO_PACKAGE_DOMINANT_SHARE`).
+
+**Report statements:** that one Go package dominates the long test step and is
+therefore a concrete candidate for internal test-name partitioning.
+
+**Reason:** A majority substantially above one half distinguishes one package
+that can move the pole from an already distributed package set. Missing timing
+or a balanced package set stays unclassified.
+
+**Proposed decision:** **Keep 60%.**
+
+**Approval status:** owner-approved 2026-11-20 (60%).
+
+### `go-fixed-wait-thresholds`
+
+**Current value:** the measured OPT19 Go poll route needs at least two
+consistent wait intervals; the poll total, or the constant test-body sleep
+total, must account for at least 50% of the measured test (or package) time
+and 20% of the drilled long-pole job. The race-helper route needs at least
+three synchronous call sites that re-exec the test binary (`_OPT19_GO_MIN_INTERVALS`,
+`_OPT19_GO_MIN_TEST_SHARE`, `_OPT19_GO_MIN_JOB_SHARE`, and
+`_OPT19_GO_RACE_HELPER_MIN_SPAWNS`).
+
+**Report statements:** that a Go test is dominated by a fixed production wait,
+or that a race job repeatedly pays the race runtime's default helper-exit sleep.
+
+**Reason:** Repeated equal gaps plus both dominance tests distinguish a fixed
+wait from ordinary slow work. Three helper call sites avoid recommending a race
+option change for a one-off subprocess.
+
+**Proposed decision:** **Keep two intervals, 50%, 20%, and three helpers.**
+
+**Approval status:** awaiting owner approval.
+
 ### `saving-caps`
 
 **Current value:** modeled cache savings use at most 90% of the available cache
@@ -638,6 +727,12 @@ implementation lands.
 
 ```json report-defaults-contract
 {
+  "account-weekly-paired-minimum": {
+    "decision": "account-weekly-paired-minimum",
+    "sources": {
+      "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 5
+    }
+  },
   "bimodal-noise-band": {
     "decision": "bimodal-noise-band",
     "symbols": [
@@ -704,10 +799,33 @@ implementation lands.
       }
     }
   },
+  "default-branch-batching-window": {
+    "decision": "default-branch-batching-window",
+    "sources": {
+      "collect_runs.py:_OPT107_BATCH_WINDOW_S": 3600,
+      "collect_runs.py:_OPT107_MIN_BATCHABLE_RUNS": 2,
+      "collect_runs.py:_OPT107_MIN_BATCHABLE_SHARE": 0.25
+    }
+  },
   "gate-frequency-interval": {
     "decision": "gate-frequency-interval",
     "planned_sources": {
       "gate_frequency_contract.py:GATE_INTERVAL_Z": 1.96
+    }
+  },
+  "go-package-dominance": {
+    "decision": "go-package-dominance",
+    "sources": {
+      "collect_runs.py:_OPT24_GO_PACKAGE_DOMINANT_SHARE": 0.6
+    }
+  },
+  "go-fixed-wait-thresholds": {
+    "decision": "go-fixed-wait-thresholds",
+    "sources": {
+      "collect_runs.py:_OPT19_GO_MIN_INTERVALS": 2,
+      "collect_runs.py:_OPT19_GO_MIN_JOB_SHARE": 0.2,
+      "collect_runs.py:_OPT19_GO_MIN_TEST_SHARE": 0.5,
+      "collect_runs.py:_OPT19_GO_RACE_HELPER_MIN_SPAWNS": 3
     }
   },
   "holds-up-threshold": {
@@ -761,6 +879,15 @@ implementation lands.
       "verify_report.py:_VR_OPT64_MIN_RETRIED_RUNS": 3
     }
   },
+  "opt108-comment-runs": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT108_SHORT_RUN_S": 30.0,
+      "collect_runs.py:_OPT108_MIN_PRICED_RUNS": 3,
+      "verify_report.py:_VR_OPT108_SHORT_RUN_S": 30.0,
+      "verify_report.py:_VR_OPT108_MIN_PRICED_RUNS": 3
+    }
+  },
   "opt79-minimums": {
     "decision": "per-pattern-minimums",
     "sources": {
@@ -808,11 +935,15 @@ implementation lands.
       "collect_runs.py:_OPT81_MIN_GAP_FRAC": 0.25,
       "collect_runs.py:_OPT81_MIN_GAP_S": 30.0,
       "collect_runs.py:_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+      "collect_runs.py:_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL": 5,
+      "collect_runs.py:_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC": 0.05,
       "collect_runs.py:_OPT81_COVERED_FRAC": 0.5,
       "collect_runs.py:_OPT81_CACHE_LEVER_MIN_S": 30.0,
       "verify_report.py:_VR_OPT81_MIN_GAP_FRAC": 0.25,
       "verify_report.py:_VR_OPT81_MIN_GAP_S": 30.0,
       "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+      "verify_report.py:_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL": 5,
+      "verify_report.py:_VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC": 0.05,
       "verify_report.py:_VR_OPT81_COVERED_FRAC": 0.5,
       "verify_report.py:_VR_OPT81_CACHE_LEVER_MIN_S": 30.0
     }
@@ -829,7 +960,9 @@ implementation lands.
       "collect_runs.py:_OPT83_MIN_SHARE": 0.15,
       "collect_runs.py:_OPT83_MIN_STEP_S": 20.0,
       "verify_report.py:_VR_OPT83_MIN_SHARE": 0.15,
-      "verify_report.py:_VR_OPT83_MIN_STEP_S": 20.0
+      "verify_report.py:_VR_OPT83_MIN_STEP_S": 20.0,
+      "verify_report.py:_VR_OPT106_MIN_STEP_SHARE": 0.15,
+      "verify_report.py:_VR_OPT106_MIN_STEP_S": 20.0
     }
   },
   "opt84-minimum-seconds": {
@@ -848,6 +981,17 @@ implementation lands.
     "sources": {
       "collect_runs.py:_OPT105_MIN_DUPLICATE_STEP_S": 20.0,
       "collect_runs.py:_OPT105_MIN_JOB_SHARE": 0.15
+    }
+  },
+  "opt106-profile-minimums": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT106_MIN_PROFILE_S": 30.0,
+      "collect_runs.py:_OPT106_MIN_JOB_SHARE": 0.2,
+      "blocking_path.py:_OPT106_MIN_PROFILE_S": 30.0,
+      "blocking_path.py:_OPT106_MIN_JOB_SHARE": 0.2,
+      "verify_report.py:_VR_OPT106_MIN_PROFILE_S": 30.0,
+      "verify_report.py:_VR_OPT106_MIN_JOB_SHARE": 0.2
     }
   },
   "partial-majority-rule": {
@@ -1030,6 +1174,8 @@ implementation lands.
 - [ ] Approve 100 completed PR commits over at least 5 days.
 - [ ] Approve the 12-page cap with early stopping and the 1,200 job-list read cap.
 - [ ] Approve the conditional 60-second bookkeeping rule.
+- [x] Approve the 60% `go-package-dominance` share (owner-approved 2026-11-20).
+- [x] Approve 5 paired runs per side for `account-weekly-paired-minimum` (owner-approved 2026-11-20).
 - [ ] Approve 5 last-finisher observations for supported ranking/grouping.
 - [ ] Approve two-sided 95% Wilson intervals and overlap as unsupported order.
 - [ ] Confirm #305, #306, and #311 may merge after their implementations match

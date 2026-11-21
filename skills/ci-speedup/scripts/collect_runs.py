@@ -47,6 +47,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+_DIR = Path(__file__).resolve().parent
+if str(_DIR) not in sys.path:
+    sys.path.insert(0, str(_DIR))
+
 from gate_frequency_contract import (
     GATE_BOOKKEEPING_CUTOFF_S as _GATE_BOOKKEEPING_CUTOFF_S,
     GATE_INTERVAL_Z as _GATE_INTERVAL_Z,
@@ -2382,6 +2386,7 @@ def _cite_chain_in_opt21_evidence(findings: "list[dict[str, Any]]",
                     "sizing_basis": "measured",
                     "wall_clock_p50_s": round(before - projection.projected_s, 1),
                     "runner_min_saving": None,
+                    "runner_min_no_effect_reason": _OPT21_NO_RUNNER_MIN_EFFECT,
                     "tier": 1,
                     "realization": "direct",
                     "size_note": "measured change in the workflow's longest dependency path",
@@ -2604,7 +2609,7 @@ def _stamp_commit_queue_work(clock: dict[str, Any]) -> dict[str, Any]:
                 complete.append(fact)
         stamped.append(fact)
     out[key] = stamped
-    if not complete:
+    if not complete or out.get("representative") is False:
         return out
     queue = [float(f["queue_s"]) for f in complete]
     work = [float(f["work_s"]) for f in complete]
@@ -5884,6 +5889,10 @@ _SIZING: dict[str, dict[str, Any]] = {
     # construction (hit_rate ≤ 1). hit_rate 0.1 is the merge_group-run share; the
     # credited figure is a CEILING (only provisioning is actually wasted today,
     # since the steps already skip), disclosed as such.
+    # OPT108: measured from the comment workflow's short successful runs
+    # (`_size_opt108_comment_runs`); unsized with its reason otherwise.
+    "OPT108": {"model": "measured"},
+    "OPT112": {"model": "measured"},
     "OPT29": {"model": "runner-min-only", "hit_rate": 0.1, "cost_basis": "affected_jobs",
               "cost_basis_rate_label": "the merge_group-run share",
               "cost_basis_label": "the merge_group-run share of the job's compute reclaimed by "
@@ -5917,6 +5926,7 @@ _SIZING: dict[str, dict[str, Any]] = {
     # detector's numbers instead of overwriting with a static hit_rate.
     "OPT46": {"model": "measured"},  # superseded runs — measured (was dead hit_rate 0.4)
     "OPT47": {"model": "measured"},  # push+PR double-trigger — measured
+    "OPT107": {"model": "measured"},  # dense default-branch validation — measured
     # Stack-Specific.
     "OPT52": {"model": "direct", "default_s": 30.0},  # turbo missing outputs
     "OPT53": {"model": "direct", "default_s": 30.0},  # turbo unstable env vars
@@ -6190,6 +6200,239 @@ def _opt32_changed_files(client: GhClient, repo: str, pr_number: int) -> list[st
     return None
 
 
+_OPT108_COMMENT_EVENTS = frozenset({"issue_comment", "pull_request_review_comment"})
+# A successful comment run under this wall time started a runner only to reject
+# the comment: the same self-skip floor the drill uses (`_NOOP_FLOOR_S`).
+_OPT108_SHORT_RUN_S = 30.0
+# Short runs that must be priced before a saving is credited (`_MIN_TIMED_RUNS`).
+_OPT108_MIN_PRICED_RUNS = 3
+_OPT108_UNSIZED_PLACEHOLDER = (
+    "not sized until matching short successful runs confirm the rejected share.")
+_OPT108_NO_WALL_CLOCK = ("comment-triggered runs do not gate a pull-request merge, so "
+                         "there is no wall-clock effect on the pull-request path")
+
+
+def _opt108_short_comment_runs(
+        all_runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Successful comment-event runs that finished under `_OPT108_SHORT_RUN_S`: the
+    runner started, the handler rejected the comment, the job exited."""
+    out = []
+    for run in all_runs:
+        wall = _run_wall_s(run)
+        if (str(run.get("event") or "") in _OPT108_COMMENT_EVENTS
+                and str(run.get("conclusion") or "") == "success"
+                and wall is not None and 0 < wall < _OPT108_SHORT_RUN_S):
+            out.append(run)
+    return out
+
+
+def _opt108_mean_billable_min(
+        jobs_per_run: list[list[dict[str, Any]]]) -> tuple[float, int]:
+    """(mean billed-equivalent minutes per run, runs priced): each job rounds up
+    to the minute (`_billable_equiv_min`), as GitHub bills it, so a 12-second
+    rejected comment costs a full minute. A known skipped/absent affected job
+    contributes zero; a run with an affected job whose timing is unreadable is
+    left out rather than counted as free."""
+    per_run: list[int] = []
+    for run_jobs in jobs_per_run:
+        mins = [
+            0 if str(job.get("conclusion") or "") == "skipped"
+            else _billable_equiv_min(job)
+            for job in run_jobs
+        ]
+        if any(m is None for m in mins):
+            continue
+        total = sum(int(m) for m in mins if m is not None)
+        per_run.append(total)
+    if not per_run:
+        return 0.0, 0
+    return sum(per_run) / len(per_run), len(per_run)
+
+
+def _opt108_unmeasured(finding: dict[str, Any], reason: str, **counts: Any) -> None:
+    finding["comment_runner_measurement"] = {
+        "status": "unmeasured", "reason": reason, **counts}
+    finding["wall_clock_p50_s"] = None
+    finding["runner_min_saving"] = None
+    finding["tier"] = 2
+    finding["realization"] = "none"
+    finding["size_note"] = (f"runner-minute saving not sized ({reason}); "
+                            f"{_OPT108_NO_WALL_CLOCK}")
+    finding["runner_min_unsized_reason"] = reason
+
+
+def _size_opt108_comment_runs(
+    finding: dict[str, Any],
+    all_runs: list[dict[str, Any]],
+    short_jobs: list[list[dict[str, Any]]],
+    affected_jobs_per_run: list[list[dict[str, Any]]],
+    monthly_volume: int | None,
+) -> None:
+    """Size OPT108 from the workflow's own run history (pure).
+
+    The saving is the measured compute of rejected comments: the share of the
+    sampled all-status runs that are short successful comment runs, times the
+    30-day run volume, times those runs' mean billed minutes (each job rounded
+    up to the minute). It is capped at the affected jobs' measured billed
+    compute over the same volume. Wall-clock is not
+    affected: comment runs do not gate a merge."""
+    sampled = len(all_runs)
+    comment_runs = sum(str(r.get("event") or "") in _OPT108_COMMENT_EVENTS
+                       for r in all_runs)
+    short = _opt108_short_comment_runs(all_runs)
+    counts = {"sampled_runs": sampled, "comment_runs": comment_runs,
+              "short_success_runs": len(short), "short_floor_s": _OPT108_SHORT_RUN_S}
+    if not isinstance(monthly_volume, int) or monthly_volume <= 0:
+        _opt108_unmeasured(finding, "the workflow's 30-day run volume is unknown or zero",
+                           **counts)
+        return
+    if not comment_runs:
+        _opt108_unmeasured(finding, "no comment-triggered runs in the sampled run list",
+                           **counts)
+        return
+    if not short:
+        _opt108_unmeasured(
+            finding,
+            f"no successful comment-triggered run finished under {_OPT108_SHORT_RUN_S:.0f}s "
+            f"in the {sampled} sampled runs", **counts)
+        return
+    mean_short, priced = _opt108_mean_billable_min(short_jobs)
+    if priced < _OPT108_MIN_PRICED_RUNS:
+        _opt108_unmeasured(
+            finding,
+            f"only {priced} short successful run(s) could be priced; at least "
+            f"{_OPT108_MIN_PRICED_RUNS} are needed", priced_runs=priced, **counts)
+        return
+    mean_affected, affected_priced = _opt108_mean_billable_min(
+        list(affected_jobs_per_run) + list(short_jobs))
+    raw = monthly_volume * len(short) / sampled * mean_short
+    cap = round(monthly_volume * mean_affected, 1)
+    saving = round(min(raw, cap), 1)
+    finding["comment_runner_measurement"] = {
+        "status": "measured", **counts, "priced_runs": priced,
+        "mean_short_billable_min": round(mean_short, 4),
+        "workflow_runs_30d": monthly_volume,
+        "affected_priced_runs": affected_priced,
+        "affected_mean_billable_min": round(mean_affected, 4),
+        "affected_compute_min_30d": cap,
+        "capped": raw > cap,
+    }
+    finding["wall_clock_p50_s"] = 0.0
+    finding["runner_min_saving"] = saving
+    finding["tier"] = 2
+    finding["realization"] = "none"
+    finding["sizing_basis"] = "measured"
+    measured = (
+        f"measured: {len(short)} of {sampled} sampled runs were successful "
+        f"comment-triggered runs under {_OPT108_SHORT_RUN_S:.0f}s; at {mean_short:.2f} "
+        f"billed minutes each over {priced} priced runs and {monthly_volume} runs per "
+        f"30 days, about {saving:.1f} runner-minutes per 30 days, capped at the "
+        f"affected jobs' measured {cap:.1f}.")
+    evidence = str(finding.get("evidence") or "")
+    if _OPT108_UNSIZED_PLACEHOLDER in evidence:
+        evidence = evidence.replace(_OPT108_UNSIZED_PLACEHOLDER, measured)
+    else:
+        evidence = (evidence.rstrip() + " " + measured).strip()
+    finding["evidence"] = evidence
+    finding["measured_signal"] = (
+        f"{len(short)} of {sampled} sampled runs short successful comment runs; "
+        f"{saving:.1f} runner-min per 30 days")
+    finding["size_note"] = f"runner-minute (bill) saving only; {_OPT108_NO_WALL_CLOCK}"
+
+
+def _measure_opt108_comment_runs(
+    client: GhClient, repo: str, findings: list[dict[str, Any]],
+    all_status_page, wf_by_path: dict[str, dict[str, Any]],
+    jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
+    vol_by_wf: dict[str, int | None], job_memo: "_JobFetchMemo",
+    job_graph: Any,
+) -> int:
+    """Measure every OPT108 finding off its workflow's cached all-status page.
+    Comment workflows are usually triaged (no job fetch), so the short runs'
+    jobs are fetched here. Returns the count of failed job fetches."""
+    failures = 0
+    credited_jobs_by_workflow: dict[str, set[str]] = {}
+    for finding in findings:
+        if finding.get("pattern") != "OPT108":
+            continue
+        wf_path = str(finding.get("workflow_file") or "")
+        requested_jobs = {
+            str(name) for name in (finding.get("affected_jobs") or [])
+            if str(name).strip()
+        }
+        credited_jobs = credited_jobs_by_workflow.setdefault(wf_path, set())
+        sized_jobs = requested_jobs - credited_jobs
+        if not sized_jobs:
+            _opt108_unmeasured(
+                finding,
+                "the finding's affected jobs were already credited by another "
+                "OPT108 finding in this workflow",
+                sized_affected_jobs=[],
+            )
+            continue
+        aliases: dict[str, str] = {}
+        for job_name in sized_jobs:
+            for alias in _own_workflow_job_identities(job_graph, wf_path, job_name):
+                aliases[alias] = job_name
+        wf_id = (wf_by_path.get(wf_path) or {}).get("id")
+        all_runs = all_status_page(wf_path, wf_id) if wf_id is not None else None
+        if all_runs is None:
+            _opt108_unmeasured(finding, "the workflow's run list could not be fetched")
+            continue
+        short_ids = {run.get("id") for run in _opt108_short_comment_runs(all_runs)}
+        # Every sampled run is priced (memoised, so runs the cost spine already
+        # read cost nothing): the short ones are the saving, all of them are the
+        # workflow's measured compute that caps it.
+        kept, failed = (_gather_run_jobs(client, repo, all_runs, memo=job_memo)
+                        if short_ids else ([], 0))
+        failures += failed
+
+        matched_jobs: set[str] = set()
+
+        def affected_only(jobs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            selected = []
+            for job in jobs:
+                name = str(job.get("name") or "").strip()
+                matched = aliases.get(_whole_run_cancel_base_key(name))
+                if matched is not None:
+                    matched_jobs.add(matched)
+                    selected.append(job)
+            return selected
+
+        short_jobs = [
+            affected_only(jobs) for run, jobs in kept if run.get("id") in short_ids]
+        workflow_jobs = [
+            affected_only(jobs) for run, jobs in kept if run.get("id") not in short_ids]
+        if not workflow_jobs:
+            workflow_jobs = [
+                affected_only(jobs)
+                for jobs in (jobs_per_run_by_wf.get(wf_path) or [])
+            ]
+        if short_ids and not matched_jobs:
+            _opt108_unmeasured(
+                finding,
+                "the affected job identities could not be resolved in the "
+                "sampled job lists",
+                sized_affected_jobs=[],
+                sampled_runs=len(all_runs),
+                comment_runs=sum(
+                    str(run.get("event") or "") in _OPT108_COMMENT_EVENTS
+                    for run in all_runs
+                ),
+                short_success_runs=len(_opt108_short_comment_runs(all_runs)),
+                short_floor_s=_OPT108_SHORT_RUN_S,
+            )
+            continue
+        _size_opt108_comment_runs(
+            finding, all_runs, short_jobs, workflow_jobs, vol_by_wf.get(wf_path))
+        measurement = finding.get("comment_runner_measurement")
+        if isinstance(measurement, dict):
+            measurement["sized_affected_jobs"] = sorted(matched_jobs)
+            if measurement.get("status") == "measured":
+                credited_jobs.update(matched_jobs)
+    return failures
+
+
 def _measure_opt32_path_filters(
     client: GhClient,
     repo: str,
@@ -6199,7 +6442,9 @@ def _measure_opt32_path_filters(
     changed_files: dict[int, list[str] | None] | None = None,
 ) -> None:
     """Measure OPT32 only from PRs already selected by the normal run sample."""
-    targets = [f for f in findings if f.get("pattern") == "OPT32"]
+    targets = [f for f in findings
+               if f.get("pattern") == "OPT32"
+               and not f.get("opt32_deploy_test_paths")]
     if not targets:
         return
     repo_patterns, pattern_sources = _opt32_repository_paths_ignore(wf_docs)
@@ -6295,6 +6540,253 @@ def _measure_opt32_path_filters(
                       "`*.md`, `docs/**/*.md`, `LICENSE*`, `.github/*.md`.")
         finding["evidence"] = (str(finding.get("evidence") or "").rstrip()
                                + measured + coverage + suffix)
+
+
+_OPT39_LANGUAGE_SUFFIXES: dict[str, tuple[str, ...]] = {
+    "go": (".go",),
+    "python": (".py", ".pyi"),
+    "rust": (".rs",),
+}
+def _opt39_paths_classification(
+        paths: list[str], language_inputs: list[str], workflow_inputs: list[str]) -> str:
+    """Classify exact-run paths against an explicit, complete owner map."""
+    if not paths:
+        return "unknown"
+    for path in paths:
+        if any(_opt32_glob_matches(path, pattern) for pattern in language_inputs):
+            return "relevant"
+        if not any(_opt32_glob_matches(path, pattern) for pattern in workflow_inputs):
+            return "unknown"
+    return "irrelevant"
+
+
+def _opt39_exact_changed_files(
+        client: GhClient, repo: str, run: dict[str, Any]) -> list[str] | None:
+    """Read the exact base/head comparison captured on one historical PR run."""
+    pulls = run.get("pull_requests")
+    if not isinstance(pulls, list) or not pulls or not isinstance(pulls[0], dict):
+        return None
+    pull = pulls[0]
+    base = (pull.get("base") or {}).get("sha") if isinstance(pull.get("base"), dict) else None
+    head = (pull.get("head") or {}).get("sha") if isinstance(pull.get("head"), dict) else None
+    # The run tested its own commit. A pull request's recorded head can be a
+    # later push, so price the run's commit whenever the run names one.
+    run_head = run.get("head_sha")
+    if isinstance(run_head, str) and re.fullmatch(r"[0-9a-fA-F]{40}", run_head):
+        head = run_head
+    if not (isinstance(base, str) and isinstance(head, str)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", base)
+            and re.fullmatch(r"[0-9a-fA-F]{40}", head)):
+        return None
+    doc = client.json(f"repos/{repo}/compare/{base}...{head}")
+    files = doc.get("files") if isinstance(doc, dict) else None
+    if not isinstance(files, list) or not files or len(files) >= 300:
+        return None
+    paths: list[str] = []
+    supported = {"added", "modified", "removed", "renamed", "copied", "changed",
+                 "unchanged"}
+    for row in files:
+        if not isinstance(row, dict) or row.get("status") not in supported:
+            return None
+        filename = row.get("filename")
+        previous = row.get("previous_filename")
+        if not isinstance(filename, str) or not filename:
+            return None
+        if row.get("status") == "renamed" and not isinstance(previous, str):
+            return None
+        if previous is not None and not isinstance(previous, str):
+            return None
+        paths.append(filename)
+        if previous:
+            paths.append(previous)
+    return paths
+
+
+def _opt39_unsized(finding: dict[str, Any], reason: str, **counts: Any) -> None:
+    finding["language_path_measurement"] = {
+        "status": "unmeasured", "reason": reason, **counts}
+    finding["wall_clock_p50_s"] = 0.0
+    finding["runner_min_saving"] = None
+    finding["runner_minute_effect"] = {"direction": "unsized", "reason": reason}
+    finding["tier"] = 2
+    finding["realization"] = "none"
+    finding["sizing_basis"] = "measured"
+    finding["size_note"] = (
+        f"runner-minute saving not sized ({reason}); changed-path lookup must "
+        "run the job whenever it is unknown or fails")
+    finding["runner_min_unsized_reason"] = reason
+
+
+def _measure_opt39_language_jobs(
+    client: GhClient,
+    repo: str,
+    findings: list[dict[str, Any]],
+    sampled_runs_by_wf: dict[str, list[dict[str, Any]]],
+    jobs_per_run_by_wf: dict[str, list[list[dict[str, Any]]]],
+    vol_by_wf: dict[str, int | None],
+    job_graph: Any,
+) -> None:
+    """Measure OPT39 per-language jobs from the sampled PRs and their job compute."""
+    targets = [
+        finding for finding in findings
+        if finding.get("pattern") == "OPT39"
+        and finding.get("opt39_job_kind") == "per-language-toolchain"
+    ]
+
+    def withhold(finding: dict[str, Any]) -> None:
+        if finding in findings:
+            findings.remove(finding)
+
+    for finding in targets:
+        workflow = str(finding.get("workflow_file") or "")
+        languages = {
+            str(language).lower() for language in finding.get("opt39_languages") or []
+            if str(language).lower() in _OPT39_LANGUAGE_SUFFIXES
+        }
+        if not languages:
+            withhold(finding)
+            continue
+        language_inputs = [
+            str(pattern) for pattern in finding.get("opt39_language_inputs") or []
+            if isinstance(pattern, str) and pattern.strip()
+        ]
+        workflow_inputs = [
+            str(pattern) for pattern in finding.get("opt39_workflow_inputs") or []
+            if isinstance(pattern, str) and pattern.strip()
+        ]
+        if not language_inputs or not workflow_inputs:
+            _opt39_unsized(
+                finding, "the job's complete language input map is not declared",
+                sampled_prs=0, unknown_prs=0, missing_job_rows=0)
+            continue
+        workflow_runs = list(sampled_runs_by_wf.get(workflow, []))
+        sampled_runs = [
+            run for run in workflow_runs
+            if str(run.get("event") or "") in {"pull_request", "pull_request_target"}
+        ]
+        if not workflow_runs or not sampled_runs:
+            withhold(finding)
+            continue
+        if any(not isinstance(_run_pr_number(run), int) for run in sampled_runs):
+            withhold(finding)
+            continue
+        exact_paths: dict[str, list[str] | None] = {}
+        for run in sampled_runs:
+            run_id = _run_id(run)
+            if not run_id:
+                withhold(finding)
+                break
+            exact_paths[run_id] = _opt39_exact_changed_files(client, repo, run)
+        if finding not in findings:
+            continue
+        if any(paths is None for paths in exact_paths.values()):
+            withhold(finding)
+            continue
+        classifications = {
+            run_id: _opt39_paths_classification(
+                paths or [], language_inputs, workflow_inputs)
+            for run_id, paths in exact_paths.items()
+        }
+        if any(value == "unknown" for value in classifications.values()):
+            withhold(finding)
+            continue
+        aliases: set[str] = set()
+        for job_name in finding.get("affected_jobs") or []:
+            aliases.update(_own_workflow_job_identities(
+                job_graph, workflow, str(job_name)))
+        rows: list[tuple[int, str, float]] = []
+        missing_job_rows = 0
+        for run_jobs in jobs_per_run_by_wf.get(workflow, []):
+            run_id = next((
+                str(job.get("_run_id")) for job in run_jobs
+                if job.get("_run_id") not in (None, "")
+            ), "")
+            if not run_id or run_id not in classifications:
+                continue
+            matched = [
+                job for job in run_jobs
+                if _whole_run_cancel_base_key(str(job.get("name") or "")) in aliases
+            ]
+            priced = [_billable_equiv_min(job) for job in matched]
+            if not matched or any(value is None for value in priced):
+                missing_job_rows += 1
+                continue
+            classification = classifications.get(run_id, "unknown")
+            rows.append((run_id, classification,
+                         float(sum(value for value in priced if value is not None))))
+        classified = rows
+        if missing_job_rows:
+            _opt39_unsized(
+                finding, "some affected job timings were missing or unreadable",
+                sampled_prs=len(classified), unknown_prs=0,
+                missing_job_rows=missing_job_rows)
+            continue
+        if not classified:
+            withhold(finding)
+            continue
+        monthly_volume = vol_by_wf.get(workflow)
+        if not isinstance(monthly_volume, int) or monthly_volume <= 0:
+            _opt39_unsized(
+                finding, "the workflow's 30-day run volume is unknown or zero",
+                sampled_prs=len(classified), unknown_prs=0,
+                missing_job_rows=missing_job_rows)
+            continue
+        irrelevant = [row for row in classified if row[1] == "irrelevant"]
+        if not irrelevant:
+            withhold(finding)
+            continue
+        sample_saved = sum(row[2] for row in irrelevant)
+        pr_volume = monthly_volume * len(sampled_runs) / len(workflow_runs)
+        saving = round(sample_saved / len(classified) * pr_volume, 1)
+        total_sample_compute = sum(row[2] for row in classified)
+        cap = round(total_sample_compute / len(classified) * pr_volume, 1)
+        saving = min(saving, cap)
+        language_text = "/".join(sorted(languages))
+        population = (
+            f"one {len(workflow_runs)}-run workflow sample "
+            f"({len(sampled_runs)} pull-request runs; {len(classified)} priced)"
+        )
+        measurement = {
+            "status": "measured",
+            "languages": sorted(languages),
+            "sampled_prs": len(classified),
+            "irrelevant_prs": len(irrelevant),
+            "unknown_prs": 0,
+            "missing_job_rows": missing_job_rows,
+            "sample_runner_minutes_saved": round(sample_saved, 1),
+            "sample_runner_minutes_total": round(total_sample_compute, 1),
+            "workflow_runs_30d": monthly_volume,
+            "estimated_pr_runs_30d": round(pr_volume, 1),
+            "workflow_sampled_runs": len(workflow_runs),
+            "pr_sampled_runs": len(sampled_runs),
+            "runner_minutes_per_30d": saving,
+            "affected_compute_cap_min_30d": cap,
+            "sample_population": population,
+        }
+        finding["language_path_measurement"] = measurement
+        finding["wall_clock_p50_s"] = 0.0
+        finding["runner_min_saving"] = saving
+        finding["runner_minute_effect"] = {
+            "direction": "saving", "runner_min_per_month": saving}
+        finding["tier"] = 2
+        finding["realization"] = "none"
+        finding["sizing_basis"] = "measured"
+        finding["size_note"] = (
+            f"runner-minute saving: {saving:.1f} per 30 days from {population}; "
+            "pull-request wall-clock is not credited because an unchanged required "
+            "aggregate may still gate the merge")
+        finding["evidence"] = (
+            str(finding.get("evidence") or "").rstrip()
+            + f" Measured {len(irrelevant)} of {len(classified)} sampled pull-request "
+              f"runs with no "
+              f"{language_text} input; their affected jobs used {sample_saved:.1f} "
+              f"runner-minutes in {population}, projecting a saving of {saving:.1f} "
+              f"runner-minutes per 30 days from {monthly_volume} workflow runs."
+            + f" The 30-day scale applies the sample's {len(sampled_runs)} of "
+              f"{len(workflow_runs)} pull-request event share to the workflow's "
+              f"{monthly_volume} total runs."
+            + " Unknown or failed changed-path lookups must run every language job."
+        )
 
 
 _CACHE_SIZING_PATTERNS = frozenset(
@@ -6633,6 +7125,8 @@ def _apply_cache_sizing_guard(
         prior_note = str(finding.get("size_note") or "").strip()
         guard_note = f"cache saving uncredited: {details}"
         finding["size_note"] = f"{prior_note}; {guard_note}" if prior_note else guard_note
+        finding["runner_min_unsized_reason"] = (
+            f"the cache sizing checks did not pass: {details}")
 
 
 def _affected_job_p50(f: dict[str, Any], crit: dict[str, Any]) -> float:
@@ -6714,6 +7208,8 @@ def _ground_opt12_duplicate_test_work(
                 "size_note": ("duplicate test work found, but matching push-lane job "
                               "timings were unavailable; measure the duplicate suite "
                               "before crediting time"),
+                "runner_min_unsized_reason": (
+                    "matching push-lane job timings were unavailable"),
                 "sizing_basis": "measured",
             })
             continue
@@ -6797,9 +7293,106 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
     f["runner_min_note"] = f"{existing}; {note}" if existing else note
 
 
+def _unsized_runner_min(f: dict[str, Any], reason: str) -> None:
+    """Record WHY this finding's runner-minute saving is unsized.
+
+    The report's group heading reads `runner_min_unsized_reason`; without it a
+    finding whose saving is real but unsized falls back to "no bill saving",
+    which misstates it. The reason must be literally true for the branch that
+    left `runner_min_saving` at None. A reason an earlier branch already stamped
+    is kept (it is the more specific one)."""
+    if not f.get("runner_min_unsized_reason"):
+        f["runner_min_unsized_reason"] = reason
+
+
+_NO_MONTHLY_VOLUME_REASON = "the workflow's monthly run count was not measured"
+_OPT16_TEST_BUILD_UNSIZED = (
+    "static source proves the repeated build shape but no build duration or "
+    "monthly execution count is measured")
+# Removing a `needs:` edge changes when the dependent job starts, not how long
+# any job runs; on runs where the dependency fails the dependent now runs too.
+_OPT21_NO_RUNNER_MIN_EFFECT = (
+    "removing a `needs:` edge changes when the dependent job starts, not how long "
+    "any job runs")
+
+
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
-    """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
+    """Set wall_clock_p50_s and runner_min_saving on the finding in-place.
+
+    Every branch that leaves `runner_min_saving` at None (unsized) also stamps
+    a literally true `runner_min_unsized_reason`; a branch that sizes the
+    effect to zero sets 0.0 (`tests/test_unsized_reason_guard.py`)."""
+    if f.get("positional_splitter_static"):
+        # Source proves an unstable assignment rule, not a duration or current
+        # imbalance. Any runner-minute saving (fewer shard timeouts and reruns)
+        # is real but unsized; do not invent the measured OPT25 wall-clock model.
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f.setdefault(
+            "size_note",
+            "runner-minute saving: unsized (passing runs execute the same tests in "
+            "the same shard jobs, so any saving comes from fewer shard timeouts and "
+            "reruns, which no CI per-test timings measure yet); the wall-clock saving "
+            "is unsized until CI per-test timings measure the imbalance",
+        )
+        f.setdefault(
+            "runner_min_unsized_reason",
+            "passing runs execute the same tests in the same shard jobs, so any "
+            "saving comes from fewer shard timeouts and reruns, which no CI per-test "
+            "timings measure yet",
+        )
+        return
+    if f.get("source_test_build_repeat"):
+        # Source proves repeated construction but contains no duration. Do not
+        # feed this OPT16 extension through the generic 10-second model: the
+        # issue's safest recipe first shares the build, then measures it.
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f.setdefault(
+            "size_note",
+            "runner-minute saving: unsized (static source proves the repeated "
+            "build shape but no build duration or monthly execution count is measured)",
+        )
+        _unsized_runner_min(f, _OPT16_TEST_BUILD_UNSIZED)
+        return
+    if f.get("opt32_deploy_test_paths"):
+        f["wall_clock_p50_s"] = 0.0
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["size_note"] = (
+            "runner-minute saving is not sized until test-only default-branch "
+            "merge frequency and the deploy jobs' measured compute are available"
+        )
+        _unsized_runner_min(f, (
+            "test-only default-branch merge frequency and the deploy jobs' "
+            "measured compute were not available"))
+        return
+    if f.get("oversized_fixture_static"):
+        # Source proves that a very large artifact is used as byte payload, but
+        # not how long that test spends on it or how often it runs. Preserve the
+        # detector's explicit unsized result instead of applying a flat model.
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f.setdefault(
+            "size_note",
+            "runner-minute saving: unsized (affected test duration and monthly "
+            "run count were not measured)",
+        )
+        # The report's group heading reads this reason; without it the heading
+        # falls back to "no bill saving", which misstates a real, unsized saving.
+        f.setdefault(
+            "runner_min_unsized_reason",
+            "affected test duration and monthly run count were not measured",
+        )
+        return
     cache_confirmation = f.get("cache_log_confirmation")
     confirmed_miss_majority = (
         isinstance(cache_confirmation, dict)
@@ -6814,6 +7407,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f["size_note"] = ("workflow configuration proves the cache shape needs review; "
                           "credit no saving until this job's logs measure a miss and "
                           "the restore/build cost")
+        _unsized_runner_min(f, (
+            "this job's logs have not measured a cache miss or the restore/build "
+            "cost"))
         return
     if f.get("sizing_basis") == "measured" and (
             "wall_clock_p50_s" in f or "runner_min_saving" in f):
@@ -6825,6 +7421,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f.setdefault("tier", 1 if isinstance(wc, (int, float)) and wc > 0 else 2)
         f.setdefault("realization", "direct" if isinstance(wc, (int, float)) and wc > 0 else "none")
         f.setdefault("size_note", "")
+        if not isinstance(f.get("runner_min_saving"), (int, float)):
+            _unsized_runner_min(f, "the measuring detector produced no monthly "
+                                   "runner-minute figure")
         return
     pat = f.get("pattern", "")
     cfg = _SIZING.get(pat)
@@ -6836,11 +7435,31 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f["tier"] = 2
         f["realization"] = "none"
         f["size_note"] = "no sizing model wired for this pattern yet"
+        _unsized_runner_min(f, "no sizing model is wired for this pattern yet")
         return
 
     long_pole = crit.get("long_pole_p50", 0.0)
     floor = crit.get("floor_p50", 0.0)
     model = cfg["model"]
+
+    if isinstance(f.get("opt16_analysis_repeat"), dict):
+        # OPT16's repeated-analysis form (only scan.py stamps this fact; keyed on
+        # the fact, not the ID, so the sizing-class battery stays complete).
+        # Repeated analysis with only report/include selectors changed: the
+        # combined run still performs the analysis once, so the flat OPT16
+        # default (one whole duplicate command) is not this variant's saving.
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f["size_note"] = (
+            "runner-minute saving: unsized (the combined run still performs the "
+            "analysis once; time the separate runs and the combined run on the "
+            "same commit before crediting minutes)")
+        _unsized_runner_min(f, (
+            "the combined run still performs the analysis once, and the separate "
+            "and combined runs were not timed on the same commit"))
+        return
 
     if _opt9_is_build_state(f):
         f["wall_clock_p50_s"] = None
@@ -6853,6 +7472,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             "validation, and save overhead — measure before and after on the "
             "same workload before crediting seconds"
         )
+        _unsized_runner_min(f, (
+            "the cache's restore, validation and save overhead were not measured "
+            "before and after on the same workload"))
         return
 
     # Guardrail A — D12 serial-gate auto-demote.
@@ -6907,6 +7529,8 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         f["tier"] = 1 if wc > 0 else 2
         f["realization"] = "direct" if wc > 0 else "none"
         f["size_note"] = note
+        if rm is None:
+            _unsized_runner_min(f, _NO_MONTHLY_VOLUME_REASON)
 
     elif model == "parallel-rebalance":
         # Sharding spreads a job's work across N shards (N=2 conservative floor).
@@ -6992,12 +7616,16 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             f["size_note"] = (
                 "runner-minute (bill) only - hit rate not measured "
                 f"({reason})")
+            _unsized_runner_min(f, f"the path-filter hit rate was not measured ({reason})")
         elif unresolved and cost_basis == "affected_jobs":
             f["runner_min_saving"] = None
             f["size_note"] = ("whole-run cancel runner-minutes not sized — none of "
                               "the affected jobs' durations could be resolved from "
                               "sampled run timings; saving ≈ the affected jobs' own "
                               "minutes × superseded-run rate × volume")
+            _unsized_runner_min(f, (
+                "none of the affected jobs' durations could be resolved from "
+                "sampled run timings"))
         elif unresolved:
             f["runner_min_saving"] = None
             f["size_note"] = ("per-job runner-minutes not sized — this finding "
@@ -7005,10 +7633,17 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                               "couldn't be resolved from sampled run timings "
                               "(reusable-workflow caller or name-overridden job); "
                               "saving ≈ the job's own minutes × skip-rate × volume")
+            _unsized_runner_min(f, (
+                "the skipped job's duration could not be resolved from sampled "
+                "run timings"))
         else:
+            # A zero hit rate (OPT12's composite-action dedup) is SIZED: it
+            # changes no runtime, so the effect is zero whatever the volume.
             f["runner_min_saving"] = (
                 round(rate * per_run_s * (monthly_volume or 0) / 60.0, 1)
-                if monthly_volume else None)
+                if monthly_volume else 0.0 if not rate else None)
+            if f["runner_min_saving"] is None:
+                _unsized_runner_min(f, _NO_MONTHLY_VOLUME_REASON)
             if cost_basis == "affected_jobs":
                 rate_label = cfg.get("cost_basis_rate_label", "the superseded-run rate")
                 f["size_note"] = (
@@ -7046,6 +7681,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                           "fan-out adds a serial gate) — prefer warming the cache "
                           "so each parallel copy stays cheap; runner-minute "
                           "(bill) saving only")
+        if rm is None:
+            _unsized_runner_min(f, _NO_MONTHLY_VOLUME_REASON if s else (
+                "no per-run saving is modeled for this pattern"))
 
     elif model == "measured":
         # Data-driven detector already set the axes from measured timings;
@@ -7065,6 +7703,9 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
         existing = f.get("size_note") or ""
         f["size_note"] = f"{existing}; {_EPHEMERAL_CAVEAT}" if existing else _EPHEMERAL_CAVEAT
         _demote_runner_min(f, _EPHEMERAL_RUNNER_MIN_CAVEAT)
+        _unsized_runner_min(f, (
+            "the cache writes to a working-dir path the next ephemeral runner "
+            "discards, and no warm-versus-cold delta was measured"))
     # Removing a `needs:` edge is a queue-wait (wall-clock) lever, never a
     # compute saving — its modeled runner-min is not realizable.
     if pat in _WALL_CLOCK_ONLY_NO_RUNNER_MIN:
@@ -7081,6 +7722,19 @@ def _size_finding(f: dict[str, Any], crit: dict[str, Any],
             "jobs don't ALREADY self-skip (via `if:` guards or an internal "
             "change-gate) and the trigger can be narrowed safely — verify per "
             "workflow before crediting"))
+        measurement = f.get("path_filter_measurement")
+        if (isinstance(measurement, dict) and measurement.get("status") != "unmeasured"
+                and int(measurement.get("sampled_prs") or 0) > 0
+                and int(measurement.get("would_skip_prs") or 0) == 0):
+            # Measured zero: no sampled PR would skip, so the filter has no
+            # runner-minute effect on this sample. "No bill saving" is true.
+            f["runner_min_no_effect_reason"] = (
+                f"none of the {int(measurement['sampled_prs'])} sampled PRs would "
+                "skip under the path filter")
+        else:
+            _unsized_runner_min(f, (
+                "the modeled figure is a gross upper bound, realizable only where "
+                "the workflow's jobs do not already self-skip"))
 
 
 def _cap_opt19_wall_clock(f: dict[str, Any], global_long_pole_p50: float) -> None:
@@ -7489,6 +8143,7 @@ def _reground_whole_run_cancel_saving(
             f["size_note"] = ("runner-minutes not sized — no affected job resolved "
                               "to a cost-spine row with measured billable compute, "
                               "so there is no measured basis to bound the saving")
+            f["runner_min_unsized_reason"] = _NO_SPINE_MATCH_REASON
             continue
         rate = cfg.get("hit_rate", 0.0)
         f["runner_min_saving"] = round(rate * measured, 1)
@@ -7514,6 +8169,10 @@ def _all_runs_excluded(wf: str, jobs: "list[str]", all_index: Any,
     return matched > 0 and every > 0
 
 
+_NO_SPINE_MATCH_REASON = (
+    "no affected job resolved to a cost-spine row with measured billable compute")
+
+
 def _mark_all_runs_excluded(f: dict[str, Any]) -> None:
     """A saving DERIVED from completed-run compute (OPT45/OPT29), clamped to it
     (the serial gates / OPT73) or capped at it (a modeled estimate) has no basis when every sampled run
@@ -7525,6 +8184,7 @@ def _mark_all_runs_excluded(f: dict[str, Any]) -> None:
     f["size_note"] = (
         (str(f.get("size_note") or "") + "; " if f.get("size_note") else "")
         + "runner-minutes not sized — " + _ALL_RUNS_EXCLUDED_NOTE)
+    f["runner_min_unsized_reason"] = _ALL_RUNS_EXCLUDED_NOTE
 
 
 def _measured_billable_index(
@@ -7765,6 +8425,12 @@ _RM_DOOR_OVERRIDES: dict[str, tuple[str, str]] = {
     "OPT105": (_RM_DOOR_CLAMP,
                "repeated local-hook work — measured step-time credit clamped to "
                "the affected jobs' measured cost-spine billable"),
+    "OPT106": (_RM_DOOR_CLAMP,
+               "profiled runtime TypeScript loader self time — measured per-run "
+               "credit clamped to the affected job's measured cost-spine billable"),
+    "OPT112": (_RM_DOOR_CLAMP,
+               "measured same-key fresh-versus-old Go build-cache slowdown — "
+               "credit clamped to the affected job's measured cost-spine billable"),
     # DERIVE — whole-run cancel re-derives hit_rate x the affected jobs' measured
     # billable (implemented by `_reground_whole_run_cancel_saving`, run first).
     "OPT45": (_RM_DOOR_DERIVE,
@@ -7933,6 +8599,7 @@ def _reground_runner_minute_savings(
             + "runner-minutes not sized — no affected job resolved to a cost-spine "
             "row with measured billable compute, so there is no measured basis to "
             "bound the saving")
+        f["runner_min_unsized_reason"] = _NO_SPINE_MATCH_REASON
 
     for f in findings:
         saving = f.get("runner_min_saving")
@@ -9164,6 +9831,63 @@ class RequiredChecks:
     def advice_complete(self) -> bool:
         """Whether absence can authorize moving a check off the PR path."""
         return self.complete and self.classic_read and self.rulesets_read
+
+
+_OPT46_AGGREGATE_ADVICE = (
+    " The complete required-check read shows check `{check}` is not required, so "
+    "`if: ${{{{ !cancelled() }}}}` is safe here. Leave the step-level result check "
+    "unchanged: the job still runs when a dependency ends failure, cancelled or "
+    "skipped, so the check still rejects every result it rejects today. A "
+    "required aggregate keeps `always()`: a job skipped by its `if:` "
+    "reports success, so a head run cancelled without a replacement would pass "
+    "with nothing validated. Runner-minute effect: saving this aggregate job's "
+    "compute on cancelled runs; not sized until matched cancelled runs measure "
+    "its runner allocation and compute.")
+
+
+def _opt46_check_may_be_required(check: str, required: "frozenset[str] | set[str]"
+                                 ) -> bool:
+    """Could ``check`` be one of the required contexts? Matches the bare check
+    name, a ``caller / check`` reusable-workflow context and a matrix suffix.
+    Erring toward a match keeps the aggregate on ``always()``."""
+    for name in required:
+        if (name == check or name.split(" / ")[-1] == check
+                or name.startswith(f"{check} (")):
+            return True
+    return False
+
+
+def _promote_opt46_aggregates(candidates: object,
+                              required_checks: "RequiredChecks | None"
+                              ) -> list[dict[str, Any]]:
+    """The OPT46 cancelled-run aggregate candidates safe to report.
+
+    ``!cancelled()`` on a REQUIRED aggregate lets a head run cancelled without a
+    replacement (a manual cancel, or a concurrency group shared with another
+    event) skip the aggregate, and a skipped required check reads as passing.
+    So a candidate is promoted only when the required-check read is complete
+    enough to authorize advice (``advice_complete``) and its check name is
+    readable and not required. Every other candidate stays quiet: the saving is
+    a seconds-long aggregate on cancelled runs, too small to justify advice
+    that could let a cancelled head run pass."""
+    if (not isinstance(candidates, list) or required_checks is None
+            or not required_checks.advice_complete):
+        return []
+    promoted: list[dict[str, Any]] = []
+    for cand in candidates:
+        if not isinstance(cand, dict):
+            continue
+        check = cand.get("opt46_check_context")
+        if not isinstance(check, str) or not check:
+            continue
+        if _opt46_check_may_be_required(check, required_checks.names):
+            continue
+        f = dict(cand)
+        f["evidence"] = (str(f.get("evidence") or "")
+                         + _OPT46_AGGREGATE_ADVICE.format(check=check))
+        f["opt46_required_check_status"] = "not_required"
+        promoted.append(f)
+    return promoted
 
 
 def _ruleset_ref_in_scope(detail: dict[str, Any], branch: str | None) -> bool:
@@ -10589,17 +11313,28 @@ def _detect_opt25_shard_imbalance(
             wc_p50=wc, rm=None, size_note=size_note,
             realization=("direct" if wc > 0 else "none"), measured_evidence=me,
         ))
+        # Which remedy the finding carries: a split slow leg adds jobs that repeat
+        # setup (held back by default, #448); rebalancing and the atomic-unit split
+        # move the same work between the existing legs.
+        out[-1]["opt25_case"] = ("atomic-unit" if atomic
+                                 else "rebalance" if is_sharded else "split-leg")
         if family is not None:
             out[-1]["shard_family"] = family
             out[-1]["evidence"] = summary
             out[-1]["measured_signal"] = summary
         if next_step is not None:
             out[-1]["next_step"] = next_step
+        # Rebalancing or splitting shards moves the same test work between legs;
+        # it removes no compute, so "no bill saving" is literally true here.
+        out[-1]["runner_min_no_effect_reason"] = _OPT25_NO_RUNNER_MIN_EFFECT
         out[-1]["legs_excluded_no_work"] = len(excluded_by_base.get(base, set()))
     return out
 
 
 _OPT43_CANCELLED_RUN_PROBE_MAX = 3
+_OPT25_NO_RUNNER_MIN_EFFECT = (
+    "rebalancing or splitting shards moves the same test work between legs and "
+    "removes no compute")
 
 
 def _detect_opt43_queue_time(
@@ -11724,6 +12459,9 @@ _PUSH_LANE_RARE_PER_30D = 8
 _SUCCESS_ONLY_CAVEAT_MIN_RUNS = 10
 _SUCCESS_ONLY_CAVEAT_FAILURE_RATE = 0.20
 _MIN_TIMED_RUNS = 3  # a per-run compute mean needs ≥3 timed runs to be stable
+_OPT107_BATCH_WINDOW_S = 60.0 * 60.0
+_OPT107_MIN_BATCHABLE_RUNS = 2
+_OPT107_MIN_BATCHABLE_SHARE = 0.25
 # Deliberately BROAD: this is the safety carve-out for run-cancellation fixes,
 # so a false positive (skip a real finding) is acceptable but a false negative
 # (advise cancel-in-progress on a deploy → corrupt a partial deploy/tag/publish)
@@ -15261,6 +15999,30 @@ _OPT81_MIN_SAMPLES_PER_LABEL = 8
 # half keeps a 30s wobble on a 40-minute job out.
 _OPT81_MIN_GAP_S = 30.0
 _OPT81_MIN_GAP_FRAC = 0.25
+# A measured downsize needs five interleaved successful runs on each class (the
+# paired public evidence population) and may add at most five percent wall time.
+_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL = 5
+_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC = 0.05
+# A measured downsize is never priced (the 2026-07-20 rule: ci-speedup never prices
+# a runner). The smaller size runs about as fast, so it uses about the same
+# runner-minutes billed at its lower per-minute rate; the saving is stated as a
+# runner-cost saving left unsized. A STRING CONTRACT mirrored in blocking_path.py
+# and verify_report.py (pinned by a coupling test).
+_OPT81_DOWNSIZE_SAME_SPEED = (
+    "same speed on a smaller runner size: about the same runner-minutes, billed at "
+    "the smaller size's lower rate")
+_OPT81_DOWNSIZE_UNSIZED_REASON = (
+    "ci-speedup does not price runners; the smaller size bills at a lower "
+    "per-minute rate")
+_OPT81_DOWNSIZE_COST_EFFECT = (
+    f"runner-cost saving: unsized ({_OPT81_DOWNSIZE_UNSIZED_REASON})")
+# A downsize is never recommended for a route that names itself pinned, frozen,
+# a compatibility leg or a release/publish/deploy path: those routes keep their
+# runner on purpose (issue #398's fix recipe). Matched as whole words against
+# the job's display name and the workflow file name.
+_OPT81_DOWNSIZE_PINNED_ROUTE_RE = _re.compile(
+    r"(?<![a-z0-9])(pin(ned)?|frozen|freeze|compat(ibility)?|legacy|release[sd]?|"
+    r"publish(ing)?|deploy(s|ment)?)(?![a-z0-9])", _re.I)
 # A2: the dominant step categories that count as compute.
 _OPT81_COMPUTE_CATEGORIES = frozenset({"build", "test"})
 # A2: a dominant step whose NAME says it is waiting, sleeping or moving bytes is not
@@ -15316,6 +16078,9 @@ _OPT81_VERDICT_GATES = frozenset({
     "different_operating_system",
     "different_architecture",
     "same_runner_class",
+    "downsize_slowdown_above_limit",
+    "downsize_pinned_or_compatibility_route",
+    "downsize_runner_matrix",
     # A2 verdicts: a cheaper lever exists, or the shape is not this lever's.
     "a2_not_a_pull_request_workflow",
     "a2_not_on_the_merge_gating_critical_path",
@@ -15425,6 +16190,29 @@ def _opt81_runner_class(label: str | None) -> "tuple[str, str, str, str] | None"
     if len(found) != 1:
         return None
     return next(iter(found))
+
+
+def _opt81_numeric_size_rank(
+        runner_class: tuple[str, str, str, str]) -> int | None:
+    """Comparable capacity rank for explicit numeric sizes of one runner class."""
+    size = runner_class[3]
+    return int(size) if size.isdigit() and int(size) > 0 else None
+
+
+def _opt81_size_stripped_label(label: str) -> str | None:
+    """The label set with each classified token's size tier removed, so two sizes
+    of one image compare equal (`ubuntu-24.04-8-cores` ~ `ubuntu-24.04-4-cores`)
+    and two images do not (`ubuntu-22.04-16-cores` vs `ubuntu-24.04-8-cores`)."""
+    out: list[str] = []
+    for tok in str(label or "").split():
+        for rx, _cls, _os in _OPT81_RUNNER_CLASSES:
+            m = rx.match(tok)
+            if m:
+                if m.groupdict().get("size"):
+                    tok = tok[:m.start("size")] + "<size>" + tok[m.end("size"):]
+                break
+        out.append(tok.lower())
+    return " ".join(sorted(out)) or None
 
 
 def _opt81_executed_steps(job: dict[str, Any]) -> list[str]:
@@ -15574,16 +16362,32 @@ def _detect_opt81_measured_runner_gap(
         if len(classified) < 2:
             _no("runner_label_not_classifiable_by_size", name, excluded=excluded)
             continue
-        qualifying = sorted(
+        standard_qualifying = sorted(
             (lb for lb in classified
              if len(labels[lb]) >= _OPT81_MIN_SAMPLES_PER_LABEL),
             key=lambda lb: (-len(labels[lb]), lb))
-        if len(qualifying) < 2:
+        downsize_qualifying = sorted(
+            (lb for lb in classified
+             if len(labels[lb]) >= _OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL),
+            key=lambda lb: (-len(labels[lb]), lb))
+        # Preserve A1's established eight-sample population. A third label with
+        # only five to seven observations must not block a valid old-style pair;
+        # the lower floor applies only when exactly two labels reach it.
+        if len(standard_qualifying) == 2:
+            qualifying = standard_qualifying
+        elif len(standard_qualifying) > 2:
+            _no("more_than_two_qualifying_runner_labels", name,
+                labels=standard_qualifying)
+            continue
+        elif len(downsize_qualifying) == 2:
+            qualifying = downsize_qualifying
+        elif len(downsize_qualifying) > 2:
+            _no("more_than_two_qualifying_runner_labels", name,
+                labels=downsize_qualifying)
+            continue
+        else:
             _no("fewer_than_min_samples_on_two_labels", name,
                 n={lb: len(labels[lb]) for lb in classified})
-            continue
-        if len(qualifying) > 2:
-            _no("more_than_two_qualifying_runner_labels", name, labels=qualifying)
             continue
         a, b = qualifying
         (cls_a, os_a, arch_a, size_a) = classified[a]
@@ -15612,6 +16416,105 @@ def _detect_opt81_measured_runner_gap(
             continue
         p50 = {lb: _percentile([r["duration_s"] for r in labels[lb]], 50)
                for lb in (a, b)}
+        rank_a, rank_b = (_opt81_numeric_size_rank(classified[lb]) for lb in (a, b))
+        downsize_candidate = (
+            classified[a][0] == classified[b][0]
+            and rank_a is not None and rank_b is not None and rank_a != rank_b
+            # Two images are an image change, not a size change.
+            and _opt81_size_stripped_label(a) == _opt81_size_stripped_label(b)
+        )
+        downsize_pair = False
+        if downsize_candidate:
+            small, large = (a, b) if rank_a < rank_b else (b, a)
+            small_rank = rank_a if small == a else rank_b
+            large_rank = rank_b if large == b else rank_a
+            delta_frac = ((p50[small] - p50[large]) / p50[large]
+                          if p50[large] > 0 else float("inf"))
+            downsize_pair = abs(delta_frac) <= _OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC
+            short = any(len(labels[lb]) < _OPT81_MIN_SAMPLES_PER_LABEL
+                        for lb in (a, b))
+            if not downsize_pair and short:
+                # Measured and decided: the sizes differ by more than the limit,
+                # and there are too few runs for the A1 gap comparison.
+                _no("downsize_slowdown_above_limit", name,
+                    delta_frac=round(delta_frac, 4))
+                continue
+            if downsize_pair and matrix:
+                # Both sizes run in every run: a configured size matrix. Dropping
+                # a leg removes a configured run, not a route choice.
+                _no("downsize_runner_matrix", name)
+                continue
+            if downsize_pair and (_OPT81_DOWNSIZE_PINNED_ROUTE_RE.search(name)
+                                  or _OPT81_DOWNSIZE_PINNED_ROUTE_RE.search(
+                                      wf_path.rsplit("/", 1)[-1])):
+                _no("downsize_pinned_or_compatibility_route", name)
+                continue
+        if downsize_pair:
+            steps = labels[large][0]["_steps"]
+            rows = [{k: v for k, v in r.items() if k != "_steps"}
+                    for lb in (large, small) for r in labels[lb]]
+            n_large, n_small = len(labels[large]), len(labels[small])
+            cs, cm = classified[large], classified[small]
+            effect = {"direction": "unsized",
+                      "reason": _OPT81_DOWNSIZE_UNSIZED_REASON}
+            evidence = (
+                f"{_OPT81_DOWNSIZE_SAME_SPEED[:1].upper()}{_OPT81_DOWNSIZE_SAME_SPEED[1:]}"
+                f". `{name}` ran the same "
+                f"{len(steps)} step(s) on two explicit sizes of one runner class and "
+                f"image: {n_large} successful run(s) on `{large}` at p50 "
+                f"{p50[large]:.0f}s and {n_small} on the smaller `{small}` at p50 "
+                f"{p50[small]:.0f}s ({abs(delta_frac):.1%} apart). Runner-minute and "
+                f"cost effect: {_OPT81_DOWNSIZE_COST_EFFECT}. {_OPT81_DISCLOSURE}")
+            me = _measured_evidence(
+                ["Runner label", "Class", "Successful runs (n)", "p50", "Steps executed"],
+                [[f"`{large}`", _opt81_class_display(cs[0], cs[3]), str(n_large),
+                  f"{p50[large]:.0f}s", str(len(steps))],
+                 [f"`{small}`", _opt81_class_display(cm[0], cm[3]), str(n_small),
+                  f"{p50[small]:.0f}s", str(len(steps))]],
+                summary=evidence,
+                note=("The two interleaved distributions execute the same steps. "
+                      "Downsize only ordinary routes; retain pinned, frozen, "
+                      "compatibility and release routes, and verify memory, reliability, "
+                      "work coverage and latency before switching."))
+            f = _new_finding(
+                "OPT81", "MEDIUM", "A Smaller Runner Is About as Fast", wf_path,
+                name, evidence, _OPT81_FIX_STRATEGY,
+                _catalog_anchor("OPT81", _OPT81_TITLE), start_idx + len(out) + 1,
+                wc_p50=0.0, rm=None,
+                size_note=(f"{_OPT81_DOWNSIZE_COST_EFFECT}; no wall-clock credit"),
+                realization="none", measured_evidence=me)
+            f["sizing_basis"] = "measured"
+            f["runner_cost_effect"] = effect
+            # The report's group heading reads this, so it never says "no bill
+            # saving" for a real saving the skill does not price.
+            f["runner_min_unsized_reason"] = _OPT81_DOWNSIZE_UNSIZED_REASON
+            f["faster_runner"] = {
+                "kind": "opt81_downsize", "half": "A1", "job": name,
+                "workflow_file": wf_path,
+                "large": {"label": large, "class": cs[0], "os": cs[1],
+                          "arch": cs[2], "size": cs[3],
+                          "p50_s": _opt81_round(p50[large]), "n": n_large,
+                          "first_run_at": span[large][0], "last_run_at": span[large][1]},
+                "small": {"label": small, "class": cm[0], "os": cm[1],
+                          "arch": cm[2], "size": cm[3],
+                          "p50_s": _opt81_round(p50[small]), "n": n_small,
+                          "first_run_at": span[small][0], "last_run_at": span[small][1]},
+                "large_size_rank": large_rank, "small_size_rank": small_rank,
+                "slowdown_frac": round(delta_frac, 4),
+                "max_abs_delta_frac": _OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC,
+                "min_samples_per_label": _OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL,
+                "step_list_sha": next(iter(shas)), "step_names": list(steps),
+                "rows": rows, "excluded_labels": dict(sorted(excluded.items())),
+                "runner_matrix": matrix, "runner_cost_effect": dict(effect),
+                "disclosure": _OPT81_DISCLOSURE,
+            }
+            out.append(f)
+            continue
+
+        if any(len(labels[lb]) < _OPT81_MIN_SAMPLES_PER_LABEL for lb in (a, b)):
+            _no("fewer_than_min_samples_on_two_labels", name,
+                n={lb: len(labels[lb]) for lb in classified})
+            continue
         slow, fast = (a, b) if (p50[a], a) >= (p50[b], b) else (b, a)
         if p50[slow] == p50[fast]:
             _no("gap_below_floor", name)
@@ -18115,18 +19018,184 @@ def _consecutive_same_sha_run_ids(runs: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+# CodeQL languages whose analysis honours `paths-ignore`. For compiled
+# languages CodeQL analyses whatever the build compiles, so an "ignored" path can
+# still be a scan input; those (and auto-detected languages) withhold the skip.
+_OPT36_INTERPRETED_CODEQL_LANGUAGES = frozenset({
+    "javascript", "javascript-typescript", "typescript", "python", "ruby", "actions"})
+# Paths that change what a scan does even when its exclusions list them.
+_OPT36_ALWAYS_RELEVANT_PREFIXES = (".github/workflows/", ".github/codeql/",
+                                   ".github/actions/")
+
+
+def _opt36_codeql_languages(job: dict[str, Any], raw: Any) -> list[str] | None:
+    """Resolve a CodeQL init `languages` input; None when it cannot be read."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    text = raw.strip()
+    match = re.fullmatch(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}", text)
+    if match:
+        key = match.group(1)
+        strategy = job.get("strategy")
+        matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+        if not isinstance(matrix, dict):
+            return None
+        values: list[str] = []
+        base = matrix.get(key)
+        if base is not None:
+            if not isinstance(base, list) or not all(isinstance(v, str) for v in base):
+                return None
+            values.extend(base)
+        include = matrix.get("include")
+        if include is not None:
+            if not isinstance(include, list):
+                return None
+            for row in include:
+                if not isinstance(row, dict):
+                    return None
+                if key in row:
+                    if not isinstance(row[key], str):
+                        return None
+                    values.append(row[key])
+        text = ",".join(values)
+    elif "${{" in text:
+        return None
+    langs = [part.strip().lower() for part in re.split(r"[,\s]+", text) if part.strip()]
+    return langs or None
+
+
+def _opt36_scanner_paths_ignore(wf_doc: dict[str, Any]) -> list[str]:
+    """Return the one explicit inline CodeQL exclusion list every category shares.
+
+    Fails closed (empty list, so no unchanged-input claim) unless EVERY job is a
+    CodeQL category with a resolvable interpreted `languages` input and the same
+    inline `config` `paths-ignore`, and no external `config-file` is merged in:
+    a path one category ignores may be a real input of another."""
+    try:
+        import yaml
+    except ImportError:
+        return []
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    if not isinstance(jobs, dict) or not jobs:
+        return []
+    shared: list[str] | None = None
+    for job in jobs.values():
+        if not isinstance(job, dict) or "uses" in job:
+            return []
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            return []
+        inits = [step for step in steps if isinstance(step, dict)
+                 and "codeql-action/init" in str(step.get("uses") or "").lower()]
+        if not inits:
+            return []
+        for step in inits:
+            with_ = step.get("with")
+            if not isinstance(with_, dict) or with_.get("config-file"):
+                return []
+            langs = _opt36_codeql_languages(job, with_.get("languages"))
+            if not langs or any(lang not in _OPT36_INTERPRETED_CODEQL_LANGUAGES
+                                for lang in langs):
+                return []
+            raw = with_.get("config")
+            if not isinstance(raw, str) or not raw.strip():
+                return []
+            try:
+                config = yaml.safe_load(raw)
+            except yaml.YAMLError:
+                return []
+            values = config.get("paths-ignore") if isinstance(config, dict) else None
+            if isinstance(values, str):
+                values = [values]
+            if not isinstance(values, list) or not values or not all(
+                    isinstance(value, str) and value.strip() for value in values):
+                return []
+            cleaned = list(dict.fromkeys(str(value) for value in values))
+            if shared is None:
+                shared = cleaned
+            elif shared != cleaned:
+                return []
+    return shared or []
+
+
+def _opt36_compare_paths(client: GhClient, repo: str,
+                         runs: list[dict[str, Any]],
+                         wf_doc: dict[str, Any]) -> dict[tuple[str, str], list[str] | None]:
+    """Read bounded compare results needed by the unchanged-input extension."""
+    if not _opt36_scanner_paths_ignore(wf_doc):
+        return {}
+    ordered = sorted(runs, key=_run_start_ts)
+    pairs = list(dict.fromkeys(
+        (str(before.get("head_sha") or ""), str(after.get("head_sha") or ""))
+        for before, after in zip(ordered, ordered[1:])
+        if before.get("head_sha") and after.get("head_sha")
+        and before.get("head_sha") != after.get("head_sha")))
+    out: dict[tuple[str, str], list[str] | None] = {}
+    for base, head in pairs:
+        endpoint = (f"repos/{repo}/compare/{quote(base, safe='')}..."
+                    f"{quote(head, safe='')}")
+        doc = client.json(endpoint, allow_missing=True)
+        files = doc.get("files") if isinstance(doc, dict) else None
+        # Only a forward diff is complete: for `behind`/`diverged` the three-dot
+        # compare omits changes on the base side, so the inputs may differ.
+        if (not isinstance(files, list) or len(files) >= 300
+                or doc.get("status") not in ("ahead", "identical")):
+            out[(base, head)] = None
+            continue
+        names = [str(row.get("filename") or "") for row in files
+                 if isinstance(row, dict) and row.get("filename")]
+        if len(names) != len(files):
+            out[(base, head)] = None
+            continue
+        # A rename out of a scanned path removes a scan input.
+        names.extend(str(row["previous_filename"]) for row in files
+                     if row.get("previous_filename"))
+        out[(base, head)] = list(dict.fromkeys(names))
+    return out
+
+
+def _opt36_redundant_input_pairs(
+    runs: list[dict[str, Any]], patterns: list[str],
+    changed_paths_by_pair: dict[tuple[str, str], list[str] | None],
+) -> list[dict[str, Any]]:
+    ordered = sorted(runs, key=_run_start_ts)
+    pairs: list[dict[str, Any]] = []
+    for before, after in zip(ordered, ordered[1:]):
+        base = str(before.get("head_sha") or "")
+        head = str(after.get("head_sha") or "")
+        if not base or not head:
+            continue
+        if base == head:
+            kind, paths = "same_head", []
+        else:
+            # The recipe skips only against a last SUCCESSFUL scan, so a rerun
+            # after a failed or unknown-outcome scan is not redundant.
+            if str(before.get("conclusion") or "") != "success":
+                continue
+            paths = changed_paths_by_pair.get((base, head))
+            if paths is None or not patterns or not all(
+                    not path.startswith(_OPT36_ALWAYS_RELEVANT_PREFIXES)
+                    and _opt32_ignored_by_patterns(path, patterns) for path in paths):
+                continue
+            kind = "excluded_only"
+        pairs.append({"base": base, "head": head, "run_id": _run_id(after),
+                      "kind": kind, "changed_paths": list(paths)})
+    return pairs
+
+
 def _detect_opt36_schedule_burn(
     wf_path: str, all_runs: list[dict[str, Any]],
     jobs_per_run: list[list[dict[str, Any]]], wf_doc: dict[str, Any],
-    monthly_schedule_volume: int | None, start_idx: int,
+    monthly_schedule_volume: int | None, start_idx: int, *,
+    changed_paths_by_pair: dict[tuple[str, str], list[str] | None] | None = None,
 ) -> list[dict[str, Any]]:
     """Cron schedule burn (catalog OPT36) — measured upgrade.
 
     Static OPT36 already flags "too frequent cron". This measured promotion
     requires positive run-history evidence: consecutive scheduled runs on the
-    same head_sha, i.e. the workflow ran again without any code change. It sizes
-    only the schedule-event subset, using the event-filtered 30-day total count
-    and the workflow's measured mean job-minutes per run."""
+    same head_sha, or a complete compare whose files all match explicit scanner
+    exclusions. It sizes only the schedule-event subset, using the event-filtered
+    30-day total count and the workflow's measured mean job-minutes per run."""
     on = _wf_on(wf_doc)
     if not _on_has_event(on, "schedule"):
         return []
@@ -18135,8 +19204,13 @@ def _detect_opt36_schedule_burn(
     schedule_runs = [r for r in all_runs if str(r.get("event") or "") == "schedule"]
     if len(schedule_runs) < 2:
         return []
-    redundant, groups = _consecutive_same_sha_count(schedule_runs)
-    redundant_run_ids = _consecutive_same_sha_run_ids(schedule_runs)
+    patterns = _opt36_scanner_paths_ignore(wf_doc)
+    redundant_pairs = _opt36_redundant_input_pairs(
+        schedule_runs, patterns, changed_paths_by_pair or {})
+    redundant = len(redundant_pairs)
+    groups = redundant
+    redundant_run_ids = [str(row["run_id"]) for row in redundant_pairs
+                         if row.get("run_id")]
     if redundant <= 0:
         return []
 
@@ -18149,20 +19223,23 @@ def _detect_opt36_schedule_burn(
         return []
     repeated_pct = round(100 * redundant / max(len(schedule_runs), 1))
 
+    excluded_only = sum(row["kind"] == "excluded_only" for row in redundant_pairs)
+    same_head = redundant - excluded_only
     title = "Cron Schedule Too Frequent"
     evidence = (
-        f"{redundant} scheduled run(s) in {groups} consecutive same-head_sha group(s) "
-        f"re-ran without a code change in the sampled schedule slice "
+        f"{redundant} scheduled run(s) re-ran with unchanged scanner inputs in the "
+        f"sampled schedule slice ({same_head} same-head_sha; {excluded_only} diff(s) "
+        "touching only explicit scanner exclusions) "
         f"({repeated_pct}% of {len(schedule_runs)} schedule run(s)); "
-        f"~{credited:.0f} runner-min/mo of schedule-event compute ({basis}).")
+        f"runner-minute saving: ~{credited:.0f}/mo of schedule-event compute ({basis}).")
     me = _measured_evidence(
-        ["Workflow", "Consecutive same-head_sha schedule runs", "Mean compute/run", "Credited runner-min/mo"],
+        ["Workflow", "Consecutive unchanged-input schedule runs", "Mean compute/run", "Credited runner-min/mo"],
         [[f"`{wf_path}`", f"{redundant} redundant run(s) in {groups} group(s)",
           f"{per_run_min:.1f} job-min over {n_timed} timed run(s)", f"~{credited:.0f}"]],
         summary=evidence,
         note=("Schedule burn is counted only on event=schedule runs whose head_sha repeats "
-              "consecutively, so the detector proves the workflow ran again without a "
-              "code change. Basis: the count is from the all-status schedule slice; "
+              "or whose complete compare touches only explicit scanner exclusions. "
+              "Basis: the count is from the all-status schedule slice; "
               f"the per-run price is the mean of {n_timed} successful schedule-event "
               "timed run(s). "
               "GUARDRAIL: confirm the current cadence is not an operational SLA before "
@@ -18178,17 +19255,30 @@ def _detect_opt36_schedule_burn(
     f["sizing_basis"] = "measured"
     f["measured_signal"] = (
         f"event=schedule total_count x mean job-minutes "
-        f"({monthly_schedule_volume} schedule run(s)/30d; {redundant} same-head_sha "
-        f"redundant run(s); {n_timed} timed run(s); scale {scale:.3g})")
+        f"({monthly_schedule_volume} schedule run(s)/30d; {redundant} unchanged-input "
+        f"redundant run(s), including {same_head} same-head_sha; {n_timed} timed "
+        f"run(s); scale {scale:.3g})")
     f["tier2_neutrality"] = {
         "proof": "non_pr_event",
         "margin_s": None,
-        "ref": ("event=schedule subset only; consecutive same-head_sha schedule runs; "
+        "ref": ("event=schedule subset only; consecutive unchanged-input schedule runs; "
                 "schedule is not a developer PR/merge event"),
     }
     f["tier2_run_subset_events"] = ["schedule"]
     if redundant_run_ids:
         f["tier2_sample_run_ids"] = redundant_run_ids
+    f["runner_minute_effect"] = {"direction": "saving",
+                                 "runner_min_per_month": credited}
+    f["opt36_unchanged_inputs"] = {
+        "same_head_pairs": same_head,
+        "excluded_only_pairs": excluded_only,
+        "paths_ignore": patterns,
+        "pairs": redundant_pairs,
+    }
+    f["fix_strategy_detail"] = (
+        "Compare the current commit with each scanner category's last successful scan; "
+        "skip only categories with no relevant change, and run the scan whenever the "
+        "comparison cannot complete.")
     f["guardrail"] = ("Confirm the cron cadence is not an operational SLA; prefer widening "
                       "the interval only for cleanup/triage/build jobs where delayed execution "
                       "is acceptable.")
@@ -18247,6 +19337,271 @@ def _supersede_static_opt36(findings: list[dict[str, Any]],
     _supersede_static_pattern(
         findings, measured, "OPT36",
         "measured OPT36 schedule-burn finding for the same workflow")
+
+
+_OPT107_SIDE_EFFECT_STEP_RE = _re.compile(
+    r"(\b(npm|pnpm|yarn|cargo|twine|poetry|gem)\s+(publish|upload|push)\b|"
+    r"\bdocker\s+push\b|\bgit\s+push\b|\bgh\s+release\b|\bdeploy\b|"
+    r"\bterraform\s+apply\b|\bkubectl\s+apply\b|\bhelm\s+(upgrade|install)\b|"
+    r"\bmigrat)", _re.IGNORECASE)
+_OPT107_SIDE_EFFECT_USES_RE = _re.compile(
+    r"(deploy|release|publish|pages|docker/build-push|aws-actions/|azure/webapps)",
+    _re.IGNORECASE)
+
+
+def _opt107_side_effect_job_names(wf_doc: dict[str, Any]) -> set[str]:
+    """Lower-cased keys and display names of jobs with commit-specific side effects.
+
+    A job stays on its push event (and out of OPT107's priced validation work)
+    when its key or name reads as release/deploy work, when it targets a
+    deployment `environment`, or when a step runs a publish, push, deploy or
+    migration command or action.  Broad on purpose: an excluded job only lowers
+    the credited saving."""
+    jobs = wf_doc.get("jobs") if isinstance(wf_doc, dict) else None
+    if not isinstance(jobs, dict):
+        return set()
+    names: set[str] = set()
+    for key, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        labels = {str(key)}
+        if isinstance(job.get("name"), str):
+            labels.add(job["name"])
+        side_effect = (any(_RELEASE_LIKE_RE.search(label) for label in labels)
+                       or job.get("environment") not in (None, "", {}))
+        steps = job.get("steps") if isinstance(job.get("steps"), list) else []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            run, uses = step.get("run"), step.get("uses")
+            if ((isinstance(run, str) and _OPT107_SIDE_EFFECT_STEP_RE.search(run))
+                    or (isinstance(uses, str)
+                        and _OPT107_SIDE_EFFECT_USES_RE.search(uses))):
+                side_effect = True
+        if side_effect:
+            names.update(label.strip().lower() for label in labels if label.strip())
+    return names
+
+
+def _opt107_job_is_side_effect(job_name: str, side_effect_names: set[str]) -> bool:
+    """Match a runtime job name (matrix `name (a, b)` or reusable `caller / job`)."""
+    name = job_name.strip().lower()
+    return any(name == label or name.startswith(label + " (")
+               or name.startswith(label + " / ")
+               for label in side_effect_names)
+
+
+def _detect_opt107_default_branch_batching(
+    wf_path: str,
+    all_runs: list[dict[str, Any]],
+    push_jobs_by_run: dict[str, list[dict[str, Any]]],
+    wf_doc: dict[str, Any],
+    default_branch: str | None,
+    start_idx: int,
+    *,
+    monthly_push_volume: "int | None | Callable[[], int | None]" = None,
+) -> list[dict[str, Any]]:
+    """Find dense default-branch validation runs that an hourly tip run can batch.
+
+    `monthly_push_volume` is the workflow's 30-day default-branch push-run count
+    (an int, or a lazy probe paid only once a saving exists).  When it is known,
+    the sample saving scales to a monthly estimate (sample saving x runs_30d /
+    sampled runs), capped at the workflow's measured 30-day validation compute;
+    otherwise the monthly figure is reported unsized with its reason.
+
+    A run is batchable only when a later default-branch push starts before it
+    finishes or within one hour after it finishes.  The hourly replacement is
+    charged before any saving: within each dense cluster, only runs beyond a
+    conservative count of hourly validation slots may be removed.  Credit then
+    uses those runs' own readable completed-job compute, never another run's
+    mean and never an unreadable run.
+    """
+    if (not default_branch or not _on_has_event(_wf_on(wf_doc), "push")
+            or _wf_is_release_like(wf_path, wf_doc)):
+        return []
+
+    spans: list[tuple[_dt.datetime, _dt.datetime, dict[str, Any]]] = []
+    for run in all_runs:
+        conclusion = str(run.get("conclusion") or "").lower()
+        if (str(run.get("event") or "") != "push"
+                or str(run.get("head_branch") or "") != default_branch
+                or conclusion in {"", "cancelled", "skipped"}):
+            continue
+        start = _parse_dt(str(run.get("run_started_at") or run.get("created_at") or ""))
+        end = _parse_dt(str(run.get("updated_at") or ""))
+        if start is None or end is None or end < start:
+            continue
+        spans.append((start, end, run))
+    spans.sort(key=lambda item: (item[0], str(item[2].get("id") or "")))
+    if len(spans) < _OPT107_MIN_BATCHABLE_RUNS + 1:
+        return []
+
+    clusters: list[list[tuple[_dt.datetime, _dt.datetime, dict[str, Any]]]] = []
+    cluster = [spans[0]]
+    for span in spans[1:]:
+        if (span[0] - cluster[-1][1]).total_seconds() <= _OPT107_BATCH_WINDOW_S:
+            cluster.append(span)
+        else:
+            clusters.append(cluster)
+            cluster = [span]
+    clusters.append(cluster)
+
+    dense_clusters = [rows for rows in clusters if len(rows) > 1]
+    batchable = [run for rows in dense_clusters for _start, _end, run in rows[:-1]]
+    share = len(batchable) / len(spans)
+    if (len(batchable) < _OPT107_MIN_BATCHABLE_RUNS
+            or share < _OPT107_MIN_BATCHABLE_SHARE):
+        return []
+
+    eligible_run_ids = {str(run.get("id") or "") for _start, _end, run in spans}
+    # Deploy, release, publish and migration jobs stay on their push event, so a
+    # mixed workflow prices only its repeatable validation jobs.
+    side_effect_names = _opt107_side_effect_job_names(wf_doc)
+    excluded_jobs: set[str] = set()
+    validation_jobs_by_run: dict[str, list[dict[str, Any]]] = {}
+    for run_id, run_jobs in push_jobs_by_run.items():
+        kept_jobs = []
+        for job in run_jobs:
+            job_name = str(job.get("name") or "")
+            if _opt107_job_is_side_effect(job_name, side_effect_names):
+                excluded_jobs.add(job_name)
+            else:
+                kept_jobs.append(job)
+        validation_jobs_by_run[run_id] = kept_jobs
+    push_jobs_by_run = validation_jobs_by_run
+    compute_by_run: dict[str, float] = {}
+    for run_id, jobs in push_jobs_by_run.items():
+        if run_id not in eligible_run_ids:
+            continue
+        seconds = sum(
+            duration
+            for job in jobs
+            if (duration := _duration_s(job.get("started_at"), job.get("completed_at")))
+            is not None and duration > 0)
+        if seconds > 0:
+            compute_by_run[run_id] = seconds / 60.0
+    if len(compute_by_run) < _MIN_TIMED_RUNS:
+        return []
+
+    credited_runs: list[tuple[str, float]] = []
+    for rows in dense_clusters:
+        span_s = max((rows[-1][0] - rows[0][0]).total_seconds(), 0.0)
+        # Count the first scheduled validation plus every possible hourly tick
+        # across the cluster.  `ceil` deliberately assumes the least favourable
+        # schedule phase, so the saving cannot rely on a lucky cron alignment.
+        replacement_runs = min(
+            len(rows), math.ceil(span_s / _OPT107_BATCH_WINDOW_S) + 1)
+        removable_count = max(len(rows) - replacement_runs, 0)
+        candidates = sorted(
+            ((str(run.get("id") or ""), compute_by_run[str(run.get("id") or "")])
+             for _start, _end, run in rows[:-1]
+             if str(run.get("id") or "") in compute_by_run),
+            key=lambda item: (item[1], item[0]))
+        # Retain the most expensive observations and credit the cheapest
+        # removable ones: the replacement run's cost is never understated.
+        credited_runs.extend(candidates[:removable_count])
+    credited = round(sum(minutes for _run_id_value, minutes in credited_runs), 1)
+    if credited <= 0:
+        return []
+
+    timed_n = len(compute_by_run)
+    credited_n = len(credited_runs)
+    mean_credited_min = credited / credited_n
+
+    sampled_runs = sum(
+        1 for run in all_runs
+        if (str(run.get("event") or "") == "push"
+            and str(run.get("head_branch") or "") == default_branch))
+    volume = (monthly_push_volume() if callable(monthly_push_volume)
+              else monthly_push_volume)
+    monthly: float | None = None
+    monthly_cap: float | None = None
+    unsized_reason = ""
+    if (isinstance(volume, int) and not isinstance(volume, bool) and volume > 0
+            and sampled_runs > 0):
+        mean_validation_min = sum(compute_by_run.values()) / len(compute_by_run)
+        monthly_cap = round(mean_validation_min * volume, 1)
+        monthly = round(min(credited * volume / sampled_runs, monthly_cap), 1)
+        if monthly <= 0:
+            monthly = None
+            unsized_reason = "monthly estimate rounds to zero runner-minutes"
+    if monthly is None and not unsized_reason:
+        unsized_reason = "30-day default-branch push count unknown"
+    monthly_text = (
+        f"~−{monthly:g} runner-min/mo (estimate from {sampled_runs} sampled runs, "
+        f"x{volume}/{sampled_runs} to the 30-day push volume)" if monthly is not None
+        else f"runner-minute saving: unsized ({unsized_reason})")
+
+    title = "Default-Branch Full CI Runs Too Often to Stay Current"
+    evidence = (
+        f"{len(batchable)} of {len(spans)} completed default-branch push runs "
+        f"(of {sampled_runs} sampled) ({share * 100:.0f}%) were replaced by another push before or within one hour "
+        f"of finishing. After reserving conservative hourly replacement slots, "
+        f"{credited_n} run(s) have their own readable compute "
+        f"({mean_credited_min:.1f} runner-min/run; {timed_n} timed run(s) total); "
+        f"runner-minute effect: −{credited:g} runner-min in the sampled window "
+        f"(saving); monthly: {monthly_text}." + (
+            f" {len(excluded_jobs)} side-effect job(s) "
+            f"({', '.join(sorted(excluded_jobs))}) stay on the push event and are "
+            "not priced." if excluded_jobs else ""))
+    measured = _measured_evidence(
+        ["Workflow", "Batchable pushes", "Measured compute/run",
+         "Credited removals", "Runner-minute effect"],
+        [[f"`{wf_path}`",
+          f"{len(batchable)} of {len(spans)} completed, of {sampled_runs} sampled "
+          f"({share * 100:.0f}%)",
+          f"{mean_credited_min:.1f} runner-min over {timed_n} timed run(s)",
+          str(credited_n),
+          f"−{credited:g} runner-min in the sample (saving); {monthly_text}"]],
+        summary=evidence,
+        note=("Safest-first fix: keep the pull-request gate unchanged; run the full "
+              "default-branch suite hourly against the current tip, retain "
+              "workflow_dispatch, and use a repository variable to switch back to "
+              "per-push validation. Do not batch release, deploy, or migration work. "
+              "The estimate reserves a conservative number of hourly replacement "
+              "runs, then credits only removable runs with their own readable "
+              "completed-job compute; it never extrapolates onto an unreadable run. "
+              "The monthly figure scales the sample saving by the workflow's 30-day "
+              "default-branch push-run count over the sampled runs, capped at the "
+              "measured 30-day validation compute, and is an estimate."))
+    finding = _new_finding(
+        "OPT107", "HIGH", title, wf_path, "", evidence,
+        "batch-default-branch-full-ci", _catalog_anchor("OPT107", title),
+        start_idx + 1, wc_p50=0.0, rm=monthly,
+        size_note=(f"runner-minute effect: saving (negative) — {monthly_text}; "
+                   f"sampled-window effect −{credited:g} runner-min after reserving "
+                   "hourly replacement validations; pull-request wait unchanged"),
+        realization="none", measured_evidence=measured)
+    finding["sample_runner_min_effect"] = -credited
+    finding["sample_runner_min_saving"] = credited
+    if monthly is not None:
+        finding["monthly_estimate_basis"] = {
+            "runs_30d": volume, "sampled_runs": sampled_runs,
+            "sample_saving_min": credited, "cap_min": monthly_cap,
+        }
+    else:
+        finding["runner_min_unsized_reason"] = unsized_reason
+    finding["batchable_run_count"] = len(batchable)
+    finding["credited_run_count"] = credited_n
+    finding["credited_run_ids"] = [run_id for run_id, _minutes in credited_runs]
+    finding["batchable_sample_count"] = len(spans)
+    finding["batchable_run_share"] = round(share, 4)
+    finding["batch_window_s"] = _OPT107_BATCH_WINDOW_S
+    finding["excluded_side_effect_jobs"] = sorted(excluded_jobs)
+    finding["measured_signal"] = (
+        "default-branch pushes replaced before or within one hour of completion, "
+        "less conservative hourly replacements, x each credited run's own completed "
+        "job compute")
+    finding["affected_jobs"] = sorted({
+        str(job.get("name") or "")
+        for run_id, _minutes in credited_runs
+        for job in push_jobs_by_run.get(run_id, [])
+        if str(job.get("name") or "")
+    })
+    run_ids = [run_id for run_id, _minutes in credited_runs]
+    if run_ids:
+        finding["tier2_sample_run_ids"] = run_ids
+    return [finding]
 
 
 def _detect_opt46_superseded_runs(
@@ -18370,7 +19725,21 @@ def _detect_opt46_superseded_runs(
               "default branch and on release tags. ROUTING: this workflow triggers on "
               f"{trig} — with a `pull_request` trigger use the catalog's DEFAULT "
               "(PR-scoped) predicate; without one, the PR-scoped predicate is never "
-              "true and saves nothing, so use the catalog's WIDENED predicate."))
+              "true and saves nothing, so use the catalog's WIDENED predicate. "
+              "PENDING-RUN SAFETY: GitHub keeps at most one pending run in a "
+              "concurrency group, so a third arrival replaces the second pending run "
+              "even when cancellation is disabled. If every default-branch commit "
+              "and tag must be validated, use the catalog's combined group "
+              "`${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', "
+              "github.event.repository.default_branch) || startsWith(github.ref, "
+              "'refs/tags/')) && github.run_id || github.head_ref || "
+              "github.ref_name }}`: default-branch and tag "
+              "runs (selected with `github.event.repository.default_branch` and "
+              "`startsWith(github.ref, 'refs/tags/')`) use `github.run_id`, while "
+              "feature-branch push and PR runs share `github.head_ref || "
+              "github.ref_name`. Do not add `github.event_name` when the same workflow "
+              "handles push and pull_request: it separates those branch groups and "
+              "breaks OPT47 push+PR dedup."))
     f = _new_finding(
         "OPT46", "MEDIUM", title, wf_path, "", evidence,
         "superseded-runs-not-cancelled-missing-concurrency-or-cancel-",
@@ -20724,6 +22093,9 @@ _OPT83_HELD_BACK_GATES = frozenset({
     "siblings_share_tool_state",
     "candidate_runs_an_install",
     "job_starts_a_container_or_background_server",
+    "separate_job_matrix_job",
+    "separate_job_later_step_may_read_moved_output",
+    "separate_job_prerequisite_unclassified",
 })
 # The independence facts every OPT83 finding stamps (all True, or it would not
 # exist). The verifier requires every key.
@@ -20764,6 +22136,8 @@ _OPT83_BUILD_ELSEWHERE_RE = _re.compile(
 # lock (target/, bin/ and obj/, .build, _build, DerivedData), or one coverage
 # data file. Each of these builds before it tests. Two candidates of one family
 # in one tree could collide when run side by side.
+_OPT83_COVERAGE_RE = _re.compile(
+    r"--cov\b|--coverage\b|-coverprofile\b|\bcoverage run\b|\bnyc\b|\bc8\b")
 _OPT83_TOOL_STATE_RES = (
     _re.compile(r"\bcargo\b"),
     _re.compile(r"(^|[\s/])(mvn|mvnw)\b"),
@@ -20773,9 +22147,13 @@ _OPT83_TOOL_STATE_RES = (
     _re.compile(r"\bswift\s+(test|build)\b"),
     _re.compile(r"\bmix\s+(test|compile)\b"),
     _re.compile(r"\bxcodebuild\b"),
-    _re.compile(r"--cov\b|--coverage\b|-coverprofile\b|\bcoverage run\b|\bnyc\b"
-                r"|\bc8\b"),
+    _OPT83_COVERAGE_RE,
 )
+_OPT83_FULL_RUNNER_RE = _re.compile(r"\bgo\s+test\b", _re.I)
+# The step categories a sibling job repeats as setup. Its duplicated time is the
+# separate-job extension's added runner cost (a floor: the aggregator job and
+# per-job minute rounding come on top).
+_OPT83_SEPARATE_SETUP_CATEGORIES = frozenset({"setup", "checkout", "install"})
 # A Lighthouse audit shares the runner's cores with whatever runs beside it, which skews
 # the scores its budget gates on (OPT103), and each `lhci collect` also clears the shared
 # `.lighthouseci/` folder. So any candidate set with a Lighthouse step is held back,
@@ -21147,13 +22525,140 @@ def _detect_opt83_parallel_steps(
             _no("candidate_has_continue_on_error", wf, job, cand_names)
             continue
         runs_txt = [str(s.get("run") or "") for s in cands]
-        if (spec.get("services")
+        shared_tool_state = any(
+            rx.search(runs_txt[a]) and rx.search(runs_txt[b])
+            and _opt83_same_tree(wds[a], wds[b])
+            for rx in _OPT83_TOOL_STATE_RES
+            for a in range(len(cands)) for b in range(a + 1, len(cands)))
+        full_runner_steps = sum(bool(_OPT83_FULL_RUNNER_RE.search(text))
+                                for text in runs_txt) >= 2
+        # A local container/background service cannot be moved to another runner.
+        # Hold that shape back before considering the separate-job recipe.
+        container_or_background = (spec.get("services")
                 or sum(bool(_OPT83_DOCKER_RE.search(t)) for t in runs_txt) >= 2
                 or any(_OPT83_LIGHTHOUSE_RE.search(t) for t in runs_txt)
-                or any(rx.search(runs_txt[a]) and rx.search(runs_txt[b])
-                       and _opt83_same_tree(wds[a], wds[b])
-                       for rx in _OPT83_TOOL_STATE_RES
-                       for a in range(len(cands)) for b in range(a + 1, len(cands)))):
+                or any(_OPT83_DOCKER_RE.search(str(lf.step.get("run") or ""))
+                       or _OPT83_CONTAINER_ACTION_RE.search(str(lf.step.get("uses") or ""))
+                       for lf in walk.leaves[:max(run) + 1])
+                or any(lf.background for lf in walk.leaves[:min(run)]))
+        if full_runner_steps and container_or_background:
+            _no("job_starts_a_container_or_background_server", wf, job, cand_names)
+            continue
+        if full_runner_steps and isinstance(spec.get("strategy"), dict):
+            # A sibling job of a matrix job repeats its setup once per cell: the
+            # added runner cost and runner count per run could not be stated.
+            _no("separate_job_matrix_job", wf, job, cand_names)
+            continue
+        cand_ids = [str(s.get("id")) for s in cands if s.get("id")]
+        if full_runner_steps and (
+                walk.leaves[max(run) + 1:]
+                or any(f"steps.{sid}." in json.dumps(spec.get("outputs"), default=str)
+                       for sid in cand_ids)):
+            # A step after them (a coverage gate, a report upload) or a job output
+            # may read what the moved step writes. Moved unchanged to its own
+            # runner, that file or output is gone from this job, so the later
+            # check would fail or check less. Which it reads cannot be told.
+            _no("separate_job_later_step_may_read_moved_output", wf, job, cand_names)
+            continue
+        if full_runner_steps and any(
+                (measured.get(names[i]) or ("", 0.0))[0]
+                not in _OPT83_SEPARATE_SETUP_CATEGORIES
+                for i in range(min(run))):
+            # The sibling job must repeat what the moved step needs. A step before
+            # them that is not setup, checkout or install (code generation, a
+            # build) or that has no measured time may be needed: the duplicated
+            # work, and so the saving and the added cost, are unmeasured.
+            _no("separate_job_prerequisite_unclassified", wf, job, cand_names)
+            continue
+        if full_runner_steps:
+            # These steps are independent in purpose, but cannot safely share one
+            # workspace or one runner's cores. Put one in a sibling job instead.
+            p50s = [measured[name][1] for name in cand_names]
+            setup_s = round(sum(
+                duration for name, (category, duration) in measured.items()
+                if name not in cand_names and category in _OPT83_SEPARATE_SETUP_CATEGORIES
+            ), 1)
+            choices = []
+            serial_s = sum(p50s)
+            for index, duration in enumerate(p50s):
+                finish_s = max(serial_s - duration, setup_s + duration)
+                choices.append((serial_s - finish_s, -duration, index, finish_s))
+            saving_s, _neg_duration, moved_index, finish_s = max(choices)
+            saving_s = round(max(0.0, saving_s), 1)
+            if saving_s <= 0:
+                _no("siblings_share_tool_state", wf, job, cand_names)
+                continue
+            moved = cand_names[moved_index]
+            runner_added = round(setup_s / 60.0, 4)
+            listing = ", ".join(
+                f"`{name}` ({duration:.0f}s)" for name, duration in zip(cand_names, p50s))
+            evidence = (
+                f"`{job}` is a measured long pole ({job_p50:.0f}s). {listing} are "
+                "independent checks, but sharing one runner is unsafe because they "
+                "share tool state or each uses the runner's cores. Moving "
+                f"`{moved}` to a sibling job adds {setup_s:.0f}s of measured setup "
+                f"there and re-derives up to {saving_s:.0f}s of merge-wait reduction "
+                "(the aggregator job's own pickup comes off it); runner-minute effect: "
+                f"added cost, at least +{runner_added:.2f} runner-min per run "
+                "(duplicated-setup floor), with one additional concurrent runner.")
+            me = _measured_evidence(
+                ["Step", "Category", "p50", "Working directory"],
+                [[f"`{name}`", measured[name][0], f"{measured[name][1]:.0f}s",
+                  f"`{wds[k]}`"] for k, name in enumerate(cand_names)],
+                summary=evidence,
+                note=("The saving is the serial candidate sum minus the slower of the "
+                      "remaining original job and the moved step plus measured setup."))
+            f = _new_finding(
+                "OPT83", "MEDIUM", "Independent Pole Steps Need Separate Parallel Jobs",
+                wf, job, evidence, _OPT83_FIX_STRATEGY,
+                _catalog_anchor("OPT83", _OPT83_TITLE), start_idx + len(out) + 1,
+                wc_p50=saving_s, rm=None,
+                size_note=(f"wall-clock saving up to {saving_s:.0f}s, re-derived from "
+                           "measured step p50s; runner-minute effect: added cost, at "
+                           f"least +{runner_added:.2f} runner-min per run "
+                           "(duplicated-setup floor); one additional concurrent runner"),
+                realization="none", measured_evidence=me)
+            f["pattern_class"] = "structural"
+            f["sizing_basis"] = "measured"
+            f["risk"] = "MEDIUM"
+            f["runner_minute_effect"] = {
+                "direction": "added_cost", "runner_min_per_run": runner_added,
+                "additional_concurrent_runners": 1,
+            }
+            f["fix_strategy_detail"] = (
+                "Move the stamped step into its own sibling job, preserve every check, "
+                "and add an always() aggregator that requires every upstream result to "
+                "be success and keeps the required check name.")
+            f["guardrail"] = (
+                "Keep every command and input. The always() aggregator must fail unless "
+                "every upstream job result is success, including cancellation.")
+            f["rollout"] = (
+                "Measure both jobs on the same commits; keep the split only if the "
+                "wall-clock gain holds and the additional runner-minute cost is accepted.")
+            f["independent_steps"] = {
+                "kind": "opt83_separate_jobs", "job": job, "yaml_job": yaml_key,
+                "workflow_file": wf, "pole_check": str(p.get("check") or ""),
+                "job_p50_s": round(job_p50, 1),
+                "steps": [{"step": name, "category": measured[name][0],
+                           "p50_s": round(measured[name][1], 1),
+                           "working_directory": wds[k]}
+                          for k, name in enumerate(cand_names)],
+                "moved_step": moved, "setup_s": setup_s,
+                "parallel_finish_s": round(finish_s, 1),
+                "ceiling_s": saving_s,
+                "ceiling_basis": ("serial candidate sum minus the slower of the "
+                                  "remaining original job and moved step plus setup"),
+                "min_share": _OPT83_MIN_SHARE, "min_step_s": _OPT83_MIN_STEP_S,
+                "separate_job_reason": "full_runner_compute",
+            }
+            out.append(f)
+            continue
+        if shared_tool_state:
+            _no("siblings_share_tool_state", wf, job, cand_names)
+            continue
+        if (spec.get("services")
+                or sum(bool(_OPT83_DOCKER_RE.search(t)) for t in runs_txt) >= 2
+                or any(_OPT83_LIGHTHOUSE_RE.search(t) for t in runs_txt)):
             # Service containers, one Docker daemon, a Lighthouse audit sharing the
             # runner's cores, or one tool's target/ or coverage file in one tree: state the workflow file does not show
             # as a dependency, but that side-by-side steps would share.
@@ -23644,6 +25149,9 @@ def _detect_structural_candidates(
                     "Uncredited. The measured coverage step is only a ceiling; "
                     "benchmark before and after on the same runner and require an "
                     "unchanged covered-line count before claiming a saving.")
+                f["runner_min_unsized_reason"] = (
+                    "the measured coverage step is only a ceiling and was not "
+                    "benchmarked before and after on the same runner")
             else:
                 # NAME-INFERRED structural pick (`sizing == "qualitative"` — set ONLY by the
                 # `mapping is None` branch, where there is NO sampled job/step): the cost category is
@@ -24215,6 +25723,10 @@ def _detect_shared_substep(
                     f"not developer wall-clock")
             f["size_note"] = f"{prev}; {demote}" if prev else demote
         f["runner_min_saving"] = rm_per_mo
+        if rm_per_mo is None and credit.runner_min_s:
+            f["runner_min_unsized_reason"] = (
+                f"~{credit.runner_min_s:.0f}s/run is saved, but the workflow's "
+                "monthly run count is unknown")
         out.append(f)
     return out
 
@@ -24328,6 +25840,11 @@ _OPT24_CARGO_COMPILE_RE = _re.compile(
 _OPT24_LOG_TS_RE = _re.compile(
     r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)\s+"
 )
+_OPT24_GO_PACKAGE_RE = _re.compile(
+    r"^(?:ok|FAIL)\s+([A-Za-z0-9][A-Za-z0-9._~+/-]*)\s+"
+    r"(\d+(?:\.\d+)?)s(?:\s|$)"
+)
+_OPT24_GO_PACKAGE_DOMINANT_SHARE = 0.60
 
 
 def _opt24_duration_seconds(text: str) -> float | None:
@@ -24348,6 +25865,177 @@ def _opt24_log_timestamp(line: str) -> float | None:
         return parsed.timestamp() if parsed is not None else None
     except (AttributeError, TypeError, ValueError):
         return None
+
+
+def _opt24_go_package_fact(log: str) -> dict[str, Any] | None:
+    """Return the one package that measurably dominates a ``go test`` log.
+
+    Go's package summary is the timing boundary available without changing the
+    repository.  Fail closed when summaries are absent or their time is spread
+    across packages: list-then-run sharding is useful only when one package owns
+    enough of the serial wall to split internally.
+    """
+    elapsed: dict[str, float] = {}
+    for raw in log.splitlines():
+        line = _OPT24_LOG_TS_RE.sub("", raw).strip()
+        match = _OPT24_GO_PACKAGE_RE.match(line)
+        if match:
+            package = match.group(1)
+            elapsed[package] = elapsed.get(package, 0.0) + float(match.group(2))
+    total = sum(elapsed.values())
+    if total <= 0:
+        return None
+    package, seconds = max(elapsed.items(), key=lambda item: item[1])
+    share = seconds / total
+    if share < _OPT24_GO_PACKAGE_DOMINANT_SHARE:
+        return None
+    return {
+        "package": package,
+        "seconds": round(seconds, 1),
+        "total_s": round(total, 1),
+        "share": round(share, 3),
+    }
+
+
+# OPT13's narrow automatic path is deliberately log-backed.  The general
+# "does this job need its build output?" question is semantic and remains a
+# manual review; this parser admits only a quality-script invocation whose own
+# log proves both a build/emit command and the quality command that follows it.
+_OPT13_QUALITY_COMMAND_RE = _re.compile(
+    r"(?:^|\s)(?:(?:pnpm|npm|yarn|bun)(?:\s+run)?\s+"
+    r"(?:lint|test|check|typecheck|type-check)\b|"
+    r"(?:vitest|jest|eslint|biome|prettier|pytest)\b)",
+    _re.IGNORECASE,
+)
+_OPT13_BUILD_COMMAND_RE = _re.compile(
+    r"(?:^|\s)(?:vite|next|nuxt|remix|astro|gatsby|ng|nest)\s+build\b|"
+    # A bundler as the command word, never a config-file argument
+    # (`--config webpack.config.test.js`).
+    r"(?:^|\s)(?:webpack|rollup|rspack|turbopack|tsup|esbuild)(?=\s|$)|"
+    # A declaration emit; `--noEmit` and `--declaration false` emit nothing.
+    r"(?:^|\s)tsc\b(?![^\n]*--noEmit\b)[^\n]*"
+    r"(?:--emitDeclarationOnly|--declaration(?!\s+false\b)(?:\s+true)?\b)|"
+    r"(?:^|\s)(?:mvn|mvnw)\s+(?:[^\n]*\s)?package\b|"
+    r"(?:^|\s)(?:gradle|gradlew)\s+(?:[^\n]*\s)?assemble\b",
+    _re.IGNORECASE,
+)
+_OPT13_BUILD_SUMMARY_RE = _re.compile(
+    r"\bbuilt\s+in\s+(\d+(?:\.\d+)?)\s*(ms|s|sec(?:onds?)?|m|min(?:utes?)?)\b",
+    _re.IGNORECASE,
+)
+_OPT13_LOADS_BUILD_OUTPUT_RE = _re.compile(
+    r"(?:^|\s)(?:node|deno|bun|vitest|jest|mocha|ava)\b[^\n]*"
+    r"(?:^|[\s'\"/(])(?:\.\.?/|/[^\s'\"]*/)?(?:dist|build|lib)/|"
+    r"(?:require|import)\s*\([^\n]*(?:^|/)(?:dist|build|lib)/|"
+    r"\bfrom\s+['\"][^'\"]*(?:^|/)(?:dist|build|lib)/",
+    _re.IGNORECASE,
+)
+
+
+def _opt13_command_text(line: str) -> str | None:
+    """Return command text only; package-manager banners and output stay inert."""
+    clean = _OPT24_LOG_TS_RE.sub("", line).strip()
+    marker = _re.match(r"^(?:##\[command\]|[>$+]\s+)", clean)
+    if marker is None:
+        return None
+    return clean[marker.end():].strip()
+
+
+def _opt13_build_label(command: str) -> str:
+    """Closed-vocabulary label: never copy untrusted job-log text to a report."""
+    for pattern, label in (
+        (r"\bvite\s+build\b", "vite build"),
+        (r"\bnext\s+build\b", "next build"),
+        (r"\bnuxt\s+build\b", "nuxt build"),
+        (r"\b(?:remix|astro|gatsby|ng|nest)\s+build\b", "framework build"),
+        (r"\b(?:webpack|rollup|rspack|turbopack|tsup|esbuild)\b", "bundle build"),
+        (r"\btsc\b", "TypeScript declaration emit"),
+        (r"\b(?:mvn|mvnw)\b", "Maven package build"),
+        (r"\b(?:gradle|gradlew)\b", "Gradle assemble build"),
+    ):
+        if _re.search(pattern, command, _re.IGNORECASE):
+            return label
+    return "build"
+
+
+# A GitHub step header, and the `run:` of a step whose FIRST command invokes a
+# quality package script (`pnpm test`, `npm run lint:ci`, `yarn typecheck`).
+# A script whose own name says it builds (`test-build`, `lint:build`) hides
+# nothing, and neither does a build written into the step's `run:` line.
+_OPT13_STEP_RE = _re.compile(r"^##\[group\]Run\s+(.*)$")
+_OPT13_QUALITY_STEP_RE = _re.compile(
+    r"^(?:pnpm|npm|yarn|bun)(?:\s+(?:run|-{1,2}[\w-]+(?:=\S+)?))*\s+"
+    r"(?:lint|test|check|typecheck|type-check)\b(?![\w:-]*build)",
+    _re.IGNORECASE,
+)
+
+
+def _opt13_build_in_quality_log(log: str) -> dict[str, Any] | None:
+    """A measured build hidden inside a lint/test wrapper, or ``None``.
+
+    The job log is split at GitHub step headers (``##[group]Run ...``) and
+    only a step whose own ``run:`` starts with a quality package script is
+    read, so a build step beside a test step never pairs with that test step's
+    commands.  Fail closed when any command in the log loads compiled output.
+    A framework build can validate more than the quality command, so the
+    emitted recipe shrinks it to a runtime-only target and keeps one full
+    validation build; it never recommends deleting the only production-build
+    gate.
+    """
+    lines = log.splitlines()
+    if any(_OPT13_LOADS_BUILD_OUTPUT_RE.search(command)
+           for command in (_opt13_command_text(line) for line in lines)
+           if command is not None):
+        return None
+    steps: list[tuple[str, list[str]]] = []
+    for line in lines:
+        header = _OPT13_STEP_RE.match(_OPT24_LOG_TS_RE.sub("", line).strip())
+        if header:
+            steps.append((header.group(1).strip(), []))
+        elif steps:
+            steps[-1][1].append(line)
+    for run, step_lines in steps:
+        if not _OPT13_QUALITY_STEP_RE.search(run):
+            continue
+        fact = _opt13_build_in_quality_step(step_lines)
+        if fact is not None:
+            return fact
+    return None
+
+
+def _opt13_build_in_quality_step(lines: list[str]) -> dict[str, Any] | None:
+    """The build-then-quality proof inside one quality-script step's lines."""
+    records = [(_opt24_log_timestamp(line), _opt13_command_text(line),
+                _OPT24_LOG_TS_RE.sub("", line).strip())
+               for line in lines]
+    build_at = next((index for index, (_stamp, command, _text) in enumerate(records)
+                     if command is not None and _OPT13_BUILD_COMMAND_RE.search(command)), None)
+    if build_at is None:
+        return None
+    seconds: float | None = None
+    quality_after: int | None = None
+    for index in range(build_at + 1, len(records)):
+        _stamp, command, text = records[index]
+        match = _OPT13_BUILD_SUMMARY_RE.search(text)
+        if match:
+            value = float(match.group(1))
+            unit = match.group(2).lower()
+            seconds = value / 1000.0 if unit == "ms" else value * 60.0 if unit[0] == "m" else value
+            continue
+        if command is not None and _OPT13_QUALITY_COMMAND_RE.search(command):
+            quality_after = index
+            break
+        # A different command means the following summary/quality command no
+        # longer bounds this build.  Omit instead of folding unrelated work
+        # (sleep, setup, another script) into the measured interval.
+        if command is not None:
+            return None
+    if quality_after is None or seconds is None or seconds <= 0:
+        return None
+    return {
+        "build_command": _opt13_build_label(str(records[build_at][1])),
+        "build_s": round(seconds, 1),
+    }
 
 
 def _opt24_static_job_name(name: str) -> str:
@@ -24798,7 +26486,6 @@ def _detect_opt24_long_test_no_sharding(
                                          "pattern": "OPT24",
                                          "gate": _DOMINANT_STEP_OVERLAP_GATE})
             continue
-        idx += 1
         # Wall-clock saving from sharding: split the job across N shards (assume
         # N=2 conservative). Sharding does not save runner-min (catalog body
         # is explicit on this), so leave rm=0.
@@ -24824,9 +26511,46 @@ def _detect_opt24_long_test_no_sharding(
         test_step_log = (_opt24_test_step_log(logged_job, base_log)
                          if logged_job is not None else "")
         pre_test_floor = _opt24_pre_test_floor(test_step_log, compiled_kind)
+        go_package = (_opt24_go_package_fact(test_step_log)
+                      if compiled_kind == "go" else None)
+        if (go_package is not None
+                and float(go_package["seconds"]) / p50
+                < _OPT24_GO_PACKAGE_DOMINANT_SHARE):
+            go_package = None
+        # Go has no native suite-shard flag. Recommend its list-then-run split
+        # only when the sampled log proves that one package dominates the long
+        # step; balanced packages and missing summaries fail closed.
+        if (compiled_kind == "go" and go_package is None
+                and logs_by_job_id is not None):
+            continue
         compile_note = ""
         measure_first = compiled_kind is not None and pre_test_floor is None
-        if pre_test_floor is not None:
+        go_extra_unsized = ""
+        if go_package is not None:
+            shardable = min(float(go_package["seconds"]), p50)
+            outside = p50 - float(go_package["total_s"])
+            wc = round(min(shardable / 2.0, p50 / 2.0), 1)
+            measure_first = False
+            if outside > 0:
+                pre_test_floor = outside
+                cost = (f"With two shards, the measured repeated floor adds about "
+                        f"{_opt24_floor_label(pre_test_floor)} of runner time per run.")
+            else:
+                # Packages ran concurrently: summed package time is not the
+                # job's test time, so job time minus it measures no floor. The
+                # second leg still repeats checkout, setup and compile.
+                pre_test_floor = None
+                go_extra_unsized = (
+                    "package times overlap, so the floor the second leg repeats "
+                    "is not measurable")
+                cost = ("With two shards, the second leg adds runner time per run "
+                        f"that is unsized ({go_extra_unsized}).")
+            compile_note = (
+                f"Go package `{go_package['package']}` accounts for "
+                f"{float(go_package['share']) * 100:.0f}% of the package time "
+                f"({shardable:.0f}s). {cost}"
+            )
+        elif pre_test_floor is not None:
             pre_test_floor = min(pre_test_floor, shardable)
             shardable = max(0.0, shardable - pre_test_floor)
             wc = round(shardable / 2.0, 1)
@@ -24991,6 +26715,7 @@ def _detect_opt24_long_test_no_sharding(
         )
         if compile_note:
             evidence_text += f"; {compile_note}"
+        idx += 1
         finding = _new_finding(
             "OPT24", "HIGH", "Long Test Job Without Sharding", wf_path, base,
             evidence_text,
@@ -25007,6 +26732,13 @@ def _detect_opt24_long_test_no_sharding(
             finding["shardable_test_s"] = round(shardable, 1)
         elif measure_first:
             finding["pre_test_floor_unmeasured"] = True
+        if go_package is not None:
+            finding["go_dominant_package"] = go_package["package"]
+            finding["go_package_share"] = go_package["share"]
+            if go_extra_unsized:
+                finding["go_shard_extra_runner_unsized_reason"] = go_extra_unsized
+            else:
+                finding["go_shard_extra_runner_s"] = round(pre_test_floor or 0.0, 1)
         out.append(finding)
     return out
 
@@ -25406,6 +27138,29 @@ _SHARD_CMD_RE = _re.compile(
     _re.IGNORECASE)
 
 
+_GO_RUN_FILTER_RE = _re.compile(
+    r"\bgo\s+test\b[^\n]*?\s-(?:test\.)?(?:run|skip)(?:[=\s]|$)", _re.IGNORECASE)
+
+
+def _go_matrix_run_split(job: dict[str, Any], matrix: Any) -> bool:
+    """A Go job already split into matrix legs by a ``-run``/``-skip`` filter.
+
+    Go has no native shard flag, so a list-then-run split shows up as a matrix
+    whose value reaches ``go test -run`` through the command or the step/job
+    environment.  Such a job is already sharded and must not be told to shard.
+    """
+    if not isinstance(matrix, dict) or not matrix:
+        return False
+    job_env = str(job.get("env") or "")
+    for step in job_walk(job).steps():
+        run = str(step.get("run", "") or "")
+        if not _GO_RUN_FILTER_RE.search(run):
+            continue
+        if "matrix." in f"{run}\n{step.get('env') or ''}\n{job_env}":
+            return True
+    return False
+
+
 def _sharded_bases(doc: dict[str, Any]) -> set[str]:
     """Base job names in this workflow that are ALREADY sharded — via a split/shard
     matrix axis OR a command-line splitter in their run steps — so OPT24 must not flag
@@ -25428,7 +27183,8 @@ def _sharded_bases(doc: dict[str, Any]) -> set[str]:
         cmd_sharded = any(
             _SHARD_CMD_RE.search(str(s.get("run", "") or ""))
             for s in job_walk(job).steps())
-        if not (axis_sharded or cmd_sharded):
+        go_split = _go_matrix_run_split(job, matrix)
+        if not (axis_sharded or cmd_sharded or go_split):
             continue
         name = job.get("name")
         # The gh job base is `name:` when it's a plain literal (no matrix interpolation),
@@ -25715,6 +27471,8 @@ def _attach_cache_log_evidence(client: "GhClient", repo: str,
                                   "measured miss, so no saving is credited")
                 f["wall_clock_p50_s"] = None
                 f["runner_min_saving"] = None
+                f["runner_min_unsized_reason"] = (
+                    "the sampled logs did not confirm a measured cache miss")
                 f["tier"] = 2
                 f["realization"] = "none"
                 continue
@@ -29107,6 +30865,9 @@ def _ground_opt96(findings: list[dict[str, Any]], poles: list[dict[str, Any]],
         if pole is None:
             finding["size_note"] = (f"check this: {_opt96_unconfirmed_reason(candidates)}; "
                                     "savings uncredited")
+            finding["runner_min_unsized_reason"] = (
+                f"{_opt96_unconfirmed_reason(candidates)}, so the cache seeding "
+                "saving is uncredited")
             continue
         cd = pole["cache_dist"]
         cd["static_confirmed"] = True
@@ -29217,6 +30978,206 @@ def _cache_path_sample(client, repo: str, jobs: list, facts: list,
                 state[i]["valid"] = False
     return {"admitted": [dict(fact, runs=s["runs"], evidence=s["evidence"])
                          for fact, s in zip(facts, state) if s["valid"] and s["runs"]]}
+
+
+# The key is quoted into the report, so only a cache key's ordinary characters
+# are admitted; a restore line carrying anything else is treated as no restore.
+_GO_CACHE_RESTORE_RE = _re.compile(
+    r"^Cache restored from key:\s*(?P<key>[A-Za-z0-9_.+=/:,@-]{1,512})\s*$",
+    _re.IGNORECASE)
+_GO_STEP_HEADER_RE = _re.compile(r"^##\[group\]Run\s+(?P<head>.+)$")
+# A step that names the Go build cache and touches files is a retention step
+# (the issue's own fix); its presence withholds the finding.
+_GO_BUILD_CACHE_NAME_RE = _re.compile(r"GOCACHE|go-build", _re.IGNORECASE)
+_GO_CACHE_TOUCH_RE = _re.compile(r"(?:^|[\s;&|(])touch\b")
+# cmd/go (src/cmd/go/internal/cache/cache.go) trims entries whose mtime is older
+# than trimLimit (5 days) plus mtimeInterval (1 hour), at most once per
+# trimInterval (24 hours), when a go command closes the cache. An archive older
+# than this at restore time is fully exposed to the first command's trim; one
+# younger than five days loses nothing to it.
+_OPT112_FRESH_ARCHIVE_DAYS = 5.0
+_OPT112_TRIM_CUTOFF_DAYS = 5.0 + 1.0 / 24.0
+_OPT112_MIN_SLOWDOWN_S = 30.0
+_OPT112_MIN_RUNS_PER_WINDOW = 2
+_OPT112_MAX_FRESH_LOGS = 4
+_OPT112_MAX_OLD_LOGS = 4
+
+
+def _step_with_inputs(lines: list[str]) -> list[str]:
+    """The `with:` input lines GitHub echoes in a step's group header.
+
+    The runner also echoes job/step `env:` into every step group; those lines
+    describe the environment, not what this step caches, so they stop the scan.
+    """
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        bare = line.strip()
+        if bare == "with:":
+            inside = True
+            continue
+        if bare == "env:" or bare.startswith("##[endgroup]"):
+            if inside:
+                break
+            continue
+        if inside:
+            out.append(line)
+    return out
+
+
+def _go_cache_restore_fact(log: str) -> dict[str, Any] | None:
+    """The exact Go build-cache key an ordinary job log restored, if any.
+
+    Reads only what `actions/setup-go` and `actions/cache` print by default:
+    setup-go's `Cache restored from key: setup-go-...` line, or an
+    `actions/cache` step whose logged `path:` input names the Go build cache.
+    `retained` is True when a later step touches the Go build cache (the fix
+    is already present). Two different restored Go keys are ambiguous: None.
+    """
+    records, untimestamped, total = _opt80_log_records(log)
+    if not records or (total and untimestamped / total > _OPT80_MAX_UNTIMESTAMPED_FRACTION):
+        return None
+    steps: list[tuple[str, list[str]]] = []
+    keys: list[tuple[int, str]] = []
+    for _stamp, text in records:
+        header = _GO_STEP_HEADER_RE.match(text)
+        if header:
+            steps.append((header.group("head").strip(), [text]))
+            continue
+        if steps:
+            steps[-1][1].append(text)
+        match = _GO_CACHE_RESTORE_RE.match(text)
+        if not match or not steps:
+            continue
+        key = match.group("key")
+        head, lines = steps[-1]
+        go_restore = (key.lower().startswith("setup-go-")
+                      or ("actions/cache" in head.lower()
+                          and any(_GO_BUILD_CACHE_NAME_RE.search(line)
+                                  for line in _step_with_inputs(lines))))
+        if go_restore:
+            keys.append((len(steps) - 1, key))
+    if not keys or len({key for _i, key in keys}) != 1:
+        return None
+    first_step = keys[0][0]
+    retained = any(
+        any(_GO_CACHE_TOUCH_RE.search(line) for line in lines)
+        and any(_GO_BUILD_CACHE_NAME_RE.search(line) for line in lines)
+        for _head, lines in steps[first_step + 1:])
+    return {"cache_key": keys[0][1], "retained": retained}
+
+
+def _go_cache_archive_created(
+    client: "GhClient", repo: str, key: str,
+) -> _dt.datetime | None:
+    """Creation time of the one cache archive stored under exactly ``key``."""
+    if not key:
+        return None
+    payload = client.json(
+        f"repos/{repo}/actions/caches?key={quote(key, safe='')}&per_page=10",
+        allow_missing=True,
+    )
+    rows = payload.get("actions_caches") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        return None
+    exact = [row for row in rows if isinstance(row, dict)
+             and str(row.get("key") or "") == key]
+    if len(exact) != 1:
+        return None
+    created = _parse_dt(str(exact[0].get("created_at") or ""))
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=_dt.timezone.utc)
+    return created
+
+
+def _go_cache_trim_fact(
+    client: "GhClient", repo: str, log: str, repr_job: dict[str, Any],
+    qual: list[tuple[float, dict[str, Any]]],
+) -> dict[str, Any] | None:
+    """Measure trim loss as a same-key natural experiment over sampled runs.
+
+    The representative log names the exact restored Go build-cache archive; its
+    creation time splits the job's sampled successful runs into those that
+    restored it while every entry was younger than cmd/go's trim limit (fresh)
+    and those that restored it past the limit (old). Each compared run's own
+    log must show the same exact key and no retention step. The finding needs
+    no instrumentation: only the restore line setup-go/actions/cache print, the
+    jobs API durations and the cache inventory's ``created_at``.
+    """
+    restore = _go_cache_restore_fact(log)
+    if restore is None or restore["retained"]:
+        return None
+    key = str(restore["cache_key"])
+    created = _go_cache_archive_created(client, repo, key)
+    if created is None:
+        return None
+
+    def _age_days(job: dict[str, Any]) -> float | None:
+        started = _parse_dt(str(job.get("started_at") or ""))
+        if started is None:
+            return None
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=_dt.timezone.utc)
+        return (started - created).total_seconds() / 86400.0
+
+    fresh_pool: list[tuple[float, float, dict[str, Any]]] = []
+    old_pool: list[tuple[float, float, dict[str, Any]]] = []
+    for duration, job in qual:
+        if job.get("conclusion") != "success" or not duration:
+            continue
+        age = _age_days(job)
+        if age is None or age < 0:
+            continue
+        if age < _OPT112_FRESH_ARCHIVE_DAYS:
+            fresh_pool.append((age, float(duration), job))
+        elif age >= _OPT112_TRIM_CUTOFF_DAYS:
+            old_pool.append((age, float(duration), job))
+    if (len(fresh_pool) < _OPT112_MIN_RUNS_PER_WINDOW
+            or len(old_pool) < _OPT112_MIN_RUNS_PER_WINDOW):
+        return None
+    fresh_pool.sort(key=lambda row: row[0])
+    # The representative is already in hand; then the runs nearest the boundary.
+    old_pool.sort(key=lambda row: (row[2].get("id") != repr_job.get("id"), row[0]))
+    known = {repr_job.get("id"): log}
+
+    def _confirmed(pool, limit):
+        out = []
+        for age, duration, job in pool[:limit]:
+            text = known.get(job.get("id"))
+            if text is None:
+                text = _fetch_job_log(client, repo, job)
+            fact = _go_cache_restore_fact(text or "")
+            if (fact is None or fact["retained"]
+                    or fact["cache_key"] != key):
+                continue
+            out.append((age, duration, str(job.get("html_url") or "")))
+        return out
+
+    fresh = _confirmed(fresh_pool, _OPT112_MAX_FRESH_LOGS)
+    if len(fresh) < _OPT112_MIN_RUNS_PER_WINDOW:
+        return None
+    old = _confirmed(old_pool, _OPT112_MAX_OLD_LOGS)
+    if len(old) < _OPT112_MIN_RUNS_PER_WINDOW:
+        return None
+    fresh_median = statistics.median(row[1] for row in fresh)
+    old_median = statistics.median(row[1] for row in old)
+    slowdown = old_median - fresh_median
+    # Every old-archive run must sit above the fresh median: one slow outlier
+    # cannot carry the comparison.
+    if (slowdown < _OPT112_MIN_SLOWDOWN_S
+            or min(row[1] for row in old) <= fresh_median):
+        return None
+    return {
+        "cache_key": key,
+        "archive_created_at": created.isoformat().replace("+00:00", "Z"),
+        "fresh_runs": [{"age_days": round(a, 1), "duration_s": round(d, 1), "url": u}
+                       for a, d, u in fresh],
+        "old_runs": [{"age_days": round(a, 1), "duration_s": round(d, 1), "url": u}
+                     for a, d, u in old],
+        "fresh_median_s": round(fresh_median, 1),
+        "old_median_s": round(old_median, 1),
+        "slowdown_s": round(slowdown, 1),
+    }
 
 
 def _persist_pole_logs(
@@ -29382,7 +31343,10 @@ def _persist_pole_logs(
         # A replay-heavy test log can still contain an independent catalog leaf
         # (most commonly dependency-cache state). Preserve that drill; replay
         # exclusion applies only when the log has no other recognized work.
-        leaf0 = bp._parse_log(log, iso) or {}
+        leaf0 = bp._parse_log(
+            log, iso, job_duration_s=repr_dur,
+            dominant_category=str(p.get("dominant_category") or ""),
+        ) or {}
         replay = bp._test_result_replay_share(log)
         if (not leaf0 and isinstance(replay, dict)
                 and replay.get("replayed") is True):
@@ -29467,6 +31431,12 @@ def _persist_pole_logs(
             except OSError as e:
                 logger.warning("could not save pole magnitude sample %s: %s", mag_fn, e)
                 mag_fn = None
+        opt13_fact = _opt13_build_in_quality_log(log)
+        runtime_ts_loader = (leaf0 if leaf0.get("fix_key") == "runtime-ts-transpilation"
+                             else None)
+        go_fixed_wait = _opt19_go_wait_fact(log, repr_dur)
+        go_slow_tests = _go_slow_test_results(log)
+        go_cache_trim = _go_cache_trim_fact(client, repo, log, repr_job, qual)
         manifest.append({
             "job": job, "check": p.get("check"), "job_id": jid, "file": fn,
             "leaf_fix_key": leaf0.get("fix_key"),
@@ -29475,16 +31445,2408 @@ def _persist_pole_logs(
             "duration_s": round(repr_dur, 1), "selected": "nearest-p50",
             "sample": [{"html_url": j.get("html_url", ""), "duration_s": round(d, 1)}
                        for d, j in qual],
+            **({"opt13_build_in_script": opt13_fact} if opt13_fact else {}),
+            **({"runtime_ts_loader": runtime_ts_loader}
+               if runtime_ts_loader else {}),
+            **({"go_fixed_wait": go_fixed_wait} if go_fixed_wait else {}),
+            **({"go_slow_tests": go_slow_tests} if go_slow_tests else {}),
+            **({"go_cache_trim": go_cache_trim} if go_cache_trim else {}),
         })
         logger.debug("saved pole log for %s -> %s (closest to P50 of %d qualifying "
                      "runs)", job, fn, len(qual))
     return manifest
 
 
+def _detect_opt13_build_in_scripts(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int, workflow_docs: dict[str, Any], root: "Path | None",
+) -> list[dict[str, Any]]:
+    """Turn conservative, measured pole-log facts into OPT13 findings."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    source_guard: dict[str, Any] | None = None
+    for entry in pole_logs:
+        fact = entry.get("opt13_build_in_script")
+        if not isinstance(fact, dict):
+            continue
+        seconds = fact.get("build_s")
+        if not isinstance(seconds, (int, float)) or seconds <= 0:
+            continue
+        wf = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        validation_job = _opt13_validation_build_job(workflow_docs, wf, job)
+        if validation_job is None:
+            continue
+        if source_guard is None:
+            source_guard = _opt13_source_output_guard(root)
+        if not source_guard.get("safe"):
+            continue
+        entry["opt13_validation_build"] = validation_job
+        entry["opt13_source_guard"] = source_guard
+        command = str(fact.get("build_command") or "build")
+        runs = volume_by_workflow.get(wf)
+        runner_min = (round(float(seconds) * runs / 60.0, 1)
+                      if isinstance(runs, int) and runs > 0 else None)
+        url = str(entry.get("html_url") or "")
+        shown = _link(float(seconds), url)
+        runner_effect = (
+            f"runner-minute saving: at most {runner_min:.1f}/month (measured build "
+            "ceiling); exact saving not sized until the runtime-only replacement is "
+            "benchmarked"
+            if runner_min is not None else
+            "runner-minute saving not sized because replacement cost and monthly run volume are unavailable")
+        evidence = (
+            f"The representative `{job}` log runs `{command}` inside its quality "
+            f"script; the build itself takes {shown}. A separate "
+            f"`{validation_job['job']}` job retains the full validation build, and "
+            f"{source_guard['source_files_checked']} source file(s) passed the compiled-output backstop."
+        )
+        measured = _measured_evidence(
+            ["Job", "Build command", "Measured build", "Representative run"],
+            [[f"`{job}`", f"`{command}`", f"{float(seconds):.1f}s",
+              f"[job log]({url})" if url else "captured job log"]],
+            f"The quality script spends {float(seconds):.1f}s in build work.",
+            "The measured build interval is a ceiling only; benchmark the runtime-only replacement before crediting a saving.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT13", "MEDIUM", "Build Step in Jobs That Don't Need It",
+            wf, job, evidence,
+            "Add a runtime-only build target for this quality job first; keep the full build "
+            "once in the artifacts/validation job, then compare the same workload before and after.",
+            "opt13--build-step-in-jobs-that-dont-need-it", idx,
+            wc_p50=None, rm=None,
+            size_note=(f"measured build ceiling {float(seconds):.1f}s; {runner_effect}"),
+            realization="none", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        finding["opt13_wall_clock_ceiling_s"] = float(seconds)
+        finding["opt13_runner_min_ceiling"] = runner_min
+        finding["opt13_validation_build"] = validation_job
+        finding["opt13_source_guard"] = source_guard
+        if isinstance(runs, int):
+            finding["workflow_runs_30d"] = runs
+        out.append(finding)
+    return out
+
+
+_OPT106_MIN_PROFILE_S = 30.0
+_OPT106_MIN_JOB_SHARE = 0.2
+
+
+def _detect_runtime_ts_transpilation(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Turn a profiler-owned runtime-loader share on a long pole into OPT106."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    for entry in pole_logs:
+        fact = entry.get("runtime_ts_loader")
+        if not isinstance(fact, dict):
+            continue
+        seconds = fact.get("profile_s")
+        job_seconds = entry.get("duration_s")
+        if (not isinstance(seconds, (int, float))
+                or not isinstance(job_seconds, (int, float))
+                or seconds < _OPT106_MIN_PROFILE_S or job_seconds <= 0
+                or seconds > job_seconds
+                or seconds / job_seconds < _OPT106_MIN_JOB_SHARE):
+            continue
+        workflow = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        runs = volume_by_workflow.get(workflow)
+        runner_min = (round(float(seconds) * runs / 60.0, 1)
+                      if isinstance(runs, int) and runs > 0 else None)
+        url = str(entry.get("html_url") or "")
+        if runner_min is not None:
+            runner_effect = (
+                f"runner-minute saving: at most {runner_min:.1f}/month (profiled "
+                f"loader ceiling from 1 representative run x {runs} workflow runs "
+                "in 30 days); confirm the realized saving after the replacement")
+        elif isinstance(runs, int) and not isinstance(runs, bool) and runs <= 0:
+            runner_effect = ("runner-minute saving: unsized (the 30-day volume "
+                             "window holds no runs of this workflow)")
+        else:
+            runner_effect = ("runner-minute saving: unsized (30-day run volume for "
+                             "this workflow is unavailable)")
+        evidence = (
+            f"The representative `{job}` log profiles {float(seconds):.1f}s of runtime "
+            f"TypeScript loader self time inside a {float(job_seconds):.1f}s long-pole job."
+        )
+        measured = _measured_evidence(
+            ["Job", "Loader self time", "Job wall", "Representative run"],
+            [[f"`{job}`", f"{float(seconds):.1f}s", f"{float(job_seconds):.1f}s",
+              f"[job log]({url})" if url else "captured job log"]],
+            (f"A profiler attributes {float(seconds):.1f}s "
+             f"({100.0 * float(seconds) / float(job_seconds):.1f}% of the job) "
+             "to runtime TypeScript loading."),
+            "The loader self time is a ceiling; re-profile after the guarded replacement.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT106", "HIGH", "Runtime TypeScript Transpilation on the Long Pole",
+            workflow, job, evidence,
+            "Precompile the exact TypeScript surfaces once (or preload a cached transform), "
+            "then add a fallback guard that fails if any exercised path invokes the runtime loader.",
+            "opt106--runtime-typescript-transpilation-on-the-long-pole", idx,
+            wc_p50=float(seconds), rm=runner_min,
+            size_note=(f"profiled loader ceiling {float(seconds):.1f}s; {runner_effect}"),
+            realization="tail", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        finding["runtime_loader_profile_s"] = float(seconds)
+        finding["runtime_loader_job_s"] = float(job_seconds)
+        finding["runtime_loader"] = str(fact.get("loader") or "runtime TypeScript loader")
+        if isinstance(runs, int):
+            finding["workflow_runs_30d"] = runs
+        out.append(finding)
+    return out
+
+
+_OPT19_GO_MIN_INTERVALS = 2
+_OPT19_GO_MIN_TEST_SHARE = 0.50
+_OPT19_GO_MIN_JOB_SHARE = 0.20
+_OPT19_GO_RACE_HELPER_MIN_SPAWNS = 3
+_OPT19_GO_MAX_FILES = 400
+_OPT19_GO_MAX_FILE_BYTES = 512_000
+_OPT19_GO_WAIT_OUTPUT_RE = _re.compile(
+    r"\b(?:wait(?:ing)?|poll(?:ing)?|retry(?:ing)?|grace|settling)\b",
+    _re.IGNORECASE,
+)
+# `go test ... -race` on one line, or `-race` inside a GOFLAGS value.
+_OPT19_GO_RACE_RE = _re.compile(
+    r"(?m)^(?=.*(?:\bgo\s+test\b|\bGOFLAGS\b)).*?(?:(?<=\s)|(?<=['\"=:]))"
+    r"-race(?:=true)?(?=\s|$|['\"])")
+_OPT19_GO_TEST_CMD_RE = _re.compile(r"\bgo\s+test\b[^\n]*")
+_OPT19_GO_RUN_RE = _re.compile(r"^=== (?:RUN|CONT)\s+(?P<test>Test\w*)(?:/\S*)?\s*$")
+_OPT19_GO_RESULT_RE = _re.compile(
+    r"^(?P<indent>\s*)--- (?:PASS|FAIL):\s+(?P<test>Test\w*)(?P<sub>/\S+)?\s+"
+    r"\((?P<seconds>\d+(?:\.\d+)?)s\)\s*$")
+_OPT19_GO_PACKAGE_RE = _re.compile(
+    r"^(?:ok|FAIL)\s+(?P<package>[A-Za-z0-9_.\-~/]+)\s+"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)s|(?P<cached>\(cached\))|\[[^\]]*\])")
+_OPT19_GO_UNITS = {"Nanosecond": 1e-9, "Microsecond": 1e-6, "Millisecond": 1e-3,
+                   "Second": 1.0, "Minute": 60.0, "Hour": 3600.0}
+_OPT19_GO_TEST_FUNC_RE = _re.compile(
+    r"(?m)^func\s+(?P<test>Test\w*)\s*\(\s*[A-Za-z_]\w*\s+\*testing\.T\s*\)")
+_OPT19_GO_FUNC_RE = _re.compile(r"(?m)^func\s+(?:\([^)]*\)\s*)?(?P<name>[A-Za-z_]\w*)\s*\(")
+_OPT19_GO_REEXEC_RE = _re.compile(
+    r"\bexec\.Command(?:Context)?\s*\(\s*(?:[A-Za-z_][\w.]*\s*,\s*)?"
+    r"(?:os\.Args\s*\[\s*0\s*\]|testenv\.Executable\s*\(\s*\w+\s*\)|"
+    r"(?P<var>[A-Za-z_]\w*)\s*[,)])")
+_OPT19_GO_SYNC_RE = _re.compile(r"\.(?:Run|Output|CombinedOutput)\s*\(\s*\)")
+_OPT19_GO_ASYNC_RE = _re.compile(r"\.(?:Start|Process)\b")
+
+
+def _opt19_go_message_key(text: str) -> str:
+    return _re.sub(r"\d+(?:\.\d+)?", "#", _re.sub(r"\s+", " ", text.strip()))
+
+
+def _opt19_go_wait_fact(log: str, job_duration_s: float | None) -> dict[str, Any] | None:
+    """What one long-pole ``go test`` log measures about fixed waits.
+
+    Reads ``go test -json`` events and plain (``-v`` or not) output with the
+    runner's own line timestamps: per-test elapsed records, package times
+    (a ``(cached)`` package ran nothing and is dropped), whether the job runs
+    the race detector, and whether ``atexit_sleep_ms=0`` is already present.
+
+    ``poll`` is the measured route: repeated, equally spaced wait messages
+    inside one test whose gaps dominate both that test and the job. Merely
+    slow or irregular tests do not produce it. The static routes (test-body
+    sleeps, race helpers) are resolved against the checkout by the detector.
+    """
+    if not isinstance(job_duration_s, (int, float)) or job_duration_s <= 0:
+        return None
+    elapsed: dict[tuple[str, str], float] = {}
+    packages: dict[str, float] = {}
+    cached: set[str] = set()
+    messages: dict[tuple[str, str, str], list[float]] = {}
+    pending_elapsed: dict[str, float] = {}
+    pending_messages: dict[tuple[str, str], list[float]] = {}
+    current = ""
+    commands: list[str] = []
+
+    def flush(package: str) -> None:
+        for test, seconds in pending_elapsed.items():
+            elapsed[(package, test)] = max(seconds, elapsed.get((package, test), 0.0))
+        for (test, message), stamps in pending_messages.items():
+            messages.setdefault((package, test, message), []).extend(stamps)
+        pending_elapsed.clear()
+        pending_messages.clear()
+
+    for raw in log.splitlines():
+        if not raw.strip():
+            continue
+        parsed = _opt80_log_line(raw)
+        stamp, text = (parsed[0].timestamp(), parsed[1]) if parsed else (None, raw.strip())
+        start = text.find("{")
+        if start >= 0 and '"Action"' in text:
+            try:
+                row = json.loads(text[start:])
+            except (json.JSONDecodeError, TypeError):
+                row = None
+            if isinstance(row, dict):
+                package = str(row.get("Package") or "")
+                test = str(row.get("Test") or "")
+                action = str(row.get("Action") or "")
+                output = str(row.get("Output") or "").strip()
+                value = row.get("Elapsed")
+                if action in {"pass", "fail"} and isinstance(value, (int, float)) and value > 0:
+                    if test and "/" not in test:
+                        elapsed[(package, test)] = float(value)
+                    elif not test and package:
+                        packages[package] = float(value)
+                if (action == "output" and test and "/" not in test
+                        and _OPT19_GO_WAIT_OUTPUT_RE.search(output)
+                        and not output.startswith(("=== ", "--- "))):
+                    when = _parse_dt(row.get("Time"))
+                    if when is not None:
+                        messages.setdefault(
+                            (package, test, _opt19_go_message_key(output)), []
+                        ).append(when.timestamp())
+                if action == "output" and not test and "(cached)" in output and package:
+                    cached.add(package)
+                continue
+        if _OPT19_GO_TEST_CMD_RE.search(text):
+            commands.append(_OPT19_GO_TEST_CMD_RE.search(text).group(0))
+        run = _OPT19_GO_RUN_RE.match(text)
+        if run:
+            current = run.group("test")
+            continue
+        result = _OPT19_GO_RESULT_RE.match(text)
+        if result:
+            if not result.group("indent") and not result.group("sub"):
+                test = result.group("test")
+                pending_elapsed[test] = max(float(result.group("seconds")),
+                                            pending_elapsed.get(test, 0.0))
+            continue
+        package_line = _OPT19_GO_PACKAGE_RE.match(text)
+        if package_line:
+            name = package_line.group("package")
+            flush(name)
+            if package_line.group("cached"):
+                cached.add(name)
+            elif package_line.group("seconds"):
+                packages[name] = max(float(package_line.group("seconds")),
+                                     packages.get(name, 0.0))
+            current = ""
+            continue
+        if current and stamp is not None and _OPT19_GO_WAIT_OUTPUT_RE.search(text):
+            pending_messages.setdefault(
+                (current, _opt19_go_message_key(text)), []).append(stamp)
+    flush("")
+    for name in cached:
+        packages.pop(name, None)
+    elapsed = {key: value for key, value in elapsed.items() if key[0] not in cached}
+
+    poll: dict[str, Any] | None = None
+    for (package, test, message), stamps in messages.items():
+        ordered = sorted(set(stamps))
+        gaps = [later - earlier for earlier, later in zip(ordered, ordered[1:])
+                if later > earlier]
+        if len(gaps) < _OPT19_GO_MIN_INTERVALS:
+            continue
+        interval = statistics.median(gaps)
+        if max(gaps) - min(gaps) > max(0.25, interval * 0.10):
+            continue
+        fixed_s = sum(gaps)
+        test_s = elapsed.get((package, test))
+        if (not isinstance(test_s, (int, float)) or fixed_s > test_s
+                or fixed_s / test_s < _OPT19_GO_MIN_TEST_SHARE
+                or fixed_s / float(job_duration_s) < _OPT19_GO_MIN_JOB_SHARE):
+            continue
+        candidate = {
+            "kind": "poll-interval", "package": package, "test": test,
+            "fixed_wait_s": round(fixed_s, 2),
+            "interval_s": round(interval, 2), "wait_count": len(gaps),
+            "test_elapsed_s": round(test_s, 2), "message": message,
+        }
+        if poll is None or candidate["fixed_wait_s"] > poll["fixed_wait_s"]:
+            poll = candidate
+    tests = [{"package": package, "test": test, "elapsed_s": round(seconds, 2)}
+             for (package, test), seconds in sorted(elapsed.items())]
+    package_rows = [{"package": name, "elapsed_s": round(seconds, 2)}
+                    for name, seconds in sorted(packages.items())]
+    if poll is None and not tests and not package_rows:
+        return None
+    return {
+        "poll": poll, "tests": tests, "packages": package_rows,
+        "race": bool(_OPT19_GO_RACE_RE.search(log)),
+        "exit_sleep_off": bool(_re.search(r"\batexit_sleep_ms\s*=\s*0\b", log)),
+        # A `-run`/`-skip` filter means a package line does not say which
+        # tests ran; the package-level route then stays quiet.
+        "filtered": any(_re.search(r"(?<!\S)-(?:test\.)?(?:run|skip)\b", cmd)
+                        for cmd in commands),
+        "command_seen": bool(commands),
+    }
+
+
+def _opt19_go_mask(text: str) -> str:
+    """Blank Go comments and string/rune literals, keeping offsets and newlines."""
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if text.startswith("//", i):
+            while i < n and text[i] != "\n":
+                out[i] = " "
+                i += 1
+            continue
+        if text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            end = n if end < 0 else end + 2
+            for j in range(i, end):
+                if text[j] != "\n":
+                    out[j] = " "
+            i = end
+            continue
+        if ch in "\"'`":
+            j = i + 1
+            while j < n and text[j] != ch:
+                if ch != "`" and text[j] == "\\":
+                    j += 1
+                elif ch != "`" and text[j] == "\n":
+                    break
+                j += 1
+            end = min(j + 1, n)
+            for k in range(i, end):
+                if text[k] != "\n":
+                    out[k] = " "
+            i = end
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _opt19_go_block_end(masked: str, opening: int, pair: str = "{}") -> int | None:
+    depth = 0
+    for index in range(opening, len(masked)):
+        if masked[index] == pair[0]:
+            depth += 1
+        elif masked[index] == pair[1]:
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def _opt19_go_import_path(root: Path, directory: Path) -> str | None:
+    current = directory
+    while True:
+        mod = current / "go.mod"
+        try:
+            if mod.is_file():
+                found = _re.search(r'(?m)^\s*module\s+"?([^\s"]+)',
+                                   mod.read_text(encoding="utf-8"))
+                if not found:
+                    return None
+                rel = directory.relative_to(current).as_posix()
+                return found.group(1) if rel == "." else f"{found.group(1)}/{rel}"
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if current == root or current.parent == current:
+            return None
+        current = current.parent
+
+
+def _opt19_go_index(root: "Path | None") -> tuple[list[dict[str, Any]], bool]:
+    """Every Go package directory with ``_test.go`` files under ``root``.
+
+    Returns ``(packages, complete)``. Each package carries its import path,
+    its test files (raw and masked) and the duration constants declared in
+    any of its files. ``complete`` is False when a cap or unreadable file
+    truncated the read; a test name is then not provably unique.
+    """
+    if root is None:
+        return [], False
+    try:
+        resolved = root.resolve()
+        paths = sorted(p for p in root.rglob("*_test.go")
+                       if not any(part in {"vendor", "testdata", "node_modules"}
+                                  or part.startswith(".")
+                                  for part in p.relative_to(root).parts[:-1]))
+    except OSError:
+        return [], False
+    complete = len(paths) <= _OPT19_GO_MAX_FILES
+    by_dir: dict[Path, list[Path]] = {}
+    for path in paths[:_OPT19_GO_MAX_FILES]:
+        by_dir.setdefault(path.parent, []).append(path)
+    out: list[dict[str, Any]] = []
+    for directory, files in sorted(by_dir.items()):
+        tests: list[dict[str, Any]] = []
+        consts: dict[str, str] = {}
+        ok = True
+        try:
+            sources = sorted(directory.glob("*.go"))
+        except OSError:
+            complete = False
+            continue
+        for path in sources:
+            try:
+                if (path.is_symlink() or not path.resolve().is_relative_to(resolved)
+                        or path.stat().st_size > _OPT19_GO_MAX_FILE_BYTES):
+                    ok = False
+                    continue
+                raw = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError, ValueError):
+                ok = False
+                continue
+            masked = _opt19_go_mask(raw)
+            # Package-level `const` durations only: a `var` can be shortened by
+            # TestMain or another test, so its value is not readable statically.
+            for block in _re.finditer(r"(?m)^const\s*\(", masked):
+                end = _opt19_go_block_end(masked, block.end() - 1, "()")
+                body = masked[block.end():(end or block.end()) - 1]
+                for line in body.splitlines():
+                    found = _re.match(
+                        r"^\s*([A-Za-z_]\w*)\s*(?:time\.Duration\s*)?=\s*(.+?)\s*$", line)
+                    if found:
+                        consts[found.group(1)] = found.group(2)
+            for found in _re.finditer(
+                    r"(?m)^const\s+([A-Za-z_]\w*)\s*(?:time\.Duration\s*)?=\s*(.+?)\s*$",
+                    masked):
+                consts[found.group(1)] = found.group(2)
+            if path in files:
+                tests.append({"path": path, "raw": raw, "masked": masked})
+        if not ok:
+            complete = False
+        out.append({"dir": directory,
+                    "rel": directory.relative_to(root).as_posix(),
+                    "import_path": _opt19_go_import_path(root, directory),
+                    "files": tests, "consts": consts, "complete": ok})
+    return out, complete
+
+
+def _opt19_go_duration_s(expr: str, consts: dict[str, str], depth: int = 0) -> float | None:
+    """Seconds in a constant Go duration expression, or None when not constant."""
+    text = _re.sub(r"\s+", "", expr)
+    while text.startswith("(") and _opt19_go_block_end(text, 0, "()") == len(text):
+        text = text[1:-1]
+    unit = r"time\.(Nanosecond|Microsecond|Millisecond|Second|Minute|Hour)"
+    number = r"(\d+(?:\.\d+)?)"
+    for pattern, order in ((rf"{unit}", "u"), (rf"{number}\*{unit}", "nu"),
+                           (rf"{unit}\*{number}", "un"),
+                           (rf"time\.Duration\({number}\)\*{unit}", "nu")):
+        found = _re.fullmatch(pattern, text)
+        if found:
+            groups = found.groups()
+            if order == "u":
+                return _OPT19_GO_UNITS[groups[0]]
+            value, name = (groups[0], groups[1]) if order == "nu" else (groups[1], groups[0])
+            return float(value) * _OPT19_GO_UNITS[name]
+    if depth >= 3:
+        return None
+    found = _re.fullmatch(r"(?:(\d+(?:\.\d+)?)\*)?([A-Za-z_]\w*)(?:\*(\d+(?:\.\d+)?))?", text)
+    if found and found.group(2) in consts and not (found.group(1) and found.group(3)):
+        base = _opt19_go_duration_s(consts[found.group(2)], consts, depth + 1)
+        if base is None:
+            return None
+        return base * float(found.group(1) or found.group(3) or 1)
+    return None
+
+
+def _opt19_go_fixed_sleeps(masked: str, opening: int, end: int,
+                           consts: dict[str, str]) -> tuple[float, list[int]] | None:
+    """Unconditional fixed waits in one test body: ``time.Sleep(D)`` and
+    ``<-time.After(D)`` with a constant ``D``, outside loops, branches,
+    goroutines and closures (a ``t.Run`` subtest body counts; it runs inline).
+
+    None when the test cannot be read as serial and always-run: it calls
+    ``Parallel``, may skip or return early, or already uses ``testing/synctest``.
+    """
+    body = masked[opening:end]
+    if (_re.search(r"\.Parallel\s*\(|\.Skip(?:f|Now)?\s*\(|\bsynctest\.|\breturn\b", body)):
+        return None
+    total = 0.0
+    lines: list[int] = []
+    stack: list[str] = []
+    boundary = statement_start = opening + 1
+    index = opening + 1
+    wait_re = _re.compile(r"\btime\.Sleep\s*\(|<-\s*time\.After\s*\(")
+    while index < end - 1:
+        ch = masked[index]
+        if ch == "{":
+            header = masked[boundary:index]
+            if _re.search(r"\.Run\s*\(.*\bfunc\s*\(", header):
+                kind = "inline"
+            elif _re.search(r"\b(?:for|if|else|switch|select|go|defer|func)\b", header):
+                kind = "conditional"
+            else:
+                kind = "inline"
+            stack.append(kind)
+            index += 1
+            boundary = statement_start = index
+            continue
+        if ch == "}":
+            if stack:
+                stack.pop()
+            index += 1
+            boundary = statement_start = index
+            continue
+        if ch == "\n":
+            index += 1
+            boundary = statement_start = index
+            continue
+        if ch == ";":
+            # A `for init; cond; post {` header spans semicolons: only the
+            # statement start moves, not the block header's start.
+            index += 1
+            statement_start = index
+            continue
+        found = wait_re.match(masked, index)
+        if found:
+            close = _opt19_go_block_end(masked, found.end() - 1, "()")
+            if close is None:
+                return None
+            statement = masked[statement_start:index]
+            if (all(kind == "inline" for kind in stack)
+                    and not _re.search(r"\b(?:go|defer|case|select)\b", statement)):
+                seconds = _opt19_go_duration_s(masked[found.end():close - 1], consts)
+                if seconds is not None and seconds > 0:
+                    total += seconds
+                    lines.append(masked.count("\n", 0, index) + 1)
+            index = close
+            continue
+        index += 1
+    return total, lines
+
+
+def _opt19_go_test_definitions(
+    index: list[dict[str, Any]], name: str, package: str | None, complete: bool,
+) -> list[tuple[dict[str, Any], dict[str, Any], re.Match[str]]]:
+    hits = []
+    for pkg in index:
+        if package and pkg["import_path"] != package:
+            continue
+        for source in pkg["files"]:
+            for found in _OPT19_GO_TEST_FUNC_RE.finditer(source["masked"]):
+                if found.group("test") == name:
+                    hits.append((pkg, source, found))
+    if package and not any(pkg["import_path"] == package for pkg in index):
+        return []
+    if not package and not complete:
+        return []
+    return hits
+
+
+def _opt19_go_sleep_of(pkg: dict[str, Any], source: dict[str, Any],
+                       found: re.Match[str]) -> dict[str, Any] | None:
+    masked = source["masked"]
+    opening = masked.find("{", found.end())
+    end = _opt19_go_block_end(masked, opening) if opening >= 0 else None
+    if end is None:
+        return None
+    sleeps = _opt19_go_fixed_sleeps(masked, opening, end, pkg["consts"])
+    if not sleeps or sleeps[0] <= 0:
+        return None
+    rel = source["path"].name
+    file = f"{pkg['rel']}/{rel}" if pkg["rel"] not in {"", "."} else rel
+    return {"test": found.group("test"), "file": file, "lines": sleeps[1],
+            "sleep_s": round(sleeps[0], 3)}
+
+
+def _opt19_go_static_sleep(index: list[dict[str, Any]], complete: bool,
+                           facts: dict[str, Any], job_s: float) -> dict[str, Any] | None:
+    """The measured test (or package) whose source sleeps dominate it."""
+    best: dict[str, Any] | None = None
+    timed_packages = {row["package"] for row in facts.get("tests") or []}
+    for row in facts.get("tests") or []:
+        test_s = float(row.get("elapsed_s") or 0)
+        if test_s <= 0:
+            continue
+        hits = _opt19_go_test_definitions(
+            index, str(row.get("test") or ""), row.get("package") or None, complete)
+        if len(hits) != 1 or not hits[0][0]["complete"]:
+            continue
+        sleep = _opt19_go_sleep_of(*hits[0])
+        if not sleep:
+            continue
+        fixed = float(sleep["sleep_s"])
+        if (fixed > test_s or fixed / test_s < _OPT19_GO_MIN_TEST_SHARE
+                or fixed / job_s < _OPT19_GO_MIN_JOB_SHARE):
+            continue
+        candidate = {"kind": "test-sleep", "package": row.get("package") or "",
+                     "test": sleep["test"], "fixed_wait_s": round(fixed, 2),
+                     "test_elapsed_s": round(test_s, 2),
+                     "sources": [sleep], "level": "test"}
+        if best is None or candidate["fixed_wait_s"] > best["fixed_wait_s"]:
+            best = candidate
+    if best or facts.get("filtered") or not facts.get("command_seen"):
+        return best
+    # Without per-test times, a package line bounds its serial tests' sleeps.
+    for row in facts.get("packages") or []:
+        package = str(row.get("package") or "")
+        if not package or package in timed_packages:
+            continue
+        matches = [pkg for pkg in index if pkg["import_path"] == package]
+        if len(matches) != 1 or not matches[0]["complete"]:
+            continue
+        pkg = matches[0]
+        sleeps = [s for source in pkg["files"]
+                  for found in _OPT19_GO_TEST_FUNC_RE.finditer(source["masked"])
+                  for s in [_opt19_go_sleep_of(pkg, source, found)] if s]
+        fixed = sum(float(s["sleep_s"]) for s in sleeps)
+        package_s = float(row.get("elapsed_s") or 0)
+        if (not sleeps or package_s <= 0 or fixed > package_s
+                or fixed / package_s < _OPT19_GO_MIN_TEST_SHARE
+                or fixed / job_s < _OPT19_GO_MIN_JOB_SHARE):
+            continue
+        candidate = {"kind": "test-sleep", "package": package,
+                     "test": sleeps[0]["test"] if len(sleeps) == 1 else "",
+                     "fixed_wait_s": round(fixed, 2),
+                     "test_elapsed_s": round(package_s, 2),
+                     "sources": sleeps, "level": "package"}
+        if best is None or candidate["fixed_wait_s"] > best["fixed_wait_s"]:
+            best = candidate
+    return best
+
+
+def _opt19_go_functions(masked: str) -> list[tuple[str, int, int, str]]:
+    """Top-level functions: (name, start, end, signature text)."""
+    out = []
+    for found in _OPT19_GO_FUNC_RE.finditer(masked):
+        params_end = _opt19_go_block_end(masked, found.end() - 1, "()")
+        if params_end is None:
+            continue
+        opening = masked.find("{", params_end)
+        end = _opt19_go_block_end(masked, opening) if opening >= 0 else None
+        if end is None:
+            continue
+        out.append((found.group("name"), found.start(), end, masked[params_end:opening]))
+    return out
+
+
+def _opt19_go_race_helpers(index: list[dict[str, Any]],
+                           facts: dict[str, Any]) -> dict[str, Any] | None:
+    """Synchronous re-execs of the race-built test binary in a package the
+    race job ran, with no ``atexit_sleep_ms`` override anywhere in it."""
+    ran = ({str(row.get("package") or "") for row in facts.get("packages") or []}
+           | {str(row.get("package") or "") for row in facts.get("tests") or []}) - {""}
+    best: dict[str, Any] | None = None
+    for pkg in index:
+        if pkg["import_path"] not in ran or not pkg["complete"]:
+            continue
+        if any("atexit_sleep_ms" in source["raw"] for source in pkg["files"]):
+            continue
+        functions = [(source, *fn) for source in pkg["files"]
+                     for fn in _opt19_go_functions(source["masked"])]
+        constructors: set[str] = set()
+        sites: list[tuple[str, int]] = []
+        for source, name, start, end, signature in functions:
+            body = source["masked"][start:end]
+            reexecs = []
+            for found in _OPT19_GO_REEXEC_RE.finditer(body):
+                var = found.group("var")
+                if var and not _re.search(
+                        rf"\b{_re.escape(var)}\b[^\n=]*:?=\s*(?:os\.Executable\s*\(|"
+                        r"os\.Args\s*\[\s*0\s*\])", body):
+                    continue
+                reexecs.append(found)
+            if not reexecs or _OPT19_GO_ASYNC_RE.search(body):
+                continue
+            if _re.search(r"\*\s*exec\.Cmd\b", signature):
+                constructors.add(name)
+            elif _OPT19_GO_SYNC_RE.search(body):
+                line = source["masked"].count("\n", 0, start + reexecs[0].start()) + 1
+                sites.extend((source["path"].name, line) for _ in reexecs)
+        for source, name, start, end, _signature in functions:
+            if name in constructors:
+                continue
+            body = source["masked"][start:end]
+            if _OPT19_GO_ASYNC_RE.search(body) or not _OPT19_GO_SYNC_RE.search(body):
+                continue
+            for helper in constructors:
+                for found in _re.finditer(rf"(?<![\w.]){_re.escape(helper)}\s*\(", body):
+                    sites.append((source["path"].name,
+                                  source["masked"].count("\n", 0, start + found.start()) + 1))
+        if len(sites) < _OPT19_GO_RACE_HELPER_MIN_SPAWNS:
+            continue
+        candidate = {
+            "kind": "race-helper-exit", "package": pkg["import_path"],
+            "helper_sites": len(sites),
+            "sources": [{"file": (f"{pkg['rel']}/{f}" if pkg["rel"] not in {"", "."} else f),
+                         "line": line} for f, line in sorted(set(sites))[:6]],
+        }
+        if best is None or candidate["helper_sites"] > best["helper_sites"]:
+            best = candidate
+    return best
+
+
+def _detect_opt19_go_waits(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int, root: "Path | None" = None,
+) -> list[dict[str, Any]]:
+    """Turn Go fixed waits on drilled long poles into OPT19 findings.
+
+    Three routes: a measured poll interval in the log; constant test-body
+    sleeps read from ``_test.go`` that dominate a measured test or package;
+    and synchronous re-execs of the race-built test binary in a race job.
+    """
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    index: list[dict[str, Any]] | None = None
+    complete = False
+    for entry in pole_logs:
+        facts = entry.get("go_fixed_wait")
+        job_s = entry.get("duration_s")
+        if not isinstance(facts, dict) or not isinstance(job_s, (int, float)) or job_s <= 0:
+            continue
+        found: list[dict[str, Any]] = []
+        if isinstance(facts.get("poll"), dict):
+            found.append(facts["poll"])
+        elif root is not None:
+            if index is None:
+                index, complete = _opt19_go_index(root)
+            sleep = _opt19_go_static_sleep(index, complete, facts, float(job_s))
+            if sleep:
+                found.append(sleep)
+        if facts.get("race") and not facts.get("exit_sleep_off") and root is not None:
+            if index is None:
+                index, complete = _opt19_go_index(root)
+            helpers = _opt19_go_race_helpers(index, facts)
+            if helpers:
+                found.append(helpers)
+        wf = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        url = str(entry.get("html_url") or "")
+        runs = volume_by_workflow.get(wf)
+        for fact in found:
+            kind = fact.get("kind")
+            if kind == "race-helper-exit":
+                sites = int(fact.get("helper_sites") or 0)
+                where = ", ".join(f"`{s['file']}:{s['line']}`" for s in fact["sources"])
+                evidence = (
+                    f"The representative `{job}` log runs `go test` with the race "
+                    f"detector, and package `{fact['package']}` re-executes its "
+                    f"race-built test binary synchronously at {sites} call sites "
+                    f"({where}) without an `atexit_sleep_ms=0` override. Each such "
+                    "child sleeps for the race runtime's default 1 s before it exits."
+                )
+                fix = (
+                    "Preserve every existing `GORACE` option and append "
+                    "`atexit_sleep_ms=0` only to the environment of the synchronous "
+                    "helper children (for example, in the helper that builds the "
+                    "`exec.Cmd`); keep the parent job, its race options and any "
+                    "asynchronous children unchanged. Then compare the package's "
+                    "`go test -race` time before and after on the same runner."
+                )
+                size_note = (
+                    "wall-clock effect: unsized (the log does not count helper "
+                    "re-execs per run; each one sleeps 1 s at exit by default); "
+                    "runner-minute saving: unsized (the log does not count helper "
+                    "re-execs per run)")
+                idx += 1
+                finding = _new_finding(
+                    "OPT19", "MEDIUM", "Race Helper Exit Sleep", wf, job, evidence,
+                    fix, "opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout",
+                    idx, wc_p50=0.0, rm=None, size_note=size_note, realization="none",
+                    measured_evidence=_measured_evidence(
+                        ["Helper call site", "Package", "Representative run"],
+                        [[f"`{s['file']}:{s['line']}`", f"`{fact['package']}`",
+                          f"[job log]({url})" if url else "captured job log"]
+                         for s in fact["sources"]],
+                        evidence,
+                        "Static source read; measure the package before and after."),
+                )
+                finding["sizing_basis"] = "measured"
+                finding["go_wait_kind"] = kind
+                finding["go_race_helper_sites"] = sites
+                out.append(finding)
+                continue
+            seconds = float(fact.get("fixed_wait_s") or 0)
+            if seconds <= 0:
+                continue
+            runner_min = (round(seconds * runs / 60.0, 1)
+                          if isinstance(runs, int) and runs > 0 else None)
+            if kind == "poll-interval":
+                test = str(fact.get("test") or "Go test")
+                evidence = (
+                    f"`{test}` spends {seconds:.1f}s in "
+                    f"{int(fact.get('wait_count') or 0)} measured "
+                    f"{float(fact.get('interval_s') or 0):.1f}s fixed poll intervals "
+                    f"of its {float(fact.get('test_elapsed_s') or 0):.1f}s "
+                    "in the representative long-pole log."
+                )
+                fix = (
+                    "Change only the test. Run the waiting test on `testing/synctest`'s "
+                    "virtual clock. If the dependency cannot use that clock, expose "
+                    "only the interval as a package variable that this test shortens "
+                    "and restores with `t.Cleanup`; keep the production default "
+                    "unchanged and retain the timeout assertions."
+                )
+                rows = [[f"`{job}`", f"`{test}`", f"{seconds:.1f}s",
+                         f"[job log]({url})" if url else "captured job log"]]
+                headers = ["Job", "Test", "Measured fixed wait", "Representative run"]
+                basis = "measured fixed-wait ceiling"
+            else:
+                sources = fact.get("sources") or []
+                lead = sources[0] if sources else {}
+                subject = (f"`{fact['test']}`" if fact.get("test")
+                           else f"the serial tests of package `{fact['package']}`")
+                measured = ("its measured" if fact.get("level") == "test"
+                            else "the package's measured")
+                evidence = (
+                    f"{subject} sleep for a constant {seconds:.1f}s in "
+                    f"`time.Sleep`/`time.After` calls (`{lead.get('file')}` lines "
+                    f"{', '.join(str(n) for n in (lead.get('lines') or [])[:6])}), "
+                    f"{seconds / float(fact['test_elapsed_s']):.0%} of {measured} "
+                    f"{float(fact['test_elapsed_s']):.1f}s in the representative "
+                    "long-pole log."
+                )
+                fix = (
+                    "Change only the test. Replace each fixed sleep with a wait on "
+                    "the event it stands in for (a channel, or a readiness check "
+                    "polled with a deadline). Where it waits out a timer in the code "
+                    "under test, run the test on `testing/synctest`'s virtual clock, "
+                    "or expose only that interval as a package variable the test "
+                    "shortens and restores with `t.Cleanup`; keep the production "
+                    "default unchanged and retain the timeout assertions."
+                )
+                rows = [[f"`{s.get('test')}`", f"`{s.get('file')}`",
+                         ", ".join(f"L{n}" for n in (s.get("lines") or [])[:8]),
+                         f"{float(s.get('sleep_s') or 0):.1f}s"]
+                        for s in sources]
+                headers = ["Test", "Source", "Sleep lines", "Constant sleep"]
+                basis = "constant source sleeps, within the measured test time"
+            if runner_min is not None:
+                size_note = (
+                    f"runner-minute saving: at most {runner_min:.1f}/month ({basis}"
+                    f" of {seconds:.1f}s from 1 representative run x {runs} workflow "
+                    "runs in 30 days)"
+                )
+            elif runs == 0:
+                size_note = ("runner-minute saving: unsized (the 30-day volume window "
+                             "holds no runs of this workflow)")
+            else:
+                size_note = ("runner-minute saving: unsized (30-day run volume for this "
+                             "workflow is unavailable)")
+            idx += 1
+            finding = _new_finding(
+                "OPT19", "HIGH", "Go Test Fixed Wait Dominance", wf, job, evidence,
+                fix, "opt19--test-source-sleep-dominance-includes-playwright-waitfortimeout",
+                idx, wc_p50=round(seconds, 1), rm=runner_min,
+                size_note=size_note, realization="direct",
+                measured_evidence=_measured_evidence(
+                    headers, rows, evidence,
+                    "The fixed wait is a ceiling; re-measure the same test after the change."),
+            )
+            finding["sizing_basis"] = "measured"
+            finding["go_wait_kind"] = kind
+            finding["go_fixed_wait_s"] = round(seconds, 1)
+            if isinstance(runs, int):
+                finding["workflow_runs_30d"] = runs
+            out.append(finding)
+    return out
+
+_GO_TEST_COMMAND_RE = re.compile(
+    r"^##\[group\]Run\s+(?:(?:env|sudo|time)\s+)?(?:go\s+test|gotestsum)(?:\s|$)",
+    re.IGNORECASE)
+_GO_TEST_RESULT_RE = re.compile(
+    r"^\s*---\s+(?:PASS|FAIL):\s+(?P<test>Test[A-Za-z0-9_]+)"
+    r"(?:/\S+)?\s+\((?P<seconds>\d+(?:\.\d+)?)s\)\s*$")
+_GO_TEST_FUNCTION_RE = re.compile(
+    r"\bfunc\s+(?P<test>Test[A-Za-z0-9_]+)\s*\(\s*"
+    r"(?P<arg>[A-Za-z_][A-Za-z0-9_]*)\s+\*testing\.T\s*\)")
+_GO_PARALLEL_MIN_TEST_S = 10.0
+_GO_PARALLEL_MAX_FILES = 200
+_GO_PARALLEL_MAX_FILE_BYTES = 512_000
+
+
+_GO_PACKAGE_RESULT_RE = re.compile(
+    r"^\s*(?P<status>ok|FAIL)\s+(?P<package>[A-Za-z0-9_.\-~/]+)\s+"
+    r"(?:(?P<seconds>\d+(?:\.\d+)?)s|\(cached\)|\[[^\]]*\])")
+# gotestsum's default package line: `✓  pkg (1m2.5s)` / `✖  pkg (3.1s)`.
+_GO_GOTESTSUM_PACKAGE_RE = re.compile(
+    "^\\s*[✓✖✔✗]\\s+(?P<package>[A-Za-z0-9_.\\-~/]+)\\s+"
+    r"\((?P<duration>[0-9hms.]+)\)\s*$")
+_GO_DURATION_RE = re.compile(
+    r"^(?:(?P<h>\d+)h)?(?:(?P<m>\d+)m(?!s))?(?:(?P<s>\d+(?:\.\d+)?)s)?"
+    r"(?:(?P<ms>\d+(?:\.\d+)?)ms)?$")
+# A step that is not `go test` itself but may run it: `make <target>` or a
+# repository script. The detector resolves these against the checkout and
+# stays quiet unless the recipe or script is a plain `go test` line.
+_GO_TEST_VIA_RE = re.compile(
+    r"^##\[group\]Run\s+(?P<via>make\s+(?P<target>[A-Za-z0-9_.\-]+)|"
+    r"(?:(?:ba)?sh\s+)?(?P<script>\.?/?[A-Za-z0-9_.\-/]+\.sh))\s*$")
+
+
+def _go_duration_s(text: str) -> float | None:
+    match = _GO_DURATION_RE.match(text)
+    if not match or not any(match.groupdict().values()):
+        return None
+    return (float(match.group("h") or 0) * 3600 + float(match.group("m") or 0) * 60
+            + float(match.group("s") or 0) + float(match.group("ms") or 0) / 1000)
+
+
+def _go_slow_test_results(log: str) -> list[dict[str, Any]]:
+    """Slow Go tests (or packages) from one long-pole ``go test`` log.
+
+    Reads verbose ``--- PASS: TestX (Ns)`` lines, ``go test -json`` events
+    and, when per-test times are absent, plain ``ok <pkg> Ns`` or gotestsum
+    package lines (``level: package`` rows). Each package's results precede
+    its package line, so a test row carries that ``package`` when the log
+    prints it. A ``make <target>`` or script step is recorded as ``via``; the
+    detector resolves it against the checkout.
+    """
+    records, _untimestamped, _total = _opt80_log_records(log)
+    via = ""
+    if not any(_GO_TEST_COMMAND_RE.search(text) for _stamp, text in records):
+        for _stamp, text in records:
+            match = _GO_TEST_VIA_RE.match(text)
+            if match:
+                via = re.sub(r"\s+", " ", match.group("via"))
+                break
+        if not via:
+            return []
+    found: dict[tuple[str, str], float] = {}
+    packages: dict[str, float] = {}
+    timed_packages: set[str] = set()
+    pending: dict[str, float] = {}
+
+    def flush(package: str) -> None:
+        for name, seconds in pending.items():
+            key = (name, package)
+            found[key] = max(seconds, found.get(key, 0.0))
+        pending.clear()
+
+    for _stamp, text in records:
+        if text.startswith("{") and '"Action"' in text:
+            try:
+                event = json.loads(text)
+            except ValueError:
+                continue
+            if not isinstance(event, dict) or event.get("Action") not in {"pass", "fail"}:
+                continue
+            package = str(event.get("Package") or "")
+            elapsed = event.get("Elapsed")
+            if not isinstance(elapsed, (int, float)):
+                continue
+            test = event.get("Test")
+            if test:
+                if package:
+                    timed_packages.add(package)
+                if (isinstance(test, str) and "/" not in test
+                        and re.fullmatch(r"Test[A-Za-z0-9_]+", test)
+                        and elapsed >= _GO_PARALLEL_MIN_TEST_S):
+                    key = (test, package)
+                    found[key] = max(float(elapsed), found.get(key, 0.0))
+            elif package:
+                packages[package] = max(float(elapsed), packages.get(package, 0.0))
+            continue
+        match = _GO_TEST_RESULT_RE.match(text)
+        if match:
+            seconds = float(match.group("seconds"))
+            pending.setdefault(match.group("test"), 0.0)
+            pending[match.group("test")] = max(seconds, pending[match.group("test")])
+            continue
+        package_line = _GO_PACKAGE_RESULT_RE.match(text)
+        seconds: float | None = None
+        name = ""
+        if package_line:
+            name = package_line.group("package")
+            if package_line.group("seconds"):
+                seconds = float(package_line.group("seconds"))
+        else:
+            gts = _GO_GOTESTSUM_PACKAGE_RE.match(text)
+            if gts:
+                name = gts.group("package")
+                seconds = _go_duration_s(gts.group("duration"))
+        if name:
+            if pending:
+                timed_packages.add(name)
+            for test_name, test_s in list(pending.items()):
+                if test_s < _GO_PARALLEL_MIN_TEST_S:
+                    del pending[test_name]
+            flush(name)
+            if seconds is not None:
+                packages[name] = max(seconds, packages.get(name, 0.0))
+    if pending:
+        timed_packages.add("")
+    for test_name, test_s in list(pending.items()):
+        if test_s < _GO_PARALLEL_MIN_TEST_S:
+            del pending[test_name]
+    flush("")
+    rows: list[dict[str, Any]] = []
+    for (name, package), seconds in sorted(found.items()):
+        row: dict[str, Any] = {"test": name, "duration_s": round(seconds, 2)}
+        if package:
+            row["package"] = package
+        rows.append(row)
+    if "" not in timed_packages:
+        # Per-test times are absent for these packages: a package row is an
+        # upper bound, and the source read decides which tests qualify.
+        for package, seconds in sorted(packages.items()):
+            if package not in timed_packages and seconds >= _GO_PARALLEL_MIN_TEST_S:
+                rows.append({"package": package, "duration_s": round(seconds, 2),
+                             "level": "package"})
+    if via:
+        for row in rows:
+            row["via"] = via
+    return rows
+
+def _go_code_mask(text: str) -> str:
+    """Blank Go comments and literals while preserving offsets and newlines."""
+    out = list(text)
+    i = 0
+    state = "code"
+    quote = ""
+    while i < len(text):
+        if state == "code":
+            if text.startswith("//", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "line"
+                continue
+            if text.startswith("/*", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "block"
+                continue
+            if text[i] in {'"', "'", "`"}:
+                quote = text[i]
+                out[i] = " "
+                i += 1
+                state = "raw" if quote == "`" else "quote"
+                continue
+        elif state == "line":
+            if text[i] == "\n":
+                state = "code"
+            else:
+                out[i] = " "
+            i += 1
+            continue
+        elif state == "block":
+            if text.startswith("*/", i):
+                out[i] = out[i + 1] = " "
+                i += 2
+                state = "code"
+            else:
+                if text[i] != "\n":
+                    out[i] = " "
+                i += 1
+            continue
+        elif state == "raw":
+            if text[i] == "`":
+                state = "code"
+            if text[i] != "\n":
+                out[i] = " "
+            i += 1
+            continue
+        else:
+            if text[i] == "\\" and i + 1 < len(text):
+                out[i] = " "
+                if text[i + 1] != "\n":
+                    out[i + 1] = " "
+                i += 2
+                continue
+            if text[i] == quote:
+                state = "code"
+            if text[i] != "\n":
+                out[i] = " "
+            i += 1
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _go_function_end(masked: str, opening: int) -> int | None:
+    depth = 0
+    for index in range(opening, len(masked)):
+        if masked[index] == "{":
+            depth += 1
+        elif masked[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+# Process-global mutations that the source text cannot classify as case-local;
+# any of them anywhere in the test withholds the finding (fail closed).
+_GO_PROCESS_GLOBAL_RE = re.compile(
+    r"\b(?:os\.(?:Setenv|Unsetenv|Clearenv|Chdir)|net\.Listen|flag\.Set|"
+    r"log\.Set(?:Output|Flags|Prefix)|signal\.Notify|runtime\.GOMAXPROCS|"
+    r"http\.(?:Handle|HandleFunc)|[A-Za-z_][A-Za-z0-9_]*\.Chdir)\s*\(|"
+    r"\bhttp\.Default[A-Za-z]+\b")
+_GO_DECL_RE = re.compile(
+    r"(?:^|[;{\s])(?P<names>[A-Za-z_][A-Za-z0-9_]*(?:\s*,\s*[A-Za-z_][A-Za-z0-9_]*)*)"
+    r"\s*:=|\bvar\s+(?P<var>[A-Za-z_][A-Za-z0-9_]*)")
+_GO_RANGE_RE = re.compile(
+    r"\bfor\s+(?P<a>[A-Za-z_][A-Za-z0-9_]*)(?:\s*,\s*(?P<b>[A-Za-z_][A-Za-z0-9_]*))?"
+    r"\s*:?=\s*range\s+(?P<table>[A-Za-z_][A-Za-z0-9_.]*)")
+_GO_LOOP_COPY_RE = re.compile(
+    r"\b(?P<name>[A-Za-z_][A-Za-z0-9_]*)\s*:=\s*(?P=name)\b")
+
+
+def _go_package_vars(directory: "Path") -> dict[str, str] | None:
+    """Package-level ``var`` names in one Go package directory, each mapped to
+    its masked declaration text (a whole ``var (...)`` block for grouped ones).
+    """
+    names: dict[str, str] = {}
+    try:
+        files = sorted(directory.glob("*.go"))
+    except OSError:
+        return None
+    if len(files) > _GO_PARALLEL_MAX_FILES:
+        return None
+    for path in files:
+        try:
+            if path.is_symlink() or path.stat().st_size > _GO_PARALLEL_MAX_FILE_BYTES:
+                return None
+            masked = _go_code_mask(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return None
+        starts = [m.start() for m in re.finditer(
+            r"(?m)^(?:func|var|const|type|import)\b", masked)] + [len(masked)]
+        for decl in re.finditer(r"(?m)^var\b", masked):
+            end = next(pos for pos in starts if pos > decl.start())
+            text = masked[decl.start():end]
+            block = re.match(r"var\s*\(", text)
+            for name in (re.findall(r"(?m)^\s+([A-Za-z_][A-Za-z0-9_]*)", text[block.end():])
+                         if block else
+                         re.findall(r"^var\s+([A-Za-z_][A-Za-z0-9_]*)", text)):
+                names[name] = text
+    return names
+
+
+# Calls a table literal may make without creating state shared by its rows.
+_GO_PURE_TABLE_CALL_RE = re.compile(
+    r"^(?:func|len|make|new|string|byte|rune|bool|u?int(?:8|16|32|64)?|"
+    r"float(?:32|64)|(?:time|errors|fmt|filepath|path|strings|bytes|strconv|"
+    r"json)\.[A-Za-z0-9_]+)$")
+
+
+def _go_blank_func_literals(masked: str) -> str:
+    """Blank the bodies of ``func(...) ... { }`` literals (row-local code)."""
+    out = list(masked)
+    for lit in re.finditer(r"\bfunc\s*\(", masked):
+        params_end = _go_paren_end(masked, lit.end() - 1)
+        if params_end is None:
+            continue
+        opening = masked.find("{", params_end)
+        end = _go_function_end(masked, opening) if opening >= 0 else None
+        if end is None:
+            continue
+        for index in range(opening, end):
+            if out[index] != "\n":
+                out[index] = " "
+    return "".join(out)
+
+
+def _go_table_is_row_local(literal: str, names: set[str]) -> bool:
+    """True when a table literal names no variable and makes no stateful call."""
+    if any(re.search(rf"(?<![.\w]){re.escape(name)}\b", literal) for name in names):
+        return False
+    calls = _go_blank_func_literals(literal)
+    return all(_GO_PURE_TABLE_CALL_RE.match(call.group(1))
+               for call in re.finditer(r"([A-Za-z_][A-Za-z0-9_.]*)\s*\(", calls))
+
+def _go_import_path(root: "Path", directory: "Path") -> str | None:
+    """Import path of ``directory`` from its nearest ``go.mod`` under ``root``."""
+    current = directory
+    while True:
+        mod = current / "go.mod"
+        try:
+            if mod.is_file():
+                found = re.search(r'(?m)^\s*module\s+"?([^\s"]+)',
+                                  mod.read_text(encoding="utf-8"))
+                if not found:
+                    return None
+                module = found.group(1)
+                rel = directory.relative_to(current).as_posix()
+                return module if rel == "." else f"{module}/{rel}"
+        except (OSError, UnicodeError, ValueError):
+            return None
+        if current == root or current.parent == current:
+            return None
+        current = current.parent
+
+
+def _go_test_parallel_proof(
+    body: str, arg: str, package_vars: dict[str, str],
+) -> dict[str, Any] | None:
+    """Prove a test's table cases are independent, or return None (fail closed)."""
+    if re.search(r"\b[A-Za-z_][A-Za-z0-9_]*\.Parallel\s*\(", body):
+        return None
+    if (re.search(r"\bfor\b[^{}\n]*\brange\b", body) is None
+            or re.search(rf"\b{arg}\.Run\s*\(", body) is None):
+        return None
+    if _GO_PROCESS_GLOBAL_RE.search(body):
+        return None
+    subtests = re.compile(
+        rf"\b{arg}\.Run\s*\([^,]+,\s*func\s*\(\s*"
+        r"(?P<arg>[A-Za-z_][A-Za-z0-9_]*)\s+\*testing\.T\s*\)\s*\{",
+        re.DOTALL)
+    regions: list[tuple[int, int, str]] = []
+    for sub in subtests.finditer(body):
+        sub_end = _go_function_end(body, sub.end() - 1)
+        if sub_end is None:
+            return None
+        regions.append((sub.end() - 1, sub_end, sub.group("arg")))
+    outer = list(body)
+    for start, end, _sub_arg in regions:
+        for index in range(start, end):
+            if outer[index] != "\n":
+                outer[index] = " "
+    parent = "".join(outer)
+    # Parallel subtests resume only after the parent function returns: a parent
+    # defer would already have run, and a parent t.Setenv/t.Chdir makes every
+    # t.Parallel() below it panic.
+    if re.search(r"\bdefer\b", parent) or re.search(
+            rf"\b{arg}\.(?:Setenv|Chdir)\s*\(", parent):
+        return None
+    loops = list(_GO_RANGE_RE.finditer(parent))
+    loop_names: set[str] = {"_"}
+    tables: set[str] = set()
+    for loop in loops:
+        loop_names.update(n for n in (loop.group("a"), loop.group("b")) if n)
+        tables.add(loop.group("table"))
+    loop_names.update(m.group("name") for m in _GO_LOOP_COPY_RE.finditer(parent))
+    declared: set[str] = set()
+    for decl in _GO_DECL_RE.finditer(parent):
+        if decl.group("var"):
+            declared.add(decl.group("var"))
+        else:
+            declared.update(n.strip() for n in decl.group("names").split(","))
+    # The parent may declare only its case tables and loop variables: any other
+    # parent value could reach every case through a row or a closure.
+    if declared - loop_names - tables:
+        return None
+    if not loops:
+        return None
+    for loop in loops:
+        table = loop.group("table")
+        local = re.search(
+            rf"(?:\b{re.escape(table)}\s*:=|\bvar\s+{re.escape(table)}\b)",
+            parent[:loop.start()])
+        if local:
+            literal = parent[local.end():loop.start()]
+        elif table in package_vars:
+            literal = package_vars[table].split("=", 1)[-1]
+        else:
+            return None  # a helper, field or other package's table: unreadable
+        others = set(package_vars) - {table}
+        if not _go_table_is_row_local(literal, others):
+            return None
+    shared_names = (declared - loop_names) | set(package_vars)
+    isolated: list[tuple[str, bool]] = []
+    for start, end, sub_arg_raw in regions:
+        sub_body = body[start:end]
+        sub_arg = re.escape(sub_arg_raw)
+        if any(re.search(rf"(?<![.\w]){re.escape(name)}\b", sub_body)
+               for name in shared_names):
+            continue
+        temp_vars = re.findall(
+            rf"\b([A-Za-z_][A-Za-z0-9_]*)\s*:?=\s*{sub_arg}\.TempDir\s*\(", sub_body)
+        temp_ref = "|".join(
+            [rf"\b{sub_arg}\.TempDir\s*\("]
+            + [rf"\b{re.escape(name)}\b" for name in temp_vars])
+        server = re.search(
+            r"\bhttptest\.New(?:TLS)?Server\s*\(", sub_body) is not None
+        store_bound = False
+        for store in re.finditer(
+                r"\b(?:new|open|make|create)[A-Za-z0-9_]*Store\s*\(", sub_body,
+                re.IGNORECASE):
+            args_end = _go_paren_end(sub_body, store.end() - 1)
+            if args_end is not None and re.search(
+                    temp_ref, sub_body[store.end():args_end - 1]):
+                store_bound = True
+        setenv = re.search(rf"\b{sub_arg}\.Setenv\s*\(", sub_body) is not None
+        config = re.search(r"\b[A-Za-z0-9_]*Config\s*\{", sub_body) is not None
+        if temp_vars and store_bound and server:
+            isolated.append(("resources", setenv))
+        elif setenv and config and server:
+            isolated.append(("config", True))
+    if not isolated:
+        return None
+    return {
+        "setenv_blocker": any(setenv for _kind, setenv in isolated),
+        "isolation": (isolated[0][0]
+                      if all(kind == isolated[0][0] for kind, _ in isolated)
+                      else "mixed"),
+    }
+
+
+def _go_paren_end(masked: str, opening: int) -> int | None:
+    depth = 0
+    for index in range(opening, len(masked)):
+        if masked[index] == "(":
+            depth += 1
+        elif masked[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+    return None
+
+
+def _go_parallel_source_definitions(
+    root: "Path | None", wanted: set[str],
+) -> tuple[dict[str, list[dict[str, Any]]], bool]:
+    """Every definition of each wanted Go test, with its proof (or None).
+
+    Returns ``(definitions, complete)``; ``complete`` is False when the file
+    cap truncated the scan, so a name's uniqueness cannot be shown.
+    """
+    if root is None or not wanted:
+        return {}, True
+    resolved = root.resolve()
+    out: dict[str, list[dict[str, Any]]] = {}
+    try:
+        paths = sorted(root.rglob("*_test.go"))
+    except OSError:
+        return {}, False
+    complete = len(paths) <= _GO_PARALLEL_MAX_FILES
+    package_vars: dict[Path, dict[str, str] | None] = {}
+    for path in paths[:_GO_PARALLEL_MAX_FILES]:
+        try:
+            target = path.resolve()
+            if (not target.is_relative_to(resolved) or path.is_symlink()
+                    or path.stat().st_size > _GO_PARALLEL_MAX_FILE_BYTES):
+                complete = False
+                continue
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError, ValueError):
+            complete = False
+            continue
+        masked = _go_code_mask(text)
+        for match in _GO_TEST_FUNCTION_RE.finditer(masked):
+            name = match.group("test")
+            if name not in wanted:
+                continue
+            definition: dict[str, Any] = {
+                "test": name,
+                "file": str(path.relative_to(root)),
+                "line": text.count("\n", 0, match.start()) + 1,
+                "import_path": _go_import_path(root, path.parent),
+                "proof": None,
+            }
+            out.setdefault(name, []).append(definition)
+            opening = masked.find("{", match.end())
+            end = _go_function_end(masked, opening) if opening >= 0 else None
+            if end is None:
+                continue
+            if path.parent not in package_vars:
+                package_vars[path.parent] = _go_package_vars(path.parent)
+            pkg_vars = package_vars[path.parent]
+            if pkg_vars is None:
+                continue
+            definition["proof"] = _go_test_parallel_proof(
+                masked[opening:end], re.escape(match.group("arg")), pkg_vars)
+    return out, complete
+
+
+def _go_parallel_source_match(
+    definitions: dict[str, list[dict[str, Any]]], complete: bool,
+    test: str, package: str | None,
+) -> dict[str, Any] | None:
+    """The one proven definition for a measured test, or None when ambiguous."""
+    defs = definitions.get(test) or []
+    if package:
+        if any(d["import_path"] is None for d in defs):
+            return None
+        defs = [d for d in defs if d["import_path"] == package]
+    elif not complete:
+        return None
+    if len(defs) != 1 or defs[0]["proof"] is None:
+        return None
+    found = defs[0]
+    return {"test": found["test"], "file": found["file"], "line": found["line"],
+            **found["proof"]}
+
+
+def _go_parallel_source_candidates(
+    root: "Path | None", wanted: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Conservative source proof that a measured Go test owns per-case state.
+
+    Without a measured package, a name defined more than once is ambiguous
+    and withheld.
+    """
+    definitions, complete = _go_parallel_source_definitions(root, wanted)
+    out: dict[str, dict[str, Any]] = {}
+    for name in wanted:
+        found = _go_parallel_source_match(definitions, complete, name, None)
+        if found:
+            out[name] = found
+    return out
+
+_GO_PLAIN_TEST_LINE_RE = re.compile(
+    r"^\s*(?:exec\s+)?(?:(?:env|time)\s+)?(?:go\s+test|gotestsum)(?:\s|$)")
+
+
+def _go_via_runs_go_test(root: "Path | None", via: str) -> bool:
+    """True when a ``make <target>`` or script step is a plain ``go test`` line."""
+    if root is None:
+        return False
+    make = re.fullmatch(r"make (?P<target>[A-Za-z0-9_.\-]+)", via)
+    try:
+        if make:
+            for name in ("GNUmakefile", "makefile", "Makefile"):
+                path = root / name
+                if path.is_file() and not path.is_symlink():
+                    break
+            else:
+                return False
+            if path.stat().st_size > _GO_PARALLEL_MAX_FILE_BYTES:
+                return False
+            lines = path.read_text(encoding="utf-8").splitlines()
+            target = re.escape(make.group("target"))
+            for index, line in enumerate(lines):
+                if re.match(rf"^{target}\s*:(?!=)", line):
+                    recipe: list[str] = []
+                    for following in lines[index + 1:]:
+                        if not following.startswith("\t"):
+                            break
+                        recipe.append(following[1:].lstrip("@-+ "))
+                    return any(_GO_PLAIN_TEST_LINE_RE.match(r) for r in recipe)
+            return False
+        script = re.sub(r"^(?:(?:ba)?sh\s+)", "", via)
+        path = (root / script.removeprefix("./")).resolve()
+        if (not path.is_relative_to(root.resolve()) or not path.is_file()
+                or path.stat().st_size > _GO_PARALLEL_MAX_FILE_BYTES):
+            return False
+        return any(_GO_PLAIN_TEST_LINE_RE.match(line)
+                   for line in path.read_text(encoding="utf-8").splitlines())
+    except (OSError, UnicodeError, ValueError):
+        return False
+
+
+def _go_package_test_proofs(
+    root: "Path | None", package: str,
+) -> list[dict[str, Any]]:
+    """Every proven-independent, serial Test function in one Go package."""
+    if root is None or not package:
+        return []
+    try:
+        paths = sorted(root.rglob("*_test.go"))
+    except OSError:
+        return []
+    directories: dict[Path, str | None] = {}
+    for path in paths[:_GO_PARALLEL_MAX_FILES]:
+        if path.parent not in directories:
+            directories[path.parent] = _go_import_path(root, path.parent)
+    matches = [d for d, imp in directories.items() if imp == package]
+    if len(matches) != 1:
+        return []
+    names: set[str] = set()
+    for path in sorted(matches[0].glob("*_test.go")):
+        try:
+            masked = _go_code_mask(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            return []
+        names.update(m.group("test") for m in _GO_TEST_FUNCTION_RE.finditer(masked))
+    definitions, complete = _go_parallel_source_definitions(root, names)
+    proven: list[dict[str, Any]] = []
+    for name in sorted(names):
+        found = _go_parallel_source_match(definitions, complete, name, package)
+        if found:
+            proven.append(found)
+    return proven
+
+
+def _detect_go_test_parallelism(
+    pole_logs: list[dict[str, Any]], root: "Path | None", start_idx: int,
+) -> list[dict[str, Any]]:
+    """Route measured isolated-but-serial Go tests to OPT88.
+
+    Per-test times (verbose or ``-json`` output) size the finding by the
+    slowest proven test. Plain package lines fall back to a static read of
+    the package: the wall-clock effect is then unsized, since the package's
+    measured time is only an upper bound.
+    """
+    wanted = {
+        str(row.get("test") or "")
+        for entry in pole_logs
+        for row in (entry.get("go_slow_tests") or [])
+        if isinstance(row, dict) and row.get("test")
+    }
+    definitions, complete = _go_parallel_source_definitions(root, wanted)
+    via_ok: dict[str, bool] = {}
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    for entry in pole_logs:
+        job_s = entry.get("duration_s")
+        matched: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        package_level: list[tuple[dict[str, Any], list[dict[str, Any]]]] = []
+        for row in entry.get("go_slow_tests") or []:
+            if not (isinstance(row, dict)
+                    and isinstance(row.get("duration_s"), (int, float))
+                    and isinstance(job_s, (int, float))
+                    and 0 < float(row["duration_s"]) <= float(job_s)):
+                continue
+            via = str(row.get("via") or "")
+            if via:
+                if via not in via_ok:
+                    via_ok[via] = _go_via_runs_go_test(root, via)
+                if not via_ok[via]:
+                    continue
+            package = row.get("package")
+            if row.get("level") == "package":
+                proven = _go_package_test_proofs(root, str(package or ""))
+                if proven:
+                    package_level.append((row, proven))
+                continue
+            source_row = _go_parallel_source_match(
+                definitions, complete, str(row.get("test") or ""),
+                str(package) if package else None)
+            if source_row:
+                matched.append((row, source_row))
+        if not matched and not package_level:
+            continue
+        job = str(entry.get("job") or "")
+        workflow = str(entry.get("workflow_file") or "")
+        url = str(entry.get("html_url") or "")
+        if matched:
+            matched.sort(key=lambda pair: (-float(pair[0]["duration_s"]),
+                                           str(pair[0]["test"])))
+            sources = [src for _row, src in matched]
+            lead, source = matched[0]
+            lead_s = float(lead["duration_s"])
+            names = ", ".join(f"`{row['test']}`" for row, _src in matched[:4])
+            measured_what = (f"measures {names} running serially; the slowest "
+                             f"takes {_link(lead_s, url)}")
+            table = [[f"`{row['test']}`", f"{float(row['duration_s']):.2f}s",
+                      f"`{src['file']}:{src['line']}`",
+                      f"[job log]({url})" if url else "captured job log"]
+                     for row, src in matched]
+            headline = f"The slowest independent serial Go test takes {lead_s:.2f}s."
+            size_note = (
+                f"measured serial test wall {lead_s:.2f}s; "
+                "runner-minute saving: unsized (no same-runner before/after "
+                "timing of the parallel form was collected)")
+            candidate = {**source, "duration_s": lead_s}
+        else:
+            package_level.sort(key=lambda pair: (-float(pair[0]["duration_s"]),
+                                                 str(pair[0]["package"])))
+            lead_row, proven = package_level[0]
+            sources = [src for _row, srcs in package_level for src in srcs]
+            lead_s = float(lead_row["duration_s"])
+            names = ", ".join(f"`{src['test']}`" for src in sources[:4])
+            measured_what = (
+                f"measures package `{lead_row['package']}` taking "
+                f"{_link(lead_s, url)} without per-test times; its source has "
+                f"{names} running serially")
+            table = [[f"`{src['test']}` (package `{row['package']}`)",
+                      f"package {float(row['duration_s']):.2f}s",
+                      f"`{src['file']}:{src['line']}`",
+                      f"[job log]({url})" if url else "captured job log"]
+                     for row, srcs in package_level for src in srcs]
+            headline = (f"Package `{lead_row['package']}` takes {lead_s:.2f}s; "
+                        "per-test times are not in the log.")
+            size_note = (
+                "wall-clock effect: unsized (per-test times not in the log; the "
+                f"package's measured {lead_s:.2f}s is an upper bound); "
+                "runner-minute saving: unsized (no same-runner before/after "
+                "timing of the parallel form was collected)")
+            candidate = {**proven[0], "package": lead_row["package"],
+                         "package_duration_s": lead_s}
+        setenv = any(src["setenv_blocker"] for src in sources)
+        kinds = {src["isolation"] for src in sources}
+        owned = {
+            frozenset({"resources"}):
+                "its own temp tree, a store opened on that tree, and a test server",
+            frozenset({"config"}): "its own config and test server",
+        }.get(frozenset(kinds),
+              "either its own temp tree, a store opened on that tree, and a test "
+              "server, or its own config and test server")
+        evidence = (
+            f"The representative `{job}` Go test log {measured_what}. Their "
+            f"source gives each table case {owned}, captures no parent-scope or "
+            "package-level variable, makes no other process-global change, and "
+            "does not opt the test into `t.Parallel()`."
+        )
+        if setenv:
+            evidence += " `t.Setenv` is the process-global blocker in at least one case."
+        loop_note = (
+            " On a module whose `go` directive is below 1.22, copy the loop "
+            "variable (`tc := tc`) before `t.Run`.")
+        verify_note = (
+            " Run the focused package with `go test -race`, confirm the same case "
+            "count and failures, and compare several before/after timings on the "
+            "same runner.")
+        fix = (
+            "Keep cases that share process-global state sequential. For the proven "
+            "isolated cases, pass the config explicitly instead of `t.Setenv` only "
+            "where the code under test takes that value from the config; a case "
+            "whose code still reads the environment keeps `t.Setenv` and stays "
+            "sequential. Then call `t.Parallel()` at the start of each independent "
+            "subtest." + loop_note + verify_note
+            if setenv else
+            "Keep cases that share process-global state sequential, and call "
+            "`t.Parallel()` at the start of each proven independent subtest."
+            + loop_note + verify_note
+        )
+        measured = _measured_evidence(
+            ["Test", "Measured wall", "Source", "Representative run"], table,
+            headline,
+            "Source isolation is a safety gate, not proof of a saving; benchmark before and after.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT88", "MEDIUM", "Independent Go Tests Run Serially",
+            workflow, job, evidence, fix,
+            "opt88--test-concurrency-is-a-guess-not-a-measurement", idx,
+            wc_p50=0.0, rm=None, size_note=size_note,
+            realization="none", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        finding["go_parallel_candidate"] = candidate
+        out.append(finding)
+    return out
+
+
+# --- OPT106, uninstrumented path -------------------------------------------
+# Issue #397's default detection: a heavy step on a drilled long pole whose
+# RESOLVED command runs TypeScript through a runtime loader. Without a profile
+# the loader's share of the step is unknown, so the finding is unsized on both
+# axes and its fix leads with measuring. The step's p50 is stated only as an
+# upper bound, never credited. Routing reuses OPT83's floors (at least
+# `_OPT83_MIN_STEP_S` seconds and `_OPT83_MIN_SHARE` of the pole's job p50) and
+# OPT84's YAML step join and package-script resolver; anything the read cannot
+# pin down (an expression, a directory change, an unreadable script) stays
+# quiet, never a guessed loader.
+_OPT106_LOADER_BINARIES = frozenset({"tsx", "ts-node", "ts-node-esm"})
+_OPT106_LOADER_MODULES = frozenset({
+    "tsx", "tsx/esm", "tsx/cjs", "ts-node", "ts-node/esm", "ts-node/register",
+    "ts-node/register/transpile-only", "ts-node/esm/transpile-only"})
+_OPT106_NODE_LOADER_FLAGS = frozenset({
+    "--loader", "--experimental-loader", "--import", "-r", "--require"})
+_OPT106_ENV_WRAPPERS = frozenset({"cross-env", "env"})
+# node options that take their value as the next token; the option loop skips
+# that value instead of mistaking it for the script name.
+_OPT106_NODE_VALUE_FLAGS = frozenset({
+    "--loader", "--experimental-loader", "--import", "-r", "--require",
+    "--conditions", "-C", "--input-type", "--env-file", "--title",
+    "--redirect-warnings", "--stack-trace-limit", "--max-old-space-size"})
+_OPT106_SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "\n"})
+_OPT106_RUNNER_PREFIXES: tuple[tuple[str, ...], ...] = (
+    ("npm", "exec", "--"), ("npm", "exec"), ("pnpm", "exec"), ("pnpm", "dlx"),
+    ("yarn", "exec"), ("yarn", "dlx"), ("bun", "x"), ("npx",), ("bunx",))
+_OPT106_ASSIGN_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_OPT106_MAX_EXPANSIONS = 20
+
+
+def _opt106_node_options_loader(value: Any) -> "str | None":
+    """The loader flag a NODE_OPTIONS value carries (`--import tsx`), else None."""
+    import shlex
+    try:
+        toks = shlex.split(str(value or ""))
+    except ValueError:
+        return None
+    for i, tok in enumerate(toks):
+        flag, eq, val = tok.partition("=")
+        if flag not in _OPT106_NODE_LOADER_FLAGS:
+            continue
+        mod = val if eq else (toks[i + 1] if i + 1 < len(toks) else "")
+        if mod in _OPT106_LOADER_MODULES:
+            return f"{flag} {mod}"
+    return None
+
+
+def _opt106_loader_in_tokens(tokens: list[str], env_loader: "str | None",
+                             via_js: bool) -> "str | None":
+    """The runtime TypeScript loader a command's tokens start, else None.
+
+    Leading `VAR=value` assignments and `cross-env` / `env` wrappers are read
+    (a NODE_OPTIONS among them counts like a step/job/workflow one), runner
+    prefixes (`npx`, `pnpm exec`, ...) are stripped, then: a `tsx` / `ts-node`
+    / `ts-node-esm` binary; `node` with `--loader`, `--import`, `-r` or
+    `--require` naming tsx or ts-node; or NODE_OPTIONS carrying such a flag on
+    a `node` process or a JS tool reached through a runner or package script
+    (`via_js`). An `echo`, a comment or any other binary is not a loader."""
+    t = list(tokens)
+    inline_env: "str | None" = None
+    inline_supplied = False
+    while t:
+        if t[0].rsplit("/", 1)[-1] in _OPT106_ENV_WRAPPERS:
+            t = t[1:]
+            continue
+        if _OPT106_ASSIGN_RE.match(t[0]):
+            name, _eq, val = t[0].partition("=")
+            if name == "NODE_OPTIONS":
+                # An inline NODE_OPTIONS replaces the inherited one, even when
+                # it is empty or names no loader.
+                inline_supplied = True
+                inline_env = _opt106_node_options_loader(val)
+            t = t[1:]
+            continue
+        break
+    for prefix in _OPT106_RUNNER_PREFIXES:
+        if tuple(t[:len(prefix)]) == prefix:
+            t = t[len(prefix):]
+            while t and t[0].startswith("-") and t[0] != "--":
+                t = t[1:]
+            if t[:1] == ["--"]:
+                t = t[1:]
+            via_js = True
+            break
+    if not t:
+        return None
+    binary = t[0].rsplit("/", 1)[-1]
+    if binary in _OPT106_LOADER_BINARIES:
+        return binary
+    env = inline_env if inline_supplied else env_loader
+    if binary == "node":
+        i = 1
+        while i < len(t):
+            tok = t[i]
+            if tok == "--" or not tok.startswith("-"):
+                break  # the script name (or end of options)
+            flag, eq, val = tok.partition("=")
+            takes_value = flag in _OPT106_NODE_VALUE_FLAGS and not eq
+            if flag in _OPT106_NODE_LOADER_FLAGS:
+                mod = val if eq else (t[i + 1] if i + 1 < len(t) else "")
+                if mod in _OPT106_LOADER_MODULES:
+                    return f"node {flag} {mod}"
+            i += 2 if takes_value else 1
+        return f"NODE_OPTIONS={env}" if env else None
+    if env and via_js and binary not in ("echo", "printf", "#", "true", ":"):
+        return f"NODE_OPTIONS={env}"
+    return None
+
+
+def _opt106_raw_segment_overrides(cmd: str) -> "dict[tuple[str, ...], tuple[str | None, bool]]":
+    """Inline `NODE_OPTIONS=...` assignments in a raw command, keyed by the
+    segment's tokens with the leading assignments and `env` / `cross-env`
+    wrappers removed (the form the run-leaf resolver hands back). The value is
+    `(loader or None, True)`: an inline NODE_OPTIONS replaces the inherited
+    one even when it names no loader. Unparseable text yields no overrides."""
+    import shlex
+    out: dict[tuple[str, ...], tuple["str | None", bool]] = {}
+    for line in str(cmd or "").splitlines():
+        try:
+            lex = shlex.shlex(line, posix=True, punctuation_chars=";&|")
+            lex.whitespace_split = True
+            lex.commenters = "#"
+            toks = list(lex)
+        except ValueError:
+            continue
+        seg: list[str] = []
+        for tok in toks + [";"]:
+            if tok in _OPT106_SHELL_SEPARATORS or set(tok) <= set(";&|"):
+                rest = list(seg)
+                supplied, loader = False, None
+                while rest:
+                    if rest[0].rsplit("/", 1)[-1] in _OPT106_ENV_WRAPPERS:
+                        rest = rest[1:]
+                        continue
+                    if _OPT106_ASSIGN_RE.match(rest[0]):
+                        name, _eq, val = rest[0].partition("=")
+                        if name == "NODE_OPTIONS":
+                            supplied, loader = True, _opt106_node_options_loader(val)
+                        rest = rest[1:]
+                        continue
+                    break
+                if supplied and rest:
+                    out[tuple(rest)] = (loader, True)
+                seg = []
+            else:
+                seg.append(tok)
+    return out
+
+
+def _opt106_inline_override(toks: list[str]) -> "tuple[str | None, bool] | None":
+    """`(loader or None, True)` when the tokens start with an inline
+    `NODE_OPTIONS=` assignment (through `env` / `cross-env`), else None."""
+    rest = list(toks)
+    found: "tuple[str | None, bool] | None" = None
+    while rest:
+        if rest[0].rsplit("/", 1)[-1] in _OPT106_ENV_WRAPPERS:
+            rest = rest[1:]
+            continue
+        if _OPT106_ASSIGN_RE.match(rest[0]):
+            name, _eq, val = rest[0].partition("=")
+            if name == "NODE_OPTIONS":
+                found = (_opt106_node_options_loader(val), True)
+            rest = rest[1:]
+            continue
+        break
+    return found
+
+
+def _opt106_override_for_chain(
+        raw: "dict[tuple[str, ...], tuple[str | None, bool]]", entry: str,
+) -> "tuple[str | None, bool] | None":
+    """The inline NODE_OPTIONS override of the raw segment that started a
+    package-script chain: same package manager, same script name
+    (`pnpm gen` and `pnpm run gen` both start `pnpm run gen`). None when no
+    raw segment matches, or when more than one does with different values."""
+    parts = entry.split()
+    if len(parts) < 2:
+        return None
+    found = {v for k, v in raw.items()
+             if k and k[0] == parts[0] and k[-1] == parts[-1]}
+    return next(iter(found)) if len(found) == 1 else None
+
+
+def _opt106_resolve_loader(run: str, wd: str,
+                           scripts_by_dir: dict[str, dict[str, str]],
+                           scripts_unreadable: "frozenset[str]",
+                           walk_complete: bool, env_loader: "str | None",
+                           ) -> "tuple[str, str] | None":
+    """`(loader, command)` for the first runtime TypeScript loader the step's
+    resolved command starts, following package scripts (`pnpm test` ->
+    `tsx --test ...`) the way OPT84 does. None when no resolved command starts
+    one, including when part of the command cannot be followed."""
+    import shlex
+    # (cmd, cwd, chain, via_js, depth, inherited NODE_OPTIONS loader or None,
+    #  whether an inherited inline NODE_OPTIONS replaced the step env)
+    queue: list[tuple[str, str, list[str], bool, int, "str | None", bool]] = [
+        (run, wd, [], False, 0, None, False)]
+    budget = _OPT106_MAX_EXPANSIONS
+    while queue:
+        cmd, cwd, chain, via, depth, inh_env, inh_supplied = queue.pop(0)
+        raw = _opt106_raw_segment_overrides(cmd)
+        base_env = inh_env if inh_supplied else env_loader
+        res = _resolve_run_leaves(cmd, cwd, scripts_by_dir, scripts_unreadable,
+                                  chain=list(chain), walk_complete=walk_complete)
+        segments: list[tuple[list[str], list[str]]] = []
+        for u in res.unresolved:
+            if u.get("kind") != "delegated":
+                continue
+            try:
+                toks = shlex.split(str(u.get("segment") or ""), comments=True)
+            except ValueError:
+                continue
+            segments.append((toks, list(u.get("chain") or [])))
+        for lf in res.leaves:
+            lf_toks = list(lf.get("tokens") or [])
+            segments.append((lf_toks, list(lf.get("chain") or [])))
+            op = _opt84_opaque_leaf(lf)
+            if (op is not None and op[0] == "expand" and lf.get("wd") is not None
+                    and budget > 0 and depth < _OPT82_MAX_SCRIPT_DEPTH):
+                budget -= 1
+                ov = _opt106_inline_override(lf_toks) or raw.get(tuple(lf_toks))
+                child_env, child_sup = (ov if ov is not None
+                                        else (inh_env, inh_supplied))
+                queue.append((op[1], str(lf["wd"]), list(lf.get("chain") or []),
+                              True, depth + 1, child_env, child_sup))
+        for toks, seg_chain in segments:
+            if toks[:1] == ["#"] or (toks and toks[0].startswith("#")):
+                continue
+            ov = raw.get(tuple(toks))
+            if ov is None and seg_chain:
+                # A package-script body inherits the NODE_OPTIONS set inline on
+                # the call that started it (`NODE_OPTIONS=... pnpm gen`).
+                ov = _opt106_override_for_chain(raw, str(seg_chain[0]))
+            seg_env = ov[0] if ov is not None else base_env
+            loader = _opt106_loader_in_tokens(toks, seg_env,
+                                              via or bool(seg_chain))
+            if loader is not None:
+                return loader, " ".join(toks)
+    return None
+
+
+def _detect_runtime_ts_loader_steps(
+    poles: list[dict[str, Any]], wf_docs: dict[str, Any],
+    block: "dict[str, Any] | None", start_idx: int,
+    seen: "set[tuple[str, str]] | None" = None,
+) -> list[dict[str, Any]]:
+    """OPT106 without a profile: a heavy long-pole step whose resolved command
+    runs TypeScript through a runtime loader. Unsized on both axes."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    seen = set() if seen is None else seen
+    tal: dict[str, Any] = block if isinstance(block, dict) else {}
+    scripts_by_dir = {str(k): v for k, v in (tal.get("package_scripts") or {}).items()
+                      if isinstance(v, dict)}
+    scripts_unreadable = frozenset(str(d) for d in
+                                   (tal.get("package_scripts_unreadable") or []))
+    walk_complete = tal.get("truncated") is False
+
+    def _finite(v: Any) -> "float | None":
+        try:
+            x = float(v)
+        except (TypeError, ValueError):
+            return None
+        return x if math.isfinite(x) else None
+
+    def _defaults_wd(m: Any) -> Any:
+        d = m.get("defaults") if isinstance(m, dict) else None
+        r = d.get("run") if isinstance(d, dict) else None
+        return r.get("working-directory") if isinstance(r, dict) else None
+
+    for p in poles or []:
+        if not isinstance(p, dict):
+            continue
+        wf = str(p.get("workflow_file") or "")
+        job = str(p.get("job") or "")
+        if not wf or not job or (wf, job) in seen:
+            continue
+        job_p50 = _finite(p.get("job_p50_s")) or 0.0
+        steps = [s for s in (p.get("steps") or []) if isinstance(s, dict)]
+        if job_p50 <= 0 or not steps:
+            continue
+        floor = max(_OPT83_MIN_STEP_S, _OPT83_MIN_SHARE * job_p50)
+        cands = []
+        for s in steps:
+            d = _finite(s.get("p50_s"))
+            name = str(s.get("step") or "").strip()
+            if d is not None and name and d >= floor:
+                cands.append((name, d))
+        if not cands:
+            continue
+        doc = wf_docs.get(wf) if isinstance(wf_docs, dict) else None
+        jobs = doc.get("jobs") if isinstance(doc, dict) else None
+        hit = _opt83_match_yaml_job(jobs, job) if isinstance(jobs, dict) else None
+        if hit is None:
+            continue
+        _yaml_key, spec = hit
+        walk = job_walk(spec)
+        by_name: dict[str, list[int]] = {}
+        for i, lf in enumerate(walk.leaves):
+            n = _opt79_yaml_step_display(lf.step)
+            if n:
+                by_name.setdefault(n, []).append(i)
+        for name, p50 in sorted(cands, key=lambda c: -c[1]):
+            idxs = by_name.get(name, [])
+            if len(idxs) != 1:
+                continue
+            st = walk.leaves[idxs[0]].step
+            run = st.get("run")
+            if st.get("uses") or not isinstance(run, str):
+                continue
+            raw_wd = st.get("working-directory",
+                            _defaults_wd(spec) if _defaults_wd(spec) is not None
+                            else _defaults_wd(doc))
+            env_values = [e.get("NODE_OPTIONS") for e in
+                          (st.get("env"), spec.get("env"), doc.get("env"))
+                          if isinstance(e, dict) and "NODE_OPTIONS" in e]
+            if ("${{" in run or "${{" in str(raw_wd or "")
+                    or any("${{" in str(v) for v in env_values[:1])
+                    or _OPT83_CD_RE.search(run)):
+                continue
+            wd_raw = str(raw_wd or "").strip()
+            wd = _opt82_norm_dir(raw_wd)
+            wd = _posixpath.normpath(wd) if wd else ""
+            if wd_raw.startswith(("/", "~")) or wd == ".." or wd.startswith("../"):
+                continue
+            wd = "" if wd == "." else wd
+            env_loader = (_opt106_node_options_loader(env_values[0])
+                          if env_values else None)
+            found = _opt106_resolve_loader(run, wd, scripts_by_dir,
+                                           scripts_unreadable, walk_complete,
+                                           env_loader)
+            if found is None:
+                continue
+            loader, command = found
+            seen.add((wf, job))
+            reason = (f"loader share not measured; the step's measured p50 of "
+                      f"{p50:.1f}s is an upper bound")
+            evidence = (
+                f"Long-pole job `{job}` spends a measured p50 of {p50:.1f}s "
+                f"({100.0 * p50 / job_p50:.0f}% of its {job_p50:.1f}s p50) in step "
+                f"`{name}`, whose resolved command `{command}` runs TypeScript "
+                f"through a runtime loader (`{loader}`). How much of the step the "
+                "loader takes has not been measured.")
+            measured = _measured_evidence(
+                ["Job", "Step", "Step p50", "Job p50", "Loader"],
+                [[f"`{job}`", f"`{name}`", f"{p50:.1f}s", f"{job_p50:.1f}s",
+                  f"`{loader}`"]],
+                (f"The step's {p50:.1f}s p50 bounds what removing runtime "
+                 "transpilation can save; the loader's share is unmeasured."),
+                "Profile one run before crediting any saving.",
+            )
+            idx += 1
+            finding = _new_finding(
+                "OPT106", "HIGH", "Runtime TypeScript Transpilation on the Long Pole",
+                wf, job, evidence,
+                "Measure first: profile one run of this step (`node --cpu-prof`, or "
+                "one instrumented run) to learn the loader's self time. Then "
+                "precompile the exact TypeScript surfaces once (or preload a cached "
+                "transform) and add a guard that fails if any exercised path falls "
+                "back to the runtime loader.",
+                "opt106--runtime-typescript-transpilation-on-the-long-pole", idx,
+                wc_p50=None, rm=None,
+                size_note=(f"wall-clock saving: unsized ({reason}); "
+                           f"runner-minute saving: unsized ({reason})"),
+                realization="none", measured_evidence=measured,
+            )
+            finding["sizing_basis"] = "unmeasured_loader_share"
+            finding["runtime_loader"] = loader
+            finding["runtime_loader_command"] = command
+            finding["runtime_loader_step"] = name
+            finding["runtime_loader_step_p50_s"] = round(p50, 1)
+            finding["runtime_loader_job_p50_s"] = round(job_p50, 1)
+            out.append(finding)
+            break
+    return out
+
+
+def _detect_go_cache_trim(
+    pole_logs: list[dict[str, Any]], volume_by_workflow: dict[str, int | None],
+    start_idx: int,
+) -> list[dict[str, Any]]:
+    """Turn a same-key fresh-versus-old Go cache slowdown into OPT112."""
+    out: list[dict[str, Any]] = []
+    idx = start_idx
+    for entry in pole_logs:
+        fact = entry.get("go_cache_trim")
+        if not isinstance(fact, dict):
+            continue
+        seconds = fact.get("slowdown_s")
+        fresh = fact.get("fresh_runs")
+        old = fact.get("old_runs")
+        job_seconds = entry.get("duration_s")
+        if (not isinstance(seconds, (int, float)) or isinstance(seconds, bool)
+                or seconds < _OPT112_MIN_SLOWDOWN_S
+                or not isinstance(job_seconds, (int, float))
+                or job_seconds <= 0 or seconds > job_seconds
+                or not isinstance(fresh, list) or not isinstance(old, list)
+                or len(fresh) < _OPT112_MIN_RUNS_PER_WINDOW
+                or len(old) < _OPT112_MIN_RUNS_PER_WINDOW):
+            continue
+        workflow = str(entry.get("workflow_file") or "")
+        job = str(entry.get("job") or "")
+        runs = volume_by_workflow.get(workflow)
+        sample = (f"{len(old)} old-archive vs {len(fresh)} fresh-archive sampled "
+                  "runs of the same cache key")
+        runner_min = (round(float(seconds) * runs / 60.0, 1)
+                      if isinstance(runs, int) and not isinstance(runs, bool)
+                      and runs > 0 else None)
+        if runner_min is not None:
+            runner_effect = (
+                f"runner-minute saving: at most {runner_min:.1f}/month (median "
+                f"slowdown from {sample} x {runs} workflow runs in 30 days; runs "
+                "that restore an archive younger than five days save nothing)")
+        elif isinstance(runs, int) and not isinstance(runs, bool) and runs <= 0:
+            runner_effect = ("runner-minute saving: unsized (the 30-day volume "
+                             "window holds no runs of this workflow)")
+        else:
+            runner_effect = ("runner-minute saving: unsized (30-day run volume for "
+                             "this workflow is unavailable)")
+        key = str(fact.get("cache_key") or "")
+        fresh_median = float(fact.get("fresh_median_s") or 0.0)
+        old_median = float(fact.get("old_median_s") or 0.0)
+        evidence = (
+            f"`{job}` restores the same exact Go build-cache archive (`{key}`) in "
+            f"every compared run. Runs that restored it within five days of its "
+            f"creation took a median {fresh_median:.0f}s; runs that restored it "
+            f"after Go's five-day trim limit took a median {old_median:.0f}s, "
+            f"{float(seconds):.0f}s slower ({sample})."
+        )
+        rows = [[f"`{job}`", label, f"{float(run.get('age_days') or 0.0):.1f} days",
+                 f"{float(run.get('duration_s') or 0.0):.1f}s",
+                 f"[job log]({run['url']})" if run.get("url") else "sampled job"]
+                for label, group in (("fresh", fresh), ("old", old))
+                for run in group if isinstance(run, dict)]
+        measured = _measured_evidence(
+            ["Job", "Archive", "Archive age at start", "Job wall", "Run"], rows,
+            (f"Same cache key, median job wall {fresh_median:.1f}s while the archive "
+             f"was younger than five days and {old_median:.1f}s after; the "
+             f"{float(seconds):.1f}s difference is the measured trim loss."),
+            "The difference compares sampled runs, not a before/after of the fix; "
+            "confirm with the same job after adding the retention step.",
+        )
+        idx += 1
+        finding = _new_finding(
+            "OPT112", "HIGH", "Restored Go Build Cache Trimmed Before Reuse",
+            workflow, job, evidence,
+            "Touch every restored `GOCACHE` file immediately after setup and before "
+            "the first Go command. Do not add a warm-up build: it can trim the other "
+            "flag population instead. Preserve the cache key and test flags, then "
+            "compare the same job before and after.",
+            "opt112--restored-go-build-cache-trimmed-before-reuse", idx,
+            wc_p50=float(seconds), rm=runner_min,
+            size_note=(f"measured median slowdown {float(seconds):.1f}s per old-archive "
+                       f"run; {runner_effect}"),
+            realization="tail", measured_evidence=measured,
+        )
+        finding["sizing_basis"] = "measured"
+        finding["go_cache_key"] = key
+        finding["go_cache_archive_created_at"] = str(fact.get("archive_created_at") or "")
+        finding["go_cache_slowdown_s"] = float(seconds)
+        finding["go_cache_fresh_runs"] = len(fresh)
+        finding["go_cache_old_runs"] = len(old)
+        if isinstance(runs, int) and not isinstance(runs, bool):
+            finding["workflow_runs_30d"] = runs
+        out.append(finding)
+    return out
+
+
+_OPT13_VALIDATION_BUILD_LINE_RE = _re.compile(
+    r"^[ \t]*(?:(?:pnpm|yarn|bun)(?:\s+run)?\s+"
+    r"build(?::(?:ci[-:]?)?artifacts?)?|"
+    r"npm\s+run\s+build(?::(?:ci[-:]?)?artifacts?)?|"
+    r"(?:vite|next|nuxt|remix|astro|gatsby|ng|nest)\s+build"
+    r"(?:\s+--[\w-]+(?:=\S+)?)*|"
+    r"(?:webpack|rollup|rspack|turbopack|tsup|esbuild)(?:\s+--[\w-]+(?:=\S+)?)*|"
+    r"(?:mvn|mvnw)\s+(?:[^\n]*\s)?package|"
+    r"(?:gradle|gradlew)\s+(?:[^\n]*\s)?assemble)\s*$",
+    _re.IGNORECASE,
+)
+_OPT13_SOURCE_OUTPUT_RE = _re.compile(
+    r"\bnew\s+Worker\s*\(|\bworker_threads\b|\bchild_process\b|"
+    r"\.(?:fork|spawn|exec|execFile|execSync)\s*\(|"
+    r"\bimport\s+['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
+    r"\bfrom\s+['\"](?:[^'\"]*/)?(?:dist|build|lib)/|"
+    r"__dirname[^\n]*\.js['\"]",
+    _re.IGNORECASE,
+)
+# Generic backstop beside the named forms above: ANY string or template
+# literal naming a `dist/`, `build/` or `lib/` path segment withholds the
+# finding (computed paths such as `require(path.resolve('dist/x.js'))`,
+# template imports, `new URL('../build/cli.mjs', ...)`, a helper the guard
+# cannot follow).  Only a literal that is plainly a build-config value on its
+# own line (`outDir: 'dist'`, `ignores: ['dist/']`) is classified as inert; a
+# false "safe" is worse than a withheld finding.
+_OPT13_SOURCE_LITERAL_RE = _re.compile(r"""(['"])((?:(?!\1)[^\n\\]|\\.)*)\1|`([^`]*)`""")
+_OPT13_OUTPUT_SEGMENT_RE = _re.compile(r"(?:^|[/\\])(?:dist|build|lib)(?:[/\\]|$)",
+                                       _re.IGNORECASE)
+_OPT13_INERT_CONFIG_PREFIX_RE = _re.compile(
+    r"\b(?:outDir|outdir|outFile|outfile|distDir|ignores|ignorePatterns|exclude)"
+    r"""\s*:\s*\[?\s*(?:(?:'[^'\n]*'|"[^"\n]*")\s*,\s*)*$""")
+
+
+def _opt13_source_names_output(text: str) -> bool:
+    """True when a literal names build output outside an inert config value."""
+    for match in _OPT13_SOURCE_LITERAL_RE.finditer(text):
+        body = match.group(2) if match.group(2) is not None else match.group(3) or ""
+        if not _OPT13_OUTPUT_SEGMENT_RE.search(body):
+            continue
+        if match.group(3) is None:
+            line_start = text.rfind("\n", 0, match.start()) + 1
+            if _OPT13_INERT_CONFIG_PREFIX_RE.search(text[line_start:match.start()]):
+                continue
+        return True
+    return False
+
+
+_OPT13_CALL_START_RE = _re.compile(r"\b(?:require|import)\s*\(", _re.IGNORECASE)
+_OPT13_COMPILED_PATH_RE = _re.compile(
+    r"(?:^|[/\\'\"`(\s,])(?:dist|build|lib)[/\\]", _re.IGNORECASE,
+)
+_OPT13_SOURCE_SUFFIXES = frozenset({
+    ".js", ".jsx", ".mjs", ".cjs", ".ts", ".tsx", ".mts", ".cts",
+})
+
+
+def _opt13_run_directory(
+    job: dict[str, Any], step: dict[str, Any], workflow: dict[str, Any] | None = None,
+) -> str | None:
+    """Repository-relative directory for a run step, or ``None`` if dynamic/unsafe."""
+    value = step.get("working-directory")
+    if value is None:
+        defaults = job.get("defaults")
+        run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+        value = (run_defaults or {}).get("working-directory") \
+            if isinstance(run_defaults, dict) else None
+    if value is None and isinstance(workflow, dict):
+        defaults = workflow.get("defaults")
+        run_defaults = defaults.get("run") if isinstance(defaults, dict) else None
+        value = (run_defaults or {}).get("working-directory") \
+            if isinstance(run_defaults, dict) else None
+    if value is None:
+        return "."
+    if not isinstance(value, str) or "${{" in value:
+        return None
+    from pathlib import PurePosixPath
+    path = PurePosixPath(value)
+    if path.is_absolute() or ".." in path.parts:
+        return None
+    normalized = str(path)
+    return normalized if normalized not in ("", ".") else "."
+
+
+def _opt13_call_loads_compiled_output(text: str) -> bool:
+    """Whether a require()/import() argument names compiled output.
+
+    Balance the call itself instead of letting a regex read into a following
+    statement.  Quotes may contain parentheses; nested calls such as
+    ``require(path.resolve('dist/runtime.js'))`` remain one argument span.
+    """
+    for match in _OPT13_CALL_START_RE.finditer(text):
+        depth = 1
+        quote = ""
+        escaped = False
+        end = match.end()
+        for index in range(end, len(text)):
+            char = text[index]
+            if quote:
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == quote:
+                    quote = ""
+                continue
+            if char in ("'", '"', "`"):
+                quote = char
+            elif char == "/" and index + 1 < len(text) \
+                    and text[index + 1] in ("/", "*"):
+                # Comments need a JavaScript parser to distinguish their
+                # punctuation from the argument grammar.  Withhold rather than
+                # risk a `)` in prose hiding a later compiled-output path.
+                return True
+            elif char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    if _OPT13_COMPILED_PATH_RE.search(text[end:index]):
+                        return True
+                    break
+        else:
+            # An unclosed call cannot be bounded safely.
+            return True
+    return False
+
+
+def _opt13_validation_build_job(
+    workflow_docs: dict[str, Any], affected_workflow: str, affected_job: str,
+) -> dict[str, str] | None:
+    """Name a separate job that keeps the full validation build."""
+    doc = workflow_docs.get(affected_workflow)
+    jobs = (doc or {}).get("jobs") if isinstance(doc, dict) else None
+    if not isinstance(jobs, dict):
+        return None
+    affected_spec: dict[str, Any] | None = None
+    for key, candidate in jobs.items():
+        if not isinstance(candidate, dict):
+            continue
+        name = str(candidate.get("name") or key)
+        static_name = _opt24_static_job_name(name) if "${{" in name else ""
+        if (affected_job in {str(key), name}
+                or (static_name and (affected_job == static_name
+                                     or affected_job.startswith(static_name + " ")))):
+            affected_spec = candidate
+            break
+    if affected_spec is None:
+        return None
+    run_steps = [step for step in (affected_spec.get("steps") or [])
+                 if isinstance(step, dict) and isinstance(step.get("run"), str)]
+    quality_dirs = {
+        directory
+        for step in run_steps
+        for directory in [_opt13_run_directory(affected_spec, step, doc)]
+        if directory is not None and any(
+            _OPT13_QUALITY_COMMAND_RE.search(line)
+            for line in str(step.get("run") or "").splitlines()
+        )
+    }
+    if not quality_dirs:
+        # The invoked package script can be hidden behind make or another
+        # wrapper in YAML.  A job whose run steps all share one static directory
+        # still gives the job-scoped log one unambiguous package boundary.
+        quality_dirs = {
+            directory
+            for step in run_steps
+            for directory in [_opt13_run_directory(affected_spec, step, doc)]
+            if directory is not None
+        }
+    # A log is job-scoped, so multiple or dynamic quality-step directories
+    # cannot be bound to the measured command safely.
+    if len(quality_dirs) != 1:
+        return None
+    affected_dir = next(iter(quality_dirs))
+    for key, spec in jobs.items():
+        if (not isinstance(spec, dict) or spec.get("if") is not None
+                or spec.get("continue-on-error") not in (None, False)):
+            continue
+        name = str(spec.get("name") or key)
+        static_name = _opt24_static_job_name(name) if "${{" in name else ""
+        if (affected_job in {str(key), name}
+                or (static_name and (affected_job == static_name
+                                     or affected_job.startswith(static_name + " ")))):
+            continue
+        steps = [step for step in (spec.get("steps") or []) if isinstance(step, dict)]
+        for step in steps:
+            if (step.get("if") is not None
+                    or step.get("continue-on-error") not in (None, False)):
+                continue
+            if (_opt13_run_directory(spec, step, doc) == affected_dir
+                    and any(_OPT13_VALIDATION_BUILD_LINE_RE.fullmatch(line)
+                            for line in str(step.get("run") or "").splitlines())):
+                return {"workflow_file": str(affected_workflow), "job": name}
+    return None
+
+
+def _opt13_source_output_guard(root: "Path | None") -> dict[str, Any]:
+    """Whole-repository D11 backstop; any possible runtime consumer withholds."""
+    if root is None or not root.is_dir():
+        return {"safe": False, "source_files_checked": 0,
+                "reason": "repository source was unavailable"}
+    checked = 0
+    for path in root.rglob("*"):
+        try:
+            relative_parts = path.relative_to(root).parts
+        except ValueError:
+            return {"safe": False, "source_files_checked": checked,
+                    "reason": "a source path escaped the repository root"}
+        if (path.is_symlink() or not path.is_file()
+                or path.suffix.lower() not in _OPT13_SOURCE_SUFFIXES
+                or any(part in {".git", "node_modules", "dist", "build",
+                                "test", "tests", "__tests__"} for part in relative_parts)
+                or ".test." in path.name or ".spec." in path.name):
+            continue
+        try:
+            if path.stat().st_size > 1_000_000:
+                return {"safe": False, "source_files_checked": checked,
+                        "reason": "a source file was too large to inspect"}
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return {"safe": False, "source_files_checked": checked,
+                    "reason": "a source file could not be read"}
+        checked += 1
+        if (_OPT13_SOURCE_OUTPUT_RE.search(text)
+                or _opt13_call_loads_compiled_output(text)
+                or _opt13_source_names_output(text)):
+            return {"safe": False, "source_files_checked": checked,
+                    "reason": "source may load compiled output"}
+    return {"safe": checked > 0, "source_files_checked": checked,
+            "reason": "no compiled-output runtime consumer was found" if checked else
+                      "no readable source file was available to inspect"}
+
+
 # =============================================================================
 # Orchestration
 # =============================================================================
 
+def _stamp_runner_min_states(doc: dict[str, Any]) -> None:
+    """Close the runner-minute state of every finding leaving `collect()`.
+
+    An OPT21 finding (remove a `needs:` edge) has no runner-minute effect
+    whatever was sampled. A finding with no `runner_min_saving` at all and no
+    reason was never sized: an early exit (no `--repo`, gh refused, the
+    collection aborted) returned before the sizing pass. Its saving is unsized,
+    not absent, so stamp a literally true reason; otherwise its group heading
+    would read "no bill saving" (`tests/test_unsized_reason_guard.py`)."""
+    sources = doc.get("data_sources") if isinstance(doc.get("data_sources"), dict) else {}
+    reason = ("no CI runs were sampled, so nothing measured its runner-minutes"
+              if not sources.get("tiers_run")
+              else "the run collection stopped before this finding was sized")
+    for f in doc.get("findings") or []:
+        if not isinstance(f, dict) or f.get("runner_min_no_effect_reason"):
+            continue
+        if (f.get("pattern") == "OPT21"
+                and not isinstance(f.get("runner_min_saving"), (int, float))):
+            f["runner_min_no_effect_reason"] = _OPT21_NO_RUNNER_MIN_EFFECT
+            continue
+        if "runner_min_saving" in f or f.get("runner_min_unsized_reason"):
+            continue
+        cfg = _SIZING.get(str(f.get("pattern") or "")) or {}
+        if cfg.get("model") == "runner-min-only" and not cfg.get("hit_rate"):
+            # Sized to zero whatever the sample: the model credits no hit rate.
+            f["runner_min_no_effect_reason"] = (
+                "the sizing model credits this fix no runner-minute saving")
+        else:
+            f["runner_min_unsized_reason"] = reason
+
+
+def _closes_runner_min_states(fn):
+    """Run `_stamp_runner_min_states` on whatever document `collect()` returns,
+    from every one of its exits (early returns included)."""
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        doc = fn(*args, **kwargs)
+        if isinstance(doc, dict):
+            _stamp_runner_min_states(doc)
+        return doc
+    return wrapper
+
+
+@_closes_runner_min_states
 def collect(findings_doc: dict[str, Any], repo: str | None,
             max_runs: int, with_logs: bool = False,
             created_before: str | None = None,
@@ -30510,6 +34872,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         required_checks.rulesets_read if required_checks is not None else False)
     findings_doc["required_checks_advice_complete"] = (
         required_checks.advice_complete if required_checks is not None else False)
+    # OPT46's cancelled-run aggregate flavor needs this read: promote only the
+    # candidates whose check is provably not required (see the helper).
+    findings.extend(_promote_opt46_aggregates(
+        findings_doc.pop("opt46_aggregate_candidates", None), required_checks))
 
     import pr_lifecycle
     findings_doc["pr_lifecycle"] = pr_lifecycle.collect(
@@ -32149,13 +36515,25 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
     _complete_walls = [float(f["wall_s"]) for f in _commit_facts
                        if isinstance(f.get("wall_s"), (int, float))]
+    # A median of the readable tail is not a typical-commit figure when most
+    # sampled commits are partial. Keep the facts for diagnosis, but refuse to
+    # publish percentiles or projections from a minority complete subset.
+    _complete_population_representative = bool(
+        _complete_walls
+        and len(_complete_walls) * 2 >= len(_commit_facts)
+    )
     _commit_wall_clock = {
         "p50_s": (round(_percentile(_complete_walls, 50), 3)
-                  if _complete_walls else None),
+                  if _complete_population_representative else None),
         "p90_s": (round(_percentile(_complete_walls, 90), 3)
-                  if _complete_walls else None),
+                  if _complete_population_representative else None),
+        "representative": _complete_population_representative,
+        "complete_commit_count": len(_complete_walls),
+        "sampled_commit_count": len(_commit_facts),
         "facts": _commit_facts,
-        **_projection_population(_commit_facts),
+        **(_projection_population(_commit_facts)
+           if _complete_population_representative
+           else {"median_projection_multiple": None, "worst_commit": None}),
     }
     _joint_runner_bases = {
         tuple(sorted((observation.get("check_runners") or {}).items()))
@@ -32180,6 +36558,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # commits' job lists are the lane's only new API reads: at most the runs of
     # `_DEFAULT_BRANCH_PUSH_SAMPLE_MAX` commits, memoised with every other job read.
     _push_lane = findings_doc.get("default_branch_push_lane") or {}
+    _push_jobs_by_run: dict[tuple[str, str], list[dict[str, Any]]] = {}
     if _push_shas and _push_lane.get("status") == "complete":
         _push_rows_by_sha = {
             _sha: [(_push_run_wf.get(str(_run.get("id") or id(_run)), ""), _run)
@@ -32274,7 +36653,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 ]
                 _push_decomp = _decompose_job_steps(_push_instances)
                 _push_leaf = bp._parse_log(
-                    _push_log or "", findings_doc.get("test_runner_isolation"))
+                    _push_log or "", findings_doc.get("test_runner_isolation"),
+                    dominant_category=str((_push_decomp or {}).get(
+                        "dominant_category") or ""))
                 _leaf_fix_key = str((_push_leaf or {}).get("fix_key") or "")
                 # The numbered catalog routes that can also have a static/data-driven
                 # finding on this job. Other recognised leaves still carry their full
@@ -32289,6 +36670,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                     "playwright-parallel": "OPT24",
                     "pytest-no-xdist": "OPT24",
                     "per-invocation-startup": "OPT85",
+                    "per-item-build-startup": "OPT85",
+                    "per-item-scan-startup": "OPT85",
+                    "per-case-worker-pool-startup": "OPT85",
                     "test-isolated-serial": "OPT24",
                     "test-loop-serial": "OPT24",
                     "vendored-lib-build": "OPT86",
@@ -32436,6 +36820,26 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _push_lane["drill"]["finding_id"] = (
                     _push_lane["drill"]["finding_ids"][0]
                     if _push_lane["drill"]["finding_ids"] else None)
+    # OPT107 needs only a bounded set of per-run compute, not a proven monthly
+    # push count.  Keep that timing sample available when the cached run page is
+    # truncated, without turning on the full push-lane projection/drill (whose
+    # monthly frequency is intentionally withheld in that state).
+    _opt107_jobs_by_run = dict(_push_jobs_by_run)
+    if (_push_shas and _push_lane.get("status") == "frequency_incomplete"):
+        _opt107_rows = list(_push_run_rows)
+        _prefetch_json(client, [
+            _run_jobs_endpoint(repo, run.get("id"))
+            for run in _opt107_rows
+            if not job_memo.contains(_fetch_run_jobs, repo, run.get("id"))
+        ])
+        _opt107_kept, _opt107_failures = _gather_run_jobs(
+            client, repo, _opt107_rows, keep_empty=True, memo=job_memo)
+        jobs_fetch_failures += _opt107_failures
+        for _run, _jobs in _opt107_kept:
+            _rid = str(_run.get("id") or "")
+            _opt107_jobs_by_run[(_push_run_wf.get(_rid, ""), _rid)] = list(_jobs)
+        _push_lane["opt107_job_fetch_count"] = len(_opt107_rows)
+        _push_lane["opt107_job_fetch_failures"] = int(_opt107_failures)
     _chain_facts = _stamp_chain_facts(
         _era_repr_shas, _era_per_sha_checks, _chain_spine, _span_caps, _jg,
         crit_by_wf, _era_sha_intervals)
@@ -33455,7 +37859,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 # YAML (which we DO have), so a workflow with no shard/timeout job specs
                 # was never going to run them and must not be reported as missing them.
                 # (OPT57's own skip, incl. its event-scoped page, is recorded below.)
-                _skipped = ["OPT46", "OPT47", "OPT64"]
+                _skipped = ["OPT46", "OPT47", "OPT64", "OPT107"]
                 if _opt35_shard_job_specs(wf_doc):
                     _skipped.insert(0, "OPT35")
                 _skip_detectors(wf_path, _skipped,
@@ -33645,15 +38049,46 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                                                          memo=job_memo)
                     jobs_fetch_failures += wf_failures
                     _accumulate_jobs(kept, schedule_jobs, {})
+                    opt36_changed_paths = _opt36_compare_paths(
+                        client, repo, schedule_runs, wf_doc)
                     new = _detect_opt36_schedule_burn(
                         wf_path, schedule_runs, schedule_jobs, wf_doc, schedule_monthly,
-                        next_id)
+                        next_id, changed_paths_by_pair=opt36_changed_paths)
                     next_id = max(next_id, max((int(f["id"][1:]) for f in new),
                                                default=next_id))
                     _supersede_static_opt36(findings, new)
                     findings.extend(new)
 
             if all_runs is not None:
+                _opt107_run_ids = {
+                    str(run.get("id") or "")
+                    for run in all_runs
+                    if (str(run.get("event") or "") == "push"
+                        and str(run.get("head_branch") or "") == str(default_branch or ""))
+                }
+                _opt107_push_jobs = {
+                    run_id_value: list(jobs)
+                    for (run_wf, run_id_value), jobs in _opt107_jobs_by_run.items()
+                    if run_wf == wf_path and run_id_value in _opt107_run_ids
+                }
+                def _opt107_volume(_wf_id: Any = wf_id) -> int | None:
+                    # One count probe, paid only once the sample shows a saving.
+                    if _wf_id is None or not default_branch:
+                        return None
+                    _doc = client.json(_push_volume_endpoint(
+                        repo, _wf_id, default_branch, created_before))
+                    _total = _doc.get("total_count") if isinstance(_doc, dict) else None
+                    return (_total if isinstance(_total, int)
+                            and not isinstance(_total, bool) else None)
+
+                new = _detect_opt107_default_branch_batching(
+                    wf_path, all_runs, _opt107_push_jobs, wf_doc, default_branch,
+                    next_id, monthly_push_volume=_opt107_volume)
+                next_id = max(
+                    next_id,
+                    max((int(f["id"][1:]) for f in new), default=next_id))
+                findings.extend(new)
+
                 new = _detect_opt46_superseded_runs(
                     wf_path, all_runs, jobs_per_run, wf_doc, monthly, next_id)
                 next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
@@ -33710,6 +38145,23 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             opt96_findings=[f for f in findings if f.get("pattern") == "OPT96"],
             wf_docs=_wf_docs,
             cache_effective_paths=findings_doc.get("cache_effective_paths"))
+        new = _detect_opt13_build_in_scripts(
+            pole_logs, vol_by_wf, next_id, _wf_docs, root)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        new = _detect_runtime_ts_transpilation(pole_logs, vol_by_wf, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        new = _detect_opt19_go_waits(pole_logs, vol_by_wf, next_id, root)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        new = _detect_go_test_parallelism(pole_logs, root, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        new = _detect_go_cache_trim(pole_logs, vol_by_wf, next_id)
+        next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
+        findings.extend(new)
+        findings_doc["findings"] = findings
     _opt96_check_default_branch(findings_doc, default_branch)
     _ground_opt96(findings, drill_poles or poles, _wf_docs,
                   fetch_gaps={str(g.get("workflow_file")) for g in _sample_gaps()})
@@ -33718,7 +38170,15 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # sampled pull requests. Reuse the run sample already selected above, fetch
     # changed files for those PRs only, and stamp the measured fraction before
     # the common sizing pass consumes it.
+    # OPT108 is sized only from the comment workflow's own short successful runs.
+    jobs_fetch_failures += _measure_opt108_comment_runs(
+        client, repo, findings, _all_status_page, wf_by_path, jobs_per_run_by_wf,
+        vol_by_wf, job_memo, findings_doc.get("workflow_job_graph"))
+
     _changed_files: dict[int, list[str] | None] = {}
+    _measure_opt39_language_jobs(
+        client, repo, findings, sampled_runs_by_wf, jobs_per_run_by_wf,
+        vol_by_wf, findings_doc.get("workflow_job_graph"))
     _measure_opt32_path_filters(
         client, repo, findings, sampled_runs_by_wf, _wf_docs,
         changed_files=_changed_files)
@@ -34022,6 +38482,36 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             if act is not None:
                 f["workflow_activity"] = act
         _o84_next = max(_o84_next, max((int(f["id"][1:]) for f in new), default=_o84_next))
+        findings.extend(new)
+
+    # OPT106 uninstrumented path: a heavy long-pole step whose resolved command
+    # runs TypeScript through a runtime loader. A job the profile path already
+    # reported (sized from its loader profile) is skipped. Unsized; no gh call.
+    _o106_seen = {(str(f.get("workflow_file") or ""),
+                   str((f.get("affected_jobs") or [""])[0]))
+                  for f in findings if str(f.get("pattern")) == "OPT106"}
+    _o106_next = max((int(f["id"][1:]) for f in findings
+                      if f.get("id", "").startswith("f") and f["id"][1:].isdigit()),
+                     default=0)
+    for _o106_pole in list((findings_doc.get("pr_critical_path") or {}).get("poles") or []):
+        try:
+            new = _detect_runtime_ts_loader_steps(
+                [_o106_pole], _wf_docs, findings_doc.get("type_aware_lint"),
+                _o106_next, seen=_o106_seen)
+        except Exception as e:  # noqa: BLE001 — never take the data pass down
+            _o106_p = _o106_pole if isinstance(_o106_pole, dict) else {}
+            _o106_wf = str(_o106_p.get("workflow_file") or "")
+            logger.warning("OPT106 loader-step detector failed on %s: %s: %s",
+                           _o106_wf, type(e).__name__, e)
+            _skip_detectors(_o106_wf, ["OPT106"],
+                            f"the runtime-loader step check failed ({type(e).__name__})")
+            new = []
+        for f in new:
+            act = activity_by_wf.get(str(f.get("workflow_file") or ""))
+            if act is not None:
+                f["workflow_activity"] = act
+        _o106_next = max(_o106_next, max((int(f["id"][1:]) for f in new),
+                                         default=_o106_next))
         findings.extend(new)
 
     # OPT81 A2: the runner-size advisory, the lever of LAST RESORT on a
