@@ -11,9 +11,9 @@
       "Test Runner - macos-latest (2/2)",
       "macos-latest - chrome",
       "ubuntu-latest - firefox",
-      "docs & lint"
+      "macos-15-large (firefox)"
     ],
-    "review_notes": "Proposed from the public shard/upload/merge workflow shape and independent month-wide oracle: lead with the longest check among gates observed on at least five completed PR commits. Awaiting owner review."
+    "review_notes": "Proposed from the public shard/upload/merge workflow shape and independent month-wide oracle: retain the rendered order from the partial replay while missing job lists stay visible as partial reads. Awaiting owner review."
   },
   "oracle": {
     "bookkeeping_cutoff_s": 60,

@@ -129,6 +129,69 @@ except ImportError:
     )
     sys.exit(1)
 
+
+class _StableSafeLoader(yaml.SafeLoader):
+    """SafeLoader with the YAML merge-key precedence ci-secure promises.
+
+    PyYAML 6.0.4 changed how sequence merge keys are flattened.  Its normal
+    mapping constructor still lets later duplicate keys win, so flattening
+    ``<<: [*a, *b]`` in source order makes ``b`` override ``a``.  The YAML
+    merge-key rule is the opposite: earlier sources win, while keys written on
+    the mapping itself win over every source.  Resolve that order here instead
+    of inheriting whichever rule the installed PyYAML release happens to use.
+    """
+
+    def flatten_mapping(self, node: Any) -> None:
+        merge: list[tuple[Any, Any]] = []
+        index = 0
+        while index < len(node.value):
+            key_node, value_node = node.value[index]
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                del node.value[index]
+                if isinstance(value_node, yaml.MappingNode):
+                    sources = [value_node]
+                elif isinstance(value_node, yaml.SequenceNode):
+                    sources = list(value_node.value)
+                    if not all(isinstance(src, yaml.MappingNode)
+                               for src in sources):
+                        bad = next(src for src in sources
+                                   if not isinstance(src, yaml.MappingNode))
+                        raise yaml.constructor.ConstructorError(
+                            "while constructing a mapping", node.start_mark,
+                            "expected a mapping for merging, but found "
+                            f"{bad.id}", bad.start_mark,
+                        )
+                else:
+                    raise yaml.constructor.ConstructorError(
+                        "while constructing a mapping", node.start_mark,
+                        "expected a mapping or list of mappings for merging, "
+                        f"but found {value_node.id}", value_node.start_mark,
+                    )
+
+                # PyYAML's mapping constructor lets later duplicate keys win.
+                # Put later merge sources first so the YAML-specified earlier
+                # source is encountered last and therefore wins.
+                for source in reversed(sources):
+                    self.flatten_mapping(source)
+                    merge.extend(source.value)
+            elif key_node.tag == "tag:yaml.org,2002:value":
+                key_node.tag = "tag:yaml.org,2002:str"
+                index += 1
+            else:
+                index += 1
+        if merge:
+            node.value = merge + node.value
+
+
+def _stable_safe_load(text: str) -> Any:
+    """Load YAML with version-independent merge-key precedence (a SafeLoader:
+    no Python tags are constructed)."""
+    loader = _StableSafeLoader(text)
+    try:
+        return loader.get_single_data()
+    finally:
+        loader.dispose()
+
 # Allow `from config import ...` and `from gh_utils import ...` regardless
 # of where this script is invoked from.
 _THIS_DIR = Path(__file__).resolve().parent
@@ -575,7 +638,7 @@ def _parse_yaml_text(text: str, file_path: Path, quiet: bool = False) -> Any:
     announcing it again tells the operator nothing new.
     """
     try:
-        return yaml.safe_load(text)
+        return _stable_safe_load(text)
     except yaml.YAMLError as e:
         key = str(file_path)
         if not quiet and key not in _PARSE_FAILURES_LOGGED:
@@ -612,7 +675,7 @@ def _probe_scannability(file_path: Path) -> str | None:
     except OSError as e:
         return f"unreadable — not scanned for any pattern ({e})"
     try:
-        doc = yaml.safe_load(text)
+        doc = _stable_safe_load(text)
     except yaml.YAMLError as e:
         # PyYAML messages span several lines (problem + context + marker);
         # collapse to one line so the report banner stays scannable.
@@ -1970,7 +2033,7 @@ def _step_spans(text: str,
     if "parallel" not in text and "background" not in text:
         return []
     try:
-        doc = yaml.safe_load(text)
+        doc = _stable_safe_load(text)
     except yaml.YAMLError:
         return []
     if not (isinstance(doc, dict) and isinstance(doc.get("jobs"), dict)):
@@ -2046,24 +2109,39 @@ def _iter_step_nodes(steps_node: Any, depth: int = 0,
             yield from _descend(keys[_PARALLEL_KEY])
 
 
-def _node_keys(node: Any) -> dict[Any, Any]:
-    """A composed mapping's keys, with `<<:` merges resolved the way the
-    loader resolves them (own keys win, then earlier merge sources), so the
-    node walker sees the same shape as the loaded dict."""
+def _node_keys(node: Any, key: Any = None,
+               _path: frozenset[int] = frozenset()) -> dict[Any, Any]:
+    """A composed mapping's keys, with `<<:` merges resolved the way
+    `_StableSafeLoader` resolves them (own keys win, then earlier merge
+    sources; a later duplicate key beats an earlier one; merges inside a
+    source are followed), so the node walker sees the same shape as the
+    loaded dict. ``key`` maps a key node to the dict key (default: its
+    scalar text). A source already being resolved on this path (a mapping
+    merged into itself) contributes nothing, as in the loader, where that
+    merge key is already gone when the mapping is re-read."""
+    if key is None:
+        key = _scalar_key
+    path = _path | {id(node)}
     own: dict[Any, Any] = {}
     merged: dict[Any, Any] = {}
     for k, v in node.value:
-        key = getattr(k, "value", None)
-        if key == "<<" and getattr(k, "tag", "") == "tag:yaml.org,2002:merge":
+        if getattr(k, "tag", "") == _MERGE_TAG:
             sources = v.value if isinstance(v, yaml.SequenceNode) else [v]
             for src in sources:
-                if isinstance(src, yaml.MappingNode):
-                    for mk, mv in _node_keys(src).items():
+                if isinstance(src, yaml.MappingNode) and id(src) not in path:
+                    for mk, mv in _node_keys(src, key, path).items():
                         merged.setdefault(mk, mv)
         else:
-            own[key] = v
+            own[key(k)] = v
     merged.update(own)
     return merged
+
+
+_MERGE_TAG = "tag:yaml.org,2002:merge"
+
+
+def _scalar_key(k: Any) -> Any:
+    return getattr(k, "value", None)
 
 
 def _job_nodes(text: str) -> dict[Any, Any]:
@@ -2080,8 +2158,6 @@ def _job_nodes(text: str) -> dict[Any, Any]:
     if not isinstance(jobs, yaml.MappingNode):
         return {}
     loader = yaml.SafeLoader("")
-    own: dict[Any, Any] = {}
-    merged: dict[Any, Any] = {}
 
     def _key(k: Any) -> Any:
         try:
@@ -2091,16 +2167,7 @@ def _job_nodes(text: str) -> dict[Any, Any]:
         except Exception:                       # unhashable or unconstructable
             return None
 
-    for k, v in jobs.value:
-        if getattr(k, "tag", "") == "tag:yaml.org,2002:merge":
-            sources = v.value if isinstance(v, yaml.SequenceNode) else [v]
-            for src in sources:
-                if isinstance(src, yaml.MappingNode):
-                    for mk, mv in src.value:
-                        merged.setdefault(_key(mk), mv)
-            continue
-        own[_key(k)] = v
-    merged.update(own)
+    merged = _node_keys(jobs, _key)
     merged.pop(None, None)
     return merged
 
@@ -3383,7 +3450,7 @@ def _pnpm_build_allowlist(root: Path | None) -> str | None:
         except OSError:
             continue
         try:
-            doc = yaml.safe_load(text)
+            doc = _stable_safe_load(text)
         except yaml.YAMLError:
             return None
         if not isinstance(doc, dict):

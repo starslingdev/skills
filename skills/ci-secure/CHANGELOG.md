@@ -13,12 +13,6 @@ entries are dated (UTC). Format loosely follows
 
 ### Fixed
 
-- **2026-11-18** (#389) — P14.25 now reads the `packageManager` pin from the
-  directory selected by `npm ci` / `npm install --prefix`, `pnpm -C` /
-  `pnpm --dir`, and `yarn --cwd`. Static paths compose with the step's current
-  directory; paths that would leave the checkout fall back to the repository
-  root pin instead of reading an outside manifest.
-
 - **2026-11-16** (#33) — P14.25's `packageManager` pin is now read from the
   installed package's own directory: the step's `working-directory:`, the
   job's or workflow's `defaults.run.working-directory`, and any static `cd`
