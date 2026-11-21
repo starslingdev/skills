@@ -19,6 +19,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT93 — NuGet Restores to a Slower Disk on Windows Runners (MEDIUM, data-driven) — measured cache placement on Windows
 - OPT96 — Cache Never Saved on the Default Branch (MEDIUM, static) — PR caches lack a reachable default-branch save
 - OPT101 — Cache and Build Use Different Directories (MEDIUM, data-driven) — missing cache path on every successful save attempt
+- OPT112 — Restored Go Build Cache Trimmed Before Reuse (HIGH, data-driven) — the same exact Go cache archive makes the job measurably slower once it is past cmd/go's five-day trim limit
 ## Category 2 — Redundancy
 - OPT11 — Redundant Environment Variables (LOW, static) — same env var at two levels
 - OPT12 — Duplicated Setup Across Jobs (MEDIUM, static) — copy-pasted setup steps
@@ -26,13 +27,16 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT14 — Repeated Checkout/Setup Without Artifact Handoff (MEDIUM, static) — every job rebuilds; no artifact handoff
 - OPT15 — Cross-Workflow Build Redundancy (HIGH, static) — same build in several PR workflows
 - OPT16 — Within-Job Duplicate Commands (LOW, static) — same command twice in one job
+- OPT110 — Uploaded Artifact Has No Repository Consumer (MEDIUM, static) — upload name is never downloaded or consumed by release/deploy
 - OPT77 — Repeated Fixed Setup Across Independent Small Jobs (MEDIUM, data-driven) — small checks each pay full setup
+- OPT113 — A Test Fixture Is Much Larger Than Its Contract Needs (MEDIUM, static) — test archives or hashes a full executable when bytes suffice
 ## Category 3 — Docker
 - OPT17 — Sleep-Based Container Readiness (MEDIUM, static) — sleep instead of healthchecks
 - OPT18 — All Containers Started for Single-Service Tests (MEDIUM, static) — compose up starts every service
 - OPT19 — Test Source Sleep Dominance (includes Playwright `waitForTimeout`) (HIGH, static) — fixed sleeps / waitForTimeout in tests
 - OPT20 — Unpinned Docker Image Tags (LOW, static) — docker images on :latest
 - OPT102 — Foreign-Architecture Image Compilation Runs Under Emulation (HIGH, static) — multi-platform Dockerfile compiles without a native or cross target
+- OPT114 — Docker Image Layers Repeat npm Advisory Lookups Already Run by CI (MEDIUM, static) — host audit retained; image-layer duplicates disabled
 ## Category 4 — Parallelization
 - OPT21 — Unnecessary `needs:` Dependencies (MEDIUM, static) — needs: on a job it does not use
 - OPT22 — Sequential Workflows via `workflow_run` (MEDIUM, static) — workflow_run chains instead of jobs
@@ -51,6 +55,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT29 — Merge Queue Skip at Step Level Only (MEDIUM, static) — merge_group skip at step level
 - OPT30 — Matrix Jobs Without Job-Level Conditional (MEDIUM, static) — matrix runners provisioned for nothing
 - OPT31 — Conditional Step With Unconditional Setup (MEDIUM, static) — setup runs when its consumer is skipped
+- OPT109 — Failure Reporter Runs on Healthy Pull Requests (MEDIUM, static) — always-running report-only job allocates a runner on green runs
 ## Category 7 — Trigger and Scope
 - OPT32 — Missing `paths`/`paths-ignore` on Expensive Workflows (HIGH, static) — no path filters on expensive workflows
 - OPT33 — No Draft PR Gating on Expensive Jobs (MEDIUM, static) — expensive jobs run on draft PRs
@@ -61,7 +66,10 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT38 — Non-Content Trigger Event Types (PR `edited`, etc.) (MEDIUM, static) — PR edited/labeled events re-run CI
 - OPT39 — Multi-Language Matrix Without Path Filter (MEDIUM, static) — scanner matrix without path filters
 - OPT40 — Monorepo Job Runs Regardless of Affected App (MEDIUM, static) — app job runs when another app changed
+- OPT108 — Comment Filter Runs After the Runner Starts (HIGH, static) — comment body or author is filtered only after runner allocation
+- OPT111 — Automated Code Review Runs on Every Pull Request Push (MEDIUM, static) — fix-up pushes repeat a full automated review
 - OPT90 — Every Pull Request Pays for Coverage That Could Run After Merge (HIGH, data-driven) — full matrix on PRs, subset would do
+- OPT107 — Default-Branch Full CI Runs Too Often to Stay Current (HIGH, data-driven) — dense post-merge validation can batch against the current tip
 ## Category 8 — Release Workflow
 - OPT41 — `TURBO_FORCE: true` Disabling All Caching (HIGH, static) — TURBO_FORCE in release
 - OPT42 — `TURBO_CACHE: remote:rw` in Release (HIGH, static) — TURBO_CACHE remote:rw in release
@@ -93,12 +101,13 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT60 — Turbo CI Configuration Missing (LOW, static) — turbo CI settings missing
 - OPT82 — Lint Builds the Whole Type Graph (MEDIUM, data-driven) — type-aware ESLint on a slow lint job
 - OPT103 — Lighthouse CI Audits Every URL N Times Per Pass, One After Another (MEDIUM, data-driven) — passes x URLs x runs, audited one after another
+- OPT106 — Runtime TypeScript Transpilation on the Long Pole (HIGH, data-driven) — a heavy long-pole step runs TypeScript through a runtime loader
 ## Category 12 — Build Caching (language-agnostic)
 - OPT61 — Missing Dependency Caching (HIGH, static) — compiled-language deps uncached
 - OPT62 — Build Artifacts Destroyed Before Every Run (HIGH, static) — rm -rf of build dirs every run
 - OPT63 — Dependency Install with Cache Disabled (MEDIUM, static) — --no-cache installs on persistent runners
 - OPT86 — CI Repeatedly Compiles Dependencies from Source (HIGH, data-driven) — measured vendored builds or confirmed prebuilt-package opportunities
-- OPT91 — The Compile Is the Long Pole and Nobody Profiled It (HIGH, data-driven) — slow compile, profile it first
+- OPT91 — The Compile Is the Long Pole and Nobody Profiled It (HIGH, data-driven) — slow compile, profile it first; static Xcode flavor flags an unread index store or a generic simulator destination
 - OPT94 — The .NET SDK Can Reconcile Unrelated Machine-Wide Workloads (MEDIUM, data-driven) — benchmark a pinned isolated SDK
 - OPT104 — Rust Coverage Loads Unoptimized Debug Artifacts (MEDIUM, structural) — measured coverage pole uses Cargo's debug/unoptimized test profile
 ## Category 13 — Hidden Failures and Dead Config
@@ -117,5 +126,5 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT78 — Per-File Test Isolation Rebuilding Shared Module State (HIGH, structural) — per-file isolation re-imports the app
 - OPT83 — Independent Steps on the Long Pole Run One After Another (MEDIUM, structural) — independent steps run serially
 - OPT84 — A Slow Step on the Long Pole Runs a Tool That Has a Native Drop-in (MEDIUM, structural) — Prettier/ESLint/tsc with native drop-ins; npm/pnpm/Yarn install → bun install
-- OPT85 — Tests Run in Many Processes Instead of One (HIGH, structural) — a process per test case
+- OPT85 — Repeated Work Runs in Many Processes Instead of Bounded Batches (HIGH, structural) — repeated process or worker-pool startup per item
 - OPT87 — Tests Wait on a Slow Dependency They Do Not Verify (HIGH, structural) — tests call a slow real dependency

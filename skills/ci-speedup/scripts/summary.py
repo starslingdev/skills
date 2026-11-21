@@ -496,7 +496,8 @@ def empty_spine_diagnostics(doc: dict[str, Any], findings_path: str,
 
 
 def render_command(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
-                   out_path: str = "REPORT.md", data_dir: str | None = None) -> str:
+                   out_path: str = "REPORT.md", data_dir: str | None = None,
+                   *, bmf: bool = False) -> str:
     """The ready-to-run `blocking_path.py` command with per-pole `--log/--steps/--mag`
     bindings pre-filled from the captured `data_bundle`. Empty string when the run
     captured no drill logs (the report still renders level-1 + P50 step bars)."""
@@ -523,7 +524,7 @@ def render_command(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
     # --in/--out are interpolated into a shell command, so quote them too (a repo path
     # with a space would otherwise emit a command that breaks immediately).
     parts = [f"python3 scripts/blocking_path.py --in {shlex.quote(findings_path)} "
-             f"--out {shlex.quote(out_path)}"]
+             f"--out {shlex.quote(out_path)}" + (" --bmf" if bmf else "")]
     for i, (key, e) in enumerate(zip(keys, logs)):
         wf = Path(str(e.get("workflow_file") or "")).name
         if "=" in key or not (unique and _match_key(dmap, wf, str(e.get("check") or "")) == i):
@@ -545,7 +546,7 @@ def render_command(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
 
 def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
                   data_dir: str | None = None, out_path: str = "REPORT.md",
-                  root: str | None = None) -> str:
+                  root: str | None = None, *, bmf: bool = False) -> str:
     """A compact, agent-facing digest of the findings JSON: the gating resolution,
     the addressable long poles (with fileless/managed checks flagged — auto-demoted
     when something else out-gates them (they aren't `critical_path_check`), or called out
@@ -774,14 +775,15 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
     out.append("")
 
     # The render command — so the agent never reads blocking_path.py to invoke it.
-    cmd = render_command(doc, findings_path=findings_path, out_path=out_path, data_dir=data_dir)
+    cmd = render_command(doc, findings_path=findings_path, out_path=out_path,
+                         data_dir=data_dir, bmf=bmf)
     if cmd:
         out.append("Render the report with (drill logs already captured — run verbatim):")
         out.append(cmd)
     else:
         out.append("No drill logs were captured; render with: "
                    f"python3 scripts/blocking_path.py --in {shlex.quote(findings_path)} "
-                   f"--out {shlex.quote(out_path)}")
+                   f"--out {shlex.quote(out_path)}" + (" --bmf" if bmf else ""))
     return "\n".join(out)
 
 

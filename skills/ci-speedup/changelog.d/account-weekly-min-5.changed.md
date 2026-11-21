@@ -1,0 +1,1 @@
+- **2026-11-21** — The account-weekly paired-run comparison now requires at least 5 runs per side, up from 2, before it states a runner-minute effect, matching OPT81's minimum of 5 runs per runner size. Owner-approved 2026-11-20. (#450)

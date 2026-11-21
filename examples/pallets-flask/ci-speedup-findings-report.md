@@ -4,6 +4,8 @@
 
 not measured: lifecycle data was not collected
 
+<!-- ci-speedup:bmf enabled=false held=0 -->
+
 | Repository | `pallets/flask` |
 | :--- | :--- |
 | **Audited commit** | [`36e4a82`](https://github.com/pallets/flask/commit/36e4a824f340fdee7ed50937ba8e7f6bc7d17f81) - file & line references are anchored to this tree |
@@ -16,9 +18,9 @@ not measured: lifecycle data was not collected
 >
 > **34s until all checks finish** - `Windows` is the slowest check a typical PR waits on. 
 >
-> **`.github/workflows/tests.yaml` changed ~223 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/tests.yaml` changed ~229 days ago - narrowed to the current configuration.** This audit measures only the 9 runs since that change; the 11 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
-> **`.github/workflows/zizmor.yaml` changed ~225 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
+> **`.github/workflows/zizmor.yaml` changed ~231 days ago - narrowed to the current configuration.** This audit measures only the 6 runs since that change; the 4 earlier runs measured the retired configuration and were excluded so no drill-down blends the two.
 >
 > **What gates next:** After this fix, CI is gated by `tests.yaml / PyPy` at ~26 s.
 > This projection assumes the full headline saving is realized; a smaller fix may leave the current gate in place.
@@ -603,7 +605,7 @@ failure mode and how you have guarded it before shipping.
 > ⚠️ _Approximate: computed across all workflows, but 1 capped workflow(s) still use the shallow 10-run job sample for finding/queue values; 1 runner-minute source workflow(s) still use a shallow 10-run cost-spine sample. Figures can shift run-to-run; re-run with `--shallow-runs 20` to confirm exact values._
 
 <details>
-<summary><strong>OPT32 - Missing `paths`/`paths-ignore` on Expensive Workflows</strong> · no bill saving · HIGH · 1 across 1 wf</summary>
+<summary><strong>OPT32 - Missing `paths`/`paths-ignore` on Expensive Workflows</strong> · runner-minute saving: unsized (the workflow's monthly run count was not measured) · HIGH · 1 across 1 wf</summary>
 
 **Where:** `publish.yaml:2` (build)
 **Activity:** 0 runs in 30 days · most recent 2026-02-19.
@@ -668,7 +670,7 @@ failure mode and how you have guarded it before shipping.
 </details>
 
 <details>
-<summary><strong>OPT33 - No Draft PR Gating on Expensive Jobs</strong> · no bill saving · MEDIUM · 1 across 1 wf</summary>
+<summary><strong>OPT33 - No Draft PR Gating on Expensive Jobs</strong> · runner-minute saving: unsized (the skipped job's duration could not be resolved from sampled run timings) · MEDIUM · 1 across 1 wf</summary>
 
 **Where:** `tests.yaml:13` (tests)
 **Activity:** 37 runs in 30 days · most recent 2026-07-22.
@@ -743,7 +745,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `b72853c-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `26f8658c-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (36e4a82) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 47 runs / 152 jobs sampled | Critical-path + per-step P50 |
 | job logs | 1 job log(s) sampled | Step internals + cross-run magnitude (deeper levels) |
 | workflow YAML | 5 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

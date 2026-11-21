@@ -53,6 +53,7 @@
     "fail": [],
     "skip": [
       "Bottom-line crowned cluster lever is presence-eligible (no minority-workflow crown)",
+      "OPT108 comment-run saving re-derives and stays within measured compute",
       "OPT43 runner-label evidence matches its structured stamp",
       "OPT64 is ranked only on enough retried runs",
       "Tier-2 R-rows carry re-derived wall-clock-neutral certificates",

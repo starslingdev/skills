@@ -28,8 +28,18 @@ REQUIRED_DECISIONS = {
     "merge-queue-proof-thresholds", "timeout-recommendation-thresholds",
     "dependency-cache-floor", "cold-cache-miss-threshold",
     "cache-partial-miss-floor",
-    "ceiling-minimum-gates", "partial-majority-rule",
+    "default-branch-batching-window",
+    "ceiling-minimum-gates", "partial-majority-rule", "go-package-dominance",
+    "go-fixed-wait-thresholds", "account-weekly-paired-minimum",
     "opt25-universal-housekeeping",
+}
+
+# Decisions the owner has approved, with the exact status line each section
+# must carry. Every decision not listed here must still read "awaiting owner
+# approval"; a listed one must carry its approval and not the pending status.
+APPROVED_DECISIONS = {
+    "go-package-dominance": "**Approval status:** owner-approved 2026-11-20 (60%).",
+    "account-weekly-paired-minimum": "**Approval status:** owner-approved 2026-11-20 (5).",
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
@@ -43,6 +53,8 @@ REQUIRED_VERIFIER_MIRRORS = {
     "verify_report.py:_VR_TIER2_CAP",
     "verify_report.py:_VR_RUNNER_MINUTE_SPINE_CAP",
     "verify_report.py:_VR_OPT64_MIN_RETRIED_RUNS",
+    "verify_report.py:_VR_OPT108_SHORT_RUN_S",
+    "verify_report.py:_VR_OPT108_MIN_PRICED_RUNS",
     "verify_report.py:_VR_OPT79_MIN_HITS",
     "verify_report.py:_VR_OPT79_MIN_MISSES",
     "verify_report.py:_VR_OPT79_MIN_WASTE_FRAC",
@@ -57,6 +69,8 @@ REQUIRED_VERIFIER_MIRRORS = {
     "verify_report.py:_VR_OPT80_MIN_GAP_S",
     "verify_report.py:_VR_OPT80_LOG_PROBE_MAX",
     "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL",
+    "verify_report.py:_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL",
+    "verify_report.py:_VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC",
     "verify_report.py:_VR_OPT81_MIN_GAP_FRAC",
     "verify_report.py:_VR_OPT81_MIN_GAP_S",
     "verify_report.py:_VR_OPT81_COVERED_FRAC",
@@ -93,9 +107,15 @@ REQUIRED_PROVISIONAL_SOURCES = {
 }
 
 REQUIRED_CURRENT_SOURCES = {
+    "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 5,
     "blocking_path.py:_AGG_GATE_TRIVIAL_S": 30.0,
     "blocking_path.py:_ALSO_NOTICED_CAP": 12,
     "blocking_path.py:_CHAIN_MAKESPAN_DIVERGENCE_PCT": 25.0,
+    "collect_runs.py:_OPT24_GO_PACKAGE_DOMINANT_SHARE": 0.6,
+    "collect_runs.py:_OPT19_GO_MIN_INTERVALS": 2,
+    "collect_runs.py:_OPT19_GO_MIN_JOB_SHARE": 0.2,
+    "collect_runs.py:_OPT19_GO_MIN_TEST_SHARE": 0.5,
+    "collect_runs.py:_OPT19_GO_RACE_HELPER_MIN_SPAWNS": 3,
     "blocking_path.py:_FLOOR_COOCCUR_MAJORITY_FRAC": 0.5,
     "blocking_path.py:_FLOOR_NEAR_UNIVERSAL_FRAC": 0.8,
     "blocking_path.py:_MAG_WIDE_REL": 0.25,
@@ -118,6 +138,9 @@ REQUIRED_CURRENT_SOURCES = {
     "collect_runs.py:_COST_RUNLIST_MAX": 100,
     "collect_runs.py:_DEEPEN_TOP_CHECKS": 12,
     "collect_runs.py:_DEFAULT_BRANCH_PUSH_SAMPLE_MAX": 10,
+    "collect_runs.py:_OPT107_BATCH_WINDOW_S": 3600,
+    "collect_runs.py:_OPT107_MIN_BATCHABLE_RUNS": 2,
+    "collect_runs.py:_OPT107_MIN_BATCHABLE_SHARE": 0.25,
     "collect_runs.py:_DEPENDENCY_CACHE_FLOOR_PCT": 50.0,
     "collect_runs.py:_GHA_DEFAULT_JOB_TIMEOUT_S": 21600.0,
     "collect_runs.py:_MAG_WIDE_REL": 0.25,
@@ -131,6 +154,8 @@ REQUIRED_CURRENT_SOURCES = {
     "collect_runs.py:_OPT57_TIMEOUT_BUFFER_S": 600.0,
     "collect_runs.py:_OPT57_TIMEOUT_MULTIPLIER": 1.5,
     "collect_runs.py:_OPT64_MIN_RETRIED_RUNS": 3,
+    "collect_runs.py:_OPT108_SHORT_RUN_S": 30.0,
+    "collect_runs.py:_OPT108_MIN_PRICED_RUNS": 3,
     "collect_runs.py:_OPT79_MIN_HITS": 3,
     "collect_runs.py:_OPT79_MIN_MISSES": 3,
     "collect_runs.py:_OPT79_MIN_WASTE_FRAC": 0.2,
@@ -148,12 +173,18 @@ REQUIRED_CURRENT_SOURCES = {
     "collect_runs.py:_OPT81_MIN_GAP_FRAC": 0.25,
     "collect_runs.py:_OPT81_MIN_GAP_S": 30.0,
     "collect_runs.py:_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+    "collect_runs.py:_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL": 5,
+    "collect_runs.py:_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC": 0.05,
     "collect_runs.py:_OPT82_MIN_LINT_P50_S": 60.0,
     "collect_runs.py:_OPT83_MIN_SHARE": 0.15,
     "collect_runs.py:_OPT83_MIN_STEP_S": 20.0,
     "collect_runs.py:_OPT84_MIN_SHARE": 0.0,
     "collect_runs.py:_OPT84_MIN_STEP_S": 20.0,
     "collect_runs.py:_OPT84_INSTALL_MIN_SHARE": 0.15,
+    "collect_runs.py:_OPT106_MIN_JOB_SHARE": 0.2,
+    "collect_runs.py:_OPT106_MIN_PROFILE_S": 30.0,
+    "blocking_path.py:_OPT106_MIN_JOB_SHARE": 0.2,
+    "blocking_path.py:_OPT106_MIN_PROFILE_S": 30.0,
     "collect_runs.py:_OPT98_CHURN_SAMPLE": 30,
     "collect_runs.py:_OPT98_DIFFERENT_RATIO": 1.5,
     "collect_runs.py:_OPT98_MIN_MERGES_PER_DAY": 30,
@@ -193,6 +224,8 @@ REQUIRED_CURRENT_SOURCES = {
     "verify_report.py:_VR_OPT57_TIMEOUT_BUFFER_S": 600.0,
     "verify_report.py:_VR_OPT57_TIMEOUT_MULTIPLIER": 1.5,
     "verify_report.py:_VR_OPT64_MIN_RETRIED_RUNS": 3,
+    "verify_report.py:_VR_OPT108_SHORT_RUN_S": 30.0,
+    "verify_report.py:_VR_OPT108_MIN_PRICED_RUNS": 3,
     "verify_report.py:_VR_OPT79_MIN_HITS": 3,
     "verify_report.py:_VR_OPT79_MIN_MISSES": 3,
     "verify_report.py:_VR_OPT79_MIN_WASTE_FRAC": 0.2,
@@ -211,11 +244,17 @@ REQUIRED_CURRENT_SOURCES = {
     "verify_report.py:_VR_OPT81_MIN_GAP_FRAC": 0.25,
     "verify_report.py:_VR_OPT81_MIN_GAP_S": 30.0,
     "verify_report.py:_VR_OPT81_MIN_SAMPLES_PER_LABEL": 8,
+    "verify_report.py:_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL": 5,
+    "verify_report.py:_VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC": 0.05,
     "verify_report.py:_VR_OPT83_MIN_SHARE": 0.15,
     "verify_report.py:_VR_OPT83_MIN_STEP_S": 20.0,
     "verify_report.py:_VR_OPT84_MIN_SHARE": 0.0,
     "verify_report.py:_VR_OPT84_MIN_STEP_S": 20.0,
     "verify_report.py:_VR_OPT84_INSTALL_MIN_SHARE": 0.15,
+    "verify_report.py:_VR_OPT106_MIN_JOB_SHARE": 0.2,
+    "verify_report.py:_VR_OPT106_MIN_PROFILE_S": 30.0,
+    "verify_report.py:_VR_OPT106_MIN_STEP_SHARE": 0.15,
+    "verify_report.py:_VR_OPT106_MIN_STEP_S": 20.0,
     "verify_report.py:_VR_PARTIAL_MISS_FLOOR_PCT": 40.0,
     "verify_report.py:_VR_POLE_HOLDS_UP_MIN_COUNT": 2,
     "verify_report.py:_VR_POLE_RECUR_FLOOR": 2,
@@ -325,8 +364,15 @@ def test_report_defaults_review_covers_every_owner_decision():
         for field in ("**Current value:**", "**Report statements:**", "**Reason:**",
                       "**Proposed decision:**"):
             assert field in section, f"{decision} lacks {field}"
-        assert "awaiting owner approval" in section, (
-            f"{decision} does not preserve its pending approval status")
+        if decision in APPROVED_DECISIONS:
+            assert APPROVED_DECISIONS[decision] in section, (
+                f"{decision} lacks its recorded owner approval")
+            assert "awaiting owner approval" not in section, (
+                f"{decision} is approved but still reads as pending")
+        else:
+            assert "awaiting owner approval" in section, (
+                f"{decision} does not preserve its pending approval status")
+    assert set(APPROVED_DECISIONS) <= REQUIRED_DECISIONS
     assert "references/report-defaults.md" in (SKILL / "SKILL.md").read_text(encoding="utf-8")
 
 
@@ -350,7 +396,12 @@ def test_report_defaults_machine_contract_matches_the_engine():
         for row in contract.values()
         for source, value in row.get("sources", {}).items()
     }
-    changelog = (SKILL / "CHANGELOG.md").read_text(encoding="utf-8")
+    # A landing is recorded either in CHANGELOG.md or, until the next assembly,
+    # in a pending fragment under changelog.d/.
+    changelog = "\n".join(
+        p.read_text(encoding="utf-8")
+        for p in [SKILL / "CHANGELOG.md", *sorted((SKILL / "changelog.d").glob("*.md"))]
+        if p.name != "README.md")
     assert REQUIRED_VERIFIER_MIRRORS <= sources
     assert documented_sources == REQUIRED_CURRENT_SOURCES
     assert REQUIRED_PROVISIONAL_SOURCES.items() <= planned_sources.items()

@@ -357,7 +357,7 @@ def test_ci_helper_reads_pr_text_only_from_env():
         assert flag in helper
     for repository in (
         "home-assistant/core", "vercel/next.js", "ethereum/go-ethereum",
-        "microsoft/playwright",
+        "microsoft/playwright", "openclaw/openclaw",
     ):
         assert f"--allow {repository}" in helper
 

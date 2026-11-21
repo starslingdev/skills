@@ -1,6 +1,10 @@
 # ci-speedup-guard compares the pull request test-merge tree with that merge
-# commit's first parent. Add merge_group only after its base/merge semantics and
-# the verdict predicate below have been implemented and tested for that event.
+# commit's first parent. It has no merge_group trigger, deliberately: it is not a
+# required check on main, so the merge queue never waits for it, and it has
+# already judged the PR. Before ever requiring it, add merge_group only after its
+# base/merge semantics and the verdict predicate below have been implemented and
+# tested for that event: on merge_group there is no github.event.pull_request, so
+# both scan guards below would evaluate wrongly (scan skips, scan-fork runs hosted).
 name: CI speedup guard
 
 on:
