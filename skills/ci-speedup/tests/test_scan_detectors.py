@@ -6978,20 +6978,27 @@ def test_opt46_per_run_non_pr_group_preserves_each_required_validation():
 
     assert len(recipes) == 1, "OPT46 needs one copy-pasteable per-run escape hatch"
     recipe = recipes[0]
-    assert "github.event_name == 'pull_request'" in recipe["cancel-in-progress"]
+    combined = (
+        "${{ github.workflow }}-${{ (github.ref == "
+        "format('refs/heads/{0}', github.event.repository.default_branch) || "
+        "startsWith(github.ref, 'refs/tags/')) && github.run_id || "
+        "github.head_ref || github.ref_name }}"
+    )
+    assert recipe["group"] == combined
+    assert "github.event_name" not in recipe["group"]
+    assert "refs/tags/" in recipe["cancel-in-progress"]
+
+    body = _catalog_section("OPT46")
+    assert "mutually exclusive for the same event" not in body
+    assert "OPT47" in body
+    assert "adding `github.event_name`" in body
 
     pr_a = _ctx("pull_request", ref="refs/pull/7/merge", head_ref="topic")
     pr_b = _ctx("pull_request", ref="refs/pull/7/merge", head_ref="topic")
     pr_b["github"]["run_id"] = "run-2"
-    assert _gha_interpolate(recipe["group"], pr_a) == _gha_interpolate(
-        recipe["group"], pr_b)
-
-    push_a = _ctx("push", ref="refs/heads/main", ref_name="main")
-    push_a["github"]["event"]["pull_request"] = {}
-    push_b = copy.deepcopy(push_a)
-    push_b["github"]["run_id"] = "run-2"
-    assert _gha_interpolate(recipe["group"], push_a) != _gha_interpolate(
-        recipe["group"], push_b)
+    # The literal contract above keeps PR and feature-push groups on the same
+    # short branch key (OPT47), while default-branch and tag runs select run_id.
+    assert "github.head_ref || github.ref_name" in recipe["group"]
 
 
 def _cancel_predicates() -> dict[str, str]:
