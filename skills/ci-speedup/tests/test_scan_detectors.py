@@ -7210,7 +7210,10 @@ def test_opt46_combined_group_validates_every_default_branch_and_tag_run():
     assert push_a == push_b == "CI-upstream/project/feature/x"
     assert c("push", ref="refs/heads/feature/x", run_id=202) is True
     # OPT47: the branch's pull_request run lands in the SAME group as its push.
-    pr = g("pull_request", ref="refs/pull/7/merge", head_ref="feature/x", run_id=203)
+    # (An in-repository PR's payload names the base repository as its head
+    # repository, so the repo-qualified key still matches the push.)
+    pr = g("pull_request", ref="refs/pull/7/merge", head_ref="feature/x", run_id=203,
+           head_repository="upstream/project")
     assert pr == push_a
     assert c("pull_request", ref="refs/pull/7/merge", head_ref="feature/x",
              run_id=203) is True
@@ -7248,6 +7251,24 @@ def test_opt45_opt46_groups_separate_same_named_fork_pull_requests():
             run_id=103, head_repository="bob/project")
         assert _ghx_render(group, fork_a) == _ghx_render(group, fork_a_again), pattern
         assert _ghx_render(group, fork_a) != _ghx_render(group, fork_b), pattern
+
+        # OPT47 dedup survives: an in-repository branch's push and its PR
+        # (whose head repository is the base repository) share one group.
+        push = _ghx_ctx("push", ref="refs/heads/patch-1", run_id=104)
+        in_repo_pr = _ghx_ctx(
+            "pull_request", ref="refs/pull/9/merge", head_ref="patch-1",
+            run_id=105, head_repository="upstream/project")
+        assert _ghx_render(group, push) == _ghx_render(group, in_repo_pr), pattern
+        # ...while a fork PR whose branch shares that name stays out of the
+        # upstream branch's group, so it cannot cancel the upstream push.
+        assert _ghx_render(group, fork_a) != _ghx_render(group, push), pattern
+        # Same for a fork PR opened from the fork's own default branch.
+        fork_main = _ghx_ctx(
+            "pull_request", ref="refs/pull/10/merge", head_ref="main",
+            run_id=106, head_repository="alice/project")
+        upstream_main = _ghx_ctx("push", ref="refs/heads/main", run_id=107)
+        assert (_ghx_render(group, fork_main)
+                != _ghx_render(group, upstream_main)), pattern
 
 
 def test_opt46_event_name_in_the_group_splits_opt47_push_pr_dedup():
