@@ -11511,13 +11511,15 @@ _OPT25_SORT_ASSIGN_RE = re.compile(
     r"\s*=\s*(?:(?P<py_sorted>sorted)\s*\(|[^\n;]*\.sort\s*\()(?P<args>[^\n]*)")
 _OPT25_SORT_IN_PLACE_RE = re.compile(
     r"(?m)^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\.sort\s*\((?P<args>[^\n]*)")
-# Name-order keys. Any other Python `key=` or JavaScript comparator (measured
-# duration, weight, cost) makes a stride over the list a timing-based deal,
-# which is the recommended shape, so it stays quiet.
-_OPT25_NAME_KEY_RE = re.compile(
-    r"\bkey\s*=\s*(?:str|str\.lower|str\.casefold|os\.path\.basename)\s*(?:,|$)")
+# Only an explicit measured timing/weight lookup proves that a positional deal
+# is timing-based. A custom key/comparator can just as easily derive from the
+# test name (`len`, `str.lower`, `a.length - b.length`) and must still warn.
 _OPT25_PY_KEY_RE = re.compile(r"\bkey\s*=")
 _OPT25_JS_COMPARATOR_RE = re.compile(r"\S")
+_OPT25_MEASURED_SORT_RE = re.compile(
+    r"\b(?:timings?|durations?|weights?|elapsed|runtimes?|seconds?|milliseconds?)\b|"
+    r"\.(?:duration|weight|elapsed|runtime|seconds|milliseconds)\b",
+    re.IGNORECASE)
 
 
 def _opt25_call_args(text: str, start: int, cap: int = 600) -> str:
@@ -11535,19 +11537,19 @@ def _opt25_call_args(text: str, start: int, cap: int = 600) -> str:
 
 
 def _opt25_sorts_by_name(text: str, assignment: re.Match[str]) -> bool:
-    """True only when the sort orders by test name, not by a measured weight."""
+    """True unless the sort demonstrably reads a measured timing or weight."""
     args = _opt25_call_args(text, assignment.start("args"))
     if assignment.groupdict().get("py_sorted"):
         # Python `sorted(iterable, key=...)`.
         return (not _OPT25_PY_KEY_RE.search(args)
-                or bool(_OPT25_NAME_KEY_RE.search(args)))
+                or not _OPT25_MEASURED_SORT_RE.search(args))
     if _OPT25_PY_KEY_RE.search(args):
         # Python in-place `list.sort(key=...)`.
-        return bool(_OPT25_NAME_KEY_RE.search(args))
-    # JavaScript `.sort()` is lexical; a comparator is name order only when it
-    # compares with `localeCompare`.
+        return not _OPT25_MEASURED_SORT_RE.search(args)
+    # JavaScript `.sort()` is lexical without a comparator. With one, stay
+    # quiet only when it actually reads a measured timing/weight.
     return (not _OPT25_JS_COMPARATOR_RE.search(args)
-            or "localeCompare" in args)
+            or not _OPT25_MEASURED_SORT_RE.search(args))
 
 
 # The saving is real but unsized: passing runs cost the same, and what a stable

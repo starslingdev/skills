@@ -1002,6 +1002,20 @@ def pick(listing, shard, count):
     names = sorted(listing)
     return names[shard::count]
 '''),
+    "python-key-str-lower": ("scripts/shard.py", '''\
+def pick(listing, shard, count):
+    names = sorted(listing, key=str.lower)
+    return names[shard::count]
+'''),
+    "python-key-len": ("scripts/shard.py", '''\
+def pick(listing, shard, count):
+    names = sorted(listing, key=len)
+    return names[shard::count]
+'''),
+    "js-name-length": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => a.length - b.length);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
 }
 
 
