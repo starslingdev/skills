@@ -80,7 +80,7 @@ from the YAML.
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: >-
     ${{ github.event_name == 'pull_request'
     && github.head_ref != github.event.repository.default_branch }}
@@ -99,7 +99,7 @@ the shared short branch name that cancellation and OPT47 dedup require.
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && github.run_id || github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && github.run_id || format('{0}/{1}', github.event.pull_request.head.repo.full_name || github.repository, github.head_ref || github.ref_name) }}
   cancel-in-progress: >-
     ${{ github.event_name != 'merge_group'
     && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
@@ -115,15 +115,15 @@ another. The key above deliberately omits it. If every event truly must be
 independent, adding the event name is an explicit trade: it preserves those
 event-specific runs but gives up OPT47 dedup.
 
-**The tension you must not "simplify" away.** The group key uses `github.head_ref || github.ref_name` — both are the **short** branch name (`head_ref` is set only on `pull_request`; `ref_name` is the short form on `push`, where `github.ref` would be the fully-formed `refs/heads/…`). That is deliberate: it lands a branch's `push` and `pull_request` runs in the **same** group, which is the whole point of the push+PR double-trigger dedup (OPT47). Writing `github.head_ref || github.ref` instead yields two different strings for one branch, the runs never share a group, and that saving is zero.
+**The tension you must not "simplify" away.** The branch key pairs the repository identity (`pull_request.head.repo.full_name` on a PR, `github.repository` on a push) with the short branch name (`head_ref` on a PR, `ref_name` on a push). An in-repository branch still lands its `push` and `pull_request` runs in the same group, preserving OPT47 dedup. Forks stay separate, so two contributors' same-named `patch-1` branches cannot cancel each other. `github.head_ref` alone is unsafe on a repository that accepts fork contributions. Writing `github.head_ref || github.ref` instead yields two different branch strings for one in-repository branch, so those runs never share a group and that saving is zero.
 
-**And that unification is exactly what makes the cancel predicate dangerous.** Cancellation is decided by the **incoming** run's `cancel-in-progress`, and it kills every in-progress run in the group *regardless of their settings*. A fork contributor commits on **their fork's `main`** and opens a PR (the most common fork workflow; a gitflow `main → develop` back-merge PR does the same): that PR run has `head_ref == "main"` → group `CI-main` — the **same group** the upstream repo's own `push: [main]` run sits in (`ref_name == "main"`). Without a guard its predicate is `true`, so it **cancels the in-flight push-to-`main` run** — the very harm this recipe exists to prevent, through a different door. The `&& github.head_ref != github.event.repository.default_branch` term closes it **for the default branch**: a PR whose head branch *is* the default branch never cancels. `github.event.repository.default_branch` is present on **both** the `push` and the `pull_request` payloads (and on `pull_request` it is the **base**/upstream repo's default branch, which is the one that matters), so it needs no per-repo substitution. Residual: the same name-collision applies to any *other* long-lived branch that both receives pushes and can appear as a PR head name (`release/1.x`, `develop`, `production`) — if pushes to such a branch must never be cancelled, add an explicit `&& github.head_ref != '<branch>'` term per branch, exactly as the widened form's release-branch note below prescribes for `github.ref`.
+Cancellation is decided by the **incoming** run's `cancel-in-progress`, and it kills every in-progress run in the group *regardless of their settings*. Repository qualification removes the fork-name collision. The `&& github.head_ref != github.event.repository.default_branch` term still protects an in-repository back-merge PR whose head branch is the default branch. `github.event.repository.default_branch` is present on **both** the `push` and the `pull_request` payloads (and on `pull_request` it is the base/upstream repo's default branch), so it needs no per-repo substitution. If pushes to another long-lived branch (`release/1.x`, `develop`, `production`) must never be cancelled, add an explicit `&& github.head_ref != '<branch>'` term per branch, exactly as the widened form's release-branch note below prescribes for `github.ref`.
 
 **Widened (Flavor A — waste is on feature-branch pushes)** — a `push`-triggered workflow (e.g. `branches-ignore: [main]`) gets *zero* benefit from the PR-scoped predicate, because it never sees a `pull_request` event. Cancel on every ref *except* the protected ones:
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
   cancel-in-progress: >-
     ${{ github.event_name != 'merge_group'
     && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)

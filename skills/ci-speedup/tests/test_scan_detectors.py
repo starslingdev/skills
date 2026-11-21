@@ -6982,7 +6982,8 @@ def test_opt46_per_run_non_pr_group_preserves_each_required_validation():
         "${{ github.workflow }}-${{ (github.ref == "
         "format('refs/heads/{0}', github.event.repository.default_branch) || "
         "startsWith(github.ref, 'refs/tags/')) && github.run_id || "
-        "github.head_ref || github.ref_name }}"
+        "format('{0}/{1}', github.event.pull_request.head.repo.full_name || "
+        "github.repository, github.head_ref || github.ref_name) }}"
     )
     assert recipe["group"] == combined
     assert "github.event_name" not in recipe["group"]
@@ -6993,8 +6994,10 @@ def test_opt46_per_run_non_pr_group_preserves_each_required_validation():
     assert "OPT47" in body
     assert "adding `github.event_name`" in body
 
-    # The literal contract above keeps PR and feature-push groups on the same
-    # short branch key (OPT47), while default-branch and tag runs select run_id.
+    # The literal contract above keeps an in-repo PR and feature push on the
+    # same repo-qualified branch key (OPT47), while forks cannot collide and
+    # default-branch and tag runs select run_id.
+    assert "github.event.pull_request.head.repo.full_name" in recipe["group"]
     assert "github.head_ref || github.ref_name" in recipe["group"]
 
 
@@ -7128,13 +7131,20 @@ def _ghx_render(template: str, ctx: dict) -> str:
     return re.sub(r"\$\{\{(.*?)}}", one, template)
 
 
-def _ghx_ctx(event_name, *, ref, head_ref="", run_id, default_branch="main"):
+def _ghx_ctx(event_name, *, ref, head_ref="", run_id, default_branch="main",
+             repository="upstream/project", head_repository=None):
     ref_name = (ref.split("/", 2)[2] if ref.startswith(("refs/heads/", "refs/tags/"))
                 else ref.split("/", 2)[-1])
     return {"github": {
         "event_name": event_name, "ref": ref, "head_ref": head_ref,
         "ref_name": ref_name, "run_id": run_id, "workflow": "CI",
-        "event": {"repository": {"default_branch": default_branch}},
+        "repository": repository,
+        "event": {
+            "repository": {"default_branch": default_branch},
+            "pull_request": {
+                "head": {"repo": {"full_name": head_repository}}
+            } if head_repository is not None else None,
+        },
     }}
 
 
@@ -7197,7 +7207,7 @@ def test_opt46_combined_group_validates_every_default_branch_and_tag_run():
     # Feature branch: successive pushes share one group and cancel.
     push_a = g("push", ref="refs/heads/feature/x", run_id=201)
     push_b = g("push", ref="refs/heads/feature/x", run_id=202)
-    assert push_a == push_b == "CI-feature/x"
+    assert push_a == push_b == "CI-upstream/project/feature/x"
     assert c("push", ref="refs/heads/feature/x", run_id=202) is True
     # OPT47: the branch's pull_request run lands in the SAME group as its push.
     pr = g("pull_request", ref="refs/pull/7/merge", head_ref="feature/x", run_id=203)
@@ -7213,6 +7223,31 @@ def test_opt46_combined_group_validates_every_default_branch_and_tag_run():
     # Merge queue entries are never cancelled.
     assert c("merge_group", ref="refs/heads/gh-readonly-queue/main/pr-9-abc",
              run_id=401) is False
+
+
+def test_opt45_opt46_groups_separate_same_named_fork_pull_requests():
+    """#458: a bare ``head_ref`` is not a fork-safe concurrency identity."""
+    yaml = pytest.importorskip("yaml")
+    groups = []
+    for pattern in ("OPT45", "OPT46"):
+        for block in _yaml_blocks(_catalog_section(pattern)):
+            concurrency = (yaml.safe_load(block) or {}).get("concurrency")
+            if isinstance(concurrency, dict) and concurrency.get("group"):
+                groups.append((pattern, str(concurrency["group"])))
+
+    assert groups
+    for pattern, group in groups:
+        fork_a = _ghx_ctx(
+            "pull_request", ref="refs/pull/7/merge", head_ref="patch-1",
+            run_id=101, head_repository="alice/project")
+        fork_a_again = _ghx_ctx(
+            "pull_request", ref="refs/pull/7/merge", head_ref="patch-1",
+            run_id=102, head_repository="alice/project")
+        fork_b = _ghx_ctx(
+            "pull_request", ref="refs/pull/8/merge", head_ref="patch-1",
+            run_id=103, head_repository="bob/project")
+        assert _ghx_render(group, fork_a) == _ghx_render(group, fork_a_again), pattern
+        assert _ghx_render(group, fork_a) != _ghx_render(group, fork_b), pattern
 
 
 def test_opt46_event_name_in_the_group_splits_opt47_push_pr_dedup():
