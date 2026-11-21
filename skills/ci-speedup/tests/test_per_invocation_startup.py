@@ -297,6 +297,20 @@ def test_opt85_stays_silent_when_one_process_batches_the_items():
     assert leaf is None
 
 
+def test_opt85_stays_silent_when_one_traced_process_builds_every_item():
+    # The ordinary-output form of the batched case: one `set -x` trace line
+    # hands every item to one process, so there is no repeated startup.
+    base = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    items = " ".join(f"plugin-{i}" for i in range(10))
+    rows = [_stamp(base, f"+ node scripts/build-plugin.mjs {items}")]
+    rows.extend(
+        _stamp(base + timedelta(seconds=3 + i), f"[build] plugin-{i}: wrote dist")
+        for i in range(10)
+    )
+
+    assert bp._parse_log("\n".join(rows), dominant_category="build") is None
+
+
 def test_opt85_prompt_sizes_a_monthly_ceiling_from_workflow_run_count():
     leaf = {
         "fix_key": "per-item-build-startup",
