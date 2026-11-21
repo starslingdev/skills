@@ -913,6 +913,110 @@ jobs:
     assert "OPT16" not in _scan_one(tmp_path, neg)
 
 
+def test_opt25_finds_sorted_positional_shard_splitter(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return names[shard::count]
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings, "expected sorted positional splitter guidance"
+    finding = findings[0]
+    assert "stable hash" in finding.get("fix_strategy", ""), finding
+    assert "runner-minute effect: roughly neutral" in finding.get("size_note", ""), finding
+
+
+def test_opt25_positional_splitter_keeps_stable_hash_partition_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+import hashlib
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return [name for name in names
+            if int(hashlib.sha256(name.encode()).hexdigest(), 16) % count == shard]
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings == [], findings
+
+
+_OPT25_TIMING_SORTED_SPLITTERS = {
+    "python-key-duration": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    names = sorted(tests, key=lambda name: -durations[name])
+    return names[shard::count]
+'''),
+    "python-in-place-key": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    tests.sort(key=lambda name: durations.get(name, 0), reverse=True)
+    return tests[shard::count]
+'''),
+    "python-multiline-key": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    names = sorted(
+        tests,
+        key=lambda name: -durations[name],
+    )
+    return names[shard::count]
+'''),
+    "js-timing-comparator": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => timings[b] - timings[a]);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT25_TIMING_SORTED_SPLITTERS))
+def test_opt25_positional_splitter_keeps_timing_sorted_stride_quiet(
+        tmp_path: Path, case: str):
+    """A list sorted by measured duration and dealt round-robin is already a
+    timing-based splitter: inserting a test does not reorder by name."""
+    rel, source = _OPT25_TIMING_SORTED_SPLITTERS[case]
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert hits == [] and incomplete == [], hits
+
+
+_OPT25_NAME_SORTED_SPLITTERS = {
+    "js-default-sort": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort();
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "js-locale-compare": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => a.localeCompare(b));
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "github-scripts-python": (".github/scripts/shard.py", '''\
+def pick(listing, shard, count):
+    names = sorted(listing)
+    return names[shard::count]
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT25_NAME_SORTED_SPLITTERS))
+def test_opt25_finds_name_sorted_positional_splitter_shapes(tmp_path: Path, case: str):
+    rel, source = _OPT25_NAME_SORTED_SPLITTERS[case]
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, _incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert [(pattern, source_path) for pattern, source_path, _hit in hits] == [
+        ("OPT25", rel)]
+    facts = hits[0][2].facts
+    assert "exactly one shard" in facts["fix_strategy"], facts
+
+
 def test_opt16_finds_same_binary_built_in_separate_go_tests(tmp_path: Path):
     _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
     tests = tmp_path / "internal" / "cli"

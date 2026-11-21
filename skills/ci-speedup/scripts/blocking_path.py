@@ -11637,6 +11637,19 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             note = str((member.get("measured_evidence") or {}).get("note") or "").strip()
             if note:
                 body.append(f"Investigate this measured shard diagnosis: {note}")
+        # A static positional-splitter member (scan.py) proves an unstable
+        # assignment rule, not a measured duration: carry its recipe and its
+        # literal cost note, never the generic off-path bill-cut framing.
+        positional = [m for m in members if m.get("positional_splitter_static")]
+        if positional:
+            recipe = str(positional[0].get("fix_strategy") or "").strip()
+            if recipe:
+                body.append(f"Fix recipe (safest first): {recipe}")
+            if len(positional) == len(members):
+                note = str(positional[0].get("size_note") or "").strip()
+                saving = ("Saving: runner-minute saving unsized - "
+                          f"{note.removeprefix('runner-minute effect: ')}."
+                          if note else "Saving: unsized.")
     body += [saving, "",
              "Read the catalog entry (background, fix recipe, and guardrail):",
              f"  {url}", ""]
