@@ -29,12 +29,14 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT16 — Within-Job Duplicate Commands (LOW, static) — same command twice in one job
 - OPT110 — Uploaded Artifact Has No Repository Consumer (MEDIUM, static) — upload name is never downloaded or consumed by release/deploy
 - OPT77 — Repeated Fixed Setup Across Independent Small Jobs (MEDIUM, data-driven) — small checks each pay full setup
+- OPT113 — A Test Fixture Is Much Larger Than Its Contract Needs (MEDIUM, static) — test archives or hashes a full executable when bytes suffice
 ## Category 3 — Docker
 - OPT17 — Sleep-Based Container Readiness (MEDIUM, static) — sleep instead of healthchecks
 - OPT18 — All Containers Started for Single-Service Tests (MEDIUM, static) — compose up starts every service
 - OPT19 — Test Source Sleep Dominance (includes Playwright `waitForTimeout`) (HIGH, static) — fixed sleeps / waitForTimeout in tests
 - OPT20 — Unpinned Docker Image Tags (LOW, static) — docker images on :latest
 - OPT102 — Foreign-Architecture Image Compilation Runs Under Emulation (HIGH, static) — multi-platform Dockerfile compiles without a native or cross target
+- OPT114 — Docker Image Layers Repeat npm Advisory Lookups Already Run by CI (MEDIUM, static) — host audit retained; image-layer duplicates disabled
 ## Category 4 — Parallelization
 - OPT21 — Unnecessary `needs:` Dependencies (MEDIUM, static) — needs: on a job it does not use
 - OPT22 — Sequential Workflows via `workflow_run` (MEDIUM, static) — workflow_run chains instead of jobs
@@ -65,6 +67,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT39 — Multi-Language Matrix Without Path Filter (MEDIUM, static) — scanner matrix without path filters
 - OPT40 — Monorepo Job Runs Regardless of Affected App (MEDIUM, static) — app job runs when another app changed
 - OPT108 — Comment Filter Runs After the Runner Starts (HIGH, static) — comment body or author is filtered only after runner allocation
+- OPT111 — Automated Code Review Runs on Every Pull Request Push (MEDIUM, static) — fix-up pushes repeat a full automated review
 - OPT90 — Every Pull Request Pays for Coverage That Could Run After Merge (HIGH, data-driven) — full matrix on PRs, subset would do
 - OPT107 — Default-Branch Full CI Runs Too Often to Stay Current (HIGH, data-driven) — dense post-merge validation can batch against the current tip
 ## Category 8 — Release Workflow

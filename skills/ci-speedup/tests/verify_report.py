@@ -1760,6 +1760,18 @@ _VR_OPT83_WITHHOLD_PHRASES = {
     "job_starts_a_container_or_background_server":
         "the job starts a container or a background server that the steps "
         "would all use at once",
+    "separate_job_matrix_job":
+        "the steps cannot share one runner, and the job is a matrix, so a sibling "
+        "job would repeat its setup in every cell and its added cost per run could "
+        "not be stated",
+    "separate_job_later_step_may_read_moved_output":
+        "the steps cannot share one runner, and a later step or a job output may "
+        "read what a moved step writes, so moving it to its own job could drop "
+        "that check",
+    "separate_job_prerequisite_unclassified":
+        "the steps cannot share one runner, and a step before them is not setup, "
+        "checkout or install, so what a sibling job would have to repeat is "
+        "unmeasured",
 }
 # OPT84's held-back gates (the renderer's `_OPT84_WITHHOLD_PHRASES`, copied).
 _VR_OPT84_WITHHOLD_PHRASES = {
@@ -7529,6 +7541,78 @@ def _post_completion_waste_corroborated(f: dict) -> bool:
     return False
 
 
+def _vr_opt36_glob_matches(path: str, pattern: str) -> bool:
+    """Independent conservative matcher for OPT36's stamped exclusions."""
+    path, pattern = path.lstrip("/"), pattern.strip().lstrip("/")
+    if not path or not pattern or any(char in pattern for char in "{}["):
+        return False
+    out: list[str] = []
+    index = 0
+    while index < len(pattern):
+        char = pattern[index]
+        if char == "*":
+            if index + 1 < len(pattern) and pattern[index + 1] == "*":
+                index += 2
+                if index < len(pattern) and pattern[index] == "/":
+                    out.append("(?:.*/)?")
+                    index += 1
+                else:
+                    out.append(".*")
+                continue
+            out.append("[^/]*")
+        elif char == "?":
+            out.append("[^/]")
+        else:
+            out.append(re.escape(char))
+        index += 1
+    return re.fullmatch("".join(out), path) is not None
+
+
+def _vr_opt36_ignored(path: str, patterns: list[str]) -> bool:
+    ignored = False
+    for raw in patterns:
+        pattern = raw.strip()
+        negated = pattern.startswith("!")
+        if negated:
+            pattern = pattern[1:]
+        if _vr_opt36_glob_matches(path, pattern):
+            ignored = not negated
+    return ignored
+
+
+def _vr_opt36_unchanged_inputs_valid(f: dict) -> bool:
+    stamp = _as_dict(f.get("opt36_unchanged_inputs"))
+    pairs = [row for row in _as_list(stamp.get("pairs")) if isinstance(row, dict)]
+    patterns = [str(value) for value in _as_list(stamp.get("paths_ignore"))
+                if isinstance(value, str) and value]
+    if not pairs:
+        return False
+    same_head = excluded_only = 0
+    for row in pairs:
+        base, head = str(row.get("base") or ""), str(row.get("head") or "")
+        paths = row.get("changed_paths")
+        if not base or not head or not isinstance(paths, list):
+            return False
+        if row.get("kind") == "same_head":
+            same_head += 1
+            if base != head or paths:
+                return False
+        elif row.get("kind") == "excluded_only":
+            excluded_only += 1
+            if base == head or not patterns or not all(
+                    isinstance(path, str) and _vr_opt36_ignored(path, patterns)
+                    for path in paths):
+                return False
+        else:
+            return False
+    effect = _as_dict(f.get("runner_minute_effect"))
+    return (stamp.get("same_head_pairs") == same_head
+            and stamp.get("excluded_only_pairs") == excluded_only
+            and effect.get("direction") == "saving"
+            and abs((_num(effect.get("runner_min_per_month")) or -1.0)
+                    - (_num(f.get("runner_min_saving")) or -2.0)) < 0.001)
+
+
 def _non_pr_event_corroborated(f: dict, data: dict) -> bool:
     cert = _as_dict(f.get("tier2_neutrality"))
     subset = {str(e) for e in _as_list(f.get("tier2_run_subset_events")) if str(e)}
@@ -7547,17 +7631,20 @@ def _non_pr_event_corroborated(f: dict, data: dict) -> bool:
     evidence_text = _text_from_json(me).lower()
     table = _as_dict(me.get("table"))
     rows = _as_list(table.get("rows"))
-    # Currently only OPT36 emits a measured non_pr_event certificate. Pin the
-    # schedule/same-head-sha evidence shape so a future detector cannot promote a
-    # generic "non-PR" claim without its own corroboration.
+    # Currently only OPT36 emits a measured non_pr_event certificate. Preserve
+    # legacy same-head evidence and independently validate the newer stamped
+    # unchanged-input pairs so a generic non-PR claim cannot promote itself.
+    has_unchanged_stamp = isinstance(f.get("opt36_unchanged_inputs"), dict)
+    legacy_same_head = (not has_unchanged_stamp and "same-head_sha" in signal
+                        and "same-head_sha" in evidence_text)
+    unchanged_inputs = has_unchanged_stamp and _vr_opt36_unchanged_inputs_valid(f)
     return (
         str(f.get("pattern")) == "OPT36"
         and subset == {"schedule"}
         and "event=schedule" in signal
-        and "same-head_sha" in signal
         and "event=schedule" in ref
         and "schedule" in ref
-        and "same-head_sha" in evidence_text
+        and (legacy_same_head or unchanged_inputs)
         and bool(rows))
 
 
@@ -11016,23 +11103,26 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
         fid = str(f.get("id") or "?")
         cid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", fid)
         ids.add(cid)
+        st = _as_dict(f.get("independent_steps"))
+        separate = st.get("kind") == "opt83_separate_jobs"
         wc = _num(f.get("wall_clock_p50_s"))
-        if wc:
+        if wc and not separate:
             bad.append(f"{fid}: OPT83 carries wall_clock_p50_s {wc} - it is uncredited")
         if f.get("runner_min_saving") is not None:
             bad.append(f"{fid}: OPT83 carries runner_min_saving "
                        f"{f.get('runner_min_saving')!r} - it is uncredited")
-        if f.get("sizing_basis") != "uncredited":
+        expected_basis = "measured" if separate else "uncredited"
+        if f.get("sizing_basis") != expected_basis:
             bad.append(f"{fid}: OPT83 sizing_basis {f.get('sizing_basis')!r}, "
-                       "not 'uncredited'")
-        st = _as_dict(f.get("independent_steps"))
-        if st.get("kind") != "opt83_independent_steps":
+                       f"not {expected_basis!r}")
+        if st.get("kind") not in {"opt83_independent_steps", "opt83_separate_jobs"}:
             bad.append(f"{fid}: missing its opt83_independent_steps block")
             continue
-        ind = _as_dict(st.get("independence"))
-        missing = [k for k in _VR_OPT83_INDEPENDENCE_KEYS if ind.get(k) is not True]
-        if missing:
-            bad.append(f"{fid}: independence facts not stamped true: {missing}")
+        if not separate:
+            ind = _as_dict(st.get("independence"))
+            missing = [k for k in _VR_OPT83_INDEPENDENCE_KEYS if ind.get(k) is not True]
+            if missing:
+                bad.append(f"{fid}: independence facts not stamped true: {missing}")
         wfb = Path(str(f.get("workflow_file") or "")).name
         job = str(st.get("job") or "")
         pole = next((p for p in poles if Path(str(p.get("workflow_file") or "")).name
@@ -11069,7 +11159,29 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
                 bad.append(f"{fid}: step `{sn}` ({ps.get('category')}, {d}s of "
                            f"{job_p50}s) does not qualify as a candidate")
             p50s.append(d)
-        want = round(sum(p50s) - max(p50s), 1) if len(p50s) >= 2 else 0.0
+        if separate and len(p50s) >= 2:
+            moved = str(st.get("moved_step") or "")
+            moved_s = next((d for name, d in zip(names, p50s) if name == moved), None)
+            setup_s = _num(st.get("setup_s"))
+            if moved_s is None or setup_s is None or setup_s < 0:
+                bad.append(f"{fid}: separate-job moved_step/setup_s is incomplete")
+                want = 0.0
+            else:
+                finish = round(max(sum(p50s) - moved_s, moved_s + setup_s), 1)
+                want = round(sum(p50s) - finish, 1)
+                if _num(st.get("parallel_finish_s")) != finish:
+                    bad.append(f"{fid}: parallel_finish_s does not re-derive ({finish})")
+                effect = _as_dict(f.get("runner_minute_effect"))
+                expected_added = round(setup_s / 60.0, 4)
+                if (effect.get("direction") != "added_cost"
+                        or _num(effect.get("runner_min_per_run")) != expected_added
+                        or effect.get("additional_concurrent_runners") != 1):
+                    bad.append(f"{fid}: separate-job runner-minute effect does not "
+                               f"re-derive (added cost {expected_added} per run)")
+                if wc != want:
+                    bad.append(f"{fid}: wall_clock_p50_s {wc!r} != re-derived {want}")
+        else:
+            want = round(sum(p50s) - max(p50s), 1) if len(p50s) >= 2 else 0.0
         if _num(st.get("ceiling_s")) != want:
             bad.append(f"{fid}: ceiling_s {st.get('ceiling_s')!r} != re-derived "
                        f"{want} (sum of the steps' p50s minus the slowest)")
@@ -11104,6 +11216,23 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
                 bad.append(f"{fid}: its anchor is named outside its own section")
                 break
         flat = " ".join(body.split())
+        if separate:
+            effect = _as_dict(f.get("runner_minute_effect"))
+            added = _num(effect.get("runner_min_per_run")) or 0.0
+            for need, what in (
+                    (f"re-derived from measured p50s):** up to {want:.0f}s",
+                     "re-derived saving"),
+                    ("aggregator job's own pickup", "aggregator-pickup caveat"),
+                    (f"added cost, at least +{added:.2f} runner-min per run",
+                     "signed runner-minute effect"),
+                    ("duplicated-setup floor", "runner-minute floor label"),
+                    ("one additional concurrent runner", "runner-count effect"),
+                    ("always()", "aggregator condition"),
+                    ("every upstream result to be `success`", "aggregator success guard"),
+                    ("keeps the required check name", "required-check guard")):
+                if need not in flat:
+                    bad.append(f"{fid}: separate-job card is missing {what}")
+            continue
         # The label sits on the line that states the bound: the prompt's copy of
         # it does not label a bare number on the card.
         bound_line = next((" ".join(ln.split()) for ln in body.splitlines()
@@ -16401,6 +16530,23 @@ _BACKTICK_SPAN_RE = re.compile(r"`[^`]*`")
 _VR_OPT81_MIN_SAMPLES_PER_LABEL = 8
 _VR_OPT81_MIN_GAP_S = 30.0
 _VR_OPT81_MIN_GAP_FRAC = 0.25
+_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL = 5
+_VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC = 0.05
+# The 2026-07-20 rule: ci-speedup never prices a runner. A measured downsize states
+# its runner-cost saving unsized, with this reason (mirrors collect_runs and
+# blocking_path, pinned by a coupling test), and no surface of it may carry a
+# price ratio, a rate source or a currency figure.
+_VR_OPT81_DOWNSIZE_SAME_SPEED = (
+    "same speed on a smaller runner size: about the same runner-minutes, billed at "
+    "the smaller size's lower rate")
+_VR_OPT81_DOWNSIZE_UNSIZED_REASON = (
+    "ci-speedup does not price runners; the smaller size bills at a lower "
+    "per-minute rate")
+_VR_OPT81_DOWNSIZE_COST_EFFECT = (
+    f"runner-cost saving: unsized ({_VR_OPT81_DOWNSIZE_UNSIZED_REASON})")
+_VR_OPT81_PRICING_RE = re.compile(
+    r"price[ _]ratio|rate ratio|rate card|runner_cost_frac|price_source|price_read|"
+    r"actions-runner-pricing|docs\.github\.com/en/billing|\$\s?\d|\d\s?USD", re.I)
 _VR_OPT81_COVERED_FRAC = 0.5
 _VR_OPT81_CACHE_LEVER_MIN_S = 30.0
 _VR_OPT81_CHEAPER_STRUCTURAL = frozenset({"OPT70", "OPT71", "OPT72", "OPT73", "OPT74",
@@ -16449,6 +16595,9 @@ _VR_OPT81_LOG_CHECKED = "no log-level lever matched this pole's log"
 # The A1 card's runner-minute line may state only that the effect is unknown: a
 # different runner class bills differently and the audit carries no rate table.
 _VR_OPT81_RUNNER_MIN_LINE = "**Runner-minute effect:**"
+_VR_OPT81_RUNNER_COST_LINE = "**Runner-cost effect:**"
+
+
 _VR_OPT81_RUNNER_MIN_UNKNOWN = (
     "unknown: a different runner class bills differently and this audit carries no "
     "rate table")
@@ -16467,6 +16616,31 @@ def _vr_opt81_label_arch(tok: str) -> str:
         if rx.search(tok):
             return arch
     return "x64"
+
+
+def _vr_opt81_numeric_size_rank(rc: "tuple[str, str, str, str] | None") -> "int | None":
+    if rc is None or not str(rc[3]).isdigit():
+        return None
+    value = int(rc[3])
+    return value if value > 0 else None
+
+
+_VR_OPT81_DOWNSIZE_PINNED_ROUTE_RE = re.compile(
+    r"(?<![a-z0-9])(pin(ned)?|frozen|freeze|compat(ibility)?|legacy|release[sd]?|"
+    r"publish(ing)?|deploy(s|ment)?)(?![a-z0-9])", re.I)
+
+
+def _vr_opt81_size_stripped_label(label: object) -> "str | None":
+    out: list[str] = []
+    for tok in str(label or "").split():
+        for rx, _cls, _os in _VR_OPT81_RUNNER_CLASSES:
+            m = rx.match(tok)
+            if m:
+                if m.groupdict().get("size"):
+                    tok = tok[:m.start("size")] + "<size>" + tok[m.end("size"):]
+                break
+        out.append(tok.lower())
+    return " ".join(sorted(out)) or None
 
 
 def _vr_opt81_runner_class(label: object) -> "tuple[str, str, str, str] | None":
@@ -16516,6 +16690,8 @@ def _opt81_a1_rederived(f: dict, data: "dict | None" = None) -> list[str]:
     given and carries it) `per_workflow_timing[wf].job_runner[job]`."""
     fid = str(f.get("id") or "?")
     fr = _as_dict(f.get("faster_runner"))
+    if fr.get("kind") == "opt81_downsize":
+        return _opt81_downsize_rederived(f)
     out: list[str] = []
     rows = [r for r in _as_list(fr.get("rows")) if isinstance(r, dict)]
     by_label: dict[str, list[dict]] = {}
@@ -16647,6 +16823,119 @@ def _opt81_a1_rederived(f: dict, data: "dict | None" = None) -> list[str]:
     return out
 
 
+def _opt81_downsize_rederived(f: dict) -> list[str]:
+    """Re-derive the measured smaller-runner comparison from its stamped rows."""
+    fid = str(f.get("id") or "?")
+    fr = _as_dict(f.get("faster_runner"))
+    out: list[str] = []
+    rows = [r for r in _as_list(fr.get("rows")) if isinstance(r, dict)]
+    by_label: dict[str, list[dict]] = {}
+    for row in rows:
+        by_label.setdefault(str(row.get("label") or ""), []).append(row)
+    large, small = _as_dict(fr.get("large")), _as_dict(fr.get("small"))
+    ll, sl = str(large.get("label") or ""), str(small.get("label") or "")
+    if set(by_label) != {ll, sl} or ll == sl:
+        return [f"OPT81 {fid}: the stamped rows carry labels {sorted(by_label)}, not "
+                f"the large and small labels `{ll}` and `{sl}`"]
+
+    stats: dict[str, tuple[float, tuple]] = {}
+    for side, label, stamp in (("large", ll, large), ("small", sl, small)):
+        durations = [_num(row.get("duration_s")) for row in by_label[label]]
+        if any(value is None or value <= 0 for value in durations):
+            out.append(f"OPT81 {fid}: a `{label}` row has no positive duration")
+            continue
+        n = len(durations)
+        if n < _VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL:
+            out.append(f"OPT81 {fid}: `{label}` has {n} sample(s), below the "
+                       f"{_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL} required")
+        if stamp.get("n") != n:
+            out.append(f"OPT81 {fid}: {side} n is {stamp.get('n')!r}, rows give {n}")
+        median = round(_vr_percentile([float(value) for value in durations], 50), 1)
+        if abs((_num(stamp.get("p50_s")) or -1.0) - median) > 0.05:
+            out.append(f"OPT81 {fid}: {side} p50_s does not re-derive ({median})")
+        rc = _vr_opt81_runner_class(label)
+        if rc is None:
+            out.append(f"OPT81 {fid}: `{label}` cannot be classified")
+            continue
+        if (stamp.get("class"), stamp.get("os"), stamp.get("arch"),
+                stamp.get("size")) != rc:
+            out.append(f"OPT81 {fid}: {side} runner classification does not re-derive")
+        stats[side] = (median, rc)
+    if out or set(stats) != {"large", "small"}:
+        return out
+
+    large_p50, large_rc = stats["large"]
+    small_p50, small_rc = stats["small"]
+    large_rank, small_rank = (_vr_opt81_numeric_size_rank(large_rc),
+                              _vr_opt81_numeric_size_rank(small_rc))
+    if (large_rc[:3] != small_rc[:3] or large_rank is None or small_rank is None
+            or small_rank >= large_rank):
+        out.append(f"OPT81 {fid}: labels are not two explicit ascending sizes of one "
+                   "runner class and platform")
+    if fr.get("runner_matrix"):
+        out.append(f"OPT81 {fid}: a size matrix (both sizes in every run) is never a "
+                   "downsize candidate")
+    if _vr_opt81_size_stripped_label(ll) != _vr_opt81_size_stripped_label(sl):
+        out.append(f"OPT81 {fid}: `{ll}` and `{sl}` are two images, not two sizes of "
+                   "one image")
+    if _VR_OPT81_DOWNSIZE_PINNED_ROUTE_RE.search(str(fr.get("job") or "")) or \
+            _VR_OPT81_DOWNSIZE_PINNED_ROUTE_RE.search(
+                str(fr.get("workflow_file") or "").rsplit("/", 1)[-1]):
+        out.append(f"OPT81 {fid}: a pinned, frozen, compatibility or release route "
+                   "is never a downsize candidate")
+    if fr.get("large_size_rank") != large_rank or fr.get("small_size_rank") != small_rank:
+        out.append(f"OPT81 {fid}: stamped runner size ranks do not re-derive")
+    delta_frac = ((small_p50 - large_p50) / large_p50
+                  if large_p50 > 0 else float("inf"))
+    if abs(delta_frac) > _VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC + 0.00005:
+        out.append(f"OPT81 {fid}: the smaller runner is {delta_frac:.1%} apart, above "
+                   f"the {_VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC:.0%} limit")
+    if abs((_num(fr.get("slowdown_frac")) or 0.0) - round(delta_frac, 4)) > 0.00005:
+        out.append(f"OPT81 {fid}: slowdown_frac does not re-derive")
+    if _num(fr.get("max_abs_delta_frac")) != _VR_OPT81_DOWNSIZE_MAX_ABS_DELTA_FRAC:
+        out.append(f"OPT81 {fid}: max_abs_delta_frac is not the verifier's limit")
+    if _num(fr.get("min_samples_per_label")) != \
+            float(_VR_OPT81_DOWNSIZE_MIN_SAMPLES_PER_LABEL):
+        out.append(f"OPT81 {fid}: min_samples_per_label is not the verifier's limit")
+
+    names = [str(name) for name in _as_list(fr.get("step_names"))]
+    sha = _vr_opt81_step_sha(names)
+    if fr.get("step_list_sha") != sha or any(
+            row.get("step_list_sha") != sha for row in rows):
+        out.append(f"OPT81 {fid}: compared runs did not execute the same stamped steps")
+
+    effect = _as_dict(f.get("runner_cost_effect"))
+    if effect != {"direction": "unsized", "reason": _VR_OPT81_DOWNSIZE_UNSIZED_REASON}:
+        out.append(f"OPT81 {fid}: a downsize's runner-cost effect must be unsized "
+                   f"(\"{_VR_OPT81_DOWNSIZE_UNSIZED_REASON}\"), never a price or a "
+                   f"sized fraction ({effect!r})")
+    if f.get("runner_min_unsized_reason") != _VR_OPT81_DOWNSIZE_UNSIZED_REASON:
+        out.append(f"OPT81 {fid}: runner_min_unsized_reason is missing or altered, so "
+                   "the group heading would read `no bill saving`")
+    for field in ("evidence", "size_note"):
+        text = str(f.get(field) or "")
+        if _VR_OPT81_DOWNSIZE_COST_EFFECT not in text:
+            out.append(f"OPT81 {fid}: its {field} does not state "
+                       f"\"{_VR_OPT81_DOWNSIZE_COST_EFFECT}\"")
+    if _VR_OPT81_DOWNSIZE_SAME_SPEED not in str(f.get("evidence") or "").lower():
+        out.append(f"OPT81 {fid}: its evidence does not state "
+                   f"\"{_VR_OPT81_DOWNSIZE_SAME_SPEED}\"")
+    m = _VR_OPT81_PRICING_RE.search(json.dumps(f, sort_keys=True, default=str))
+    if m:
+        out.append(f"OPT81 {fid}: a downsize finding carries a price (`{m.group(0)}`); "
+                   "ci-speedup never prices a runner")
+    if _as_dict(fr.get("runner_cost_effect")) != effect:
+        out.append(f"OPT81 {fid}: the stamped runner-cost effects disagree")
+    if "runner_minute_effect" in f or "runner_minute_effect" in fr:
+        out.append(f"OPT81 {fid}: downsize advice states a runner-minute effect; its "
+                   "saving is a runner-cost (price) difference")
+    if (_num(f.get("wall_clock_p50_s")) or 0.0) != 0.0:
+        out.append(f"OPT81 {fid}: downsize advice must not credit merge wait")
+    if f.get("runner_min_saving") is not None:
+        out.append(f"OPT81 {fid}: downsize advice carries a monthly runner-minute claim")
+    return out
+
+
 def _opt81_a2_rederived(f: dict, data: dict) -> list[str]:
     """An A2 advisory carries no number, and gate (d) holds on the findings doc."""
     fid = str(f.get("id") or "?")
@@ -16763,17 +17052,37 @@ def check_opt81_runner_comparison_rederived(report: str,
         if not held and _VR_OPT81_DISCLOSURE not in fence:
             bad.append(f"OPT81 {fid}: its agent prompt does not carry the disclosure line")
         if half == "A1":
-            s, q = _as_dict(fr.get("slow")), _as_dict(fr.get("fast"))
+            downsize = fr.get("kind") == "opt81_downsize"
+            s = _as_dict(fr.get("large") if downsize else fr.get("slow"))
+            q = _as_dict(fr.get("small") if downsize else fr.get("fast"))
             for st in (s, q):
                 want = f"at p50 {(_num(st.get('p50_s')) or 0):.0f}s"
                 if want not in block:
                     bad.append(f"OPT81 {fid}: the card does not state `{want}` for "
                                f"`{st.get('label')}`")
-            rm_lines = [ln for ln in card.splitlines() if _VR_OPT81_RUNNER_MIN_LINE in ln]
-            if len(rm_lines) != 1 or rm_lines[0].split(_VR_OPT81_RUNNER_MIN_LINE, 1)[1] \
-                    .strip() != f"{_VR_OPT81_RUNNER_MIN_UNKNOWN}.":
-                bad.append(f"OPT81 {fid}: the A1 card's runner-minute line must say only "
-                           f"\"{_VR_OPT81_RUNNER_MIN_UNKNOWN}\" ({rm_lines!r})")
+            line_key = (_VR_OPT81_RUNNER_COST_LINE if downsize
+                        else _VR_OPT81_RUNNER_MIN_LINE)
+            rm_lines = [ln for ln in card.splitlines() if line_key in ln]
+            if downsize:
+                want_effect = f"{_VR_OPT81_DOWNSIZE_COST_EFFECT}."
+                pm = _VR_OPT81_PRICING_RE.search(block)
+                if pm:
+                    bad.append(f"OPT81 {fid}: the downsize card or prompt carries a "
+                               f"price (`{pm.group(0)}`); ci-speedup never prices a "
+                               "runner")
+                if _VR_OPT81_DOWNSIZE_SAME_SPEED not in card.lower():
+                    bad.append(f"OPT81 {fid}: the downsize card does not state "
+                               f"\"{_VR_OPT81_DOWNSIZE_SAME_SPEED}\"")
+                if any(_VR_OPT81_RUNNER_MIN_LINE in ln for ln in card.splitlines()):
+                    bad.append(f"OPT81 {fid}: the downsize card states a runner-minute "
+                               "effect; its saving is a runner-cost difference")
+            else:
+                want_effect = f"{_VR_OPT81_RUNNER_MIN_UNKNOWN}."
+            if len(rm_lines) != 1 or rm_lines[0].split(line_key, 1)[1] \
+                    .strip() != want_effect:
+                bad.append(f"OPT81 {fid}: the A1 card's "
+                           f"{'runner-cost' if downsize else 'runner-minute'} line must say only "
+                           f"\"{want_effect}\" ({rm_lines!r})")
         elif not held:
             if _VR_OPT81_INSTALL_SENTENCE not in block:
                 bad.append(f"OPT81 {fid}: the A2 recipe omits the app-install prerequisite")
