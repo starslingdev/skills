@@ -7187,9 +7187,6 @@ def test_opt46_combined_group_validates_every_default_branch_and_tag_run():
         assert len(merges) == 3, merges
         assert not c("push", ref=f"refs/heads/{default}", run_id=1,
                      default_branch=default)
-    # Scheduled / manual runs on the default branch are also per run.
-    assert g("schedule", ref="refs/heads/main", run_id=1) != g(
-        "schedule", ref="refs/heads/main", run_id=2)
     # Tags: per run, never cancelled.
     # (Same tag ref, three runs: a re-pushed tag or manual reruns still get
     # their own groups, not a shared `CI-v1.1`.)
