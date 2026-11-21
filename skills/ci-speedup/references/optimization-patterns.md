@@ -1584,6 +1584,18 @@ upper bound. It can include nearby work in that step, so the report never credit
 more than that duration and requires re-measurement after the duplicate leaf
 command is removed.
 
+Test source can hide the same duplication from both workflow and job-log command
+matching. In one Go package, inspect distinct `Test*` functions for the same
+`exec.Command` build (`go build`, `cargo build`, or a bundler build) whose output
+is routed through that test's own `t.TempDir`. Two or more tests with the same
+build inputs are one OPT16 finding. Same inputs means the same literal tool,
+verb, flags (`-tags`, `-ldflags`), target, command `Env` and `Dir`, in files
+with the same build constraint. A shared helper containing the one build,
+different build targets, and builds without per-test temporary output stay quiet.
+A test that sets process environment (`t.Setenv("GOOS", ...)`), changes
+directory, or passes a test-local variable as a build input is withheld: source
+alone cannot show that its build matches the others.
+
 ```bash
 # For each job in each workflow, check if any command appears in multiple steps
 for f in /tmp/workflows/*.yml; do
@@ -1603,6 +1615,79 @@ then confirm every original test target still builds and runs. If distinct featu
 or platform coverage is intentional, keep both builds. If the rebuild is a
 workaround for stale artifacts, fix the root cause (e.g., cache key, build system
 incremental support) instead.
+
+For repeated builds inside test source, create one once-per-process build helper
+shared by those tests and clean its artifact at process exit. Build into a
+directory the process owns (for Go, `os.MkdirTemp` in `TestMain`, removed after
+`m.Run()`), not into the first caller's `t.TempDir`, which is deleted when that
+test ends. Keep the build error and fail every caller with it. Preserve each test's
+arguments, environment, failure assertions, and isolation around the built binary;
+only construction is shared. Add a helper failure test and run the original tests
+against the shared artifact before deleting their local build paths. Static source
+does not reveal the build duration or monthly execution count, so the runner-minute
+saving remains unsized until before/after timing is collected. A public example
+shares one CLI build across five contract tests in
+[openclaw/crabbox#1674](https://github.com/openclaw/crabbox/pull/1674).
+
+---
+
+### OPT110 — Uploaded Artifact Has No Repository Consumer
+
+<!-- METADATA
+pattern: OPT110
+impact: MEDIUM
+class: static
+detector: yaml-cross-workflow
+affected_files: ".github/workflows/*.yml,.github/workflows/*.yaml"
+fix_strategy: remove-or-reuse-unused-artifact
+title_template: "Uploaded artifact has no repository consumer (unverified externally)"
+-->
+
+**Anti-pattern**: A job packs and uploads a build output or compiled worker that
+no job downloads and no release or deploy step consumes. The upload time,
+retention storage and repeated packaging are pure cost when no human or
+external system uses the artifact either.
+
+**Detection heuristic**: Index each literal `actions/upload-artifact` name
+across the repository. Match it against literal `actions/download-artifact`
+names and patterns, `gh run download` selectors, `actions/deploy-pages`, other
+artifact actions that name the artifact, and uploaded paths referenced by
+release or deploy steps. A download without a selector consumes all names.
+Withhold every finding when a download selector is dynamic or unreadable, or
+when the repository calls the artifacts API, an external reusable workflow, a
+third-party artifact action without a literal name, or a local action that may
+download. Withhold an upload whose likely reader is a person or a delivery:
+uploads gated on `failure()`, `always()` or `cancelled()`, diagnostic names or
+paths (logs, reports, traces, coverage, screenshots), release- or deploy-named
+artifacts, `github-pages`, uploads whose URL or id output is read, and every
+upload in a reusable (`workflow_call`), tag- or release-triggered or
+release-like workflow or in a release or deploy job. The scan cannot see a
+human download or an external API consumer, so a remaining finding is
+explicitly unverified outside the repository.
+
+**Fix recipe (safest first)**:
+
+1. Search workflow history, release automation and owner documentation for the
+   artifact name and path. Confirm whether a person or external system still
+   depends on it and whether its retention is required for diagnostics.
+2. If there is no consumer, remove the upload and any packaging done only for
+   it. Preserve every test, build, diagnostic and release step.
+3. If another job rebuilds the same output, keep one producer and reuse its
+   artifact there instead (OPT14). Prove the consumer validates the same source,
+   dependency and toolchain inputs before deleting its local build.
+
+**Sizing**: Runner-minute effect is a **saving**: the upload step's measured
+billed compute, plus packaging time performed only for that upload. Do not
+state a number until those steps are timed. Storage reduction is real but is a
+separate retention quantity, not runner-minute saving. Removing an off-path
+upload normally does not shorten pull-request merge wait.
+
+**Public evidence**: [OpenClaw pull request #154095](https://github.com/openclaw/openclaw/pull/154095)
+is the public example of this shape.
+
+**Risk**: MEDIUM. A repository-local search cannot disprove human downloads or
+external API use. Removing a diagnostic or release artifact can break incident
+response or delivery without making CI red, so confirm those consumers first.
 
 ---
 
@@ -2491,6 +2576,7 @@ Strip trailing digits and separators from named variants (`slow-0` → `large`),
 
 - Collect per-leg median duration of a matrix base across sampled runs; flag an atomic-unit ratio of at least 1.6×, or a plain imbalance if `max_leg_median / min_leg_median > 3` (**lower to 2x** when the slow leg is the workflow's long pole).
 - **Classify the case**: without a named family, the matrix is *sharded* (case 1) only when the varying axis token is an explicit `shard`/`partition` marker. A prefix-varying / named-package / named-config axis is *heterogeneous* (case 2). Bare-number axes (node versions, etc.) are treated as heterogeneous (they are not interchangeable shards).
+- **Static early warning**: inspect repository sharding scripts for a sorted test list assigned by position (`names[index::count]`, or a sorted JavaScript list filtered by `index % count`). Inserting one test reshuffles most existing assignments even before sampled legs cross the imbalance threshold. A stable name hash, or a list sorted by measured duration or weight (a Python `key=` or a JavaScript comparator other than `localeCompare`), stays quiet: dealing a timing-sorted list is already timing-based.
 
 **Fix — case 1 (sharded suite), achievable by redistribution**:
 
@@ -2499,6 +2585,7 @@ Strip trailing digits and separators from named variants (`slow-0` → `large`),
 - Timing-based sharding (pytest-split, nextest timing data): enable it.
 - Runner distributes by whole file (Jest `--shard`, Playwright `--shard` without `fullyParallel: true`, file-granular splitters): the imbalance is one oversized file, so find it from measured per-file runtime and split it before adding shards; more shards cannot spread one file. Playwright with `fullyParallel: true` shards individual tests, so this does not apply there.
 - Sizing: the slow shard can drop toward the mean leg duration → `Δwc ≈ slow − mean(legs)`.
+- For a hand-written positional splitter, place every unlisted test by a stable hash of its test name. Keep a checked-in list of measured slow tests and pack those heaviest first onto the currently lightest shard. Take weights from the per-test timings printed by CI shards, not local runs, and exclude per-shard constants such as a one-time build paid by the first caller. Every test must land on exactly one shard: listed tests only through the packing, unlisted tests only through the hash, and a listed name that no longer exists is dropped; add a check that the union of all shards equals the full test listing with no duplicates. The same existing jobs still execute the same tests, so the runner-minute effect is roughly neutral for passing runs; any saving from fewer shard timeouts and reruns is unsized, and the wall-clock saving remains unsized until CI timings measure the imbalance. Public examples show that a net +2 tests moved 1,949 existing assignments under the stride rule and zero under the hash rule in [openclaw/crabbox#2826](https://github.com/openclaw/crabbox/pull/2826), with weights then taken from CI timings in [openclaw/crabbox#2832](https://github.com/openclaw/crabbox/pull/2832).
 
 **Fix — case 2 (heterogeneous legs), NOT rebalanceable**:
 
@@ -6017,7 +6104,10 @@ fix_strategy: profile-the-compile
 title_template: "The compile is the long pole and nobody profiled it"
 -->
 
-**Not auto-detected yet.** Like OPT86, no pass emits OPT91, so the audit never reports it on its own and never claims to have checked it. No audit phase applies it; a reader applies it by hand, reading the slow build step and the compiler's own timing reports against the heuristic below.
+The compiler-profile flavor remains manual: no pass infers a compiler hotspot
+without timing evidence. A narrow Xcode CI flavor is auto-detected from workflow
+YAML when a compiling `xcodebuild` invocation leaves its index store on, or a
+simulator build/test uses a generic destination without one host architecture.
 
 **TL;DR**: The slowest job's time goes to compiling, the cache is already doing its job, and nobody has asked the compiler where the time goes. Profile the compile with the compiler's own timing reports, then fix the hotspot it names: a build-profile setting that costs far more build time than it returns at runtime, or one piece of code that is expensive to compile.
 
@@ -6031,6 +6121,32 @@ title_template: "The compile is the long pole and nobody profiled it"
 2. The cache is not the explanation: dependencies are restored, or the job builds clean by design (a release build), and the slow part is compiling the project's own code or the final optimized link.
 3. Nobody has read the compiler's timing report for this job (a report CI already produces but nobody examines counts as unread; check the workflow for it and whether its artifact survives), or the report names one dominant item: for Rust, `cargo build --timings` (per crate) and `-Z time-passes` (per compiler pass, nightly); for TypeScript, `tsc --extendedDiagnostics` or `--generateTrace`; for C and C++, Clang's `-ftime-trace`.
 
+**Static Xcode CI check**:
+
+1. Inspect workflow `run:` steps that invoke `xcodebuild` for `build`, `test`,
+   `build-for-testing`, `archive` or `analyze`. A version probe, a listing or
+   `-showBuildSettings` call, `test-without-building`, and an option value that
+   spells an action (`-derivedDataPath build`) do not compile and stay quiet.
+2. Flag the index store when the build uses an unoptimized configuration (no
+   `-configuration` on a non-archive action, or a Debug one), which is where
+   Xcode's `Default` setting writes it, unless the command, the effective
+   workflow/job/step environment, or a repository `.xcconfig` or
+   `project.pbxproj` sets `COMPILER_INDEX_STORE_ENABLE=NO`. An archive, a
+   Release build and a templated configuration stay quiet. A job whose steps
+   read the index store (Periphery, an IndexStoreDB tool, a copied
+   `Index.noindex` DataStore) stays quiet.
+3. On simulator build/test work, also flag a `generic/platform=… Simulator`
+   destination unless one architecture is selected: `ARCHS` set to `arm64`,
+   `x86_64`, the host's `uname -m` or a runner-architecture expression,
+   `-arch`, `EXCLUDED_ARCHS`, or a repository setting. A multiple-architecture
+   `ARCHS` value does not clear the finding. Keep a generic device destination
+   for an archive/release build; it is not this simulator-test waste.
+4. Withhold the finding when the workflow text cannot classify an input: a
+   setting taken from a shell variable, a `-xcconfig` file or
+   `XCODE_XCCONFIG_FILE`, an unreadable repository settings file, or an
+   unreadable parallel step group. An invocation hidden in a helper or source
+   program is not classified from workflow YAML.
+
 **Fix recipe**:
 
 1. Profile the slow target on the same runner class with the same cache state as the slow job (dependencies restored, or a clean build when the job builds clean by design), and keep the report. A clean build profiled separately is a comparison, not the measurement.
@@ -6038,9 +6154,21 @@ title_template: "The compile is the long pole and nobody profiled it"
 3. If one crate, module or construct dominates, change that code (for example a macro that generates heavy wrappers for every implementation, or deeply nested generics), keeping its public shape where possible.
 4. Re-profile, and record the before and after with the commands used, so a later regression can be measured the same way.
 
+For the static Xcode flavor, start with the two independent settings: add
+`COMPILER_INDEX_STORE_ENABLE=NO` to CI build/test invocations whose index is not
+consumed, then restrict `ARCHS` to the runner host for generic simulator builds.
+Preserve the project, scheme, configuration, signing flags, test selection and
+outputs. Do not replace a generic archive/release destination. Measure each
+setting against the same runner class and cache state so either can be rolled
+back independently if output parity changes.
+
 **Guardrail**: a release-profile setting changes the product, not just the build. Measure the runtime and size of what ships before changing it, and keep the shipped artifact on the settings that were measured. A profile setting used only to speed up CI must not silently become the release setting.
 
-**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured compile share of the step; the saving is what the next profile and the next sampled runs show.
+**Sizing: uncredited**. No `_SIZING` model. The ceiling is the measured compile share of the step; the saving is what the next profile and the next sampled runs show. For the static Xcode flavor, the runner-minute effect is a **saving** of part of the build's compile time, never the whole step; the finding reads `runner-minute saving: unsized (no matched before/after builds isolate these settings, and this static check does not read the workflow's run volume)`. The public result below is evidence that the lever can matter, not a forecast for another repository.
+
+**Public Xcode evidence**: [OpenClaw pull request #187136](https://github.com/openclaw/openclaw/pull/187136)
+made this change to its Xcode CI build and reports the median build time down
+45.8%. That is their result, not a forecast for your repository.
 
 **Real-world example (OpenAI)**, their numbers, not a forecast for your repo:
 

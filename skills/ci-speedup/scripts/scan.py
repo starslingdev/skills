@@ -51,6 +51,7 @@ SCAN_INCOMPLETE_KINDS = frozenset({
     "parallel-group-unread", "symlink-out-of-tree", "no-workflows-dir",
     "opt19-file-cap", "opt19-source-unreadable", "opt113-file-cap",
     "opt113-source-unreadable", "turbo-unreadable",
+    "opt25-source-unreadable",
 })
 
 # Detectors proven by cardinality tests to emit one finding per physical
@@ -1679,6 +1680,285 @@ def _detect_opt45(doc: dict, raw: str) -> list[Hit]:
         match_text="(workflow)",
         snippet=block,
     )]
+
+
+# ---- OPT91 extension — Xcode CI index/architecture waste --------------------
+
+_OPT91_XCODEBUILD_RE = re.compile(r"(?:^|\s)(?:xcrun\s+)?xcodebuild(?:\s|$)", re.I)
+_OPT91_GENERIC_SIM_RE = re.compile(
+    r"generic\s*/\s*platform\s*=\s*[^'\"\n]*(?:iOS|tvOS|watchOS|visionOS)?\s*Simulator",
+    re.I,
+)
+_OPT91_ONE_ARCH = frozenset({"arm64", "x86_64"})
+_OPT91_HOST_ARCH_RE = re.compile(
+    r"\$\(\s*uname\s+-m\s*\)|\$\{\{[^}]*runner\.arch[^}]*\}\}", re.I)
+_OPT91_COMPILE_ACTIONS = frozenset({"build", "test", "archive", "analyze", "build-for-testing"})
+_OPT91_SIMULATOR_ACTIONS = frozenset({"build", "test", "build-for-testing"})
+# Options that take the next token as their value: `-derivedDataPath build`
+# names a directory, not the `build` action.
+_OPT91_VALUE_OPTIONS = frozenset(o.lower() for o in (
+    "-project", "-workspace", "-scheme", "-target", "-configuration", "-sdk",
+    "-destination", "-destination-timeout", "-derivedDataPath",
+    "-resultBundlePath", "-resultBundleVersion", "-archivePath", "-xcconfig",
+    "-testPlan", "-toolchain", "-arch", "-jobs", "-xctestrun",
+    "-testProductsPath", "-exportPath", "-exportOptionsPlist",
+    "-clonedSourcePackagesDirPath", "-packageCachePath",
+    "-parallel-testing-enabled", "-parallel-testing-worker-count",
+    "-maximum-concurrent-test-simulator-destinations",
+    "-maximum-parallel-testing-workers", "-enableCodeCoverage",
+    "-test-iterations", "-only-test-configuration", "-skip-test-configuration",
+    "-test-timeouts-enabled", "-default-test-execution-time-allowance",
+    "-maximum-test-execution-time-allowance", "-collect-test-diagnostics",
+    "-authenticationKeyPath", "-authenticationKeyID",
+    "-authenticationKeyIssuerID", "-localizationPath", "-exportLanguage",
+    "-packageDependencySchemePolicy", "-defaultPackageRegistryURL",
+    "-scmProvider", "-only-testing", "-skip-testing"))
+# Invocations that list, print or export instead of compiling.
+_OPT91_NON_COMPILING_OPTIONS = frozenset(o.lower() for o in (
+    "-version", "-list", "-showsdks", "-showdestinations", "-showBuildSettings",
+    "-showBuildSettingsForIndex", "-showTestPlans", "-resolvePackageDependencies",
+    "-exportArchive", "-exportNotarizedApp", "-exportLocalizations",
+    "-importLocalizations", "-create-xcframework", "-checkFirstLaunchStatus",
+    "-runFirstLaunch", "-dry-run", "-n"))
+# A later step that reads the build's index store (Periphery, an IndexStoreDB
+# tool, a copied DataStore). Disabling the store would break it.
+_OPT91_INDEX_CONSUMER_RE = re.compile(
+    r"\bperiphery\b|index[-_ ]?store|Index\.noindex|IndexStoreDB|/DataStore\b",
+    re.I)
+# The setting's own name is not a consumer of the store it controls.
+_OPT91_INDEX_SETTING_RE = re.compile(r"COMPILER_INDEX_STORE_ENABLE", re.I)
+_OPT91_SETTING_RE = re.compile(
+    r"^\s*(?P<key>COMPILER_INDEX_STORE_ENABLE|ARCHS|EXCLUDED_ARCHS)"
+    r"(?:\[[^\]]*\])?\s*=\s*(?P<value>[^;\n]*)", re.M)
+_OPT91_REPO_FILE_CAP = 2000
+_OPT91_REPO_FILE_BYTES = 8_000_000
+_OPT91_UNSIZED_REASON = (
+    "no matched before/after builds isolate these settings, and this static "
+    "check does not read the workflow's run volume")
+
+
+def _opt91_repo_settings(root: Path | None) -> dict[str, bool]:
+    """Project-level Xcode settings that already remove (or may remove) the
+    waste. `index_off` / `arch_set`: some xcconfig or project file sets the
+    index store off, or sets/excludes architectures. An unreadable or
+    over-cap tree sets both, so the finding is withheld, never called safe."""
+    result = {"index_off": False, "arch_set": False}
+    if root is None:
+        return result
+    skipped = {".git", "node_modules", "vendor", "Pods", "Carthage", "build",
+               "DerivedData", ".build"}
+    seen = 0
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in skipped]
+        for filename in filenames:
+            if not (filename.endswith(".xcconfig") or filename == "project.pbxproj"):
+                continue
+            seen += 1
+            path = Path(directory) / filename
+            try:
+                if seen > _OPT91_REPO_FILE_CAP:
+                    raise OSError("too many Xcode settings files")
+                if path.is_symlink() or path.stat().st_size > _OPT91_REPO_FILE_BYTES:
+                    raise OSError("unreadable Xcode settings file")
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return {"index_off": True, "arch_set": True}
+            for match in _OPT91_SETTING_RE.finditer(text):
+                key = match.group("key")
+                value = match.group("value").strip().strip('"').strip()
+                if key == "COMPILER_INDEX_STORE_ENABLE":
+                    if value.upper() != "YES":
+                        result["index_off"] = True
+                elif key == "EXCLUDED_ARCHS":
+                    if value:
+                        result["arch_set"] = True
+                elif value and "ARCHS_STANDARD" not in value:
+                    result["arch_set"] = True
+    return result
+
+
+def _opt91_xcode_invocations(run: str) -> list[str]:
+    normalized = re.sub(r"\\\s*\n", " ", run)
+    return [
+        segment.strip()
+        for segment in re.split(r"\r?\n|&&|\|\||;", normalized)
+        if _OPT91_XCODEBUILD_RE.search(segment)
+    ]
+
+
+def _opt91_parse(invocation: str) -> dict[str, Any] | None:
+    """Actions, option values and build-setting assignments of one
+    `xcodebuild` invocation; None when the shell words cannot be read."""
+    try:
+        tokens = shlex.split(invocation)
+    except ValueError:
+        return None
+    try:
+        start = next(i for i, t in enumerate(tokens)
+                     if t.rsplit("/", 1)[-1] == "xcodebuild") + 1
+    except StopIteration:
+        return None
+    actions: set[str] = set()
+    options: dict[str, str] = {}
+    settings: dict[str, str] = {}
+    i = start
+    while i < len(tokens):
+        token = tokens[i]
+        low = token.lower()
+        if token in {"|", ">", ">>", "2>&1"}:
+            break
+        if low.startswith("-"):
+            if low in _OPT91_VALUE_OPTIONS and i + 1 < len(tokens):
+                options[low] = tokens[i + 1]
+                i += 2
+                continue
+            options[low.split(":", 1)[0]] = ""
+        elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?=.*", token):
+            key, value = token.split("=", 1)
+            settings[key.split("[", 1)[0].upper()] = value
+        elif low in _OPT91_COMPILE_ACTIONS:
+            actions.add(low)
+        i += 1
+    return {"actions": actions, "options": options, "settings": settings}
+
+
+def _opt91_env(job: dict, step: dict, doc: dict) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for owner in (doc, job, step):
+        env = owner.get("env") if isinstance(owner, dict) else None
+        if isinstance(env, dict):
+            result.update({str(key): str(value) for key, value in env.items()})
+    return result
+
+
+def _opt91_arch_state(value: str | None) -> str:
+    """`one` (a single host architecture), `many`, or `unknown` (a value the
+    workflow text cannot resolve) for an `ARCHS` value; `absent` for None."""
+    if value is None:
+        return "absent"
+    text = value.strip().strip("'\"").strip()
+    if _OPT91_HOST_ARCH_RE.fullmatch(text):
+        return "one"
+    if "$" in text:
+        return "unknown"
+    words = text.split()
+    if len(words) == 1 and words[0].lower() in _OPT91_ONE_ARCH:
+        return "one"
+    return "many"
+
+
+def _opt91_index_state(value: str | None) -> str:
+    """`off`, `on`, or `unknown` for a `COMPILER_INDEX_STORE_ENABLE` value."""
+    if value is None:
+        return "on"
+    text = value.strip().strip("'\"").strip().upper()
+    if "$" in text:
+        return "unknown"
+    return "on" if text in {"YES", "DEFAULT"} else "off"
+
+
+def _opt91_unoptimized(parsed: dict[str, Any]) -> bool:
+    """True only when the build is known to use an unoptimized (Debug)
+    configuration, the only one where Xcode's `Default` setting writes an index
+    store. `archive` defaults to Release; an explicit non-Debug or templated
+    configuration cannot be classified from the workflow."""
+    configuration = parsed["options"].get("-configuration")
+    if configuration is None:
+        return "archive" not in parsed["actions"]
+    return "$" not in configuration and "debug" in configuration.lower()
+
+
+def _detect_opt91_xcode_ci(doc: dict, raw: str,
+                           repo_settings: dict[str, bool] | None = None
+                           ) -> list[Hit]:
+    """Static Xcode build waste: an index store no step reads, or a simulator
+    build that leaves a generic destination to compile more than one
+    architecture. Any input that cannot be classified withholds that flavor."""
+    repo_settings = repo_settings or {"index_off": False, "arch_set": False}
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        steps = _steps(job)
+        index_consumed = any(
+            _OPT91_INDEX_CONSUMER_RE.search(_OPT91_INDEX_SETTING_RE.sub(
+                "", f"{_run(step) or ''}\n{step.get('uses') or ''}"))
+            for step in steps if isinstance(step, dict))
+        job_issues: set[str] = set()
+        first_step = ""
+        for step in steps:
+            run = _run(step)
+            if not run:
+                continue
+            env = _opt91_env(job, step, doc)
+            for invocation in _opt91_xcode_invocations(run):
+                parsed = _opt91_parse(invocation)
+                if parsed is None or not parsed["actions"]:
+                    continue
+                if set(parsed["options"]) & _OPT91_NON_COMPILING_OPTIONS:
+                    continue
+                if "-xcconfig" in parsed["options"] or "XCODE_XCCONFIG_FILE" in env:
+                    continue
+                settings = parsed["settings"]
+                issues: set[str] = set()
+                index_value = settings.get(
+                    "COMPILER_INDEX_STORE_ENABLE",
+                    env.get("COMPILER_INDEX_STORE_ENABLE"))
+                if (_opt91_index_state(index_value) == "on"
+                        and (index_value is not None
+                             or not repo_settings["index_off"])
+                        and _opt91_unoptimized(parsed)
+                        and not index_consumed):
+                    issues.add("index")
+                arch_value = settings.get("ARCHS", env.get("ARCHS"))
+                excluded = settings.get("EXCLUDED_ARCHS", env.get("EXCLUDED_ARCHS"))
+                generic_sim = bool(
+                    parsed["actions"] & _OPT91_SIMULATOR_ACTIONS
+                    and "archive" not in parsed["actions"]
+                    and _OPT91_GENERIC_SIM_RE.search(invocation)
+                    and "-arch" not in parsed["options"]
+                    and not (excluded or "").strip())
+                arch_state = _opt91_arch_state(arch_value)
+                if generic_sim and (
+                        arch_state == "many"
+                        or (arch_state == "absent" and not repo_settings["arch_set"])):
+                    issues.add("architecture")
+                if issues:
+                    job_issues.update(issues)
+                    if not first_step:
+                        first_step = str(step.get("name") or "Run xcodebuild")
+        if not job_issues:
+            continue
+        issue_text = " and ".join(
+            part for key, part in (
+                ("index", "writes an index store (Xcode's Debug default) that no "
+                          "step in the job reads"),
+                ("architecture", "uses a generic simulator destination without one "
+                                 "host architecture"),
+            ) if key in job_issues
+        )
+        fixes = []
+        if "index" in job_issues:
+            fixes.append("set `COMPILER_INDEX_STORE_ENABLE=NO`")
+        if "architecture" in job_issues:
+            fixes.append("set `ARCHS` to the host simulator architecture")
+        line = _line_of_in_job(raw, job_name, "xcodebuild")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"job `{job_name}` step `{first_step}` {issue_text}. "
+                f"{' and '.join(fixes)} for CI build/test work; keep generic "
+                "destinations for archive/release builds. Runner-minute effect: "
+                "saving (part of the build's compile time, not the whole step); "
+                f"runner-minute saving: unsized ({_OPT91_UNSIZED_REASON})."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+            facts={"fix_strategy": "xcode-ci-build-shape",
+                   "runner_min_unsized_reason": _OPT91_UNSIZED_REASON},
+        ))
+    return hits
 
 
 # ---- OPT46 extension — always() aggregate after cancellation ----------------
@@ -4748,6 +5028,262 @@ def _artifact_selector_matches(
         return True  # actions/download-artifact without a selector downloads all
     pattern_re = re.escape(download_pattern).replace(r"\*", ".*").replace(r"\?", ".")
     return re.fullmatch(pattern_re, upload_name) is not None
+
+
+_OPT110_GH_DOWNLOAD_RE = re.compile(
+    r"\bgh\s+run\s+download\b([^\n;&|]*)", re.IGNORECASE)
+_OPT110_DYNAMIC_RE = re.compile(r"\$\{\{|\$\(|\$[A-Za-z_{]")
+
+
+def _opt110_dynamic(value: str) -> bool:
+    return _OPT110_DYNAMIC_RE.search(value) is not None
+
+
+def _opt110_gh_downloads(script: str) -> tuple[list[tuple[str, str]], bool]:
+    """Literal ``gh run download`` selectors and whether one was unreadable.
+
+    A command without ``--name``/``--pattern`` downloads all artifacts. Dynamic
+    selectors fail closed because they may name any upload in the repository.
+    The run-id positional argument is irrelevant to artifact-name matching.
+    """
+    selectors: list[tuple[str, str]] = []
+    unreadable = False
+    for match in _OPT110_GH_DOWNLOAD_RE.finditer(script):
+        try:
+            args = shlex.split(match.group(1), comments=True, posix=True)
+        except ValueError:
+            unreadable = True
+            continue
+        names: list[str] = []
+        patterns: list[str] = []
+        index = 0
+        while index < len(args):
+            token = args[index]
+            value = ""
+            target: list[str] | None = None
+            if token in ("-n", "--name"):
+                target = names
+                index += 1
+                value = args[index] if index < len(args) else ""
+            elif token.startswith("--name="):
+                target, value = names, token.split("=", 1)[1]
+            elif token in ("-p", "--pattern"):
+                target = patterns
+                index += 1
+                value = args[index] if index < len(args) else ""
+            elif token.startswith("--pattern="):
+                target, value = patterns, token.split("=", 1)[1]
+            if target is not None:
+                if not value or _opt110_dynamic(value):
+                    unreadable = True
+                else:
+                    target.append(value)
+            index += 1
+        if names or patterns:
+            selectors.extend((name, "") for name in names)
+            selectors.extend(("", pattern) for pattern in patterns)
+        elif not unreadable:
+            selectors.append(("", ""))
+    return selectors, unreadable
+
+
+def _opt110_step_blob(step: dict) -> str:
+    values = step.get("with") if isinstance(step.get("with"), dict) else {}
+    env = step.get("env") if isinstance(step.get("env"), dict) else {}
+    return "\n".join((
+        str(step.get("name") or ""),
+        _uses(step),
+        _run(step),
+        json.dumps(values, sort_keys=True),
+        json.dumps(env, sort_keys=True),
+    ))
+
+
+# A person reads these when a run fails or for a report; they are diagnostics,
+# not build output, and the repository cannot see that reader.
+_OPT110_DIAGNOSTIC_RE = re.compile(
+    r"(?:^|[\s./_-])(?:allure|coverage|junit|reports?|results?|logs?|traces?|"
+    r"screenshots?|videos?|diagnostics?|debug|dumps?|crash(?:es)?|core|sarif|"
+    r"profiles?|benchmarks?|bench|snapshots?|diffs?|playwright|cypress)"
+    r"(?:$|[\s./_-])",
+    re.IGNORECASE,
+)
+_OPT110_RUN_STATUS_IF_RE = re.compile(
+    r"\b(?:failure|always|cancelled)\s*\(", re.IGNORECASE)
+# REST/CLI artifact consumers that select by run, not by a literal name.
+_OPT110_ARTIFACT_API_RE = re.compile(
+    r"(?:list\w*Artifacts|downloadArtifact|getArtifact|/actions/artifacts|"
+    r"/actions/runs/\S*/artifacts|\bgh\s+api\b[^\n]*artifacts)",
+    re.IGNORECASE,
+)
+
+
+def _opt110_on_events(doc: dict) -> Any:
+    return doc.get("on") or doc.get(True)
+
+
+def _opt110_tag_triggered(on: Any) -> bool:
+    if not isinstance(on, dict):
+        return False
+    push = on.get("push")
+    if isinstance(push, dict) and ("tags" in push or "tags-ignore" in push):
+        return True
+    return "release" in on
+
+
+def _opt110_job_ships(job_name: str, job: dict) -> bool:
+    """A job that releases or deploys: its uploads may be the shipped record."""
+    if job.get("environment"):
+        return True
+    if _RELEASE_NAME_RE.search(f"{job_name}\n{job.get('name') or ''}"):
+        return True
+    if _RELEASE_OP_RE.search(_job_run_blob(job)):
+        return True
+    return any(_RELEASE_OP_RE.search(_uses(s)) for s in _steps(job))
+
+
+def _opt110_upload_withheld(step: dict, name: str, paths: list[str]) -> bool:
+    """An upload whose likely reader is a person or a release, not a job."""
+    if _OPT110_RUN_STATUS_IF_RE.search(str(step.get("if") or "")):
+        return True
+    identity = "\n".join([str(step.get("name") or ""), name, *paths])
+    return bool(_OPT110_DIAGNOSTIC_RE.search(identity)
+                or _RELEASE_NAME_RE.search(identity)
+                or name == "github-pages")
+
+
+def _opt110_local_action_may_download(root: Path | None, uses: str) -> bool:
+    """Whether a local action could consume artifacts; unreadable means yes."""
+    if root is None:
+        return True
+    base = root / uses.split("@", 1)[0].removeprefix("./").rstrip("/")
+    for candidate in (base / "action.yml", base / "action.yaml"):
+        if candidate.is_file():
+            try:
+                text = candidate.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return True
+            return bool(re.search(r"download-artifact|deploy-pages", text, re.I)
+                        or _OPT110_GH_DOWNLOAD_RE.search(text)
+                        or _OPT110_ARTIFACT_API_RE.search(text))
+    return True
+
+
+def _detect_opt110_unused_artifacts(
+        parsed: list[tuple[str, dict, str]],
+        root: Path | None = None) -> list[tuple[str, str, Hit]]:
+    """Uploads with no repository-visible consumer.
+
+    Match literal names across every workflow against download-artifact and
+    ``gh run download``. A release/deploy step that references an uploaded
+    literal path is also a consumer. Dynamic selectors fail closed. Human and
+    external API consumers are unobservable, so every finding says unverified.
+    """
+    uploads: list[dict[str, Any]] = []
+    downloads: list[tuple[str, str]] = []
+    release_blobs: list[str] = []
+    unreadable_download = False
+
+    for rel, doc, raw in parsed:
+        release_like = _is_release_like(doc)
+        on = _opt110_on_events(doc)
+        producer_withheld = (release_like or _opt110_tag_triggered(on)
+                             or _on_includes(on, ("workflow_call",)))
+        for job_name, job in _jobs_from_doc(doc).items():
+            if not isinstance(job, dict):
+                continue
+            job_uses = str(job.get("uses") or "")
+            if job_uses and not job_uses.startswith("./"):
+                return []  # an external reusable workflow may download anything
+            job_withheld = producer_withheld or _opt110_job_ships(job_name, job)
+            for step in _steps(job):
+                uses = _uses(step).lower()
+                values = step.get("with") if isinstance(step.get("with"), dict) else {}
+                if _OPT110_ARTIFACT_API_RE.search(_opt110_step_blob(step)):
+                    return []  # selects artifacts by run, not by literal name
+                if uses.startswith("./") and _opt110_local_action_may_download(
+                        root, _uses(step)):
+                    return []
+                if "actions/upload-artifact" in uses:
+                    name, _ = _artifact_selector(step, upload=True)
+                    if not name or _opt110_dynamic(name):
+                        continue
+                    paths = [
+                        line.strip() for line in str(values.get("path") or "").splitlines()
+                        if line.strip() and not line.lstrip().startswith("!")
+                        and not _opt110_dynamic(line.strip())
+                    ]
+                    step_id = str(step.get("id") or "")
+                    if (job_withheld or _opt110_upload_withheld(step, name, paths)
+                            or (step_id and re.search(
+                                rf"steps\.{re.escape(step_id)}\.outputs\.artifact",
+                                raw))):
+                        continue
+                    line = (_line_of_in_job(raw, job_name, "upload-artifact")
+                            or _line_of_in_job(raw, job_name, name) or 1)
+                    uploads.append({
+                        "workflow": rel,
+                        "job": job_name,
+                        "name": name,
+                        "paths": paths,
+                        "line": line,
+                        "snippet": _block_lines(raw, line),
+                    })
+                    continue
+                if "actions/download-artifact" in uses:
+                    name, pattern = _artifact_selector(step, upload=False)
+                    if _opt110_dynamic(name) or _opt110_dynamic(pattern):
+                        unreadable_download = True
+                    else:
+                        downloads.append((name, pattern))
+                elif "deploy-pages" in uses:
+                    downloads.append((str(values.get("artifact_name") or "github-pages"), ""))
+                elif "artifact" in uses and "upload" not in uses:
+                    # A third-party artifact action: trust only a literal name.
+                    name = str(values.get("name") or "").strip()
+                    if name and not _opt110_dynamic(name):
+                        downloads.append((name, ""))
+                    else:
+                        unreadable_download = True
+                shell_downloads, shell_unreadable = _opt110_gh_downloads(_run(step))
+                downloads.extend(shell_downloads)
+                unreadable_download = unreadable_download or shell_unreadable
+                if release_like:
+                    blob = _opt110_step_blob(step)
+                    operation = "\n".join((
+                        str(step.get("name") or ""), _uses(step), _run(step)))
+                    if (_RELEASE_OP_RE.search(blob)
+                            or _RELEASE_NAME_RE.search(operation)):
+                        release_blobs.append(blob)
+
+    if unreadable_download:
+        return []
+
+    hits: list[tuple[str, str, Hit]] = []
+    for upload in uploads:
+        name = str(upload["name"])
+        if any(_artifact_selector_matches(name, dl_name, dl_pattern)
+               for dl_name, dl_pattern in downloads):
+            continue
+        if any(path in blob for path in upload["paths"] for blob in release_blobs):
+            continue
+        job_name = str(upload["job"])
+        hits.append(("OPT110", str(upload["workflow"]), Hit(
+            line=int(upload["line"]),
+            affected_jobs=[job_name],
+            evidence=(
+                f"job `{job_name}` uploads artifact `{name}`, but no workflow "
+                "downloads that name and no release or deploy step references its "
+                "uploaded path; a human or external API consumer is unverified outside "
+                "this repository. Confirm retention and external consumers, then drop "
+                "the upload or reuse it where another job rebuilds the same output "
+                "(OPT14). Runner-minute effect: saving the upload step's measured "
+                "compute; not sized until that step is timed."
+            ),
+            match_text=name,
+            snippet=str(upload["snippet"]),
+        )))
+    return hits
 
 
 _REPORT_ARTIFACT_RE = re.compile(
@@ -8073,7 +8609,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT46", "OPT76", "OPT108", "OPT109", "OPT111"})
+    "OPT39", "OPT46", "OPT76", "OPT91", "OPT108", "OPT109", "OPT111"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -8244,7 +8780,7 @@ _ADVISORY_PATTERNS: set[str] = {"OPT19"}
 # Patterns handled by a cross-workflow / repo-file / source-grep pass rather
 # than the per-file dispatch — excluded from `catalog_patterns_without_detector`.
 _NON_PERFILE_PATTERNS: set[str] = {
-    "OPT7", "OPT37", "OPT40", "OPT96",   # cross-workflow
+    "OPT7", "OPT37", "OPT40", "OPT96", "OPT110",  # cross-workflow
     "OPT52", "OPT53", "OPT58", "OPT59", "OPT60",  # turbo.json repo-file
     "OPT19",                              # source-file sleep grep
 }
@@ -10925,6 +11461,7 @@ def _cross_workflow_hits(parsed: list[tuple[str, dict, str]], root: Path,
     out += _detect_opt40(parsed, root)
     out += _detect_opt4_ephemeral_mounts(parsed, root)
     out += _detect_opt12_duplicate_test_work(parsed)
+    out += _detect_opt110_unused_artifacts(parsed, root)
     turbo_hits, incomplete = _detect_turbo(root, _ci_turbo_tasks(root, parsed))
     out += turbo_hits
     cache_hits, cache_held = _detect_opt96(parsed, root, default_branch, branch_source)
@@ -10965,6 +11502,482 @@ _OPT19_PATTERNS: tuple[tuple[str, "re.Pattern[str]", float], ...] = (
 )
 
 _OPT19_FILE_CAP = 8000
+
+
+_OPT25_SPLITTER_PATH_RE = re.compile(r"(?:shard|split|partition)", re.IGNORECASE)
+_OPT25_SPLITTER_SUFFIXES = (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs")
+_OPT25_SORT_ASSIGN_RE = re.compile(
+    r"(?m)^\s*(?:const\s+|let\s+|var\s+)?(?P<name>[A-Za-z_][A-Za-z0-9_]*)"
+    r"\s*=\s*(?:(?P<py_sorted>sorted)\s*\(|[^\n;]*\.sort\s*\()(?P<args>[^\n]*)")
+_OPT25_SORT_IN_PLACE_RE = re.compile(
+    r"(?m)^\s*(?P<name>[A-Za-z_][A-Za-z0-9_]*)\.sort\s*\((?P<args>[^\n]*)")
+# Name-order keys. Any other Python `key=` or JavaScript comparator (measured
+# duration, weight, cost) makes a stride over the list a timing-based deal,
+# which is the recommended shape, so it stays quiet.
+_OPT25_NAME_KEY_RE = re.compile(
+    r"\bkey\s*=\s*(?:str|str\.lower|str\.casefold|os\.path\.basename)\s*(?:,|$)")
+_OPT25_PY_KEY_RE = re.compile(r"\bkey\s*=")
+_OPT25_JS_COMPARATOR_RE = re.compile(r"\S")
+
+
+def _opt25_call_args(text: str, start: int, cap: int = 600) -> str:
+    """The sort call's argument text up to its closing parenthesis, across
+    lines, so a `key=` on a continuation line is still read."""
+    depth = 0
+    for offset, char in enumerate(text[start:start + cap]):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            if depth == 0:
+                return text[start:start + offset]
+            depth -= 1
+    return text[start:start + cap]
+
+
+def _opt25_sorts_by_name(text: str, assignment: re.Match[str]) -> bool:
+    """True only when the sort orders by test name, not by a measured weight."""
+    args = _opt25_call_args(text, assignment.start("args"))
+    if assignment.groupdict().get("py_sorted"):
+        # Python `sorted(iterable, key=...)`.
+        return (not _OPT25_PY_KEY_RE.search(args)
+                or bool(_OPT25_NAME_KEY_RE.search(args)))
+    if _OPT25_PY_KEY_RE.search(args):
+        # Python in-place `list.sort(key=...)`.
+        return bool(_OPT25_NAME_KEY_RE.search(args))
+    # JavaScript `.sort()` is lexical; a comparator is name order only when it
+    # compares with `localeCompare`.
+    return (not _OPT25_JS_COMPARATOR_RE.search(args)
+            or "localeCompare" in args)
+
+
+_OPT25_POSITIONAL_SIZE_NOTE = (
+    "runner-minute effect: roughly neutral for passing runs because the same "
+    "existing shard jobs run the same tests; any saving from fewer shard "
+    "timeouts and reruns is unsized, and the wall-clock saving is unsized until "
+    "CI per-test timings measure the imbalance")
+_OPT25_POSITIONAL_UNSIZED = (
+    "static source finding; the same shard jobs run the same tests, and no CI "
+    "per-test timings measure the imbalance or timeout reruns")
+
+
+def _opt25_positional_use(text: str, name: str) -> re.Match[str] | None:
+    escaped = re.escape(name)
+    stride = re.compile(
+        rf"\b{escaped}\s*\[\s*(?:shard|index|i)\w*\s*::\s*"
+        rf"(?:count|shards?|total|n)\w*\s*\]", re.IGNORECASE)
+    modulo = re.compile(
+        rf"\b{escaped}\.filter\s*\([^\n]{{0,240}}\b(?:index|i)\w*\s*%\s*"
+        rf"(?:count|shards?|total|n)\w*", re.IGNORECASE)
+    return stride.search(text) or modulo.search(text)
+
+
+def _detect_opt25_positional_splitters(root: Path):
+    """Sorted test lists assigned by position, so insertions reshuffle shards."""
+    hits: list[tuple[str, str, Hit]] = []
+    incomplete: list[dict[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        # `.github/` is the one hidden directory kept: repositories commonly
+        # keep their CI planner scripts in `.github/scripts/`.
+        dirnames[:] = [name for name in dirnames
+                       if name not in _OPT19_SKIP_DIRS
+                       and (not name.startswith(".")
+                            or (name == ".github" and dirpath == str(root)))]
+        for filename in filenames:
+            if not filename.endswith(_OPT25_SPLITTER_SUFFIXES):
+                continue
+            path = Path(dirpath, filename)
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            try:
+                if not _inside_scan_root(path):
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                incomplete.append({
+                    "path": rel, "kind": "opt25-source-unreadable",
+                    "reason": f"OPT25 splitter source read failed: {exc}",
+                })
+                continue
+            if (not _OPT25_SPLITTER_PATH_RE.search(rel)
+                    and not re.search(r"\b(?:shard|partition)\w*\b", text,
+                                      re.IGNORECASE)):
+                continue
+            assignments = list(_OPT25_SORT_ASSIGN_RE.finditer(text))
+            assignments += list(_OPT25_SORT_IN_PLACE_RE.finditer(text))
+            for assignment in assignments:
+                name = assignment.group("name")
+                if not _opt25_sorts_by_name(text, assignment):
+                    continue
+                positional = _opt25_positional_use(text[assignment.end():], name)
+                if positional is None:
+                    continue
+                line = text.count("\n", 0, assignment.end() + positional.start()) + 1
+                hit = Hit(
+                    line=line, affected_jobs=[], match_text=name,
+                    evidence=(f"planner file `{rel}` sorts `{name}` and assigns it by "
+                              "position, so inserting a test reshuffles existing shards"),
+                    facts={
+                        "positional_splitter_static": True,
+                        "pattern_class": "static",
+                        "wall_clock_p50_s": None,
+                        "runner_min_saving": None,
+                        "tier": 2,
+                        "realization": "none",
+                        "fix_strategy": (
+                            "Place unlisted tests by a stable hash of the test name, "
+                            "then pack a checked-in list of measured slow tests "
+                            "heaviest first onto the lightest shard. Take weights from "
+                            "per-test timings printed by CI shards and exclude per-shard "
+                            "constants from those weights. Every test must land on "
+                            "exactly one shard: listed tests only through the packing, "
+                            "unlisted tests only through the hash, and a listed name "
+                            "that no longer exists is dropped from the list. Add a "
+                            "check that the union of all shards equals the full test "
+                            "listing with no duplicates before relying on the new "
+                            "split."),
+                        "size_note": _OPT25_POSITIONAL_SIZE_NOTE,
+                        "runner_min_unsized_reason": _OPT25_POSITIONAL_UNSIZED,
+                    },
+                )
+                hits.append(("OPT25", rel, hit))
+                break
+    return hits, incomplete
+
+
+_OPT16_GO_TEST_FUNC_RE = re.compile(
+    r"(?m)^\s*func\s+(?P<name>Test[A-Za-z0-9_]+)\s*\(\s*"
+    r"(?P<t>[A-Za-z_][A-Za-z0-9_]*)\s+\*testing\.T\s*\)[^{\n]*\{")
+_OPT16_EXEC_RE = re.compile(r"\bexec\.Command(?P<ctx>Context)?\s*\(")
+_OPT16_OUTPUT_FLAGS = frozenset({"-o", "--target-dir", "--outdir", "--outfile",
+                                 "--output", "--output-path"})
+_OPT16_PKG_TOOLS = frozenset({"npm", "pnpm", "yarn", "bun"})
+_OPT16_BUILD_VERB_TOOLS = frozenset({"go", "cargo", "vite", "webpack"})
+_OPT16_FLAGLESS_BUNDLERS = frozenset({"rollup", "esbuild"})
+_OPT16_GO_STRING_RE = re.compile(r'^(?:"(?:[^"\\\n]|\\.)*"|`[^`]*`)$', re.DOTALL)
+_OPT16_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_OPT16_GOOS = frozenset({
+    "aix", "android", "darwin", "dragonfly", "freebsd", "illumos", "ios", "js",
+    "linux", "netbsd", "openbsd", "plan9", "solaris", "wasip1", "windows"})
+_OPT16_GOARCH = frozenset({
+    "386", "amd64", "arm", "arm64", "loong64", "mips", "mips64", "mips64le",
+    "mipsle", "ppc64", "ppc64le", "riscv64", "s390x", "wasm"})
+
+
+def _opt16_mask_go_comments(text: str) -> str:
+    """Blank Go comments (offsets and newlines kept) so commented code never matches."""
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'":
+            i += 1
+            while i < n and text[i] != ch and text[i] != "\n":
+                i += 2 if text[i] == "\\" else 1
+            i += 1
+        elif ch == "`":
+            close = text.find("`", i + 1)
+            i = n if close < 0 else close + 1
+        elif text.startswith("//", i):
+            close = text.find("\n", i)
+            close = n if close < 0 else close
+            for j in range(i, close):
+                out[j] = " "
+            i = close
+        elif text.startswith("/*", i):
+            close = text.find("*/", i + 2)
+            close = n if close < 0 else close + 2
+            for j in range(i, close):
+                if out[j] != "\n":
+                    out[j] = " "
+            i = close
+        else:
+            i += 1
+    return "".join(out)
+
+
+def _opt16_close(text: str, open_idx: int) -> int | None:
+    """Index of the bracket closing ``text[open_idx]`` (comment-masked text)."""
+    pairs = {"(": ")", "[": "]", "{": "}"}
+    stack = [pairs[text[open_idx]]]
+    i, n = open_idx + 1, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'":
+            i += 1
+            while i < n and text[i] != ch and text[i] != "\n":
+                i += 2 if text[i] == "\\" else 1
+        elif ch == "`":
+            close = text.find("`", i + 1)
+            if close < 0:
+                return None
+            i = close
+        elif ch in pairs:
+            stack.append(pairs[ch])
+        elif ch in ")]}":
+            if ch != stack.pop():
+                return None
+            if not stack:
+                return i
+        i += 1
+    return None
+
+
+def _opt16_split_args(text: str) -> list[str]:
+    """Split a call's argument text at top-level commas."""
+    args, depth, cur, i, n = [], 0, [], 0, len(text)
+    while i < n:
+        ch = text[i]
+        if ch in "\"'`":
+            if ch == "`":
+                close = text.find("`", i + 1)
+            else:
+                close = i + 1
+                while close < n and text[close] != ch:
+                    close += 2 if text[close] == "\\" else 1
+            close = n - 1 if close < 0 else min(close, n - 1)
+            cur.append(text[i:close + 1])
+            i = close + 1
+            continue
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            args.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+        i += 1
+    tail = "".join(cur).strip()
+    if tail:
+        args.append(tail)
+    return args
+
+
+def _opt16_literal(arg: str) -> str | None:
+    if not _OPT16_GO_STRING_RE.match(arg):
+        return None
+    return arg[1:-1]
+
+
+def _opt16_is_build(values: list[str | None]) -> bool:
+    """True only for a build verb; `go run`, `npm run test` etc. are not builds."""
+    tool = values[0]
+    rest = values[1:]
+    if tool in _OPT16_BUILD_VERB_TOOLS:
+        return rest[:1] == ["build"]
+    if tool in _OPT16_PKG_TOOLS:
+        return rest[:1] == ["build"] or rest[:2] == ["run", "build"]
+    if tool in {"npx", "bunx"}:
+        return (rest[:1] in (["rollup"], ["esbuild"])
+                or (rest[:1] in (["vite"], ["webpack"]) and rest[1:2] == ["build"]))
+    return tool in _OPT16_FLAGLESS_BUNDLERS
+
+
+def _opt16_statement(body: str, start: int) -> str:
+    """Text of the statement beginning at ``start`` (bracket-aware, to end of line)."""
+    i, n = start, len(body)
+    while i < n and body[i] != "\n":
+        if body[i] in "([{":
+            close = _opt16_close(body, i)
+            if close is None:
+                return body[start:].strip()
+            i = close
+        i += 1
+    return body[start:i].strip()
+
+
+def _opt16_temp_traced(body: str, t_name: str) -> set[str]:
+    """Local identifiers whose value derives from this test's ``t.TempDir()``."""
+    temp_call = re.compile(rf"\b{re.escape(t_name)}\.TempDir\(\s*\)")
+    assigns = [(m.group(1), _opt16_statement(body, m.end()))
+               for m in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:?=(?!=)", body)]
+    traced: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for name, rhs in assigns:
+            if name in traced:
+                continue
+            if temp_call.search(rhs) or traced & set(_OPT16_IDENT_RE.findall(rhs)):
+                traced.add(name)
+                changed = True
+    return traced
+
+
+def _opt16_env_rhs_ok(rhs: str) -> bool:
+    """An Env value built only from literals and the inherited environment."""
+    rest = re.sub(r'"(?:[^"\\\n]|\\.)*"|`[^`]*`', "", rhs)
+    return set(_OPT16_IDENT_RE.findall(rest.replace("os.Environ", "osEnviron"))) <= {
+        "append", "string", "osEnviron"}
+
+
+def _opt16_build_constraint(raw_text: str, filename: str) -> str:
+    """The file's build constraint: tests in exclusive files never share a process."""
+    expr = ""
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("package "):
+            break
+        if stripped.startswith("//go:build"):
+            expr = " ".join(stripped[len("//go:build"):].split())
+    parts = filename[:-len("_test.go")].split("_")[1:]
+    suffix = []
+    if parts and parts[-1] in _OPT16_GOARCH:
+        suffix.insert(0, parts.pop())
+    if parts and parts[-1] in _OPT16_GOOS:
+        suffix.insert(0, parts.pop())
+    return f"{expr}|{'_'.join(suffix)}"
+
+
+def _opt16_test_builds(t_name: str, body: str) -> list[tuple[str, int]]:
+    """(identity, offset-in-body) for each fully classified temp-output build.
+
+    Every build input except the output value must be a string literal; the
+    output value must trace to this test's ``t.TempDir()``; the command's own
+    ``Env``/``Dir`` are part of the identity. Anything the source cannot
+    classify (a local-variable argument, a test-local working directory, a test
+    that mutates the process environment or cwd, a reassigned ``Args``/``Path``)
+    is withheld, never grouped.
+    """
+    if re.search(r"\b(?:Setenv|Unsetenv|Clearenv|Chdir)\s*\(", body):
+        return []
+    traced = _opt16_temp_traced(body, t_name)
+    temp_call = re.compile(rf"\b{re.escape(t_name)}\.TempDir\(\s*\)")
+    local_names = {m.group(1) for m in re.finditer(
+        r"\b([A-Za-z_][A-Za-z0-9_]*)\s*:?=(?!=)", body)}
+    builds = []
+    for call in _OPT16_EXEC_RE.finditer(body):
+        close = _opt16_close(body, call.end() - 1)
+        if close is None:
+            continue
+        args = _opt16_split_args(body[call.end():close])
+        if call.group("ctx"):
+            args = args[1:]
+        values = [_opt16_literal(arg) for arg in args]
+        if not values or values[0] is None:
+            continue
+        lowered = [value.lower() if value is not None else None for value in values]
+        flag_idx = [i for i, value in enumerate(lowered) if value in _OPT16_OUTPUT_FLAGS]
+        if len(flag_idx) != 1 or flag_idx[0] + 1 >= len(args):
+            continue
+        out_idx = flag_idx[0] + 1
+        out_arg = args[out_idx]
+        if values[out_idx] is not None or not (
+                temp_call.search(out_arg)
+                or traced & set(_OPT16_IDENT_RE.findall(out_arg))):
+            continue
+        inputs = [value for i, value in enumerate(values) if i != out_idx]
+        if any(value is None for value in inputs):
+            continue  # a non-literal build input cannot be compared statically
+        if not _opt16_is_build(inputs):
+            continue
+        command_values = list(values)
+        command_values[out_idx] = "<TEMP_OUTPUT>"
+        extras: list[str] = []
+        line_start = body.rfind("\n", 0, call.start()) + 1
+        var = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*:?=\s*$",
+                        body[line_start:call.start()])
+        if var is not None:
+            name = re.escape(var.group(1))
+            if re.search(rf"\b{name}\.(?:Args|Path)\b", body):
+                continue
+            unclassified = False
+            for field in re.finditer(rf"\b{name}\.(Env|Dir)\s*=(?!=)", body):
+                rhs = " ".join(_opt16_statement(body, field.end()).split())
+                if field.group(1) == "Env" and not _opt16_env_rhs_ok(rhs):
+                    unclassified = True
+                if field.group(1) == "Dir" and (
+                        _opt16_literal(rhs) is None
+                        and set(_OPT16_IDENT_RE.findall(rhs)) & (local_names | traced)):
+                    unclassified = True  # a test-local working directory
+                extras.append(f"{field.group(1)}={rhs}")
+            if unclassified:
+                continue
+        identity = " ".join(json.dumps(value) for value in command_values)
+        if extras:
+            identity += " [" + "; ".join(extras) + "]"
+        builds.append((identity, call.start()))
+    return builds
+
+
+def _detect_opt16_test_binary_builds(root: Path):
+    """Repeated same-binary builds performed independently by Go tests.
+
+    A package is a source directory, its declared package name and the file's
+    build constraint. Each occurrence must sit in a distinct ``Test*`` function
+    body, invoke the same fully literal build (same tool, verb, flags, target,
+    command env and working dir), and write its output through that test's
+    ``t.TempDir``. A shared helper stays quiet: the build lives outside every
+    test body.
+    """
+    groups: dict[tuple[str, str, str, str], list[tuple[str, str, int]]] = {}
+    incomplete: list[dict[str, str]] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames
+                       if name not in _OPT19_SKIP_DIRS and not name.startswith(".")]
+        for filename in filenames:
+            if not filename.endswith("_test.go"):
+                continue
+            path = Path(dirpath, filename)
+            rel = os.path.relpath(path, root).replace(os.sep, "/")
+            try:
+                if not _inside_scan_root(path):
+                    continue
+                raw = path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                incomplete.append({"path": rel, "kind": "opt19-source-unreadable",
+                                   "reason": f"OPT16 test source read failed: {exc}"})
+                continue
+            text = _opt16_mask_go_comments(raw)
+            package_match = re.search(r"(?m)^\s*package\s+([A-Za-z_][A-Za-z0-9_]*)", text)
+            if package_match is None:
+                continue
+            constraint = _opt16_build_constraint(raw, filename)
+            for function in _OPT16_GO_TEST_FUNC_RE.finditer(text):
+                open_idx = function.end() - 1
+                close = _opt16_close(text, open_idx)
+                if close is None:
+                    continue
+                body = text[open_idx:close + 1]
+                for identity, offset in _opt16_test_builds(function.group("t"), body):
+                    line = text.count("\n", 0, open_idx + offset) + 1
+                    key = (str(Path(dirpath).relative_to(root)),
+                           package_match.group(1), constraint, identity)
+                    groups.setdefault(key, []).append(
+                        (rel, function.group("name"), line))
+    hits = []
+    for (_directory, package, _constraint, identity), occurrences in sorted(groups.items()):
+        tests = sorted({test for _path, test, _line in occurrences})
+        if len(tests) < 2:
+            continue
+        first_path, _first_test, first_line = occurrences[0]
+        shown = ", ".join(tests[:6])
+        evidence = (
+            f"package `{package}` has {len(tests)} tests that each run the same "
+            f"binary build into their own `t.TempDir`: {shown}"
+        )
+        hit = Hit(
+            line=first_line, affected_jobs=[], evidence=evidence,
+            match_text=identity[:160], facts={
+                "source_test_build_repeat": True,
+                "source_test_build_count": len(tests),
+                "source_test_build_tests": tests,
+                "fix_strategy": ("Build the binary once per test process in one "
+                                 "shared helper, into a directory the process owns "
+                                 "(not the first caller's t.TempDir, which is "
+                                 "deleted when that test ends); return the build "
+                                 "error to every caller, reuse that artifact in "
+                                 "every named test, and clean it up at process exit."),
+                "wall_clock_p50_s": None,
+                "runner_min_saving": None,
+                "tier": 2,
+                "realization": "none",
+                "size_note": ("runner-minute saving: unsized (static source proves "
+                              "the repeated build shape but no build duration or monthly "
+                              "execution count is measured)"),
+            })
+        hits.append(("OPT16", first_path, hit))
+    return hits, incomplete
 
 
 def _detect_opt19(root: Path):
@@ -12058,6 +13071,13 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # reused for the `type_aware_lint` block below.
     type_aware_lint = _read_type_aware_lint(root)
 
+    # OPT91's Xcode flavor reads the project's own xcconfig/pbxproj settings
+    # once: a project that already disables the index store or pins its
+    # architectures has no waste for a workflow override to remove.
+    opt91_entry = catalog_by_id.get("OPT91")
+    opt91_repo_settings = (_opt91_repo_settings(root)
+                           if opt91_entry is not None else None)
+
     # --- Per-file pass ---
     for rel, doc, raw in parsed:
         basename = Path(rel).name
@@ -12110,6 +13130,27 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
                     f["evidence_snippet"] = snippet
                 findings.append(f)
 
+        # OPT91's primary compiler-profile route remains manual/data-driven.
+        # Its Xcode index/architecture flavor is independently provable from
+        # workflow YAML, so emit only that narrow extension as static and
+        # leave it uncredited until matched build timings exist.
+        if opt91_entry is not None:
+            opt91_hits = _detect_opt91_xcode_ci(doc, raw, opt91_repo_settings)
+            if unreadable_jobs:
+                opt91_hits = _hold_back_unreadable(
+                    "OPT91", opt91_hits, rel, unreadable_jobs)
+            for hit in opt91_hits:
+                finding_idx += 1
+                f = _emit(opt91_entry, hit, rel, finding_idx)
+                f["pattern_class"] = "static"
+                f.update(hit.facts)
+                f["workflow_lanes"] = workflow_lanes.get(rel, [])
+                if workflow_push_scopes.get(rel):
+                    f["workflow_push_scopes"] = workflow_push_scopes[rel]
+                snippet = hit.snippet or _raw_line(raw, hit.line)
+                if snippet:
+                    f["evidence_snippet"] = snippet
+                findings.append(f)
         # OPT46's primary detector remains run-history based. Its
         # cancellation-enabled aggregate flavor is provable from YAML, but its
         # advice is safe only for a check that is not required, so the hits are
@@ -12185,6 +13226,34 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         f["realization"] = "direct"
         f["measured_signal"] = hit.evidence
         f["measured_evidence"] = me
+        findings.append(f)
+
+    # OPT25 source extension: a positional splitter can be structurally
+    # unstable before sampled leg timings have become imbalanced. Keep it
+    # uncredited and hand off the stable-hash + CI-weighted recipe.
+    opt25_source_hits, opt25_source_incomplete = _detect_opt25_positional_splitters(root)
+    scan_incomplete.extend(opt25_source_incomplete)
+    for pat, source_path, hit in opt25_source_hits:
+        entry = catalog_by_id.get(pat)
+        if entry is None:
+            continue
+        finding_idx += 1
+        f = _emit(entry, hit, source_path, finding_idx)
+        f.update(hit.facts)
+        findings.append(f)
+
+    # OPT16 source extension: repeated binary builds hidden inside separate Go
+    # tests are not visible in workflow YAML. Keep the static proof uncredited
+    # until a build duration and execution count are measured.
+    opt16_source_hits, opt16_source_incomplete = _detect_opt16_test_binary_builds(root)
+    scan_incomplete.extend(opt16_source_incomplete)
+    for pat, source_path, hit in opt16_source_hits:
+        entry = catalog_by_id.get(pat)
+        if entry is None:
+            continue
+        finding_idx += 1
+        f = _emit(entry, hit, source_path, finding_idx)
+        f.update(hit.facts)
         findings.append(f)
 
     # --- Go test source pass (OPT113) — categorical until run timings reveal

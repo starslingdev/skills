@@ -526,6 +526,119 @@ def test_opt13_finds_build_hidden_in_quality_script_but_not_quality_only(
             if not check.skipped and not check.ok] == []
 
 
+def test_positional_splitter_runs_through_collection_and_full_verifier(
+        monkeypatch, tmp_path):
+    positive = tmp_path / "positional-splitter"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    scripts = positive / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return names[shard::count]
+''', encoding="utf-8")
+    run_root = tmp_path / "run-positional-splitter"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(positive, monkeypatch, run_root, max_runs=20)
+    findings = [row for row in doc["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings, "expected sorted positional splitter guidance"
+    finding = findings[0]
+    assert finding.get("wall_clock_p50_s") is None, finding
+    assert finding.get("runner_min_saving") is None, finding
+    assert "stable hash" in finding.get("fix_strategy", ""), finding
+    assert "runner-minute effect: roughly neutral" in finding.get("size_note", ""), finding
+    failures = [check for check in checks if not check.skipped and not check.ok]
+    assert failures == [], [(check.name, check.detail) for check in failures]
+    # The rendered card must carry the recipe and a literally true cost line:
+    # no "no bill saving", no off-critical-path / cloud-bill-cut claim.
+    start = _report.index("<summary><strong>OPT25 - Shard Imbalance</strong>")
+    card = _report[start:_report.index("</details>", start)]
+    summary_line = card.splitlines()[0]
+    assert "runner-minute saving: unsized (" in summary_line, summary_line
+    assert "no bill saving" not in card, card
+    assert "off the merge-gating critical path" not in card, card
+    assert "cloud-bill cut" not in card, card
+    assert "Fix recipe (safest first): Place unlisted tests by a stable hash" in card, card
+    assert "exactly one shard" in card, card
+
+    negative = tmp_path / "stable-hash-splitter"
+    shutil.copytree(positive, negative)
+    (negative / "scripts" / "test-shard.py").write_text('''\
+import hashlib
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return [name for name in names
+            if int(hashlib.sha256(name.encode()).hexdigest(), 16) % count == shard]
+''', encoding="utf-8")
+    negative_root = tmp_path / "run-stable-hash-splitter"
+    negative_root.mkdir()
+    negative_doc, _negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
+def test_test_local_binary_builds_run_through_collection_and_full_verifier(
+        monkeypatch, tmp_path):
+    positive = tmp_path / "test-local-binary-builds"
+    shutil.copytree(FIXTURE_ROOT / "serial-chain", positive)
+    source = positive / "internal" / "cli"
+    source.mkdir(parents=True)
+    source_text = r'''package cli
+import ("os/exec"; "path/filepath"; "testing")
+func TestConfigContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "tool")
+    _ = exec.Command("go", "build", "-o", out, "./cmd/tool").Run()
+}
+func TestHelpContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "tool")
+    _ = exec.Command("go", "build", "-o", out, "./cmd/tool").Run()
+}
+'''
+    (source / "contract_test.go").write_text(source_text, encoding="utf-8")
+    run_root = tmp_path / "run-test-local-builds"
+    run_root.mkdir()
+    doc, _report, checks = run_fixture(positive, monkeypatch, run_root, max_runs=20)
+    findings = [row for row in doc["findings"]
+                if row.get("pattern") == "OPT16"
+                and row.get("source_test_build_repeat")]
+    assert findings, "expected repeated test-local binary build guidance"
+    finding = findings[0]
+    assert finding.get("runner_min_saving") is None, finding
+    assert finding.get("wall_clock_p50_s") is None, finding
+    assert "runner-minute saving: unsized" in finding.get("size_note", ""), finding
+    assert "once per test process" in finding.get("fix_strategy", ""), finding
+    assert [check for check in checks if not check.skipped and not check.ok] == []
+
+    negative = tmp_path / "shared-test-binary-build"
+    shutil.copytree(positive, negative)
+    (negative / "internal" / "cli" / "contract_test.go").write_text(r'''package cli
+import ("os/exec"; "path/filepath"; "sync"; "testing")
+var once sync.Once
+func sharedBinary(t *testing.T) string {
+    out := filepath.Join(t.TempDir(), "tool")
+    once.Do(func() { _ = exec.Command("go", "build", "-o", out, "./cmd/tool").Run() })
+    return out
+}
+func TestConfigContract(t *testing.T) { _ = sharedBinary(t) }
+func TestHelpContract(t *testing.T) { _ = sharedBinary(t) }
+''', encoding="utf-8")
+    negative_root = tmp_path / "run-shared-test-build"
+    negative_root.mkdir()
+    negative_doc, _negative_report, negative_checks = run_fixture(
+        negative, monkeypatch, negative_root, max_runs=20)
+    assert not [row for row in negative_doc["findings"]
+                if row.get("pattern") == "OPT16"
+                and row.get("source_test_build_repeat")]
+    assert [check for check in negative_checks
+            if not check.skipped and not check.ok] == []
+
+
 def test_runtime_typescript_loader_is_sized_from_profiled_long_pole_only(
         monkeypatch, tmp_path):
     """Runtime transpilation needs a measured loader share, not a command guess."""

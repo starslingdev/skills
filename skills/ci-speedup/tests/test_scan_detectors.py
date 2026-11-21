@@ -613,6 +613,280 @@ jobs:
     assert "OPT14" in _scan_one(tmp_path, pos)
 
 
+def test_opt110_upload_without_a_repository_consumer_is_unverified_waste(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build:runtime
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-runtime-build
+          path: dist/runtime.tar.gz
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT110"
+    ]
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding["affected_jobs"] == ["build"]
+    assert "dist-runtime-build" in finding["evidence"]
+    assert "unverified outside this repository" in finding["evidence"]
+    assert "Runner-minute effect: saving" in finding["evidence"]
+
+
+def test_opt110_matching_download_action_is_a_consumer(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: dist, path: dist}
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {name: dist}
+      - run: npm test
+"""
+    assert "OPT110" not in _scan_one(tmp_path, workflow)
+
+
+def test_opt110_cross_workflow_gh_download_is_a_consumer(tmp_path: Path):
+    _write_workflow(tmp_path, "build.yml", """name: Build
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: worker-bundle, path: dist/worker.tgz}
+""")
+    _write_workflow(tmp_path, "deploy.yml", """name: Deploy
+on: workflow_dispatch
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh run download "$RUN_ID" --name worker-bundle
+      - run: ./deploy worker-bundle
+""")
+    assert "OPT110" not in _patterns(_scan(tmp_path))
+
+
+def test_opt110_different_download_name_does_not_confirm_consumption(
+        tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-bundle, path: dist/runtime.tgz}
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {name: coverage-report}
+"""
+    _write_workflow(tmp_path, "ci.yml", workflow)
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT110"
+    ]
+    assert len(findings) == 1
+    assert "runtime-bundle" in findings[0]["evidence"]
+
+
+def test_opt110_release_step_using_the_uploaded_path_is_a_consumer(
+        tmp_path: Path):
+    workflow = """name: Release
+on:
+  push:
+    tags: ['v*']
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build:runtime
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-bundle, path: dist/runtime.tgz}
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/runtime.tgz
+"""
+    assert "OPT110" not in _scan_one(tmp_path, workflow, "release.yml")
+
+
+def test_opt110_dynamic_download_selector_holds_back_the_finding(tmp_path: Path):
+    workflow = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with: {name: runtime-bundle, path: dist/runtime.tgz}
+  consume:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with: {name: '${{ inputs.artifact }}'}
+"""
+    assert "OPT110" not in _scan_one(tmp_path, workflow)
+
+
+_OPT110_BUILD = """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+"""
+_OPT110_UPLOAD = """      - uses: actions/upload-artifact@v4
+        with: {name: %s, path: %s}
+"""
+
+# Shapes whose artifact may have a consumer the repository scan cannot rule
+# out (a person reading diagnostics, a release or deploy, an external reusable
+# workflow or API client). Each must stay quiet: the finding is withheld.
+_OPT110_OUTSIDE_CONSUMER_SHAPES = {
+    "failure_diagnostic": _OPT110_BUILD + """      - if: failure()
+        uses: actions/upload-artifact@v4
+        with: {name: browser-trace, path: traces/}
+""",
+    "always_logs": _OPT110_BUILD + """      - if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with: {name: e2e-logs, path: logs/}
+""",
+    "diagnostic_name": _OPT110_BUILD + _OPT110_UPLOAD % (
+        "playwright-report", "playwright-report/"),
+    "deploy_pages": _OPT110_BUILD + _OPT110_UPLOAD % ("github-pages", "site.tar")
+    + """  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/deploy-pages@v4
+""",
+    "third_party_download": _OPT110_BUILD + _OPT110_UPLOAD % ("bundle", "dist")
+    + """  use:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: dawidd6/action-download-artifact@v6
+        with: {workflow: ci.yml}
+""",
+    "external_reusable_workflow": _OPT110_BUILD
+    + _OPT110_UPLOAD % ("bundle", "dist") + """  e2e:
+    needs: build
+    uses: example-org/shared/.github/workflows/e2e.yml@v1
+""",
+    "workflow_call_producer": """name: Build
+on: workflow_call
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+""" + _OPT110_UPLOAD % ("bundle", "dist"),
+    "artifact_url_output": _OPT110_BUILD + """      - id: up
+        uses: actions/upload-artifact@v4
+        with: {name: preview-build, path: dist}
+      - run: echo "${{ steps.up.outputs.artifact-url }}" >> "$GITHUB_STEP_SUMMARY"
+""",
+    "artifacts_api_client": _OPT110_BUILD + _OPT110_UPLOAD % ("bundle", "dist")
+    + """  fetch:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.listWorkflowRunArtifacts({owner: 'o', repo: 'r', run_id: 1});
+""",
+    "deploy_environment_job": """name: CI
+on: push
+jobs:
+  ship:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: npm run build
+""" + _OPT110_UPLOAD % ("site-build", "dist"),
+    "release_named_artifact": _OPT110_BUILD + _OPT110_UPLOAD % (
+        "release-binaries", "out/"),
+    "tag_release_workflow": """name: Build
+on:
+  push:
+    tags: ['v*']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npm run build
+""" + _OPT110_UPLOAD % ("runtime-bundle", "dist"),
+    "local_action_downloads": _OPT110_BUILD + _OPT110_UPLOAD % ("bundle", "dist")
+    + """  use:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/fetch-build
+""",
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_OPT110_OUTSIDE_CONSUMER_SHAPES))
+def test_opt110_possible_outside_consumer_withholds_the_finding(
+        tmp_path: Path, shape: str):
+    action = tmp_path / ".github" / "actions" / "fetch-build" / "action.yml"
+    action.parent.mkdir(parents=True)
+    action.write_text("""name: fetch build
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@v4
+      with: {path: dist}
+""")
+    _write_workflow(tmp_path, "ci.yml", _OPT110_OUTSIDE_CONSUMER_SHAPES[shape])
+    assert "OPT110" not in _patterns(_scan(tmp_path))
+
+
+def test_opt110_unrelated_local_action_keeps_the_finding(tmp_path: Path):
+    action = tmp_path / ".github" / "actions" / "setup" / "action.yml"
+    action.parent.mkdir(parents=True)
+    action.write_text("""name: setup
+runs:
+  using: composite
+  steps:
+    - run: npm ci
+      shell: bash
+""")
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: pull_request
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/setup
+      - run: npm run build:runtime
+      - uses: actions/upload-artifact@v4
+        with: {name: dist-runtime-build, path: dist/runtime.tar.gz}
+""")
+    assert "OPT110" in _patterns(_scan(tmp_path))
+
+
 def test_opt16_within_job_duplicate(tmp_path: Path):
     pos = """name: CI
 on: push
@@ -637,6 +911,305 @@ jobs:
       - run: pnpm run test:packages
 """
     assert "OPT16" not in _scan_one(tmp_path, neg)
+
+
+def test_opt25_finds_sorted_positional_shard_splitter(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return names[shard::count]
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings, "expected sorted positional splitter guidance"
+    finding = findings[0]
+    assert "stable hash" in finding.get("fix_strategy", ""), finding
+    assert "runner-minute effect: roughly neutral" in finding.get("size_note", ""), finding
+
+
+def test_opt25_positional_splitter_keeps_stable_hash_partition_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+import hashlib
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return [name for name in names
+            if int(hashlib.sha256(name.encode()).hexdigest(), 16) % count == shard]
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings == [], findings
+
+
+_OPT25_TIMING_SORTED_SPLITTERS = {
+    "python-key-duration": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    names = sorted(tests, key=lambda name: -durations[name])
+    return names[shard::count]
+'''),
+    "python-in-place-key": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    tests.sort(key=lambda name: durations.get(name, 0), reverse=True)
+    return tests[shard::count]
+'''),
+    "python-multiline-key": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    names = sorted(
+        tests,
+        key=lambda name: -durations[name],
+    )
+    return names[shard::count]
+'''),
+    "js-timing-comparator": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => timings[b] - timings[a]);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT25_TIMING_SORTED_SPLITTERS))
+def test_opt25_positional_splitter_keeps_timing_sorted_stride_quiet(
+        tmp_path: Path, case: str):
+    """A list sorted by measured duration and dealt round-robin is already a
+    timing-based splitter: inserting a test does not reorder by name."""
+    rel, source = _OPT25_TIMING_SORTED_SPLITTERS[case]
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert hits == [] and incomplete == [], hits
+
+
+_OPT25_NAME_SORTED_SPLITTERS = {
+    "js-default-sort": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort();
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "js-locale-compare": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => a.localeCompare(b));
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "github-scripts-python": (".github/scripts/shard.py", '''\
+def pick(listing, shard, count):
+    names = sorted(listing)
+    return names[shard::count]
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT25_NAME_SORTED_SPLITTERS))
+def test_opt25_finds_name_sorted_positional_splitter_shapes(tmp_path: Path, case: str):
+    rel, source = _OPT25_NAME_SORTED_SPLITTERS[case]
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, _incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert [(pattern, source_path) for pattern, source_path, _hit in hits] == [
+        ("OPT25", rel)]
+    facts = hits[0][2].facts
+    assert "exactly one shard" in facts["fix_strategy"], facts
+
+
+def test_opt16_finds_same_binary_built_in_separate_go_tests(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    tests = tmp_path / "internal" / "cli"
+    tests.mkdir(parents=True)
+    (tests / "contract_test.go").write_text(r'''package cli
+import ("os/exec"; "path/filepath"; "testing")
+func TestConfigContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    cmd := exec.Command("go", "build", "-o", out, "./cmd/crabbox")
+    _ = cmd.Run()
+}
+func TestHelpContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    cmd := exec.Command("go", "build", "-o", out, "./cmd/crabbox")
+    _ = cmd.Run()
+}
+func TestVersionContract(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    cmd := exec.Command("go", "build", "-o", out, "./cmd/crabbox")
+    _ = cmd.Run()
+}
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT16"]
+    assert findings, "expected repeated test-local binary builds"
+    finding = findings[0]
+    assert finding.get("source_test_build_repeat") is True, finding
+    assert "3 tests" in finding.get("evidence", ""), finding
+    assert "runner-minute saving: unsized" in finding.get("size_note", ""), finding
+
+
+def test_opt16_test_binary_detector_keeps_shared_or_distinct_builds_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    tests = tmp_path / "internal" / "cli"
+    tests.mkdir(parents=True)
+    (tests / "contract_test.go").write_text(r'''package cli
+import ("os/exec"; "path/filepath"; "sync"; "testing")
+var buildOnce sync.Once
+func sharedBinary(t *testing.T) string {
+    out := filepath.Join(t.TempDir(), "crabbox")
+    buildOnce.Do(func() { _ = exec.Command("go", "build", "-o", out, "./cmd/crabbox").Run() })
+    return out
+}
+func TestConfigContract(t *testing.T) { _ = sharedBinary(t) }
+func TestHelpContract(t *testing.T) { _ = sharedBinary(t) }
+func TestDifferentTargets(t *testing.T) {
+    out := filepath.Join(t.TempDir(), "worker")
+    _ = exec.Command("go", "build", "-o", out, "./cmd/worker").Run()
+}
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT16"
+                and row.get("source_test_build_repeat")]
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("tool, verb, output_flag, target", [
+    ("go", "build", "-o", "./cmd/tool"),
+    ("cargo", "build", "--target-dir", "--bin=tool"),
+    ("vite", "build", "--outDir", "web/tool"),
+])
+def test_opt16_test_binary_detector_covers_supported_build_tools(
+        tmp_path: Path, tool: str, verb: str, output_flag: str, target: str):
+    root = tmp_path / tool
+    _write_workflow(root, "ci.yml", "name: x\non: push\njobs: {}\n")
+    tests = root / "pkg"
+    tests.mkdir(parents=True)
+    call = f'exec.Command("{tool}", "{verb}", "{output_flag}", out, "{target}").Run()'
+    (tests / "build_test.go").write_text(f'''package pkg
+import ("os/exec"; "path/filepath"; "testing")
+func TestOne(t *testing.T) {{
+    out := filepath.Join(t.TempDir(), "tool")
+    _ = {call}
+}}
+func TestTwo(t *testing.T) {{
+    out := filepath.Join(t.TempDir(), "tool")
+    _ = {call}
+}}
+''', encoding="utf-8")
+    findings = [row for row in _scan(root)["findings"]
+                if row.get("pattern") == "OPT16"
+                and row.get("source_test_build_repeat")]
+    assert findings, f"expected repeated {tool} test build"
+
+
+_OPT16_GO_HEADER = ('package cli\nimport ("os"; "os/exec"; "path/filepath"; '
+                    '"testing")\n')
+
+
+def _opt16_source_findings(root: Path, files: dict[str, str]) -> list[dict]:
+    _write_workflow(root, "ci.yml", "name: x\non: push\njobs: {}\n")
+    pkg = root / "internal" / "cli"
+    pkg.mkdir(parents=True)
+    for name, text in files.items():
+        (pkg / name).write_text(text, encoding="utf-8")
+    return [row for row in _scan(root)["findings"]
+            if row.get("pattern") == "OPT16"
+            and row.get("source_test_build_repeat")]
+
+
+def _opt16_pair(first: str, second: str) -> str:
+    return (_OPT16_GO_HEADER
+            + "func TestA(t *testing.T) {\n" + first + "\n}\n"
+            + "func TestB(t *testing.T) {\n" + second + "\n}\n")
+
+
+_OPT16_OUT = '    out := filepath.Join(t.TempDir(), "x")\n'
+
+
+@pytest.mark.parametrize("case, first, second", [
+    # Build inputs on a continuation line are part of the identity.
+    ("multiline-tags",
+     _OPT16_OUT + '    _ = exec.Command("go", "build",\n'
+                  '        "-tags", "integration", "-o", out, "./cmd/x").Run()',
+     _OPT16_OUT + '    _ = exec.Command("go", "build",\n'
+                  '        "-tags", "e2e", "-o", out, "./cmd/x").Run()'),
+    # A different GOOS in the command environment is a different binary.
+    ("cmd-env-goos",
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, "./cmd/x")\n'
+                  '    cmd.Env = append(os.Environ(), "GOOS=linux")\n    _ = cmd.Run()',
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, "./cmd/x")\n'
+                  '    cmd.Env = append(os.Environ(), "GOOS=windows")\n    _ = cmd.Run()'),
+    # Process environment set by the test (GOARCH) changes the build.
+    ("setenv-goarch",
+     '    t.Setenv("GOARCH", "arm64")\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()',
+     '    t.Setenv("GOARCH", "amd64")\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()'),
+    # A local variable argument cannot be compared statically: withhold.
+    ("local-ldflags",
+     '    ldflags := "-X main.version=1"\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-ldflags", ldflags, "-o", out, "./cmd/x").Run()',
+     '    ldflags := "-X main.version=2"\n' + _OPT16_OUT
+     + '    _ = exec.Command("go", "build", "-ldflags", ldflags, "-o", out, "./cmd/x").Run()'),
+    # A different working directory builds a different module/package.
+    ("cmd-dir",
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, ".")\n'
+                  '    cmd.Dir = "testdata/a"\n    _ = cmd.Run()',
+     _OPT16_OUT + '    cmd := exec.Command("go", "build", "-o", out, ".")\n'
+                  '    cmd.Dir = "testdata/b"\n    _ = cmd.Run()'),
+    # `go run` of a generator is not a reusable built binary.
+    ("go-run",
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("go", "run", "./cmd/gen", "-o", filepath.Join(dir, "a.json")).Run()',
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("go", "run", "./cmd/gen", "-o", filepath.Join(dir, "a.json")).Run()'),
+    # `npm run test` is not a build.
+    ("npm-run-test",
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("npm", "run", "test", "--", "--outfile", dir).Run()',
+     '    dir := t.TempDir()\n'
+     '    _ = exec.Command("npm", "run", "test", "--", "--outfile", dir).Run()'),
+    # The temp dir and output flag belong to another command, not the build.
+    ("unrelated-output-flag",
+     '    dir := t.TempDir()\n    _ = exec.Command("go", "build", "./...").Run()\n'
+     '    _ = exec.Command("tar", "-o", dir).Run()',
+     '    dir := t.TempDir()\n    _ = exec.Command("go", "build", "./...").Run()\n'
+     '    _ = exec.Command("tar", "-o", dir).Run()'),
+    # Commented-out builds are not executed.
+    ("commented-out",
+     _OPT16_OUT + '    // _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()',
+     _OPT16_OUT + '    // _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()'),
+])
+def test_opt16_test_binary_detector_withholds_differing_or_unclassifiable_builds(
+        tmp_path: Path, case: str, first: str, second: str):
+    findings = _opt16_source_findings(
+        tmp_path, {"build_test.go": _opt16_pair(first, second)})
+    assert findings == [], (case, findings)
+
+
+def test_opt16_test_binary_detector_separates_exclusive_build_constraints(
+        tmp_path: Path):
+    """Tests that can never share one test process are not one finding."""
+    body = (_OPT16_OUT
+            + '    _ = exec.Command("go", "build", "-o", out, "./cmd/x").Run()\n')
+    files = {
+        "a_linux_test.go": _OPT16_GO_HEADER + "func TestA(t *testing.T) {\n" + body + "}\n",
+        "b_windows_test.go": _OPT16_GO_HEADER + "func TestB(t *testing.T) {\n" + body + "}\n",
+    }
+    assert _opt16_source_findings(tmp_path, files) == []
+
+
+def test_opt16_test_binary_detector_fires_on_multiline_call_with_same_dir(
+        tmp_path: Path):
+    """Same inputs split over lines, same package-level working dir: one finding."""
+    body = (_OPT16_OUT
+            + '    cmd := exec.Command(\n        "go", "build", "-o", out, "./cmd/x",\n    )\n'
+            + '    cmd.Dir = repoRoot\n    _ = cmd.Run()')
+    findings = _opt16_source_findings(
+        tmp_path, {"build_test.go": _opt16_pair(body, body)
+                   + 'var repoRoot = "../.."\n'})
+    assert len(findings) == 1, findings
+    assert "2 tests" in findings[0]["evidence"], findings
 
 
 def test_opt16_repeated_analysis_with_different_report_flags(tmp_path: Path):
@@ -4417,6 +4990,238 @@ jobs:
       - run: pnpm test
 """
     assert "OPT45" in _scan_one(tmp_path, pos)
+
+
+def test_opt91_xcode_ci_build_writes_index_and_builds_generic_simulator(
+        tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tests
+        run: >-
+          xcodebuild -project App.xcodeproj -scheme AppTests
+          -destination 'generic/platform=iOS Simulator'
+          build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"]
+        if row["pattern"] == "OPT91" and row["affected_jobs"] == ["ios-tests"]
+    ]
+    assert len(findings) == 1
+    assert "COMPILER_INDEX_STORE_ENABLE=NO" in findings[0]["evidence"]
+    assert "host simulator architecture" in findings[0]["evidence"]
+    assert "Runner-minute effect: saving" in findings[0]["evidence"]
+
+
+def test_opt91_xcode_simulator_build_with_both_guards_stays_quiet(tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - name: Build tests
+        run: >-
+          xcodebuild -project App.xcodeproj -scheme AppTests
+          COMPILER_INDEX_STORE_ENABLE=NO ARCHS=arm64
+          -destination 'platform=iOS Simulator,name=iPhone 16'
+          build-for-testing
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_multi_arch_setting_does_not_clear_generic_simulator_waste(
+        tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO
+          ARCHS="arm64 x86_64"
+          -destination 'generic/platform=iOS Simulator'
+          build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT91"
+    ]
+    assert len(findings) == 1
+    assert "host simulator architecture" in findings[0]["evidence"]
+
+
+def test_opt91_generic_archive_destination_is_not_a_simulator_test_waste(
+        tmp_path: Path):
+    workflow = """name: Release
+on: workflow_dispatch
+jobs:
+  archive:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -project App.xcodeproj -scheme App
+          COMPILER_INDEX_STORE_ENABLE=NO
+          -destination 'generic/platform=iOS Simulator'
+          archive
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "release.yml")
+
+
+def test_opt91_xcode_version_probe_is_not_a_build(tmp_path: Path):
+    workflow = """name: Toolchain
+on: pull_request
+jobs:
+  version:
+    runs-on: macos-15
+    steps:
+      - run: xcodebuild -version
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "toolchain.yml")
+
+
+_OPT91_NEAR_MISS_RUNS = {
+    # Archive and Release builds are optimized: Xcode's `Default` index-store
+    # setting writes no index store there, so there is nothing to disable.
+    "archive-default-config": (
+        "xcodebuild -project App.xcodeproj -scheme App "
+        "-destination 'generic/platform=iOS' archive"),
+    "release-build": (
+        "xcodebuild -scheme App -configuration Release "
+        "-destination 'platform=iOS Simulator,name=iPhone 16' build"),
+    # An option value that spells an action is not the action.
+    "derived-data-named-build": (
+        "xcodebuild test-without-building -derivedDataPath build "
+        "-destination 'platform=iOS Simulator,name=iPhone 16'"),
+    "show-build-settings": "xcodebuild -scheme App -showBuildSettings build",
+    # One architecture selected by the -arch flag or by excluding the other.
+    "arch-flag": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO -arch arm64 "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "excluded-archs": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO "
+        "EXCLUDED_ARCHS=x86_64 "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "quoted-uname": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO "
+        "ARCHS=\"$(uname -m)\" "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    # Values the workflow text cannot classify withhold the finding.
+    "archs-from-variable": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO "
+        "ARCHS=\"$HOST_ARCH\" "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "index-from-variable": (
+        "xcodebuild -scheme AppTests "
+        "COMPILER_INDEX_STORE_ENABLE=\"$INDEX_STORE\" "
+        "-destination 'platform=iOS Simulator,name=iPhone 16' build-for-testing"),
+    "xcconfig-file": (
+        "xcodebuild -scheme AppTests -xcconfig ci.xcconfig "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "matrix-configuration": (
+        "xcodebuild -scheme App -configuration ${{ matrix.configuration }} "
+        "-destination 'platform=iOS Simulator,name=iPhone 16' build"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT91_NEAR_MISS_RUNS))
+def test_opt91_xcode_near_miss_shapes_stay_quiet(tmp_path: Path, case: str):
+    run = _OPT91_NEAR_MISS_RUNS[case]
+    workflow = f"""name: iOS CI
+on: pull_request
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - name: Xcode
+        run: {json.dumps(run)}
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml"), case
+
+
+def test_opt91_index_store_read_by_a_later_step_is_not_waste(tmp_path: Path):
+    """Periphery scans the index store the build wrote; disabling it would
+    break that check, so the index flavor must stay quiet."""
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  dead-code:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme App -derivedDataPath DerivedData
+          -destination 'platform=iOS Simulator,name=iPhone 16' build
+      - run: periphery scan --skip-build --index-store-path DerivedData/Index.noindex/DataStore
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_index_setting_on_one_step_is_not_an_index_consumer(
+        tmp_path: Path):
+    """The setting's own name must not read as a later step consuming the
+    index store, or one guarded step would hide an unguarded sibling."""
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - run: xcodebuild -scheme Lib COMPILER_INDEX_STORE_ENABLE=NO build
+      - run: >-
+          xcodebuild -scheme AppTests
+          -destination 'platform=iOS Simulator,name=iPhone 16' build-for-testing
+"""
+    assert "OPT91" in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_project_setting_disables_index_store(tmp_path: Path):
+    (tmp_path / "Config").mkdir()
+    (tmp_path / "Config" / "Base.xcconfig").write_text(
+        "COMPILER_INDEX_STORE_ENABLE = NO\n", encoding="utf-8")
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme App
+          -destination 'platform=iOS Simulator,name=iPhone 16' build
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_finding_states_an_unsized_saving_never_no_bill_saving(
+        tmp_path: Path):
+    import blocking_path as bp
+
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme AppTests
+          -destination 'platform=iOS Simulator,name=iPhone 16' build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+    finding = next(row for row in _scan(tmp_path)["findings"]
+                   if row["pattern"] == "OPT91")
+    assert finding["runner_min_unsized_reason"]
+    assert "runner-minute saving: unsized (" in finding["evidence"]
+    lines, n, _ = bp._also_noticed_block([finding], "https://example.invalid/c.md")
+    heading = next(line for line in lines
+                   if line.startswith("<summary><strong>OPT91 - "))
+    assert "no bill saving" not in heading
+    assert "runner-minute saving: unsized (" in heading
 
 
 def test_opt32_deploy_positive_path_also_matches_test_directory(tmp_path: Path):

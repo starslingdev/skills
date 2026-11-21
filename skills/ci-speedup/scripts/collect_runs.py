@@ -7287,6 +7287,41 @@ def _demote_runner_min(f: dict[str, Any], note: str) -> None:
 def _size_finding(f: dict[str, Any], crit: dict[str, Any],
                   monthly_volume: int | None) -> None:
     """Set wall_clock_p50_s and runner_min_saving on the finding in-place."""
+    if f.get("positional_splitter_static"):
+        # Source proves an unstable assignment rule, not a duration or current
+        # imbalance. Preserve its neutral runner-cost disclosure without
+        # inventing the measured OPT25 wall-clock model.
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f.setdefault(
+            "size_note",
+            "runner-minute effect: roughly neutral for passing runs because the "
+            "same existing shard jobs run the same tests; any saving from fewer "
+            "shard timeouts and reruns is unsized, and the wall-clock saving is "
+            "unsized until CI per-test timings measure the imbalance",
+        )
+        f.setdefault(
+            "runner_min_unsized_reason",
+            "static source finding; the same shard jobs run the same tests, and "
+            "no CI per-test timings measure the imbalance or timeout reruns",
+        )
+        return
+    if f.get("source_test_build_repeat"):
+        # Source proves repeated construction but contains no duration. Do not
+        # feed this OPT16 extension through the generic 10-second model: the
+        # issue's safest recipe first shares the build, then measures it.
+        f["wall_clock_p50_s"] = None
+        f["runner_min_saving"] = None
+        f["tier"] = 2
+        f["realization"] = "none"
+        f.setdefault(
+            "size_note",
+            "runner-minute saving: unsized (static source proves the repeated "
+            "build shape but no build duration or monthly execution count is measured)",
+        )
+        return
     if f.get("opt32_deploy_test_paths"):
         f["wall_clock_p50_s"] = 0.0
         f["runner_min_saving"] = None

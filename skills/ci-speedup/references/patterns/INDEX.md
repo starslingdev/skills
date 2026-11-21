@@ -27,6 +27,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT14 — Repeated Checkout/Setup Without Artifact Handoff (MEDIUM, static) — every job rebuilds; no artifact handoff
 - OPT15 — Cross-Workflow Build Redundancy (HIGH, static) — same build in several PR workflows
 - OPT16 — Within-Job Duplicate Commands (LOW, static) — same command twice in one job
+- OPT110 — Uploaded Artifact Has No Repository Consumer (MEDIUM, static) — upload name is never downloaded or consumed by release/deploy
 - OPT77 — Repeated Fixed Setup Across Independent Small Jobs (MEDIUM, data-driven) — small checks each pay full setup
 - OPT113 — A Test Fixture Is Much Larger Than Its Contract Needs (MEDIUM, static) — test archives or hashes a full executable when bytes suffice
 ## Category 3 — Docker
@@ -106,7 +107,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT62 — Build Artifacts Destroyed Before Every Run (HIGH, static) — rm -rf of build dirs every run
 - OPT63 — Dependency Install with Cache Disabled (MEDIUM, static) — --no-cache installs on persistent runners
 - OPT86 — CI Repeatedly Compiles Dependencies from Source (HIGH, data-driven) — measured vendored builds or confirmed prebuilt-package opportunities
-- OPT91 — The Compile Is the Long Pole and Nobody Profiled It (HIGH, data-driven) — slow compile, profile it first
+- OPT91 — The Compile Is the Long Pole and Nobody Profiled It (HIGH, data-driven) — slow compile, profile it first; static Xcode flavor flags an unread index store or a generic simulator destination
 - OPT94 — The .NET SDK Can Reconcile Unrelated Machine-Wide Workloads (MEDIUM, data-driven) — benchmark a pinned isolated SDK
 - OPT104 — Rust Coverage Loads Unoptimized Debug Artifacts (MEDIUM, structural) — measured coverage pole uses Cargo's debug/unoptimized test profile
 ## Category 13 — Hidden Failures and Dead Config
