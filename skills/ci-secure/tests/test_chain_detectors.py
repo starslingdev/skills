@@ -2101,7 +2101,8 @@ def test_p1425_install_directory_flags_select_the_nested_pin(
     note = hits[0].derived_note or ""
     assert nested_pin in note
     assert "apps/web" in note
-    assert root_pin not in note
+    assert f"this repo pins `{root_pin}`" not in note
+    assert f"which pins `{root_pin}`" in note
 
 
 @pytest.mark.parametrize(("command", "root_pin", "outside_pin"), [
@@ -2248,10 +2249,10 @@ def test_p1425_directory_flag_nested_pnpm9_is_not_covered_by_root_pnpm10(
 def test_p1425_directory_flag_nested_pnpm10_uses_the_allowlist_mechanism(
     tmp_path,
 ):
-    """The mirror: a nested pnpm-10 package is protected by a real disable
-    aimed at the workspace config even when the repository root pins pnpm 9.
+    """The mirror: a nested pnpm-10 package launched from a pnpm-10 root is
+    protected by a real disable aimed at the workspace config.
     """
-    _pkg(tmp_path, "pnpm@9.15.0", "allowBuilds:\n  core-js: true\n")
+    _pkg(tmp_path, "pnpm@10.25.0", "allowBuilds:\n  core-js: true\n")
     _nested_pkg(tmp_path, "apps/web", "pnpm@10.34.5")
     assert _install_hits(tmp_path, """\
         name: publish
@@ -2266,6 +2267,73 @@ def test_p1425_directory_flag_nested_pnpm10_uses_the_allowlist_mechanism(
                   yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
                   pnpm install --dir apps/web
     """) == []
+
+
+@pytest.mark.parametrize("command", [
+    "pnpm install --dir apps/web",
+    "pnpm -C apps/web install",
+])
+def test_p1425_directory_flag_cannot_borrow_cover_from_the_nested_pin(
+    tmp_path, command,
+):
+    """A directory option does not move the process that launches pnpm.
+    Corepack resolves the version from the directory the step runs in, so
+    `pnpm -C apps/web install` from a root pinned at pnpm 9 runs pnpm 9
+    whatever `apps/web` pins. Checked with Corepack 0.36: root
+    `pnpm@9.15.0`, `apps/web` `pnpm@10.4.1`, a preinstall echoing
+    `$npm_config_user_agent` printed `pnpm/9.15.0`. The pnpm-10 allowlist
+    cannot be the mitigation for an install pnpm 9 may run.
+    """
+    _pkg(tmp_path, "pnpm@9.15.0", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.34.5")
+    hits = _install_hits(tmp_path, f"""\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  {command}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "pnpm@10.34.5" in note
+    assert "launched from the repo root, which pins `pnpm@9.15.0`" in note
+
+
+def test_p1425_directory_flag_note_names_the_launch_pin_when_they_differ(
+    tmp_path,
+):
+    """Either pin can be the one that runs: Corepack takes the launch
+    directory's, a standalone pnpm 10 switches to the target's. The note
+    names both when they differ, and adds nothing when they agree.
+    """
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    body = """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: pnpm -C apps/web install
+    """
+    hits = _install_hits(tmp_path, body)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "the installed package (`apps/web`) pins `pnpm@9.15.0`" in note
+    assert "launched from the repo root, which pins `pnpm@10.25.0`" in note
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.25.0")
+    hits = _install_hits(tmp_path, body)
+    assert len(hits) == 1
+    assert "launched from" not in (hits[0].derived_note or "")
 
 
 @pytest.mark.parametrize("command", [

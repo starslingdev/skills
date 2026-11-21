@@ -3299,6 +3299,7 @@ def _install_pin_directory(
     candidates: list[tuple[int, str, str]],
     ordinal: int,
     marks: list[Any] | None,
+    include_flag: bool = True,
 ) -> str | None:
     """The repo-relative directory the ordinal-th install runs in, or None.
 
@@ -3310,6 +3311,13 @@ def _install_pin_directory(
     leg is unknowable (an expression, an unreadable `cd`, an absolute path):
     the caller falls back to the repo root, the historical reading, which is
     right for the single-package repos the check was written against.
+
+    ``include_flag=False`` stops before the install's own directory option
+    (`--prefix`, `-C`/`--dir`, `--cwd`): that is the directory the manager is
+    LAUNCHED from, which is where Corepack resolves the version. Corepack
+    0.36 runs the root-pinned pnpm for `pnpm -C apps/web install` from the
+    root whatever `apps/web` pins, while a standalone pnpm 10 switches to the
+    target's pin, so a directory option leaves two candidate pins.
     """
     install_line = candidates[ordinal][0]
     # A step mark's end_line is the parser's node end — it can spill one line
@@ -3364,7 +3372,7 @@ def _install_pin_directory(
                 return None
             base = _resolve_path(base, target)
     flag_present, flag_dir = _install_directory_flag(candidates[ordinal][2])
-    if flag_present:
+    if flag_present and include_flag:
         if (not flag_dir or _EXPRESSION_TOKEN_RE.search(flag_dir)
                 or "$" in flag_dir or "`" in flag_dir
                 or flag_dir.startswith("~")
@@ -3871,6 +3879,43 @@ def _correlation_install_scripts_in_privileged_job(
             text, doc, job, job_name, ranges.get(job_name),
             candidates, ordinal, marks)
         return _package_manager_pin_at(root, rel)
+
+    def _launch_pin_for_install(
+        job: Any,
+        job_name: str,
+        candidates: list[tuple[int, str, str]],
+        ordinal: int,
+    ) -> tuple[tuple[str, int, str] | None, str | None] | None:
+        """The pin at the directory the install is LAUNCHED from, when the
+        install carries its own directory option; None when it does not
+        (the launch directory and the install directory are then one).
+        """
+        if not _install_directory_flag(candidates[ordinal][2])[0]:
+            return None
+        rel = _install_pin_directory(
+            text, doc, job, job_name, ranges.get(job_name),
+            candidates, ordinal, marks, include_flag=False)
+        return _package_manager_pin_at(root, rel)
+
+    def _pnpm10_everywhere(
+        job: Any,
+        job_name: str,
+        candidates: list[tuple[int, str, str]],
+        ordinal: int,
+    ) -> bool:
+        """Does every pin that can pick this install's pnpm resolve >= 10?
+
+        With a directory option either the launch directory's pin (Corepack)
+        or the target's (a standalone pnpm 10 switching versions) can run
+        the install, so the pnpm-10 allowlist is the mechanism only when
+        both resolve pnpm >= 10.
+        """
+        pins = [_pin_for_install(job, job_name, candidates, ordinal)]
+        launch = _launch_pin_for_install(job, job_name, candidates, ordinal)
+        if launch is not None:
+            pins.append(launch)
+        return all(p[0] and p[0][0] == "pnpm" and p[0][1] >= 10
+                   for p in pins)
     for job_name, job in _walk_jobs(doc):
         runs = _job_run_texts(job)
         if not any(_scalar_has_unprotected_install(r) for r in runs):
@@ -3939,11 +3984,7 @@ def _correlation_install_scripts_in_privileged_job(
             exposed = next(
                 ((i, c) for i, c in enumerate(candidates)
                  if _install_manager(c[2]) != "pnpm"
-                 or not (
-                     (p := _pin_for_install(job, job_name, candidates, i))[0]
-                     and p[0][0] == "pnpm"
-                     and p[0][1] >= 10
-                 )
+                 or not _pnpm10_everywhere(job, job_name, candidates, i)
                  or _builds_disabled_at(
                      _covering_writes(_install_pin_directory(
                          text, doc, job, job_name, ranges.get(job_name),
@@ -3964,6 +4005,17 @@ def _correlation_install_scripts_in_privileged_job(
             manager = _install_manager(command)
         pin, pin_origin = _pin_for_install(job, job_name, candidates,
                                            exposed_ordinal)
+        launch = _launch_pin_for_install(job, job_name, candidates,
+                                         exposed_ordinal)
+        launch_note = ""
+        if launch is not None and launch[0] and launch[0] != pin:
+            where = f"`{launch[1]}`" if launch[1] else "the repo root"
+            launch_note = (
+                f" The install is launched from {where}, which pins "
+                f"`{launch[0][0]}@{launch[0][2]}`; Corepack resolves the "
+                "version from the launch directory, not from the install's "
+                "directory option, so confirm which of the two pins runs."
+            )
 
         payoff_parts = []
         if secrets:
@@ -3991,6 +4043,7 @@ def _correlation_install_scripts_in_privileged_job(
                 + _manager_condition_note(
                     manager, "\n".join(runs), pin, allowlist, pin_origin,
                 )
+                + launch_note
             ),
         )
 
