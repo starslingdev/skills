@@ -2336,6 +2336,32 @@ def test_p1425_directory_flag_note_names_the_launch_pin_when_they_differ(
     assert "launched from" not in (hits[0].derived_note or "")
 
 
+def test_p1425_launch_pin_note_stays_quiet_for_another_managers_pins(
+    tmp_path,
+):
+    """`npm ci --prefix apps/web` in a repo whose manifests pin pnpm: the
+    npm note quotes no pnpm pin, so the launch clause must not quote one
+    either. It is about the pin that picks THIS install's manager.
+    """
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: npm ci --prefix apps/web
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "launched from" not in note
+    assert "pnpm@" not in note
+
+
 @pytest.mark.parametrize("command", [
     "npm ci --maxsockets 3",
     "pnpm install --fetch-timeout 60000",

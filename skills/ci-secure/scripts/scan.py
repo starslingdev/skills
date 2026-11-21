@@ -4008,7 +4008,11 @@ def _correlation_install_scripts_in_privileged_job(
         launch = _launch_pin_for_install(job, job_name, candidates,
                                          exposed_ordinal)
         launch_note = ""
-        if launch is not None and launch[0] and launch[0] != pin:
+        # Only when both pins name THIS install's manager: the condition note
+        # quotes no pin of another manager, so the launch clause must not.
+        if (launch is not None and launch[0] and launch[0] != pin
+                and pin is not None and pin[0] == manager
+                and launch[0][0] == manager):
             where = f"`{launch[1]}`" if launch[1] else "the repo root"
             launch_note = (
                 f" The install is launched from {where}, which pins "
