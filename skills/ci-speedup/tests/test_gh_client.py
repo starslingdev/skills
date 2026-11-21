@@ -761,6 +761,48 @@ def test_mid_run_auth_failure_trips_the_breaker_without_fetching_the_whole_plan(
     assert "the token stopped working" in stops[0].getMessage()
 
 
+def test_plain_403s_on_late_job_fetches_trip_the_auth_breaker(monkeypatch, caplog):
+    """Some expired tokens return only a plain Forbidden response. After run
+    discovery succeeded, the same response across consecutive run-job fetches
+    is an authentication interruption, not optional sample thinning."""
+    calls: list[list[str]] = []
+
+    def _run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _completed(returncode=0, stdout=_ok('{"workflow_runs": []}'))
+        return _completed(
+            returncode=1,
+            stdout=_gh_i("HTTP/2.0 403 Forbidden", body='{"message":"Forbidden"}'),
+            stderr="gh: HTTP 403",
+        )
+
+    _patch_run(monkeypatch, _run)
+    client = GhClient()
+    assert client.json("repos/o/r/actions/workflows/1/runs?per_page=100") == {
+        "workflow_runs": []}
+
+    results = [
+        client.json(f"repos/o/r/actions/runs/{run_id}/jobs?per_page=100",
+                    allow_missing=True)
+        for run_id in range(1, 6)
+    ]
+
+    assert results == [None] * 5
+    assert client.errors == 5
+    assert client.gave_up
+    assert client.auth_interrupted
+    assert len(calls) == 4
+    stops = [r for r in caplog.records
+             if "GIVING UP on the whole gh pass" in r.getMessage()]
+    assert len(stops) == 1
+    assert "token stopped working" in stops[0].getMessage()
+    data_sources = {"partial_kind": "sample_thinned"}
+    collect_runs._stamp_auth_interruption(data_sources, client)
+    assert data_sources["partial_kind"] == "collection_failed"
+    assert data_sources["auth_interrupted"] is True
+
+
 def test_auth_interruption_reason_has_no_dangling_separator():
     client = GhClient()
     client.auth_interrupted = True

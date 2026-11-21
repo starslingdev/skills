@@ -841,6 +841,7 @@ class GhClient:
         self._gave_up = False
         self._had_successful_invoke = False
         self._consecutive_auth_failures = 0
+        self._consecutive_plain_job_forbidden = 0
         self.auth_interrupted = False
         self.job_fetch_count = 0
         self.job_fetch_failed_count = 0
@@ -1358,7 +1359,9 @@ class GhClient:
           - auth rejection (401, or an auth-shaped 403): never retried per endpoint.
             After a successful call, three consecutive auth rejections trip the
             global breaker: the token stopped working, so trying more queued
-            endpoints cannot recover it.
+            endpoints cannot recover it. Three consecutive plain 403s from late
+            run-job fetches take the same path; permission-shaped 403s elsewhere
+            remain optional and never trip it.
           - Exhausting the retries on any of those is a REAL COVERAGE GAP: it
             counts toward `errors` (tripping the report's partial-coverage banner)
             EVEN on an `allow_missing` endpoint. `allow_missing` means "a 404
@@ -1466,6 +1469,7 @@ class GhClient:
                     with self._lock:
                         self._had_successful_invoke = True
                         self._consecutive_auth_failures = 0
+                        self._consecutive_plain_job_forbidden = 0
                     return body
                 stderr = (r.stderr or "").strip()
                 try:
@@ -1480,6 +1484,43 @@ class GhClient:
                 # needs both pieces of the same failed response; logging below still
                 # uses stderr so a response body is not sprayed into logs.
                 kind = _classify_gh_failure("\n".join((stderr, body)), status, headers)
+            # Some expired credentials yield only ``403 Forbidden`` after the
+            # earlier run-list calls succeeded.  Do not globally reinterpret a
+            # 403: optional branch-protection and permission probes legitimately
+            # use it.  Three consecutive *plain* responses from distinct late
+            # run-job fetches are the narrow evidence that the credential died.
+            plain_late_job_forbidden = (
+                kind == "forbidden"
+                and status == 403
+                and "/actions/runs/" in endpoint
+                and endpoint.split("?", 1)[0].endswith("/jobs")
+                and (failure_message or "").strip().lower() in ("", "forbidden")
+                and not any(cue in (stderr or "").lower() for cue in (
+                    "resource not accessible", "admin rights", "permission",
+                ))
+            )
+            if plain_late_job_forbidden:
+                with self._lock:
+                    if self._had_successful_invoke:
+                        self._consecutive_plain_job_forbidden += 1
+                    else:
+                        self._consecutive_plain_job_forbidden = 0
+                    plain_forbidden = self._consecutive_plain_job_forbidden
+                    if plain_forbidden >= 3:
+                        # The first two were tentatively treated as optional.
+                        # Once the third proves an auth interruption, count
+                        # those missing job lists retroactively and preload the
+                        # existing auth breaker with the same evidence.
+                        if plain_forbidden == 3:
+                            self.errors += 2
+                        self._consecutive_auth_failures = max(
+                            self._consecutive_auth_failures,
+                            plain_forbidden - 1,
+                        )
+                        kind = "auth"
+            else:
+                with self._lock:
+                    self._consecutive_plain_job_forbidden = 0
             if kind != "auth":
                 with self._lock:
                     self._consecutive_auth_failures = 0
