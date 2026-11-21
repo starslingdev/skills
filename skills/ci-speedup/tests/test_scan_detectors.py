@@ -913,6 +913,110 @@ jobs:
     assert "OPT16" not in _scan_one(tmp_path, neg)
 
 
+def test_opt25_finds_sorted_positional_shard_splitter(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return names[shard::count]
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings, "expected sorted positional splitter guidance"
+    finding = findings[0]
+    assert "stable hash" in finding.get("fix_strategy", ""), finding
+    assert "runner-minute effect: roughly neutral" in finding.get("size_note", ""), finding
+
+
+def test_opt25_positional_splitter_keeps_stable_hash_partition_quiet(tmp_path: Path):
+    _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "test-shard.py").write_text('''\
+import hashlib
+def select_tests(listing, shard, count):
+    names = sorted(set(listing.splitlines()))
+    return [name for name in names
+            if int(hashlib.sha256(name.encode()).hexdigest(), 16) % count == shard]
+''', encoding="utf-8")
+    findings = [row for row in _scan(tmp_path)["findings"]
+                if row.get("pattern") == "OPT25"
+                and row.get("positional_splitter_static")]
+    assert findings == [], findings
+
+
+_OPT25_TIMING_SORTED_SPLITTERS = {
+    "python-key-duration": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    names = sorted(tests, key=lambda name: -durations[name])
+    return names[shard::count]
+'''),
+    "python-in-place-key": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    tests.sort(key=lambda name: durations.get(name, 0), reverse=True)
+    return tests[shard::count]
+'''),
+    "python-multiline-key": ("scripts/shard.py", '''\
+def pick(tests, durations, shard, count):
+    names = sorted(
+        tests,
+        key=lambda name: -durations[name],
+    )
+    return names[shard::count]
+'''),
+    "js-timing-comparator": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => timings[b] - timings[a]);
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT25_TIMING_SORTED_SPLITTERS))
+def test_opt25_positional_splitter_keeps_timing_sorted_stride_quiet(
+        tmp_path: Path, case: str):
+    """A list sorted by measured duration and dealt round-robin is already a
+    timing-based splitter: inserting a test does not reorder by name."""
+    rel, source = _OPT25_TIMING_SORTED_SPLITTERS[case]
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert hits == [] and incomplete == [], hits
+
+
+_OPT25_NAME_SORTED_SPLITTERS = {
+    "js-default-sort": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort();
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "js-locale-compare": ("scripts/test-shard.mjs", '''\
+const files = listed.slice().sort((a, b) => a.localeCompare(b));
+export const mine = files.filter((_, index) => index % total === shard);
+'''),
+    "github-scripts-python": (".github/scripts/shard.py", '''\
+def pick(listing, shard, count):
+    names = sorted(listing)
+    return names[shard::count]
+'''),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT25_NAME_SORTED_SPLITTERS))
+def test_opt25_finds_name_sorted_positional_splitter_shapes(tmp_path: Path, case: str):
+    rel, source = _OPT25_NAME_SORTED_SPLITTERS[case]
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(source, encoding="utf-8")
+    hits, _incomplete = scan._detect_opt25_positional_splitters(tmp_path)
+    assert [(pattern, source_path) for pattern, source_path, _hit in hits] == [
+        ("OPT25", rel)]
+    facts = hits[0][2].facts
+    assert "exactly one shard" in facts["fix_strategy"], facts
+
+
 def test_opt16_finds_same_binary_built_in_separate_go_tests(tmp_path: Path):
     _write_workflow(tmp_path, "ci.yml", "name: x\non: push\njobs: {}\n")
     tests = tmp_path / "internal" / "cli"
@@ -4886,6 +4990,238 @@ jobs:
       - run: pnpm test
 """
     assert "OPT45" in _scan_one(tmp_path, pos)
+
+
+def test_opt91_xcode_ci_build_writes_index_and_builds_generic_simulator(
+        tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tests
+        run: >-
+          xcodebuild -project App.xcodeproj -scheme AppTests
+          -destination 'generic/platform=iOS Simulator'
+          build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+
+    findings = [
+        row for row in _scan(tmp_path)["findings"]
+        if row["pattern"] == "OPT91" and row["affected_jobs"] == ["ios-tests"]
+    ]
+    assert len(findings) == 1
+    assert "COMPILER_INDEX_STORE_ENABLE=NO" in findings[0]["evidence"]
+    assert "host simulator architecture" in findings[0]["evidence"]
+    assert "Runner-minute effect: saving" in findings[0]["evidence"]
+
+
+def test_opt91_xcode_simulator_build_with_both_guards_stays_quiet(tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - name: Build tests
+        run: >-
+          xcodebuild -project App.xcodeproj -scheme AppTests
+          COMPILER_INDEX_STORE_ENABLE=NO ARCHS=arm64
+          -destination 'platform=iOS Simulator,name=iPhone 16'
+          build-for-testing
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_multi_arch_setting_does_not_clear_generic_simulator_waste(
+        tmp_path: Path):
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO
+          ARCHS="arm64 x86_64"
+          -destination 'generic/platform=iOS Simulator'
+          build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+    findings = [
+        row for row in _scan(tmp_path)["findings"] if row["pattern"] == "OPT91"
+    ]
+    assert len(findings) == 1
+    assert "host simulator architecture" in findings[0]["evidence"]
+
+
+def test_opt91_generic_archive_destination_is_not_a_simulator_test_waste(
+        tmp_path: Path):
+    workflow = """name: Release
+on: workflow_dispatch
+jobs:
+  archive:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -project App.xcodeproj -scheme App
+          COMPILER_INDEX_STORE_ENABLE=NO
+          -destination 'generic/platform=iOS Simulator'
+          archive
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "release.yml")
+
+
+def test_opt91_xcode_version_probe_is_not_a_build(tmp_path: Path):
+    workflow = """name: Toolchain
+on: pull_request
+jobs:
+  version:
+    runs-on: macos-15
+    steps:
+      - run: xcodebuild -version
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "toolchain.yml")
+
+
+_OPT91_NEAR_MISS_RUNS = {
+    # Archive and Release builds are optimized: Xcode's `Default` index-store
+    # setting writes no index store there, so there is nothing to disable.
+    "archive-default-config": (
+        "xcodebuild -project App.xcodeproj -scheme App "
+        "-destination 'generic/platform=iOS' archive"),
+    "release-build": (
+        "xcodebuild -scheme App -configuration Release "
+        "-destination 'platform=iOS Simulator,name=iPhone 16' build"),
+    # An option value that spells an action is not the action.
+    "derived-data-named-build": (
+        "xcodebuild test-without-building -derivedDataPath build "
+        "-destination 'platform=iOS Simulator,name=iPhone 16'"),
+    "show-build-settings": "xcodebuild -scheme App -showBuildSettings build",
+    # One architecture selected by the -arch flag or by excluding the other.
+    "arch-flag": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO -arch arm64 "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "excluded-archs": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO "
+        "EXCLUDED_ARCHS=x86_64 "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "quoted-uname": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO "
+        "ARCHS=\"$(uname -m)\" "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    # Values the workflow text cannot classify withhold the finding.
+    "archs-from-variable": (
+        "xcodebuild -scheme AppTests COMPILER_INDEX_STORE_ENABLE=NO "
+        "ARCHS=\"$HOST_ARCH\" "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "index-from-variable": (
+        "xcodebuild -scheme AppTests "
+        "COMPILER_INDEX_STORE_ENABLE=\"$INDEX_STORE\" "
+        "-destination 'platform=iOS Simulator,name=iPhone 16' build-for-testing"),
+    "xcconfig-file": (
+        "xcodebuild -scheme AppTests -xcconfig ci.xcconfig "
+        "-destination 'generic/platform=iOS Simulator' build-for-testing"),
+    "matrix-configuration": (
+        "xcodebuild -scheme App -configuration ${{ matrix.configuration }} "
+        "-destination 'platform=iOS Simulator,name=iPhone 16' build"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_OPT91_NEAR_MISS_RUNS))
+def test_opt91_xcode_near_miss_shapes_stay_quiet(tmp_path: Path, case: str):
+    run = _OPT91_NEAR_MISS_RUNS[case]
+    workflow = f"""name: iOS CI
+on: pull_request
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - name: Xcode
+        run: {json.dumps(run)}
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml"), case
+
+
+def test_opt91_index_store_read_by_a_later_step_is_not_waste(tmp_path: Path):
+    """Periphery scans the index store the build wrote; disabling it would
+    break that check, so the index flavor must stay quiet."""
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  dead-code:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme App -derivedDataPath DerivedData
+          -destination 'platform=iOS Simulator,name=iPhone 16' build
+      - run: periphery scan --skip-build --index-store-path DerivedData/Index.noindex/DataStore
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_index_setting_on_one_step_is_not_an_index_consumer(
+        tmp_path: Path):
+    """The setting's own name must not read as a later step consuming the
+    index store, or one guarded step would hide an unguarded sibling."""
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - run: xcodebuild -scheme Lib COMPILER_INDEX_STORE_ENABLE=NO build
+      - run: >-
+          xcodebuild -scheme AppTests
+          -destination 'platform=iOS Simulator,name=iPhone 16' build-for-testing
+"""
+    assert "OPT91" in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_project_setting_disables_index_store(tmp_path: Path):
+    (tmp_path / "Config").mkdir()
+    (tmp_path / "Config" / "Base.xcconfig").write_text(
+        "COMPILER_INDEX_STORE_ENABLE = NO\n", encoding="utf-8")
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme App
+          -destination 'platform=iOS Simulator,name=iPhone 16' build
+"""
+    assert "OPT91" not in _scan_one(tmp_path, workflow, "ios.yml")
+
+
+def test_opt91_finding_states_an_unsized_saving_never_no_bill_saving(
+        tmp_path: Path):
+    import blocking_path as bp
+
+    workflow = """name: iOS CI
+on: pull_request
+jobs:
+  ios-tests:
+    runs-on: macos-15
+    steps:
+      - run: >-
+          xcodebuild -scheme AppTests
+          -destination 'platform=iOS Simulator,name=iPhone 16' build-for-testing
+"""
+    _write_workflow(tmp_path, "ios.yml", workflow)
+    finding = next(row for row in _scan(tmp_path)["findings"]
+                   if row["pattern"] == "OPT91")
+    assert finding["runner_min_unsized_reason"]
+    assert "runner-minute saving: unsized (" in finding["evidence"]
+    lines, n, _ = bp._also_noticed_block([finding], "https://example.invalid/c.md")
+    heading = next(line for line in lines
+                   if line.startswith("<summary><strong>OPT91 - "))
+    assert "no bill saving" not in heading
+    assert "runner-minute saving: unsized (" in heading
 
 
 def test_opt32_deploy_positive_path_also_matches_test_directory(tmp_path: Path):
