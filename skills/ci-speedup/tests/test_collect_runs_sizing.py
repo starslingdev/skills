@@ -733,6 +733,63 @@ def test_sharded_bases_detects_split_axis_and_pytest_split_command():
     assert "integration-app-harness-playwright" not in sharded
 
 
+def test_go_matrix_repeated_filters_are_not_called_already_sharded(tmp_path):
+    """#462: reaching ``-run`` is not a partition when every leg repeats it."""
+    from collect_runs import _sharded_bases
+    doc = {"jobs": {"go-tests": {
+        "strategy": {"matrix": {"filter": ["^TestCLI$", "^TestCLI$"]}},
+        "steps": [{"run": "go test ./cmd/app -run '${{ matrix.filter }}'"}],
+    }}}
+    package = tmp_path / "cmd" / "app"
+    package.mkdir(parents=True)
+    (package / "app_test.go").write_text(
+        "package app\nfunc TestCLI(t *testing.T) {}\nfunc TestConfig(t *testing.T) {}\n",
+        encoding="utf-8")
+    assert "go-tests" not in _sharded_bases(doc, tmp_path)
+
+
+def test_go_matrix_filters_must_partition_readable_package_tests_exactly(tmp_path):
+    from collect_runs import _sharded_bases
+    package = tmp_path / "cmd" / "app"
+    package.mkdir(parents=True)
+    (package / "app_test.go").write_text(
+        "package app\nfunc TestCLI(t *testing.T) {}\nfunc TestConfig(t *testing.T) {}\n",
+        encoding="utf-8")
+
+    def workflow(filters):
+        return {"jobs": {"go-tests": {
+            "strategy": {"matrix": {"filter": filters}},
+            "steps": [{"run": "go test ./cmd/app -run '${{ matrix.filter }}'"}],
+        }}}
+
+    assert "go-tests" in _sharded_bases(
+        workflow(["^TestCLI$", "^TestConfig$"]), tmp_path)
+    assert "go-tests" not in _sharded_bases(
+        workflow(["^Test.*$", "^TestCLI$"]), tmp_path)
+    assert "go-tests" not in _sharded_bases(
+        workflow(["^TestCLI$"]), tmp_path)
+
+
+def test_opt24_discloses_an_unverified_go_matrix_partition(tmp_path):
+    from collect_runs import _detect_opt24_long_test_no_sharding, _sharded_bases
+    package = tmp_path / "cmd" / "app"
+    package.mkdir(parents=True)
+    (package / "app_test.go").write_text(
+        "package app\nfunc TestCLI(t *testing.T) {}\nfunc TestConfig(t *testing.T) {}\n",
+        encoding="utf-8")
+    workflow = {"jobs": {"go-tests": {
+        "strategy": {"matrix": {"filter": ["^Test.*$", "^TestCLI$"]}},
+        "steps": [{"run": "go test ./cmd/app -run '${{ matrix.filter }}'"}],
+    }}}
+    runs = [[_opt24_job("go-tests", 400)] for _ in range(4)]
+    findings = _detect_opt24_long_test_no_sharding(
+        "ci.yml", runs, 0, sharded_bases=_sharded_bases(workflow, tmp_path),
+        wf_doc=workflow, repo_root=tmp_path)
+    assert len(findings) == 1
+    assert "existing Go partition unverified" in findings[0]["evidence"]
+    assert "disjointly and exhaustively" in findings[0]["evidence"]
+
+
 def test_opt24_suppressed_for_already_sharded_base_keeps_unsharded_sibling():
     # The detector must honor the YAML-derived sharded set: a pytest-split-sharded base
     # is NOT flagged "no shard axis observed", while a genuinely unsharded sibling in

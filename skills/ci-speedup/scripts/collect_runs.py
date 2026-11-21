@@ -25957,6 +25957,7 @@ def _detect_opt24_long_test_no_sharding(
     wf_doc: "dict[str, Any] | None" = None,
     overlap_withheld: "list[dict[str, Any]] | None" = None,
     logs_by_job_id: "dict[Any, str] | None" = None,
+    repo_root: "str | Path | None" = None,
 ) -> list[dict[str, Any]]:
     """Long test jobs with no sharding — catalog body OPT24.
 
@@ -25978,6 +25979,7 @@ def _detect_opt24_long_test_no_sharding(
     as 'no shard axis observed' on a job that is already split.
     """
     sharded_bases = sharded_bases or set()
+    unverified_go_filters = _unverified_go_filter_bases(wf_doc or {}, repo_root)
     # Jobs that are LEGS of a heterogeneous matrix (different packages/configs)
     # are OPT25's domain ("Matrix Leg Imbalance — split the slow leg"), not
     # OPT24's ("unsharded suite"). Flagging such a leg here too double-counts
@@ -26273,6 +26275,11 @@ def _detect_opt24_long_test_no_sharding(
                       f"path by ~{wc:.0f}s (does not reduce runner-minutes)."))
         if compile_note:
             me["note"] = f"{me['note']} {compile_note}"
+        partition_note = unverified_go_filters.get(base)
+        if partition_note:
+            me["note"] = (
+                f"{me['note']} The workflow passes a matrix value to `go test`, "
+                f"but it is not treated as an existing shard: {partition_note}.")
         # `wc_eff` is `wc` for a single-job workflow and the genuine pole; it is 0 when
         # a longer concurrent sibling means sharding saves no wall-clock. The size_note
         # must not claim "the long pole" for a non-pole finding (it survives into the
@@ -26292,6 +26299,8 @@ def _detect_opt24_long_test_no_sharding(
         )
         if compile_note:
             evidence_text += f"; {compile_note}"
+        if partition_note:
+            evidence_text += f"; existing Go partition unverified: {partition_note}"
         idx += 1
         finding = _new_finding(
             "OPT24", "HIGH", "Long Test Job Without Sharding", wf_path, base,
@@ -26717,28 +26726,98 @@ _SHARD_CMD_RE = _re.compile(
 
 _GO_RUN_FILTER_RE = _re.compile(
     r"\bgo\s+test\b[^\n]*?\s-(?:test\.)?(?:run|skip)(?:[=\s]|$)", _re.IGNORECASE)
+_GO_MATRIX_FILTER_RE = _re.compile(
+    r"-(?:test\.)?(run|skip)(?:=|\s+)['\"]?"
+    r"\$\{\{\s*matrix\.([A-Za-z_][A-Za-z0-9_-]*)\s*}}",
+    _re.IGNORECASE)
+_GO_TEST_FUNC_RE = _re.compile(
+    r"(?m)^\s*func\s+((?:Test|Example)[A-Za-z0-9_]*)\s*\(")
 
 
-def _go_matrix_run_split(job: dict[str, Any], matrix: Any) -> bool:
+def _go_matrix_split_status(
+    job: dict[str, Any], matrix: Any, root: str | Path | None = None,
+) -> tuple[bool, str | None]:
+    """Prove that a matrix filter partitions one literal Go package exactly.
+
+    Distinct filter strings are necessary but not sufficient.  When the package
+    and its ``*_test.go`` files are locally readable, every discovered test must
+    run in exactly one leg.  Unknown source, dynamic packages, invalid regexes,
+    overlaps and gaps all fail closed with a disclosure reason.
+    """
+    if not isinstance(matrix, dict) or not matrix:
+        return False, None
+    job_env = str(job.get("env") or "")
+    saw_matrix_filter = False
+    for step in job_walk(job).steps():
+        run = str(step.get("run", "") or "")
+        if not _GO_RUN_FILTER_RE.search(run):
+            continue
+        refs = list(_GO_MATRIX_FILTER_RE.finditer(run))
+        if not refs and "matrix." in f"{run}\n{step.get('env') or ''}\n{job_env}":
+            return False, "the Go matrix filter expression cannot be read statically"
+        for match in refs:
+            saw_matrix_filter = True
+            mode, axis = match.group(1).lower(), match.group(2)
+            values = matrix.get(axis)
+            if not isinstance(values, list) or len(values) < 2 or any(
+                    isinstance(value, (dict, list)) for value in values):
+                return False, "the Go matrix filter values cannot be read statically"
+            filters = [str(value) for value in values]
+            if len(set(filters)) != len(filters):
+                return False, "the Go matrix repeats a filter across multiple legs"
+
+            # Exactly one literal package is required. Wildcards and variables
+            # need Go's package loader, so they are unknown rather than safe.
+            prefix = run[:match.start()]
+            command = _re.search(r"\bgo\s+test\b(?P<args>[^\n]*)$", prefix)
+            args = command.group("args").split() if command else []
+            packages = [arg.strip("'\"") for arg in args
+                        if not arg.startswith("-") and not arg.startswith("${{")]
+            packages = [package for package in packages
+                        if package.startswith("./") and "..." not in package]
+            if root is None or len(packages) != 1:
+                return False, "the dominant Go package's test set cannot be read statically"
+            package_dir = Path(root) / packages[0][2:]
+            try:
+                test_files = sorted(package_dir.glob("*_test.go"))
+                test_names = sorted({name for path in test_files
+                                     for name in _GO_TEST_FUNC_RE.findall(
+                                         path.read_text(encoding="utf-8"))})
+            except (OSError, UnicodeError):
+                test_names = []
+            if not test_names:
+                return False, "the dominant Go package's test set cannot be read statically"
+            try:
+                regexes = [_re.compile(value) for value in filters]
+            except _re.error:
+                return False, "a Go matrix filter is not a statically readable regex"
+            for test_name in test_names:
+                matching = sum(bool(regex.search(test_name)) for regex in regexes)
+                runs = matching if mode == "run" else len(regexes) - matching
+                if runs != 1:
+                    return False, (
+                        "the Go matrix filters do not partition the dominant package's "
+                        "tests disjointly and exhaustively")
+            return True, None
+    return False, ("the Go matrix filter expression cannot be read statically"
+                   if saw_matrix_filter else None)
+
+
+def _go_matrix_run_split(
+    job: dict[str, Any], matrix: Any, root: str | Path | None = None,
+) -> bool:
     """A Go job already split into matrix legs by a ``-run``/``-skip`` filter.
 
     Go has no native shard flag, so a list-then-run split shows up as a matrix
     whose value reaches ``go test -run`` through the command or the step/job
     environment.  Such a job is already sharded and must not be told to shard.
     """
-    if not isinstance(matrix, dict) or not matrix:
-        return False
-    job_env = str(job.get("env") or "")
-    for step in job_walk(job).steps():
-        run = str(step.get("run", "") or "")
-        if not _GO_RUN_FILTER_RE.search(run):
-            continue
-        if "matrix." in f"{run}\n{step.get('env') or ''}\n{job_env}":
-            return True
-    return False
+    return _go_matrix_split_status(job, matrix, root)[0]
 
 
-def _sharded_bases(doc: dict[str, Any]) -> set[str]:
+def _sharded_bases(
+    doc: dict[str, Any], root: str | Path | None = None,
+) -> set[str]:
     """Base job names in this workflow that are ALREADY sharded — via a split/shard
     matrix axis OR a command-line splitter in their run steps — so OPT24 must not flag
     them as 'no shard axis observed' just because the rendered job name carries a bare
@@ -26760,7 +26839,7 @@ def _sharded_bases(doc: dict[str, Any]) -> set[str]:
         cmd_sharded = any(
             _SHARD_CMD_RE.search(str(s.get("run", "") or ""))
             for s in job_walk(job).steps())
-        go_split = _go_matrix_run_split(job, matrix)
+        go_split = _go_matrix_run_split(job, matrix, root)
         if not (axis_sharded or cmd_sharded or go_split):
             continue
         name = job.get("name")
@@ -26769,6 +26848,30 @@ def _sharded_bases(doc: dict[str, Any]) -> set[str]:
         for cand in (name if isinstance(name, str) and "${{" not in name else None, key):
             if cand:
                 out.add(_matrix_base_name(str(cand)))
+    return out
+
+
+def _unverified_go_filter_bases(
+    doc: dict[str, Any], root: str | Path | None = None,
+) -> dict[str, str]:
+    """Base job names whose Go matrix filter was seen but not proven safe."""
+    jobs = doc.get("jobs")
+    if not isinstance(jobs, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        strategy = job.get("strategy") or {}
+        matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+        verified, reason = _go_matrix_split_status(job, matrix, root)
+        if verified or reason is None:
+            continue
+        name = job.get("name")
+        for candidate in (name if isinstance(name, str) and "${{" not in name else None,
+                          key):
+            if candidate:
+                out[_matrix_base_name(str(candidate))] = reason
     return out
 
 
@@ -37037,8 +37140,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             continue
         _provisional = _detect_opt24_long_test_no_sharding(
             _wf_path, _jobs_per_run, 0, vol_by_wf.get(_wf_path),
-            sharded_bases=_sharded_bases(_wf_docs.get(_wf_path, {})),
-            wf_doc=_wf_docs.get(_wf_path, {}))
+            sharded_bases=_sharded_bases(_wf_docs.get(_wf_path, {}), root),
+            wf_doc=_wf_docs.get(_wf_path, {}), repo_root=root)
         _opt24_probe_jobs.extend(
             _opt24_representative_log_jobs(_jobs_per_run, _provisional))
     # A critical matrix leg may already be sharded and therefore never be an
@@ -37151,10 +37254,10 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
 
         new = _detect_opt24_long_test_no_sharding(
             wf_path, jobs_per_run, next_id, monthly,
-            sharded_bases=_sharded_bases(_wf_docs.get(wf_path, {})),
+            sharded_bases=_sharded_bases(_wf_docs.get(wf_path, {}), root),
             wf_doc=_wf_docs.get(wf_path, {}),
             overlap_withheld=_overlap_withheld,
-            logs_by_job_id=opt24_logs)
+            logs_by_job_id=opt24_logs, repo_root=root)
         next_id = max(next_id, max((int(f["id"][1:]) for f in new), default=next_id))
         findings.extend(new)
 
