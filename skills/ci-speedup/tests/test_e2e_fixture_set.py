@@ -4723,7 +4723,8 @@ def test_pr_sample_stops_at_era_boundary_discovered_on_later_page(
     assert cp["sample_candidate_era_door"] is True
     assert cp["sample_complete"] is False
     assert [c for c in checks if not c.skipped and not c.ok] == []
-    assert "9 of 100 PRs sampled: era door" in report
+    assert "9 of 100 PRs sampled: workflow configuration boundary reached" in report
+    assert "era door" not in report
 
 
 def test_pr_sample_verifier_rejects_doctored_stop_reason(monkeypatch, tmp_path):
