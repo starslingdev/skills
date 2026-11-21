@@ -342,3 +342,28 @@ def test_opt97_bmf_own_job_recipe_states_added_runner_minute_cost(tmp_path):
         "No runner-minute saving",
     )
     assert vr.check_bmf_runner_minute_filter(tampered, findings_path).ok is False
+
+
+def test_default_pre_start_wait_section_omits_a_held_opt97_card(tmp_path):
+    # A measured OPT97 carries positive savable wait, so it would render in the
+    # pre-start wait section; the default mode holds it, so the card must go.
+    finding = {
+        "id": "opt97-queue",
+        "pattern": "OPT97",
+        "severity": "MEDIUM",
+        "title": "Queue Caused by a One-at-a-Time Resource",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["test"],
+        "evidence": "job `test` has P90 queue 8m20s with a single-slot resource",
+        "wall_clock_p50_s": 120.0,
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
+
+    default = _option_report(finding, bmf=False)
+
+    assert "enabled=false held=1" in default
+    assert "<strong>OPT97 - " not in default
+    assert finding["evidence"] not in default
+    assert vr.check_bmf_runner_minute_filter(default, findings_path).ok is True
+    assert "<strong>OPT97 - " in _option_report(finding, bmf=True)

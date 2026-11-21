@@ -251,8 +251,11 @@ def _is_wait_finding(f: dict[str, Any]) -> bool:
     section over-counting (after the floor cascade most emitted OPT43s have zero savable wait;
     only the few with a positive cap belong here). Such a finding doesn't leak into the
     hygiene appendix either — `_also_noticed_block` excludes every `_WAIT_PATTERNS` finding
-    unconditionally (not by saving) — and `_queue_wait_block` discloses the dropped count."""
+    unconditionally (not by saving) — and `_queue_wait_block` discloses the dropped count.
+    A finding the default mode holds back (`_bmf_held_back`, e.g. OPT97's own-job move) is
+    not rendered here either; `render()`'s held-back line already counts it."""
     return (str(f.get("pattern", "")) in _WAIT_PATTERNS and not f.get("advisory")
+            and not f.get("_bmf_held_back")
             and (_num(f.get("wall_clock_p50_s")) or 0) > 0)
 
 
