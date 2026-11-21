@@ -505,6 +505,59 @@ def test_merge_keys_resolve_the_same_way_in_both_walkers() -> None:
             for n in scan._iter_step_nodes(steps_node)] == leaves
 
 
+def _walker_leaves(text: str) -> tuple[dict, dict]:
+    """Each job's leaf `run:` values, from the loaded data and from the
+    composed nodes; line attribution needs the two to be equal."""
+    doc = scan._parse_yaml_text(text, Path("merge-keys.yml"), quiet=True)
+    data = {name: [s.step.get("run") for s in scan._iter_job_steps(job)]
+            for name, job in doc["jobs"].items()}
+    nodes = {}
+    for name, job_node in scan._job_nodes(text).items():
+        steps_node = scan._node_keys(job_node).get("steps")
+        nodes[name] = [getattr(scan._node_keys(n).get("run"), "value", None)
+                       for n in scan._iter_step_nodes(steps_node)]
+    return data, nodes
+
+
+def test_merge_precedence_does_not_come_from_the_installed_pyyaml(
+        monkeypatch: pytest.MonkeyPatch) -> None:
+    """PyYAML 6.0.4 lets the LATER source of `<<: [*a, *b]` win. Simulate
+    that release on whatever PyYAML is installed: ci-secure's own merge rule
+    (earlier source wins) must still hold, so CI proves version independence
+    on a single PyYAML version."""
+    import yaml
+
+    def later_source_wins(self, node):          # 6.0.4's precedence
+        merge, index = [], 0
+        while index < len(node.value):
+            key_node, value_node = node.value[index]
+            if key_node.tag == "tag:yaml.org,2002:merge":
+                del node.value[index]
+                subs = (value_node.value
+                        if isinstance(value_node, yaml.SequenceNode)
+                        else [value_node])
+                for sub in subs:
+                    self.flatten_mapping(sub)
+                    merge.extend(sub.value)
+            else:
+                index += 1
+        if merge:
+            node.value = merge + node.value
+
+    monkeypatch.setattr(yaml.SafeLoader, "flatten_mapping", later_source_wins)
+    assert yaml.safe_load("a: &a {k: a}\nb: &b {k: b}\nc: {<<: [*a, *b]}\n"
+                          )["c"]["k"] == "b"    # the simulation bites
+    data, nodes = _walker_leaves(textwrap.dedent("""\
+        x-a: &a {run: from-a}
+        x-b: &b {run: from-b}
+        jobs:
+          j:
+            steps:
+              - <<: [*a, *b]
+        """))
+    assert data == nodes == {"j": ["from-a"]}
+
+
 @pytest.mark.parametrize("steps", _lockstep_shapes())
 def test_node_walker_stays_in_lockstep_with_the_step_walker(steps) -> None:
     """Line attribution pairs the two walkers' outputs by position, so they
