@@ -18052,6 +18052,92 @@ def check_queue_runner_label_evidence(report: str,
         else f"{len(findings)} OPT43 runner-label finding(s) match their stamps")
 
 
+# ---- Unsized runner-minute saving vs the "no bill saving" heading ----------
+#
+# The rule. A finding's runner-minute effect is in exactly one of three states:
+#
+#   * SIZED: `runner_min_saving` is a number. A positive number renders as the
+#     monthly figure; zero means the sizing concluded the fix removes no compute.
+#   * NO EFFECT: `runner_min_saving` is None but the finding carries a non-empty
+#     `runner_min_no_effect_reason` naming why the fix removes no compute (moving
+#     the same work between shards, removing a `needs:` edge, a measured zero
+#     path-filter hit rate).
+#   * UNSIZED: anything else. The saving may be real, but nothing measured it, so
+#     the finding must carry a literally true `runner_min_unsized_reason` and its
+#     group heading reads `runner-minute saving: unsized (<reason>)`.
+#
+# "no bill saving" is a claim that the fix removes no compute. It is true only for
+# a SIZED-to-zero or NO-EFFECT finding, so a group heading that says it while any
+# member is UNSIZED misstates a real but unsized saving. The converse holds for the
+# rendered unsized statement itself: "runner-minute saving: unsized (...)" followed
+# by "roughly neutral" (or "no bill saving") tells the reader both that a saving
+# exists and that it does not. A finding whose effect is neutral is NO EFFECT and
+# says so plainly; an UNSIZED one names what is unmeasured.
+_VR_NO_BILL_SAVING = "no bill saving"
+_VR_GROUP_HEADING_RE = re.compile(r"^<summary><strong>(OPT\d+) - ")
+_VR_UNSIZED_STATEMENT_RE = re.compile(r"runner-minute saving:? unsized\b(?P<rest>.*)$",
+                                      re.IGNORECASE)
+_VR_NO_EFFECT_CLAIM_RE = re.compile(
+    r"\bneutral\b|\bno bill saving\b|\bno runner-minute saving\b", re.IGNORECASE)
+
+
+def runner_min_effect_unsized(finding: dict) -> bool:
+    """True when the finding's runner-minute effect is UNSIZED (see the rule)."""
+    rm = finding.get("runner_min_saving")
+    if isinstance(rm, (int, float)) and not isinstance(rm, bool):
+        return False
+    return not str(finding.get("runner_min_no_effect_reason") or "").strip()
+
+
+def no_bill_heading_violations(findings: list, report: str) -> list[str]:
+    """Every rendered group heading that reads "no bill saving" while a non-advisory
+    finding of that pattern is UNSIZED. Pure: findings + report text in, problems out."""
+    by_pattern: dict[str, list[dict]] = {}
+    for f in findings:
+        if isinstance(f, dict) and not f.get("advisory"):
+            by_pattern.setdefault(str(f.get("pattern") or ""), []).append(f)
+    out: list[str] = []
+    for line in report.splitlines():
+        m = _VR_GROUP_HEADING_RE.match(line)
+        if not m or _VR_NO_BILL_SAVING not in line:
+            continue
+        unsized = [f for f in by_pattern.get(m.group(1), [])
+                   if runner_min_effect_unsized(f)]
+        if unsized:
+            fid = unsized[0].get("id") or "?"
+            reason = str(unsized[0].get("runner_min_unsized_reason") or "").strip()
+            out.append(f"{m.group(1)} group heading reads `no bill saving` but "
+                       f"finding {fid} is unsized "
+                       + (f"({reason})" if reason else
+                          "and carries no runner_min_unsized_reason"))
+    return out
+
+
+def unsized_statement_violations(report: str) -> list[str]:
+    """Every rendered "runner-minute saving: unsized" statement that, on the same
+    line, also claims the effect is neutral or absent. Pure: report text in."""
+    out: list[str] = []
+    for line in report.splitlines():
+        m = _VR_UNSIZED_STATEMENT_RE.search(line)
+        if m and _VR_NO_EFFECT_CLAIM_RE.search(m.group("rest")):
+            out.append("an unsized runner-minute saving is also described as neutral "
+                       f"or absent: {line.strip()[:160]}")
+    return out
+
+
+def check_no_bill_heading_for_unsized_saving(report: str, findings_path) -> Check:
+    name = "an unsized runner-minute saving never reads `no bill saving` or neutral"
+    try:
+        data = json.loads(Path(findings_path).read_text())
+    except (OSError, TypeError, ValueError):
+        return Check(name, True, "findings JSON unavailable", skipped=True)
+    findings = _as_list(_as_dict(data).get("findings"))
+    problems = (no_bill_heading_violations(findings, report)
+                + unsized_statement_violations(report))
+    return Check(name, not problems, "; ".join(problems[:8]) if problems
+                 else f"{len(findings)} finding(s): no unsized saving reads `no bill saving`")
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -18065,6 +18151,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_measured_cause_matches_rendered_timeline(report),
         check_skip_family_prompts_carry_pending_caveat(report),
         check_also_noticed_count_honest(report),
+        check_no_bill_heading_for_unsized_saving(report, findings_path),
         check_coverage_disclosed(report, findings_path),
         check_pr_sample_stop_reason(report, findings_path),
         check_run_list_gaps_named(report, findings_path),

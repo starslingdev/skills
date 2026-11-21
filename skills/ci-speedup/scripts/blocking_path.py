@@ -11815,10 +11815,10 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             if recipe:
                 body.append(f"Fix recipe (safest first): {recipe}")
             if len(positional) == len(members):
+                # The note already reads "runner-minute saving: unsized (<what
+                # is unmeasured>)"; state it as is, never beside a neutral claim.
                 note = str(positional[0].get("size_note") or "").strip()
-                saving = ("Saving: runner-minute saving unsized - "
-                          f"{note.removeprefix('runner-minute effect: ')}."
-                          if note else "Saving: unsized.")
+                saving = f"Saving: {note}." if note else "Saving: unsized."
     body += [saving, "",
              "Read the catalog entry (background, fix recipe, and guardrail):",
              f"  {url}", ""]
@@ -13382,7 +13382,7 @@ def _also_noticed_block(findings: list[dict[str, Any]],
         elif pat == "OPT32":
             modeled = sum(_num(m.get("runner_min_unrealizable_s")) or 0.0 for m in ms)
             summary_metric = (f"{_fmt_runner_min(modeled)} modeled upper bound"
-                              if modeled > 0 else "no bill saving")
+                              if modeled > 0 else bill)
             ev = _group_evidence(ms, compose=True)
         else:
             summary_metric = bill
