@@ -702,7 +702,7 @@ must keep those legs in the comparison.
 bookkeeping cutoff while making longer shared work visible to the imbalance
 detector.
 
-**Approval status:** awaiting owner approval.
+**Approval status:** owner-approved 2026-11-21 (60 seconds).
 
 ### `saving-caps`
 
@@ -1202,6 +1202,7 @@ implementation lands.
 - [ ] Approve the conditional 60-second bookkeeping rule.
 - [x] Approve the 60% `go-package-dominance` share (owner-approved 2026-11-20).
 - [x] Approve 5 paired runs per side for `account-weekly-paired-minimum` (owner-approved 2026-11-20).
+- [x] Approve the 60-second `opt25-universal-housekeeping` cutoff (owner-approved 2026-11-21).
 - [ ] Approve 5 last-finisher observations for supported ranking/grouping.
 - [ ] Approve two-sided 95% Wilson intervals and overlap as unsupported order.
 - [ ] Confirm #305, #306, and #311 may merge after their implementations match

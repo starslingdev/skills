@@ -40,6 +40,7 @@ REQUIRED_DECISIONS = {
 APPROVED_DECISIONS = {
     "go-package-dominance": "**Approval status:** owner-approved 2026-11-20 (60%).",
     "account-weekly-paired-minimum": "**Approval status:** owner-approved 2026-11-20 (5).",
+    "opt25-universal-housekeeping": "**Approval status:** owner-approved 2026-11-21 (60 seconds).",
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
