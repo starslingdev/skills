@@ -425,3 +425,76 @@ def test_unmeasured_monthly_volume_states_why_the_saving_is_unsized(
     assert not finding.get("runner_min_no_effect_reason")
     assert finding.get("runner_min_unsized_reason") == cr._NO_MONTHLY_VOLUME_REASON
     assert vr.no_bill_heading_violations(doc["findings"], report) == []
+
+
+def _opt105_prompt_text(report: str) -> str:
+    start = report.index("Pattern: OPT105")
+    return report[start:report.index("```", start)]
+
+
+def test_prompt_states_the_capped_saving_with_its_sign(monkeypatch, tmp_path):
+    """The hand-off quotes the already-capped figures as a saving, never as a
+    pre-cap number or a bare runner-minute count."""
+    _doc, report = _collect(
+        monkeypatch, tmp_path, "pnpm tsc --noEmit && pnpm lint && pnpm test")
+    prompt = _opt105_prompt_text(report)
+    assert "before the critical-path and compute caps" not in prompt
+    assert "runner-minute saving: at most " in prompt
+
+
+def test_prompt_never_prints_zero_for_an_unsized_saving(monkeypatch, tmp_path):
+    _doc, report = _collect(
+        monkeypatch, tmp_path, "pnpm tsc --noEmit && pnpm lint && pnpm test",
+        client_cls=_NoVolumeClient)
+    prompt = _opt105_prompt_text(report)
+    assert "~0 runner-min" not in prompt
+    assert ("runner-minute saving: unsized (the workflow's monthly run count was "
+            "not measured)") in prompt
+
+
+@pytest.mark.parametrize("config", [
+    # A Lefthook group that is not a Git hook name runs only on `lefthook run`.
+    "ci-checks:\n  commands:\n    test:\n      run: pnpm test\n",
+    # `skip` / `only` make the command conditional or never run.
+    "pre-push:\n  commands:\n    test:\n      skip: true\n      run: pnpm test\n",
+    "pre-push:\n  skip: true\n  commands:\n    test:\n      run: pnpm test\n",
+    "pre-push:\n  commands:\n    test:\n      only: [merge]\n      run: pnpm test\n",
+])
+def test_lefthook_commands_that_git_never_runs_are_not_hooks(tmp_path, config):
+    (tmp_path / "lefthook.yml").write_text(config, encoding="utf-8")
+
+    assert cr._opt105_config_commands(tmp_path) == [], (
+        "only a command Lefthook runs from a Git hook is repeated hook work")
+
+
+def test_lefthook_unconditional_hook_command_is_read(tmp_path):
+    (tmp_path / "lefthook.yml").write_text(
+        "pre-push:\n  commands:\n    test:\n      skip: false\n      run: pnpm test\n",
+        encoding="utf-8")
+
+    assert cr._opt105_config_commands(tmp_path) == [("lefthook.yml", "pnpm test", "")]
+
+
+_PRE_COMMIT_HOOK = ("  - repo: local\n    hooks:\n      - id: tests\n"
+                    "        entry: pnpm test\n        pass_filenames: false\n")
+
+
+@pytest.mark.parametrize("config", [
+    "repos:\n" + _PRE_COMMIT_HOOK + "        stages: [manual]\n",
+    "default_stages: [manual]\nrepos:\n" + _PRE_COMMIT_HOOK,
+    "repos:\n" + _PRE_COMMIT_HOOK + "        stages: manual\n",
+])
+def test_pre_commit_manual_stage_hooks_are_not_git_hooks(tmp_path, config):
+    (tmp_path / ".pre-commit-config.yaml").write_text(config, encoding="utf-8")
+
+    assert cr._opt105_config_commands(tmp_path) == [], (
+        "a manual-stage pre-commit hook runs only on `pre-commit run --hook-stage manual`")
+
+
+def test_pre_commit_push_stage_hook_is_read(tmp_path):
+    (tmp_path / ".pre-commit-config.yaml").write_text(
+        "default_stages: [manual]\nrepos:\n" + _PRE_COMMIT_HOOK
+        + "        stages: [pre-push, manual]\n", encoding="utf-8")
+
+    assert cr._opt105_config_commands(tmp_path) == [
+        (".pre-commit-config.yaml", "pnpm test", "")]

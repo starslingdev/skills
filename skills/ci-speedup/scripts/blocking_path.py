@@ -11651,7 +11651,17 @@ def _opt105_prompt(title: str, members: list[dict[str, Any]], url: str,
     """The hook-reuse hand-off keeps the safe recipe and opt-in trust guards local."""
     evidence = _group_evidence(members, compose=True)
     wall = max((_num(member.get("wall_clock_p50_s")) or 0.0) for member in members)
-    runner = _rmin_of(members)
+    # Both figures are already capped (critical-path headroom, measured
+    # compute); an unsized runner-minute saving says why, never "~0".
+    wall_text = (f"~{_clock(wall)} of merge wait" if wall > 0
+                 else "no credited merge-wait saving")
+    unsized = next((str(m.get("runner_min_unsized_reason") or "").strip()
+                    for m in members
+                    if not isinstance(_num(m.get("runner_min_saving")), (int, float))), None)
+    if unsized is not None:
+        runner_text = f"runner-minute saving: unsized ({unsized or 'not measured'})"
+    else:
+        runner_text = f"runner-minute saving: at most {_rmin_of(members):,.0f}/month"
     body = [
         "ci-speedup measured the pattern below but does NOT prescribe the fix -",
         "investigate it in the repo and apply a safe change.",
@@ -11659,8 +11669,7 @@ def _opt105_prompt(title: str, members: list[dict[str, Any]], url: str,
         f"Pattern: OPT105 - {title}.",
         f"Where: {locs}.",
         f"What ci-speedup saw: {evidence}",
-        f"Measured ceiling: ~{_clock(wall)} of merge wait and "
-        f"~{runner:,.0f} runner-min/mo before the critical-path and compute caps.",
+        f"Measured saving ceiling: {wall_text}; {runner_text}.",
         "",
         "DEFAULT - input-keyed reuse (CI remains authoritative): make the second",
         "proof cheap using tsc --incremental with cached .tsbuildinfo, eslint",

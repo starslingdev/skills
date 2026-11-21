@@ -17413,6 +17413,11 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
             if isinstance(value, dict):
                 identity = id(value)
                 seen.add(identity)
+                if lefthook and any(value.get(gate) not in (None, False)
+                                    for gate in ("skip", "only")):
+                    # A skipped or condition-gated command may never run from
+                    # the hook; withhold it rather than call it repeated work.
+                    return
                 local_directory = working_directory
                 if lefthook and isinstance(value.get("root"), str):
                     raw_directory = str(value["root"])
@@ -17426,6 +17431,11 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
                         return
                     local_directory = "" if local_directory == "." else local_directory
                 for child_key, child in value.items():
+                    if (lefthook and depth == 0
+                            and str(child_key) not in _OPT105_HOOK_NAMES):
+                        # Top-level groups that are not Git hook names run only
+                        # on an explicit `lefthook run <group>`.
+                        continue
                     _walk(child, str(child_key), local_directory, depth + 1)
             elif isinstance(value, list):
                 identity = id(value)
@@ -17453,6 +17463,18 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
         repos = doc.get("repos") if isinstance(doc, dict) else None
         if not isinstance(repos, list) or len(repos) > _OPT105_YAML_MAX_NODES:
             return
+        def _stages(value: Any) -> "list[str] | None":
+            if isinstance(value, str):
+                return [value]
+            if isinstance(value, list) and all(isinstance(v, str) for v in value):
+                return list(value)
+            return None
+
+        default_stages: "list[str] | None" = None
+        if "default_stages" in doc:
+            default_stages = _stages(doc.get("default_stages"))
+            if default_stages is None:
+                return
         rows: list[tuple[str, str, str]] = []
         visits = 0
         for repo in repos:
@@ -17467,6 +17489,14 @@ def _opt105_config_commands(root: "Path | None") -> list[tuple[str, str, str]]:
                 if visits > _OPT105_YAML_MAX_NODES:
                     return
                 if not isinstance(hook, dict) or hook.get("pass_filenames") is not False:
+                    continue
+                stages = (_stages(hook.get("stages")) if "stages" in hook
+                          else default_stages)
+                if "stages" in hook and stages is None:
+                    continue
+                if stages is not None and all(stage == "manual" for stage in stages):
+                    # Manual-stage hooks run only on `pre-commit run --hook-stage
+                    # manual`, never from a Git hook.
                     continue
                 entry = hook.get("entry")
                 args = hook.get("args", [])
