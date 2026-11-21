@@ -83,7 +83,7 @@ jobs:
       # they fail for a reason that has nothing to do with the floor. It is the
       # only third-party package anything shipped here needs.
       - name: Install the one dependency the engines need
-        run: pip install pyyaml
+        run: pip install "pyyaml<6.0.4"
       - name: Confirm the version really is the floor
         run: |
           set -euo pipefail
