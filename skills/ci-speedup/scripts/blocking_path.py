@@ -9010,6 +9010,7 @@ _OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 _OPT83_WITHHELD_DOC_KEY = "opt83_withheld_candidates"
 _OPT84_WITHHELD_DOC_KEY = "opt84_withheld_candidates"
 _PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
+_OPT24_WITHHELD_DOC_KEY = "opt24_withheld_candidates"
 class WithheldRow(NamedTuple):
     """One pattern's whole registration in the held-back disclosure.
 
@@ -9067,6 +9068,11 @@ _WITHHELD_ROWS: tuple[WithheldRow, ...] = (
                 "step"),
     # A credited lever (OPT24 sharding, the structural OPT70/72/75 route) whose
     # saving is priced from step medians on a job whose steps overlap.
+    WithheldRow(_OPT24_WITHHELD_DOC_KEY, "test sharding: held back",
+                "candidate test job(s)",
+                "Why a long Go test job already split by matrix -run/-skip filters "
+                "produced no sharding finding",
+                "job"),
     WithheldRow(_PARALLEL_STEPS_WITHHELD_DOC_KEY, "parallel steps: held back",
                 "candidate lever(s)",
                 "Why a lever priced from step times on a job that runs steps side by "
@@ -9358,7 +9364,16 @@ _PARALLEL_STEPS_WITHHOLD_PHRASES: dict[str, str] = {
         "parallel step group or in the background), so their times overlap and "
         "cutting one does not come straight off the job; no saving is claimed",
 }
+# The one reason OPT24 holds a long Go test job back (collect_runs
+# `_GO_PARTITION_UNVERIFIED_GATE`); verify_report carries an equal copy.
+_OPT24_WITHHOLD_PHRASES: dict[str, str] = {
+    "go_matrix_partition_unverified":
+        "the job already splits go test across matrix legs with -run or -skip "
+        "filters, but whether every test runs in exactly one leg could not be "
+        "verified from the workflow and the checkout, so no sharding advice is given",
+}
 _WITHHELD_PHRASES_BY_KEY: dict[str, dict[str, str]] = {
+    _OPT24_WITHHELD_DOC_KEY: _OPT24_WITHHOLD_PHRASES,
     _OPT77_WITHHELD_DOC_KEY: _OPT77_WITHHOLD_PHRASES,
     _PARALLEL_STEPS_WITHHELD_DOC_KEY: _PARALLEL_STEPS_WITHHOLD_PHRASES,
     _OPT80_WITHHELD_DOC_KEY: _OPT80_WITHHOLD_PHRASES,

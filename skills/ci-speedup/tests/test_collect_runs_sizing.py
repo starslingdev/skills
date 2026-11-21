@@ -786,8 +786,8 @@ def test_opt24_discloses_an_unverified_go_matrix_partition(tmp_path):
         "ci.yml", runs, 0, sharded_bases=_sharded_bases(workflow, tmp_path),
         wf_doc=workflow, repo_root=tmp_path)
     assert len(findings) == 1
-    assert "existing Go partition unverified" in findings[0]["evidence"]
-    assert "disjointly and exhaustively" in findings[0]["evidence"]
+    assert "do not partition the tests" in findings[0]["evidence"]
+    assert "`TestCLI` runs in 2 legs" in findings[0]["evidence"]
 
 
 def test_opt24_suppressed_for_already_sharded_base_keeps_unsharded_sibling():
