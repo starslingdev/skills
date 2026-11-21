@@ -26985,7 +26985,12 @@ def _detect_opt24_long_test_no_sharding(
             if go_extra_unsized:
                 finding["go_shard_extra_runner_unsized_reason"] = go_extra_unsized
             else:
-                finding["go_shard_extra_runner_s"] = round(pre_test_floor or 0.0, 1)
+                # The per-run Go recipe and the monthly signed-cost stamp describe
+                # the same extra shard.  Both therefore use the complete repeated
+                # floor (in-step compile plus separate checkout/setup/build), rather
+                # than letting the recipe omit setup that the monthly total includes.
+                finding["go_shard_extra_runner_s"] = finding.get(
+                    "runner_minute_setup_floor_s", round(pre_test_floor or 0.0, 1))
         out.append(finding)
     return out
 

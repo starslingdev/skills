@@ -17735,6 +17735,7 @@ def check_wall_clock_runner_minute_effects(
     effect_schema = data.get("runner_minute_effect_schema") == 1
     findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
     priced_amounts: list[float] = []
+    go_per_run_floors: set[int] = set()
     for finding in findings:
         pattern = str(finding.get("pattern") or "")
         if pattern not in {"OPT24", "OPT25"}:
@@ -17771,6 +17772,26 @@ def check_wall_clock_runner_minute_effects(
             failures.append(f"{pattern} added cost does not re-derive from floor*(N-1)*runs")
         elif amount > 0:
             priced_amounts.append(amount)
+        if pattern == "OPT24" and finding.get("go_dominant_package"):
+            per_run = _num(finding.get("go_shard_extra_runner_s"))
+            if per_run is None or floor is None or abs(per_run - floor) > 0.05:
+                failures.append(
+                    "OPT24 Go per-run cost and monthly cost use different setup floors")
+            else:
+                go_per_run_floors.add(int(round(per_run)))
+    displayed_go_costs = {
+        int(round(seconds))
+        for text in re.findall(
+            r"Runner-minute effect: added cost of ~([^\n.]+) per run for the "
+            r"assumed two-shard split",
+            report,
+        )
+        if (seconds := _parse_clock_to_s(text)) is not None
+    }
+    for displayed in displayed_go_costs - go_per_run_floors:
+        failures.append(
+            f"displayed OPT24 Go per-run cost {_fmt_clock(displayed)} does not "
+            "match its monthly setup floor")
     displayed_costs = [float(value) for value in re.findall(
         r"Runner-minute effect:\s*\+([0-9]+(?:\.[0-9]+)?)\s+runner-min/month",
         report,

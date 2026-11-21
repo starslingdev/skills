@@ -1,0 +1,1 @@
+- **2026-11-21** — Made OPT24's Go per-run and monthly runner-minute costs use one complete repeated setup floor (#481).

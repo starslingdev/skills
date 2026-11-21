@@ -239,6 +239,40 @@ class _BalancedGoPackagesClient(_Client):
         ])
 
 
+class _SeparateSetupGoClient(_Client):
+    """A Go shard candidate with checkout/setup outside the test step."""
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        response = super().json(endpoint, allow_missing)
+        if re.match(r"repos/o/r/actions/runs/(101|102)/jobs", endpoint):
+            go = response["jobs"][1]
+            go["steps"] = [
+                {
+                    "name": "Checkout",
+                    "conclusion": "success",
+                    "started_at": _iso(0),
+                    "completed_at": _iso(300),
+                },
+                {
+                    "name": "Run tests",
+                    "conclusion": "success",
+                    "started_at": _iso(300),
+                    "completed_at": _iso(2900),
+                },
+            ]
+        return response
+
+    def text(self, endpoint: str, allow_missing: bool = False):
+        job_id = int(endpoint.split("/")[-2])
+        if job_id % 10 != 2:
+            return super().text(endpoint, allow_missing)
+        self.queries += 1
+        return "\n".join([
+            f"{_iso(300)} $ go test ./...",
+            f"{_iso(2500)} ok example/project 2000.0s",
+        ])
+
+
 def _finding(doc: dict, job: str) -> dict:
     return next(
         finding for finding in doc["findings"]
@@ -377,6 +411,33 @@ def test_separate_build_compile_is_not_subtracted_from_test_payload_twice(
         "setup_floor_s": 2990.0,
         "assumed_shards": 2,
     }
+
+
+def test_go_per_run_and_monthly_cost_share_one_setup_floor(
+        monkeypatch, tmp_path: Path) -> None:
+    doc = _collect_and_verify(monkeypatch, tmp_path, _SeparateSetupGoClient)
+    go = _finding(doc, "go tests")
+    effect = go["runner_minute_effect"]
+
+    assert go["runner_minute_setup_floor_s"] == 1200.0
+    assert go["go_shard_extra_runner_s"] == 1200.0
+    assert effect == {
+        "direction": "added_cost",
+        "runner_min_per_month": 240.0,
+        "runs_per_month": 12,
+        "setup_floor_s": 1200.0,
+        "assumed_shards": 2,
+    }
+
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z", bmf=True)
+    assert "Runner-minute effect: added cost of ~20m 00s per run" in report
+    findings_path = tmp_path / "separate-setup-findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    inconsistent = report.replace(
+        "added cost of ~20m 00s per run", "added cost of ~15m 00s per run")
+    check = vr.check_wall_clock_runner_minute_effects(inconsistent, findings_path)
+    assert not check.ok
+    assert "per-run cost 15m 00s" in check.detail
 
 
 def test_fractional_shard_cost_is_positive_and_report_amount_is_verified(
