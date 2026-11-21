@@ -66,6 +66,31 @@
         "Did not invoke a sling or gh subcommand to answer a YAML question"
       ],
       "files": []
+    },
+    {
+      "id": 6,
+      "name": "agent-owned-pr-check-goes-red",
+      "should_trigger": true,
+      "prompt": "You are driving your own pull request to green. `gh pr checks` now shows that the test job failed. Diagnose it and keep working.",
+      "expected_output": "Invokes the sling skill even though the user did not ask a failure question, identifies the failed job with `gh pr checks`, then runs `sling why` before fetching any log detail. It does not start by scraping raw output with `gh run view --log` or `--log-failed`.",
+      "assertions": [
+        "Invoked `sling why` for the failed job before fetching logs",
+        "Did not use `gh run view --log` or `--log-failed` as the first diagnostic path",
+        "Treated the red check encountered during the agent's own PR work as a sling trigger"
+      ],
+      "files": []
+    },
+    {
+      "id": 7,
+      "name": "agent-owned-pr-checks-green-review-comment",
+      "should_trigger": false,
+      "prompt": "You are driving your own pull request to merge. `gh pr checks` shows every check passing. The only thing left is a review comment asking you to rename a helper function. Address it and push.",
+      "expected_output": "Edits the code to address the review comment and pushes, without invoking the sling skill: no check is red, so there is no run or job to diagnose.",
+      "assertions": [
+        "Did not invoke the sling skill or any `sling` subcommand",
+        "Addressed the review comment by editing the code"
+      ],
+      "files": []
     }
   ]
 }
