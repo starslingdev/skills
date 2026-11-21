@@ -2068,6 +2068,300 @@ def test_p1425_a_nested_manifest_symlinked_out_of_the_checkout_is_not_read(
     assert "this repo pins `pnpm@10.25.0`" in (hits[0].derived_note or "")
 
 
+@pytest.mark.parametrize(("command", "root_pin", "nested_pin"), [
+    ("npm ci --prefix apps/web", "npm@11.0.0", "npm@10.9.0"),
+    ("npm install --prefix apps/web", "npm@11.0.0", "npm@10.9.0"),
+    ("pnpm -C apps/web install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("pnpm --dir apps/web install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("pnpm -C  apps/web install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("pnpm --dir\tapps/web install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("yarn --cwd apps/web", "yarn@4.0.0", "yarn@1.22.22"),
+])
+def test_p1425_install_directory_flags_select_the_nested_pin(
+    tmp_path, command, root_pin, nested_pin,
+):
+    """Install-directory flags select the same nested manifest as a step's
+    ``working-directory`` instead of inheriting the repository-root pin.
+    """
+    _pkg(tmp_path, root_pin)
+    _nested_pkg(tmp_path, "apps/web", nested_pin)
+    hits = _install_hits(tmp_path, f"""\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: |
+                  {command}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert nested_pin in note
+    assert "apps/web" in note
+    assert f"this repo pins `{root_pin}`" not in note
+    assert f"which pins `{root_pin}`" in note
+
+
+@pytest.mark.parametrize(("command", "root_pin", "outside_pin"), [
+    ("npm ci --prefix ../outside", "npm@11.0.0", "npm@10.9.0"),
+    ("pnpm -C ../outside install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("pnpm --dir ../outside install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    ("yarn --cwd ../outside", "yarn@4.0.0", "yarn@1.22.22"),
+])
+def test_p1425_install_directory_flags_cannot_read_outside_the_repo(
+    tmp_path, command, root_pin, outside_pin,
+):
+    """A command-line directory that escapes the checkout falls back to the
+    repository-root pin instead of reading an outside manifest.
+    """
+    _pkg(tmp_path, root_pin)
+    outside = tmp_path.parent / "outside"
+    outside.mkdir(exist_ok=True)
+    (outside / "package.json").write_text(
+        f'{{"name": "outside", "packageManager": "{outside_pin}"}}\n')
+    hits = _install_hits(tmp_path, f"""\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: {command}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert f"this repo pins `{root_pin}`" in note
+    assert outside_pin not in note
+
+
+def test_p1425_tilde_directory_flag_does_not_read_a_literal_repo_directory(
+    tmp_path,
+):
+    """An unquoted tilde is expanded by the shell outside the checkout. The
+    scanner must not mistake a repository directory literally named ``~`` for
+    that external location.
+    """
+    _pkg(tmp_path, "npm@11.0.0")
+    _nested_pkg(tmp_path, "~/outside", "npm@10.9.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: npm ci --prefix ~/outside
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "this repo pins `npm@11.0.0`" in note
+    assert "npm@10.9.0" not in note
+
+
+def test_p1425_later_command_directory_flag_does_not_move_the_install(
+    tmp_path,
+):
+    """Only the qualifying install command owns its directory option. A
+    later command on the same line cannot relocate the earlier root install.
+    """
+    _pkg(tmp_path, "pnpm@9.15.0", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.34.5")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  pnpm install && pnpm --dir apps/web run build
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "this repo pins `pnpm@9.15.0`" in note
+    assert "pnpm@10.34.5" not in note
+
+
+def test_p1425_manager_and_directory_come_from_the_same_install_segment(
+    tmp_path,
+):
+    """A protected install before the exposed one cannot lend that later
+    install its package manager.  Manager and placement are properties of one
+    qualifying shell segment, not independent searches across the source line.
+    """
+    _pkg(tmp_path, "pnpm@10.34.5", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/legacy", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  pnpm --dir apps/legacy install --ignore-scripts && npm ci
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "npm major your runner resolves" in note
+    assert "pnpm@9.15.0" not in note
+    assert "pnpm@10.34.5" not in note
+
+
+def test_p1425_directory_flag_nested_pnpm9_is_not_covered_by_root_pnpm10(
+    tmp_path,
+):
+    """The directory option affects the mitigation gate as well as the note:
+    pnpm 9 does not carry pnpm 10's build-allowlist mechanism.
+    """
+    _pkg(tmp_path, "pnpm@10.34.5", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  pnpm install --dir apps/web
+    """)
+    assert len(hits) == 1
+    assert "pnpm@9.15.0" in (hits[0].derived_note or "")
+
+
+def test_p1425_directory_flag_nested_pnpm10_uses_the_allowlist_mechanism(
+    tmp_path,
+):
+    """The mirror: a nested pnpm-10 package launched from a pnpm-10 root is
+    protected by a real disable aimed at the workspace config.
+    """
+    _pkg(tmp_path, "pnpm@10.25.0", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.34.5")
+    assert _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  pnpm install --dir apps/web
+    """) == []
+
+
+@pytest.mark.parametrize("command", [
+    "pnpm install --dir apps/web",
+    "pnpm -C apps/web install",
+])
+def test_p1425_directory_flag_cannot_borrow_cover_from_the_nested_pin(
+    tmp_path, command,
+):
+    """A directory option does not move the process that launches pnpm.
+    Corepack resolves the version from the directory the step runs in, so
+    `pnpm -C apps/web install` from a root pinned at pnpm 9 runs pnpm 9
+    whatever `apps/web` pins. Checked with Corepack 0.36: root
+    `pnpm@9.15.0`, `apps/web` `pnpm@10.4.1`, a preinstall echoing
+    `$npm_config_user_agent` printed `pnpm/9.15.0`. The pnpm-10 allowlist
+    cannot be the mitigation for an install pnpm 9 may run.
+    """
+    _pkg(tmp_path, "pnpm@9.15.0", "allowBuilds:\n  core-js: true\n")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.34.5")
+    hits = _install_hits(tmp_path, f"""\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              id-token: write
+            steps:
+              - run: |
+                  yq '.allowBuilds[]=false' -i pnpm-workspace.yaml
+                  {command}
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "pnpm@10.34.5" in note
+    assert "launched from the repo root, which pins `pnpm@9.15.0`" in note
+
+
+def test_p1425_directory_flag_note_names_the_launch_pin_when_they_differ(
+    tmp_path,
+):
+    """Either pin can be the one that runs: Corepack takes the launch
+    directory's, a standalone pnpm 10 switches to the target's. The note
+    names both when they differ, and adds nothing when they agree.
+    """
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    body = """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: pnpm -C apps/web install
+    """
+    hits = _install_hits(tmp_path, body)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "the installed package (`apps/web`) pins `pnpm@9.15.0`" in note
+    assert "launched from the repo root, which pins `pnpm@10.25.0`" in note
+    _nested_pkg(tmp_path, "apps/web", "pnpm@10.25.0")
+    hits = _install_hits(tmp_path, body)
+    assert len(hits) == 1
+    assert "launched from" not in (hits[0].derived_note or "")
+
+
+def test_p1425_launch_pin_note_stays_quiet_for_another_managers_pins(
+    tmp_path,
+):
+    """`npm ci --prefix apps/web` in a repo whose manifests pin pnpm: the
+    npm note quotes no pnpm pin, so the launch clause must not quote one
+    either. It is about the pin that picks THIS install's manager.
+    """
+    _pkg(tmp_path, "pnpm@10.25.0")
+    _nested_pkg(tmp_path, "apps/web", "pnpm@9.15.0")
+    hits = _install_hits(tmp_path, """\
+        name: publish
+        on: push
+        jobs:
+          publish:
+            runs-on: ubuntu-latest
+            permissions:
+              contents: write
+            steps:
+              - run: npm ci --prefix apps/web
+    """)
+    assert len(hits) == 1
+    note = hits[0].derived_note or ""
+    assert "launched from" not in note
+    assert "pnpm@" not in note
+
+
 @pytest.mark.parametrize("command", [
     "npm ci --maxsockets 3",
     "pnpm install --fetch-timeout 60000",
