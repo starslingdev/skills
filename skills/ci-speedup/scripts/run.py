@@ -24,6 +24,7 @@ no fix-subagent phase. After this driver, the orchestrator just renders with
 Usage:
     run.py --root REPO --out FINDINGS.json [--repo owner/repo]
            [--target N] [--with-logs] [--catalog PATH]
+           [--accept-request-estimate]
            [--account-weekly-series PATH]
            [--skill-commit-sha SHA] [--commit-sha SHA]
     # writes FINDINGS.json; then render it with `blocking_path.py --in FINDINGS.json`.
@@ -44,10 +45,13 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
 import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 _DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_DIR))
@@ -143,6 +147,150 @@ def _skill_lock_provenance(skill_root: Path) -> str:
 _STEP_TIMEOUT_S = 900
 
 
+class _RequestEstimate(NamedTuple):
+    """Cheap preflight estimate, kept separate from the measured final count.
+
+    `request_*` are core-quota JSON requests (the preflight probes included),
+    `log_*` core-quota job-log downloads. `*_ceiling` is every conditional detector
+    read firing on every workflow (see `request_estimate.py`)."""
+
+    request_low: int
+    request_high: int
+    log_low: int
+    log_high: int
+    remaining: int
+    reset_epoch: int
+    probe_requests: int
+    request_ceiling: int = 0
+    log_ceiling: int = 0
+    limit: int = 0
+    graphql_high: int = 0
+    graphql_remaining: int | None = None
+    search_high: int = 0
+
+
+class _RequestProbe:
+    """Count every attempted preflight request, including a failing final probe."""
+
+    def __init__(self) -> None:
+        self.requests = 0
+
+    def json(self, endpoint: str) -> dict:
+        self.requests += 1
+        return _gh_json(endpoint)
+
+
+def _gh_json(endpoint: str) -> dict:
+    """Read one audited-repository endpoint through the authenticated gh client."""
+    result = subprocess.run(
+        ["gh", "api", endpoint], capture_output=True, text=True, timeout=30)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or f"gh api failed for {endpoint}")
+    value = json.loads(result.stdout)
+    if not isinstance(value, dict):
+        raise ValueError(f"gh api returned non-object JSON for {endpoint}")
+    return value
+
+
+def _estimate_data_pass(
+        repo: str, *, with_logs: bool, target: int = 10,
+        probe: _RequestProbe | None = None,
+        root: Path | None = None) -> _RequestEstimate:
+    """Estimate the bulk pass from four cheap, bounded probes.
+
+    Every request family the collector issues is priced in `request_estimate.py`;
+    job logs count even without `--with-logs`, because several detectors read a
+    bounded number of logs on every run."""
+    import request_estimate  # local: imports the collector's constants
+    probe = probe or _RequestProbe()
+    workflows = probe.json(f"repos/{repo}/actions/workflows?per_page=100")
+    runs = probe.json(f"repos/{repo}/actions/runs?per_page=10")
+    recent = runs.get("workflow_runs") if isinstance(runs.get("workflow_runs"), list) else []
+    run_id = next((r.get("id") for r in recent if isinstance(r, dict) and r.get("id")), None)
+    jobs = (probe.json(f"repos/{repo}/actions/runs/{run_id}/jobs?per_page=100")
+            if run_id is not None else {"total_count": 0, "jobs": []})
+    rate = probe.json("rate_limit")
+
+    facts = request_estimate.facts_from_probe(
+        workflows, runs, jobs, root=root, with_logs=with_logs)
+    totals = request_estimate.estimate(facts)
+    probe_requests = probe.requests
+    resources = rate.get("resources") or {}
+    core = resources.get("core") or {}
+    graphql = resources.get("graphql") or {}
+    graphql_remaining = graphql.get("remaining")
+    return _RequestEstimate(
+        request_low=probe_requests + totals.json_low,
+        request_high=probe_requests + totals.json_high,
+        log_low=totals.log_low, log_high=totals.log_high,
+        remaining=max(0, int(core.get("remaining") or 0)),
+        reset_epoch=max(0, int(core.get("reset") or 0)),
+        probe_requests=probe_requests,
+        request_ceiling=probe_requests + totals.json_ceiling,
+        log_ceiling=totals.log_ceiling,
+        limit=max(0, int(core.get("limit") or 0)),
+        graphql_high=totals.graphql_high,
+        graphql_remaining=(int(graphql_remaining)
+                           if isinstance(graphql_remaining, int) else None),
+        search_high=totals.search_high,
+    )
+
+
+def _confirm_request_budget(
+        estimate: _RequestEstimate, *, explicitly_accepted: bool = False) -> bool:
+    """Require explicit consent before a pass may spend over half the quota.
+
+    Gates on the expected upper figure only. The ceiling (every conditional read
+    firing on every workflow) is printed and recorded, never gated on: it is not
+    a realistic figure, and stopping on it would stop most mid-size scans."""
+    quota_high = estimate.request_high + estimate.log_high
+    if quota_high <= estimate.remaining / 2 or explicitly_accepted:
+        return True
+    # An agent or redirected run must never hang on input(). Its rerun command
+    # carries the explicit acceptance flag instead.
+    if not sys.stdin.isatty():
+        return False
+    relation = ("exceeds the remaining quota" if quota_high > estimate.remaining
+                else "exceeds half the remaining quota")
+    try:
+        answer = input(
+            f"The estimated data pass (up to {quota_high} API calls: "
+            f"{estimate.request_low}-{estimate.request_high} JSON requests and "
+            f"{estimate.log_low}-{estimate.log_high} log downloads) "
+            f"{relation} ({estimate.remaining} remain). Continue? [y/N] ")
+    except EOFError:
+        return False
+    return answer.strip().lower() in {"y", "yes"}
+
+
+def _estimate_line(e: _RequestEstimate) -> str:
+    """The one pre-collection line: estimate, ceiling, and what is left."""
+    reset = (time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime(e.reset_epoch))
+             if e.reset_epoch else "unknown")
+    left = (f"{e.remaining} of {e.limit}" if e.limit else f"{e.remaining}")
+    line = (
+        "Data-pass request estimate: "
+        f"{e.request_low}-{e.request_high} GitHub API requests; "
+        f"{e.log_low}-{e.log_high} log downloads "
+        f"(ceiling {e.request_ceiling + e.log_ceiling} if every conditional read fires); "
+        f"{left} requests remain (reset {reset}).")
+    if e.graphql_high or e.search_high:
+        gql_left = (f", {e.graphql_remaining} remain"
+                    if e.graphql_remaining is not None else "")
+        line += (f" Separate quotas: up to {e.graphql_high} GraphQL "
+                 f"quer{'y' if e.graphql_high == 1 else 'ies'}{gql_left}; "
+                 f"up to {e.search_high} search request(s).")
+    return line
+
+
+def _accepted_estimate_command(argv: list[str] | None) -> str:
+    """Exact command that repeats this run with the quota estimate accepted."""
+    raw = list(sys.argv[1:] if argv is None else argv)
+    if "--accept-request-estimate" not in raw:
+        raw.append("--accept-request-estimate")
+    return shlex.join([sys.executable, str(_DIR / "run.py"), *raw])
+
+
 def _step(cmd: list[str], *, capture_stdout: bool) -> subprocess.CompletedProcess[str]:
     """Run a sub-step. stderr always inherits (flows to our stderr → the
     orchestrator sees scan warnings etc. inline, so no per-script stderr file is
@@ -191,6 +339,11 @@ def main(argv: list[str] | None = None) -> int:
                              "(issue #81).")
     parser.add_argument("--with-logs", action="store_true",
                         help="Also run collect_runs' Tier-3 logs deep dive.")
+    parser.add_argument(
+        "--accept-request-estimate", action="store_true",
+        help="Proceed when the printed upper request estimate exceeds half of "
+             "the remaining GitHub quota (required for non-interactive runs). "
+             "The printed ceiling is context only and never stops a run.")
     parser.add_argument("--bmf", action="store_true",
                         help="Show wall-clock-only recommendations that add runner "
                              "minutes or use an unpriced larger runner.")
@@ -243,6 +396,32 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: account weekly series is invalid ({e}); stopping.",
                   file=sys.stderr)
             return 1
+
+    # Price the bulk data pass only after every local input is valid, so a
+    # malformed account export never costs the user preflight API reads.
+    request_estimate: _RequestEstimate | None = None
+    request_probe = _RequestProbe()
+    offline_replay = bool(os.environ.get("CI_SPEEDUP_GH_FIXTURES"))
+    if args.repo and not args.verify_branch and not offline_replay:
+        try:
+            request_estimate = _estimate_data_pass(
+                args.repo, with_logs=args.with_logs, target=args.target,
+                probe=request_probe, root=Path(args.root))
+        except (OSError, TypeError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
+            # A failed cheap probe must not turn an otherwise usable collector into a
+            # static-only run. Collection keeps its existing loud partial-state path.
+            print(f"Data-pass request estimate unavailable ({e}).", file=sys.stderr)
+        else:
+            print(_estimate_line(request_estimate), flush=True)
+            if not _confirm_request_budget(
+                    request_estimate,
+                    explicitly_accepted=args.accept_request_estimate):
+                print("Data pass not started. Omit --with-logs or wait for the "
+                      "quota reset, or explicitly accept this estimate.",
+                      file=sys.stderr)
+                print("Rerun exactly: " + _accepted_estimate_command(argv),
+                      file=sys.stderr)
+                return 1
 
     # Verification resumes the artifact produced before the fix.  Do this
     # before scan/collect so the historical baseline is never replaced with a
@@ -376,6 +555,24 @@ def main(argv: list[str] | None = None) -> int:
             print(f"ERROR: post-collect findings JSON is unreadable ({e}); stopping.",
                   file=sys.stderr)
             return 1
+        ds = data.get("data_sources")
+        if isinstance(ds, dict) and request_probe.requests:
+            measured = ds.get("gh_query_count")
+            if isinstance(measured, int) and not isinstance(measured, bool):
+                ds["gh_query_count"] = measured + request_probe.requests
+        if request_estimate is not None and isinstance(ds, dict):
+            ds["request_estimate"] = {
+                "request_low": request_estimate.request_low,
+                "request_high": request_estimate.request_high,
+                "log_low": request_estimate.log_low,
+                "log_high": request_estimate.log_high,
+                "remaining_before_data_pass": request_estimate.remaining,
+                "probe_requests": request_estimate.probe_requests,
+                "request_ceiling": request_estimate.request_ceiling,
+                "log_ceiling": request_estimate.log_ceiling,
+                "graphql_high": request_estimate.graphql_high,
+                "search_high": request_estimate.search_high,
+            }
         if account_weekly is not None:
             data["account_weekly"] = account_weekly
         timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
