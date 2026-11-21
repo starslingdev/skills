@@ -178,7 +178,7 @@ Only the delivery mechanism varies; the contract is **agent-independent.**
    to stdout — the gating resolution (required checks, **already resolved from rulesets
    + branch protection**: a fileless/managed check like `Claude Code Review` is flagged
    auto-demoted, an empty set means none are declared), the addressable long poles, the gh
-   API call count, and the **exact `blocking_path.py` render command** with per-pole bindings pre-filled.
+   API call count, and the **exact `blocking_path.py` render command** with per-pole bindings pre-filled. By default recommendations save or preserve runner minutes; if the user explicitly prioritizes wall-clock time, add `--bmf` to include wall-clock-only levers with signed runner-minute effects, otherwise the report gives only their held-back count.
    **Act on that summary.** Do NOT re-query gh for branch protection / rulesets (the
    data pass did it — read `required_checks`), manually verify a fileless check's
    gating, or hand-spelunk `findings.json` with `python -c` — it's all in the summary.

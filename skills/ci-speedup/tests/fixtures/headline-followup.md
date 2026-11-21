@@ -4,6 +4,8 @@
 
 not measured: lifecycle data was not collected
 
+<!-- ci-speedup:bmf enabled=false held=0 -->
+
 | Repository | `example/project` |
 | :--- | :--- |
 | **Audited commit** | [`abcdef1`](https://github.com/example/project/commit/abcdef1234567890) - file & line references are anchored to this tree |

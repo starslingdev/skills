@@ -12229,7 +12229,7 @@ def _opt81_half(f: dict[str, Any]) -> str:
 
 def _opt81_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [f for f in findings if str(f.get("pattern", "")) == "OPT81"
-            and _opt81_half(f) in ("A1", "A2")]
+            and _opt81_half(f) in ("A1", "A2") and not f.get("_bmf_held_back")]
 
 
 def _opt81_for_pole(pole: dict[str, Any],
@@ -12505,7 +12505,8 @@ _OPT83_SUMMARY = "uncredited, benchmark first"
 
 def _opt83_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [f for f in findings if str(f.get("pattern", "")) == "OPT83"
-            and isinstance(f.get("independent_steps"), dict)]
+            and isinstance(f.get("independent_steps"), dict)
+            and not f.get("_bmf_held_back")]
 
 
 def _opt83_for_pole(pole: dict[str, Any],
@@ -12993,6 +12994,8 @@ def _also_noticed_block(findings: list[dict[str, Any]],
     # without changing the source finding `_data_driven_for_pole` reads later.
     render_findings: list[dict[str, Any]] = []
     for source in findings:
+        if source.get("_bmf_held_back"):
+            continue
         finding = dict(source)
         jobs = finding.get("affected_jobs") or (
             [finding.get("job")] if finding.get("job") else [])
@@ -13726,6 +13729,8 @@ def _data_driven_for_pole(pole: dict[str, Any],
 
     out: list[dict[str, Any]] = []
     for f in findings:
+        if f.get("_bmf_held_back"):
+            continue
         if f.get("advisory"):
             continue
         if _wf_conflict(pole_wf, str(f.get("workflow_file") or "")):
@@ -14814,9 +14819,67 @@ def _account_weekly_block(value: Any) -> list[str]:
     return lines
 
 
-def render(doc: dict[str, Any], *args, **kwargs) -> str:
-    """Include lifecycle context on every report path, including static-only."""
-    report = _render_core(doc, *args, **kwargs)
+def _bmf_held_back(finding: dict[str, Any]) -> bool:
+    """Whether this wall-clock lever can add runner use or unpriced runner cost."""
+    effect = finding.get("runner_minute_effect")
+    effect = effect if isinstance(effect, dict) else {}
+    direction = str(effect.get("direction") or "").lower()
+    per_run = _num(effect.get("runner_min_per_run"))
+    per_month = _num(effect.get("runner_min_per_month"))
+    if direction in {"added", "added_cost", "cost", "increase"}:
+        return True
+    if (per_run is not None and per_run > 0) or (per_month is not None and per_month > 0):
+        return direction not in {"saving", "saved", "neutral"}
+    pattern = str(finding.get("pattern") or "")
+    if pattern == "OPT24":
+        return True
+    if pattern == "OPT83":
+        stamp = finding.get("independent_steps")
+        return (isinstance(stamp, dict)
+                and stamp.get("kind") == "opt83_separate_jobs")
+    if pattern == "OPT81":
+        runner = finding.get("faster_runner")
+        runner = runner if isinstance(runner, dict) else {}
+        return runner.get("kind") != "opt81_downsize"
+    mechanism = " ".join(str(finding.get(key) or "") for key in
+                         ("title", "fix_strategy", "fix_strategy_detail"))
+    if direction == "unsized" and re.search(
+            r"\b(?:shard(?:ing)?|split|sibling|matrix)\b", mechanism, re.I):
+        return True
+    return False
+
+
+def render(doc: dict[str, Any], *args, bmf: bool = False, **kwargs) -> str:
+    """Include lifecycle context and apply the runner-minute recommendation policy."""
+    findings = []
+    held = 0
+    for source in doc.get("findings") or []:
+        finding = source
+        if isinstance(source, dict) and not bmf and _bmf_held_back(source):
+            finding = dict(source)
+            finding["_bmf_held_back"] = True
+            held += 1
+        findings.append(finding)
+    original_findings = doc.get("findings")
+    doc["findings"] = findings
+    try:
+        report = _render_core(doc, *args, **kwargs)
+    finally:
+        if original_findings is None:
+            doc.pop("findings", None)
+        else:
+            doc["findings"] = original_findings
+    marker = f"<!-- ci-speedup:bmf enabled={'true' if bmf else 'false'} held={held} -->"
+    disclosure = []
+    if held:
+        noun = "lever" if held == 1 else "levers"
+        disclosure = [
+            f"{held} wall-clock {noun} held back because they add runner minutes or "
+            "change to an unpriced runner; rerun with `--bmf` to show them."
+        ]
+    first, separator, rest = report.partition("\n\n")
+    report = ("\n\n".join([first, marker, *disclosure, rest])
+              if separator else "\n\n".join([report, marker, *disclosure]))
     block = pr_lifecycle.render(doc.get("pr_lifecycle"))
     first, separator, rest = report.partition("\n\n")
     report = (first + "\n\n" + block + "\n" + rest
@@ -17914,6 +17977,9 @@ def main(argv: list[str] | None = None) -> int:
                          "coverage-gap dead-end. See SKILL.md's gap-fill phase.")
     ap.add_argument("--captured-at", dest="captured_at", default="",
                     help="Date the --log/--sample data was fetched (provenance note).")
+    ap.add_argument("--bmf", action="store_true",
+                    help="Show wall-clock levers that add runner minutes or use an "
+                         "unpriced larger runner (hidden by default).")
     args = ap.parse_args(argv)
 
     def _split(spec: str, flag: str) -> tuple[str, str] | None:
@@ -17990,7 +18056,7 @@ def main(argv: list[str] | None = None) -> int:
                 "__analysis_parse_error__": f"the analysis JSON could not be read or parsed: {e}"
             }
     md = render(doc, logs, samples, log_runs, args.captured_at, steps, mags,
-                analyses=analyses)
+                analyses=analyses, bmf=args.bmf)
     _report_unmatched_analysis_dispositions(doc, analyses)
     if args.out_path:
         args.out_path.write_text(md + "\n", encoding="utf-8")

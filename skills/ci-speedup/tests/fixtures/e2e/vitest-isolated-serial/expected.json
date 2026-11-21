@@ -61,6 +61,7 @@
       "OPT108 comment-run saving re-derives and stays within measured compute",
       "OPT43 runner-label evidence matches its structured stamp",
       "OPT64 is ranked only on enough retried runs",
+      "TOC 'Also noticed' pointer's on/off-path label matches the appendix",
       "Tier-2 R-rows carry re-derived wall-clock-neutral certificates",
       "Tier-2 R-rows use measured sizing basis",
       "Tier-2 savings rows are backed by runner-minute cost spine",

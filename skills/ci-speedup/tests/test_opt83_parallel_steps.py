@@ -1347,7 +1347,7 @@ def test_render_puts_opt83_before_an_opt81_card_on_the_same_pole():
     import test_opt81_faster_runner as t81
     f81 = t81._a1_finding()
     f81.update({"id": "f50", "workflow_file": _WF, "affected_jobs": ["quality"]})
-    md = bp.render(_render_doc([_render_pole(p50=120.0)], [_finding(), f81]))
+    md = bp.render(_render_doc([_render_pole(p50=120.0)], [_finding(), f81]), bmf=True)
     a83, a81 = md.find('<a id="opt83-f41"></a>'), md.find('<a id="opt81-f50"></a>')
     assert a83 != -1 and a81 != -1, (a83, a81)
     assert a83 < a81

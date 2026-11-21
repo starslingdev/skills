@@ -1282,7 +1282,7 @@ def _render_doc(findings: list[dict], poles: list[dict]) -> str:
            "findings": findings,
            "pr_critical_path": {"sampled_pr_count": 20, "sample_target": 20,
                                 "sample_complete": True, "poles": poles}}
-    return bp.render(doc, {}, {}, {}, "2026-06-08")
+    return bp.render(doc, {}, {}, {}, "2026-06-08", bmf=True)
 
 
 def test_opt81_renders_exactly_once_when_two_poles_map_to_one_finding():
@@ -1330,7 +1330,7 @@ def test_opt81_held_back_row_reaches_the_coverage_check(tmp_path):
            bp._OPT81_WITHHELD_DOC_KEY: [
                {"workflow_file": _WF, "job": "bench",
                 "gate": "not_interleaved", "half": "A1"}]}
-    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    md = bp.render(doc, {}, {}, {}, "2026-06-08", bmf=True)
     assert "runner class: held back" in md, md
     path = tmp_path / "f.json"
     path.write_text(json.dumps(doc), encoding="utf-8")
@@ -1623,7 +1623,7 @@ def test_opt81_a1_credit_survives_the_real_cascade_renders_and_verifies(
     # A1 data exists for this job, so the advisory half never fires on it.
     assert _o81(doc, "A2") == []
     assert doc["opt81_withheld_by_gate"].get("a2_measured_runner_data_exists") == 1
-    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    md = bp.render(doc, {}, {}, {}, "2026-06-08", bmf=True)
     assert md.count(f'<a id="opt81-{f["id"]}"></a>') == 1
     assert "- **Merge wait:** this job is on the merge-gating path" in md
     path = tmp_path / "f.json"
@@ -1646,7 +1646,7 @@ def test_opt81_downsize_runs_through_collect_and_full_report_verifier(
     findings = [f for f in _o81(doc, "A1")
                 if f["faster_runner"].get("kind") == "opt81_downsize"]
     assert len(findings) == 1, doc.get("opt81_withheld_by_gate")
-    report = bp.render(doc, {}, {}, {}, "2026-06-08")
+    report = bp.render(doc, {}, {}, {}, "2026-06-08", bmf=True)
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"
     findings_path.write_text(json.dumps(doc), encoding="utf-8")
@@ -1862,7 +1862,7 @@ def test_opt81_a1_held_back_candidate_reaches_the_doc_through_collect(monkeypatc
         {"workflow_file": _CI, "job": "test",
          "gate": "runner_label_not_classifiable_by_size", "half": "A1"}], (
         doc.get("opt81_withheld_by_gate"))
-    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    md = bp.render(doc, {}, {}, {}, "2026-06-08", bmf=True)
     assert "runner class: held back" in md, md
 
 
@@ -1881,5 +1881,5 @@ def test_opt81_a2_held_back_candidate_reaches_the_doc_through_collect(monkeypatc
     assert doc[cr._OPT81_WITHHELD_DOC_KEY] == [
         {"workflow_file": _CI, "job": "test", "gate": "a2_dominant_step_unresolved",
          "half": "A2"}], doc.get("opt81_withheld_by_gate")
-    md = bp.render(doc, {}, {}, {}, "2026-06-08")
+    md = bp.render(doc, {}, {}, {}, "2026-06-08", bmf=True)
     assert "runner class: held back" in md, md

@@ -11075,6 +11075,10 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
         return Check(name, True, err, skipped=True)
     found = [f for f in _as_list(_as_dict(data).get("findings"))
              if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT83"]
+    if "<!-- ci-speedup:bmf enabled=false " in report:
+        found = [f for f in found
+                 if _as_dict(f.get("independent_steps")).get("kind")
+                 != "opt83_separate_jobs"]
     cards = _vr_opt83_card_bodies(report)
     bad: list[str] = []
     # Every held-back gate is counted once AND listed once: the counter and the
@@ -17020,6 +17024,9 @@ def check_opt81_runner_comparison_rederived(report: str,
         return Check(name, True, err, skipped=True)
     found = [f for f in _as_list(data.get("findings"))
              if isinstance(f, dict) and f.get("pattern") == "OPT81"]
+    if "<!-- ci-speedup:bmf enabled=false " in report:
+        found = [f for f in found
+                 if _as_dict(f.get("faster_runner")).get("kind") == "opt81_downsize"]
     if not found:
         if '<a id="opt81-' in report:
             return Check(name, False, "the report renders an OPT81 card, but the run "
@@ -18138,6 +18145,72 @@ def check_no_bill_heading_for_unsized_saving(report: str, findings_path) -> Chec
                  else f"{len(findings)} finding(s): no unsized saving reads `no bill saving`")
 
 
+_VR_BMF_MARKER_RE = re.compile(
+    r"<!-- ci-speedup:bmf enabled=(true|false) held=(\d+) -->")
+
+
+def _vr_bmf_held_back(finding: dict) -> bool:
+    effect = _as_dict(finding.get("runner_minute_effect"))
+    direction = str(effect.get("direction") or "").lower()
+    per_run = _num(effect.get("runner_min_per_run"))
+    per_month = _num(effect.get("runner_min_per_month"))
+    if direction in {"added", "added_cost", "cost", "increase"}:
+        return True
+    if ((per_run is not None and per_run > 0)
+            or (per_month is not None and per_month > 0)):
+        return direction not in {"saving", "saved", "neutral"}
+    pattern = str(finding.get("pattern") or "")
+    if pattern == "OPT24":
+        return True
+    if pattern == "OPT83":
+        return _as_dict(finding.get("independent_steps")).get("kind") == "opt83_separate_jobs"
+    if pattern == "OPT81":
+        return _as_dict(finding.get("faster_runner")).get("kind") != "opt81_downsize"
+    mechanism = " ".join(str(finding.get(key) or "") for key in
+                         ("title", "fix_strategy", "fix_strategy_detail"))
+    if direction == "unsized" and re.search(
+            r"\b(?:shard(?:ing)?|split|sibling|matrix)\b", mechanism, re.I):
+        return True
+    return False
+
+
+def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
+    name = "default report holds back runner-minute-adding wall-clock levers"
+    markers = list(_VR_BMF_MARKER_RE.finditer(report))
+    if not markers:
+        return Check(name, True, "legacy report has no bmf mode marker", skipped=True)
+    if len(markers) != 1:
+        return Check(name, False, f"expected one bmf mode marker, found {len(markers)}")
+    enabled = markers[0].group(1) == "true"
+    stamped = int(markers[0].group(2))
+    try:
+        data = json.loads(Path(findings_path).read_text())
+    except (OSError, TypeError, ValueError):
+        return Check(name, True, "findings JSON unavailable", skipped=True)
+    held = [f for f in _as_list(_as_dict(data).get("findings"))
+            if isinstance(f, dict) and _vr_bmf_held_back(f)]
+    expected = 0 if enabled else len(held)
+    bad = []
+    if stamped != expected:
+        bad.append(f"marker says {stamped} held, expected {expected}")
+    disclosure = (f"{expected} wall-clock "
+                  f"{'lever' if expected == 1 else 'levers'} held back because they add "
+                  "runner minutes or change to an unpriced runner; rerun with `--bmf` to show them.")
+    if expected and report.count(disclosure) != 1:
+        bad.append("the one-line held-back disclosure is missing or duplicated")
+    if not enabled:
+        for f in held:
+            fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(f.get("id") or "x"))
+            pattern = str(f.get("pattern") or "")
+            if pattern == "OPT83" and f'<a id="opt83-{fid}"></a>' in report:
+                bad.append(f"held OPT83 {fid} still renders a recommendation card")
+            if pattern == "OPT81" and f'<a id="opt81-{fid}"></a>' in report:
+                bad.append(f"held OPT81 {fid} still renders a recommendation card")
+    return Check(name, not bad, "; ".join(bad) if bad else
+                 ("--bmf recommendations enabled" if enabled
+                  else f"{expected} runner-minute-adding lever(s) held back"))
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -18152,6 +18225,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_skip_family_prompts_carry_pending_caveat(report),
         check_also_noticed_count_honest(report),
         check_no_bill_heading_for_unsized_saving(report, findings_path),
+        check_bmf_runner_minute_filter(report, findings_path),
         check_coverage_disclosed(report, findings_path),
         check_pr_sample_stop_reason(report, findings_path),
         check_run_list_gaps_named(report, findings_path),

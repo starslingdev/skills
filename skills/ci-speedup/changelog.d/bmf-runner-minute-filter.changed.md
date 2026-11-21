@@ -1,0 +1,1 @@
+- **2026-11-20** — Recommend runner-minute-saving or neutral changes by default, with `--bmf` as an explicit opt-in for wall-clock levers that add runner use or change to an unpriced larger runner (#458).

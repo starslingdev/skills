@@ -191,6 +191,9 @@ def main(argv: list[str] | None = None) -> int:
                              "(issue #81).")
     parser.add_argument("--with-logs", action="store_true",
                         help="Also run collect_runs' Tier-3 logs deep dive.")
+    parser.add_argument("--bmf", action="store_true",
+                        help="Show wall-clock-only recommendations that add runner "
+                             "minutes or use an unpriced larger runner.")
     parser.add_argument("--catalog", default=None, help="Override catalog path.")
     parser.add_argument(
         "--account-weekly-series", type=Path, default=None,
@@ -406,7 +409,7 @@ def main(argv: list[str] | None = None) -> int:
         # whether --out was relative.
         try:
             print(build_summary(data, findings_path=str(args.out), out_path=report_path,
-                                root=args.root))
+                                root=args.root, bmf=args.bmf))
         except Exception as e:  # a summary failure must never fail the run
             print(f"(summary unavailable: {e}; findings at {args.out})", file=sys.stderr)
 
