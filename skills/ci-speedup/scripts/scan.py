@@ -1681,6 +1681,285 @@ def _detect_opt45(doc: dict, raw: str) -> list[Hit]:
     )]
 
 
+# ---- OPT91 extension — Xcode CI index/architecture waste --------------------
+
+_OPT91_XCODEBUILD_RE = re.compile(r"(?:^|\s)(?:xcrun\s+)?xcodebuild(?:\s|$)", re.I)
+_OPT91_GENERIC_SIM_RE = re.compile(
+    r"generic\s*/\s*platform\s*=\s*[^'\"\n]*(?:iOS|tvOS|watchOS|visionOS)?\s*Simulator",
+    re.I,
+)
+_OPT91_ONE_ARCH = frozenset({"arm64", "x86_64"})
+_OPT91_HOST_ARCH_RE = re.compile(
+    r"\$\(\s*uname\s+-m\s*\)|\$\{\{[^}]*runner\.arch[^}]*\}\}", re.I)
+_OPT91_COMPILE_ACTIONS = frozenset({"build", "test", "archive", "analyze", "build-for-testing"})
+_OPT91_SIMULATOR_ACTIONS = frozenset({"build", "test", "build-for-testing"})
+# Options that take the next token as their value: `-derivedDataPath build`
+# names a directory, not the `build` action.
+_OPT91_VALUE_OPTIONS = frozenset(o.lower() for o in (
+    "-project", "-workspace", "-scheme", "-target", "-configuration", "-sdk",
+    "-destination", "-destination-timeout", "-derivedDataPath",
+    "-resultBundlePath", "-resultBundleVersion", "-archivePath", "-xcconfig",
+    "-testPlan", "-toolchain", "-arch", "-jobs", "-xctestrun",
+    "-testProductsPath", "-exportPath", "-exportOptionsPlist",
+    "-clonedSourcePackagesDirPath", "-packageCachePath",
+    "-parallel-testing-enabled", "-parallel-testing-worker-count",
+    "-maximum-concurrent-test-simulator-destinations",
+    "-maximum-parallel-testing-workers", "-enableCodeCoverage",
+    "-test-iterations", "-only-test-configuration", "-skip-test-configuration",
+    "-test-timeouts-enabled", "-default-test-execution-time-allowance",
+    "-maximum-test-execution-time-allowance", "-collect-test-diagnostics",
+    "-authenticationKeyPath", "-authenticationKeyID",
+    "-authenticationKeyIssuerID", "-localizationPath", "-exportLanguage",
+    "-packageDependencySchemePolicy", "-defaultPackageRegistryURL",
+    "-scmProvider", "-only-testing", "-skip-testing"))
+# Invocations that list, print or export instead of compiling.
+_OPT91_NON_COMPILING_OPTIONS = frozenset(o.lower() for o in (
+    "-version", "-list", "-showsdks", "-showdestinations", "-showBuildSettings",
+    "-showBuildSettingsForIndex", "-showTestPlans", "-resolvePackageDependencies",
+    "-exportArchive", "-exportNotarizedApp", "-exportLocalizations",
+    "-importLocalizations", "-create-xcframework", "-checkFirstLaunchStatus",
+    "-runFirstLaunch", "-dry-run", "-n"))
+# A later step that reads the build's index store (Periphery, an IndexStoreDB
+# tool, a copied DataStore). Disabling the store would break it.
+_OPT91_INDEX_CONSUMER_RE = re.compile(
+    r"\bperiphery\b|index[-_ ]?store|Index\.noindex|IndexStoreDB|/DataStore\b",
+    re.I)
+# The setting's own name is not a consumer of the store it controls.
+_OPT91_INDEX_SETTING_RE = re.compile(r"COMPILER_INDEX_STORE_ENABLE", re.I)
+_OPT91_SETTING_RE = re.compile(
+    r"^\s*(?P<key>COMPILER_INDEX_STORE_ENABLE|ARCHS|EXCLUDED_ARCHS)"
+    r"(?:\[[^\]]*\])?\s*=\s*(?P<value>[^;\n]*)", re.M)
+_OPT91_REPO_FILE_CAP = 2000
+_OPT91_REPO_FILE_BYTES = 8_000_000
+_OPT91_UNSIZED_REASON = (
+    "no matched before/after builds isolate these settings, and this static "
+    "check does not read the workflow's run volume")
+
+
+def _opt91_repo_settings(root: Path | None) -> dict[str, bool]:
+    """Project-level Xcode settings that already remove (or may remove) the
+    waste. `index_off` / `arch_set`: some xcconfig or project file sets the
+    index store off, or sets/excludes architectures. An unreadable or
+    over-cap tree sets both, so the finding is withheld, never called safe."""
+    result = {"index_off": False, "arch_set": False}
+    if root is None:
+        return result
+    skipped = {".git", "node_modules", "vendor", "Pods", "Carthage", "build",
+               "DerivedData", ".build"}
+    seen = 0
+    for directory, dirnames, filenames in os.walk(root, followlinks=False):
+        dirnames[:] = [d for d in dirnames if d not in skipped]
+        for filename in filenames:
+            if not (filename.endswith(".xcconfig") or filename == "project.pbxproj"):
+                continue
+            seen += 1
+            path = Path(directory) / filename
+            try:
+                if seen > _OPT91_REPO_FILE_CAP:
+                    raise OSError("too many Xcode settings files")
+                if path.is_symlink() or path.stat().st_size > _OPT91_REPO_FILE_BYTES:
+                    raise OSError("unreadable Xcode settings file")
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                return {"index_off": True, "arch_set": True}
+            for match in _OPT91_SETTING_RE.finditer(text):
+                key = match.group("key")
+                value = match.group("value").strip().strip('"').strip()
+                if key == "COMPILER_INDEX_STORE_ENABLE":
+                    if value.upper() != "YES":
+                        result["index_off"] = True
+                elif key == "EXCLUDED_ARCHS":
+                    if value:
+                        result["arch_set"] = True
+                elif value and "ARCHS_STANDARD" not in value:
+                    result["arch_set"] = True
+    return result
+
+
+def _opt91_xcode_invocations(run: str) -> list[str]:
+    normalized = re.sub(r"\\\s*\n", " ", run)
+    return [
+        segment.strip()
+        for segment in re.split(r"\r?\n|&&|\|\||;", normalized)
+        if _OPT91_XCODEBUILD_RE.search(segment)
+    ]
+
+
+def _opt91_parse(invocation: str) -> dict[str, Any] | None:
+    """Actions, option values and build-setting assignments of one
+    `xcodebuild` invocation; None when the shell words cannot be read."""
+    try:
+        tokens = shlex.split(invocation)
+    except ValueError:
+        return None
+    try:
+        start = next(i for i, t in enumerate(tokens)
+                     if t.rsplit("/", 1)[-1] == "xcodebuild") + 1
+    except StopIteration:
+        return None
+    actions: set[str] = set()
+    options: dict[str, str] = {}
+    settings: dict[str, str] = {}
+    i = start
+    while i < len(tokens):
+        token = tokens[i]
+        low = token.lower()
+        if token in {"|", ">", ">>", "2>&1"}:
+            break
+        if low.startswith("-"):
+            if low in _OPT91_VALUE_OPTIONS and i + 1 < len(tokens):
+                options[low] = tokens[i + 1]
+                i += 2
+                continue
+            options[low.split(":", 1)[0]] = ""
+        elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(?:\[[^\]]*\])?=.*", token):
+            key, value = token.split("=", 1)
+            settings[key.split("[", 1)[0].upper()] = value
+        elif low in _OPT91_COMPILE_ACTIONS:
+            actions.add(low)
+        i += 1
+    return {"actions": actions, "options": options, "settings": settings}
+
+
+def _opt91_env(job: dict, step: dict, doc: dict) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for owner in (doc, job, step):
+        env = owner.get("env") if isinstance(owner, dict) else None
+        if isinstance(env, dict):
+            result.update({str(key): str(value) for key, value in env.items()})
+    return result
+
+
+def _opt91_arch_state(value: str | None) -> str:
+    """`one` (a single host architecture), `many`, or `unknown` (a value the
+    workflow text cannot resolve) for an `ARCHS` value; `absent` for None."""
+    if value is None:
+        return "absent"
+    text = value.strip().strip("'\"").strip()
+    if _OPT91_HOST_ARCH_RE.fullmatch(text):
+        return "one"
+    if "$" in text:
+        return "unknown"
+    words = text.split()
+    if len(words) == 1 and words[0].lower() in _OPT91_ONE_ARCH:
+        return "one"
+    return "many"
+
+
+def _opt91_index_state(value: str | None) -> str:
+    """`off`, `on`, or `unknown` for a `COMPILER_INDEX_STORE_ENABLE` value."""
+    if value is None:
+        return "on"
+    text = value.strip().strip("'\"").strip().upper()
+    if "$" in text:
+        return "unknown"
+    return "on" if text in {"YES", "DEFAULT"} else "off"
+
+
+def _opt91_unoptimized(parsed: dict[str, Any]) -> bool:
+    """True only when the build is known to use an unoptimized (Debug)
+    configuration, the only one where Xcode's `Default` setting writes an index
+    store. `archive` defaults to Release; an explicit non-Debug or templated
+    configuration cannot be classified from the workflow."""
+    configuration = parsed["options"].get("-configuration")
+    if configuration is None:
+        return "archive" not in parsed["actions"]
+    return "$" not in configuration and "debug" in configuration.lower()
+
+
+def _detect_opt91_xcode_ci(doc: dict, raw: str,
+                           repo_settings: dict[str, bool] | None = None
+                           ) -> list[Hit]:
+    """Static Xcode build waste: an index store no step reads, or a simulator
+    build that leaves a generic destination to compile more than one
+    architecture. Any input that cannot be classified withholds that flavor."""
+    repo_settings = repo_settings or {"index_off": False, "arch_set": False}
+    hits: list[Hit] = []
+    for job_name, job in _jobs_from_doc(doc).items():
+        if not isinstance(job, dict):
+            continue
+        steps = _steps(job)
+        index_consumed = any(
+            _OPT91_INDEX_CONSUMER_RE.search(_OPT91_INDEX_SETTING_RE.sub(
+                "", f"{_run(step) or ''}\n{step.get('uses') or ''}"))
+            for step in steps if isinstance(step, dict))
+        job_issues: set[str] = set()
+        first_step = ""
+        for step in steps:
+            run = _run(step)
+            if not run:
+                continue
+            env = _opt91_env(job, step, doc)
+            for invocation in _opt91_xcode_invocations(run):
+                parsed = _opt91_parse(invocation)
+                if parsed is None or not parsed["actions"]:
+                    continue
+                if set(parsed["options"]) & _OPT91_NON_COMPILING_OPTIONS:
+                    continue
+                if "-xcconfig" in parsed["options"] or "XCODE_XCCONFIG_FILE" in env:
+                    continue
+                settings = parsed["settings"]
+                issues: set[str] = set()
+                index_value = settings.get(
+                    "COMPILER_INDEX_STORE_ENABLE",
+                    env.get("COMPILER_INDEX_STORE_ENABLE"))
+                if (_opt91_index_state(index_value) == "on"
+                        and (index_value is not None
+                             or not repo_settings["index_off"])
+                        and _opt91_unoptimized(parsed)
+                        and not index_consumed):
+                    issues.add("index")
+                arch_value = settings.get("ARCHS", env.get("ARCHS"))
+                excluded = settings.get("EXCLUDED_ARCHS", env.get("EXCLUDED_ARCHS"))
+                generic_sim = bool(
+                    parsed["actions"] & _OPT91_SIMULATOR_ACTIONS
+                    and "archive" not in parsed["actions"]
+                    and _OPT91_GENERIC_SIM_RE.search(invocation)
+                    and "-arch" not in parsed["options"]
+                    and not (excluded or "").strip())
+                arch_state = _opt91_arch_state(arch_value)
+                if generic_sim and (
+                        arch_state == "many"
+                        or (arch_state == "absent" and not repo_settings["arch_set"])):
+                    issues.add("architecture")
+                if issues:
+                    job_issues.update(issues)
+                    if not first_step:
+                        first_step = str(step.get("name") or "Run xcodebuild")
+        if not job_issues:
+            continue
+        issue_text = " and ".join(
+            part for key, part in (
+                ("index", "writes an index store (Xcode's Debug default) that no "
+                          "step in the job reads"),
+                ("architecture", "uses a generic simulator destination without one "
+                                 "host architecture"),
+            ) if key in job_issues
+        )
+        fixes = []
+        if "index" in job_issues:
+            fixes.append("set `COMPILER_INDEX_STORE_ENABLE=NO`")
+        if "architecture" in job_issues:
+            fixes.append("set `ARCHS` to the host simulator architecture")
+        line = _line_of_in_job(raw, job_name, "xcodebuild")
+        hits.append(Hit(
+            line=line,
+            affected_jobs=[job_name],
+            evidence=(
+                f"job `{job_name}` step `{first_step}` {issue_text}. "
+                f"{' and '.join(fixes)} for CI build/test work; keep generic "
+                "destinations for archive/release builds. Runner-minute effect: "
+                "saving (part of the build's compile time, not the whole step); "
+                f"runner-minute saving: unsized ({_OPT91_UNSIZED_REASON})."
+            ),
+            match_text=job_name,
+            snippet=_block_lines(raw, line),
+            facts={"fix_strategy": "xcode-ci-build-shape",
+                   "runner_min_unsized_reason": _OPT91_UNSIZED_REASON},
+        ))
+    return hits
+
+
 # ---- OPT46 extension — always() aggregate after cancellation ----------------
 
 _OPT46_ALWAYS_RE = re.compile(r"\balways\s*\(\s*\)", re.I)
@@ -8329,7 +8608,7 @@ def _detect_opt6(doc: dict, raw: str) -> list[Hit]:
 # missing concurrency group) stay true whatever the unread group holds.
 _ABSENCE_STEP_PATTERNS: frozenset[str] = frozenset({
     "OPT1", "OPT2", "OPT5", "OPT14", "OPT21", "OPT28", "OPT29", "OPT31",
-    "OPT39", "OPT46", "OPT76", "OPT108", "OPT109", "OPT111"})
+    "OPT39", "OPT46", "OPT76", "OPT91", "OPT108", "OPT109", "OPT111"})
 UNREADABLE_GROUP_HELD_BACK_REASON = "job_has_an_unreadable_parallel_group"
 
 
@@ -12652,6 +12931,13 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # reused for the `type_aware_lint` block below.
     type_aware_lint = _read_type_aware_lint(root)
 
+    # OPT91's Xcode flavor reads the project's own xcconfig/pbxproj settings
+    # once: a project that already disables the index store or pins its
+    # architectures has no waste for a workflow override to remove.
+    opt91_entry = catalog_by_id.get("OPT91")
+    opt91_repo_settings = (_opt91_repo_settings(root)
+                           if opt91_entry is not None else None)
+
     # --- Per-file pass ---
     for rel, doc, raw in parsed:
         basename = Path(rel).name
@@ -12704,6 +12990,27 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
                     f["evidence_snippet"] = snippet
                 findings.append(f)
 
+        # OPT91's primary compiler-profile route remains manual/data-driven.
+        # Its Xcode index/architecture flavor is independently provable from
+        # workflow YAML, so emit only that narrow extension as static and
+        # leave it uncredited until matched build timings exist.
+        if opt91_entry is not None:
+            opt91_hits = _detect_opt91_xcode_ci(doc, raw, opt91_repo_settings)
+            if unreadable_jobs:
+                opt91_hits = _hold_back_unreadable(
+                    "OPT91", opt91_hits, rel, unreadable_jobs)
+            for hit in opt91_hits:
+                finding_idx += 1
+                f = _emit(opt91_entry, hit, rel, finding_idx)
+                f["pattern_class"] = "static"
+                f.update(hit.facts)
+                f["workflow_lanes"] = workflow_lanes.get(rel, [])
+                if workflow_push_scopes.get(rel):
+                    f["workflow_push_scopes"] = workflow_push_scopes[rel]
+                snippet = hit.snippet or _raw_line(raw, hit.line)
+                if snippet:
+                    f["evidence_snippet"] = snippet
+                findings.append(f)
         # OPT46's primary detector remains run-history based. Its
         # cancellation-enabled aggregate flavor is provable from YAML, but its
         # advice is safe only for a check that is not required, so the hits are

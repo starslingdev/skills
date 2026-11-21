@@ -4740,6 +4740,13 @@ _VERIFICATION_BAR_LINES = [
 
 
 _FIX_META: dict[str, dict[str, Any]] = {
+    "xcode-ci-build-shape": {
+        "cause": "The CI Xcode build writes an index store no later step reads, or a generic simulator destination leaves more than one architecture in the build.",
+        "look": "Inspect the exact xcodebuild action, destination, runner architecture and whether any later step consumes the index store. Separate simulator test builds from archive/release builds.",
+        "constraints": "Keep the same project, scheme, configuration, test selection, signing behavior and archive output. Generic destinations remain appropriate for archive/release builds. An architecture setting must match the runner host; do not hardcode one architecture across mixed Intel and Apple Silicon runners.",
+        "docs": ["https://developer.apple.com/documentation/xcode/build-settings-reference"],
+        "deliver": "For CI build/test work, set COMPILER_INDEX_STORE_ENABLE=NO and restrict ARCHS to the runner host when using a generic simulator destination. Keep generic archive destinations. Compare matched builds on the same runner and cache state, preserve the test/archive outputs, and roll back either setting if output parity changes.",
+    },
     "remove-or-reuse-unused-artifact": {
         "cause": "A job uploads an Actions artifact that no repository workflow downloads and no release or deploy step consumes.",
         "look": "Search every workflow and release/deploy path for the exact artifact name and uploaded path, then check documented human or external API consumers before treating the repository-local absence as proof.",
