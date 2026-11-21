@@ -4,9 +4,9 @@
 
 not measured: lifecycle data was not collected
 
-<!-- ci-speedup:bmf enabled=false held=9 -->
+<!-- ci-speedup:bmf enabled=false held=12 -->
 
-9 wall-clock levers held back because they add runner minutes or change to an unpriced runner; rerun with `--bmf` to show them.
+12 wall-clock levers held back because they add runner minutes or change to an unpriced runner; rerun with `--bmf` to show them.
 
 | Repository | `microsoft/playwright` |
 | :--- | :--- |
@@ -67,7 +67,7 @@ not measured: lifecycle data was not collected
 4. 🟢 [Superseded Runs Not Cancelled](#r-4) - 141 min/mo
 5. 🟢 [Cron Schedule Too Frequent](#r-5) - 13 min/mo
 
-**🧹 Also noticed** - 14 findings (mostly off-path runner-minute savings; **one or more flagged DO sit on the critical path** and cut wall-clock): [see below](#also-noticed).
+**🧹 Also noticed** - 13 additional hygiene findings kept outside the neutral runner-minute section (modeled/uncertified, mostly ~0 wall-clock), below the critical path: [see below](#also-noticed).
 
 <a id="long-pole-map"></a>
 
@@ -936,65 +936,9 @@ failure mode and how you have guarded it before shipping.
 
 ## 🧹 Also noticed - residual hygiene
 
-> Most of these stay outside the wall-clock-neutral runner-minute section and do **not** sit on the merge-gating critical path above, so fixing them removes little or no developer wall-clock. **One or more exceptions are flagged inline** with a **Wall-clock** note: those DO sit on the critical path and their fix cuts developer wall-clock (shown first). **Expand any finding** for its locations, evidence, the catalog fix recipe, and a copy-paste agent prompt; exact per-occurrence lines + evidence also live in the findings JSON.
+> These findings stay outside the wall-clock-neutral runner-minute section because they are modeled, uncertified, advisory-by-shape, missing source-spine backing, or below that section's measured admission gate. Most do **not** sit on the merge-gating critical path above, so fixing them removes little or no developer wall-clock - but they can still cut runner-minutes. **Expand any finding** for its locations, evidence, the catalog fix recipe, and a copy-paste agent prompt; exact per-occurrence lines + evidence also live in the findings JSON.
 
 > ⚠️ _Approximate: computed across all workflows, but 9 capped workflow(s) still use the shallow 10-run job sample for finding/queue values; 8 runner-minute source workflow(s) still use a shallow 10-run cost-spine sample. Figures can shift run-to-run; re-run with `--shallow-runs 20` to confirm exact values._
-
-<details>
-<summary><strong>OPT25 - Matrix Leg Imbalance</strong> · ~3m 21s wall-clock · MEDIUM · 2 across 2 wf</summary>
-
-**Where:** `tests_components.yml` (- Node.js 20), `tests_secondary.yml` (Windows)
-**Activity:** 1114 runs in 30 days · most recent 2026-07-24.
-**Wall-clock:** unlike the other findings in this section, this one **sits ON the merge-gating critical path** (a long pole) - its catalog fix **cuts developer wall-clock**, it is not a bill-only cleanup. See the spine above and this pattern's catalog recipe below for the remedy.
-**Evidence:** leg `Windows (firefox)` median 4377s vs `Windows (chromium)` 1598s - 2.7× imbalance over 3 sampled runs (heterogeneous legs - split the slow leg, don't rebalance)
-**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt25--shard-imbalance
-
-#### 🤖 Prompt for your coding agent
-
-```text
-ci-speedup measured the pattern below but does NOT prescribe the fix -
-investigate it in the repo and apply a safe change.
-
-Pattern: OPT25 - Matrix Leg Imbalance.
-Where: tests_components.yml (- Node.js 20); tests_secondary.yml (Windows).
-What ci-speedup saw: leg `Windows (firefox)` median 4377s vs `Windows (chromium)` 1598s - 2.7× imbalance over 3 sampled runs (heterogeneous legs - split the slow leg, don't rebalance)
-Concurrency order: First use OPT88 to measure and fill the existing job's idle cores; only then add shards or jobs. Before adding workers, confirm that they cannot interfere through a shared external server.
-Runner-minute effect: With safe in-job concurrency, runner minutes go down because the same job finishes sooner. Extra shard jobs repeat checkout and setup and bill each job; N shards also add roughly (N-1) × the measured pre-test floor in runner minutes. Measure compile and setup before adding jobs.
-Saving: developer WALL-CLOCK (~3m 21s) - this job is a long pole ON the merge-gating critical path, so its catalog fix shortens the merge wait. NOT a runner-bill cut, and NOT off the critical path.
-
-Read the catalog entry (background, fix recipe, and guardrail):
-  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt25--shard-imbalance
-
-NEVER BUY SPEED BY CHECKING LESS
-- The commit that merges must still be verified by exactly what verifies
-  it today. Unless the finding above IS that reduction, do not: delete or
-  narrow matrix legs so fewer configurations are tested; add
-  `continue-on-error`, `|| true`, or any other exit-code suppression;
-  narrow or remove a required status check, or change a job so a required
-  check stops reporting; skip tests behind a path/branch filter that do
-  cover the change; or cut test counts, timeouts, or retries in a way
-  that weakens the signal rather than the cost.
-- Not running a check against a change it cannot fail on is NOT checking
-  less, and several catalog fixes work exactly that way: a `paths:` /
-  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
-  selection. Those stay in bounds as long as the commit that merges is
-  still verified by every check its own change could fail - follow the
-  guardrail on the catalog recipe where this prompt links one, because
-  that is the half it exists to protect.
-- A pipeline that finishes sooner because it verifies less is a
-  regression, not a win. If that is the only way to make this faster, say
-  so and stop.
-
-VERIFICATION BAR
-- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
-- State the pole's observed range beside the predicted saving. Do not open a pull request when the predicted saving is smaller than that range.
-
-Do: confirm the pattern at each location above, recover the intent from git
-history, and apply the catalog's fix recipe where it is safe. State the
-failure mode and how you have guarded it before shipping.
-```
-
-</details>
 
 <details>
 <summary><strong>OPT73 - Shared step recurs across the cluster - fix once, lower the floor</strong> · 109,114 min/mo · HIGH · 1 across 1 wf</summary>
@@ -1583,8 +1527,73 @@ failure mode and how you have guarded it before shipping.
 
 </details>
 
+<details>
+<summary><strong>OPT33 - No Draft PR Gating on Expensive Jobs</strong> · no bill saving · MEDIUM · 10 across 6 wf</summary>
+
+**Where:** `tests_bidi.yml:25` (test_bidi), `tests_components.yml:26` (test_components), `tests_extension.yml:36` (test_extension), `tests_mcp.yml:32` (test_mcp), `tests_primary.yml:33` (test_linux), `tests_primary.yml:68` (test_test_runner), `tests_primary.yml:143` (test_web_components), `tests_primary.yml:202` (test_package_installations), +2 more
+**Activity:** 2638 runs in 30 days · most recent 2026-07-24.
+**Evidence:** expensive job `test_bidi` (matrix) runs on every PR that changes the workflow's filtered `paths:` including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_components` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_extension` (matrix) runs on every PR that changes the workflow's filtered `paths:` including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_mcp` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_linux` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_test_runner` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_web_components` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_package_installations` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate
+**Catalog (background + fix recipe):** https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt33--no-draft-pr-gating-on-expensive-jobs
+
+#### 🤖 Prompt for your coding agent
+
+```text
+ci-speedup measured the pattern below but does NOT prescribe the fix -
+investigate it in the repo and apply a safe change.
+
+Pattern: OPT33 - No Draft PR Gating on Expensive Jobs.
+Where: tests_bidi.yml:25 (test_bidi); tests_components.yml:26 (test_components); tests_extension.yml:36 (test_extension); tests_mcp.yml:32 (test_mcp); tests_primary.yml:33 (test_linux); tests_primary.yml:68 (test_test_runner); tests_primary.yml:143 (test_web_components); tests_primary.yml:202 (test_package_installations); +2 more (see findings JSON).
+What ci-speedup saw: expensive job `test_bidi` (matrix) runs on every PR that changes the workflow's filtered `paths:` including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_components` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_extension` (matrix) runs on every PR that changes the workflow's filtered `paths:` including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_mcp` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_linux` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_test_runner` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_web_components` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate; expensive job `test_package_installations` (matrix) runs on every PR including drafts - no `if: github.event.pull_request.draft == false` gate
+Saving: no measured runner-min saving - off the merge-gating critical path, so ~0 developer wall-clock (a cloud-bill cut, not a merge-wait cut).
+
+Read the catalog entry (background, fix recipe, and guardrail):
+  https://github.com/starslingdev/skills/blob/2f048be/skills/ci-speedup/references/optimization-patterns.md#opt33--no-draft-pr-gating-on-expensive-jobs
+
+CAVEAT - the required-status 'Pending' landmine: if ANY check this
+workflow produces is a required status check, do NOT skip it via
+paths:/branches: filters, [skip ci], or by removing/narrowing a trigger
+event - a workflow that no longer fires leaves its
+required check 'Pending' and the PR can never merge (official guidance:
+do not use path/branch filtering on required workflows). The
+documented-safe shape is a job-level `if:` - a skipped job reports
+Success and satisfies the gate. The no-op twin-workflow trick (same
+workflow AND job name, inverse filter) is a community-known workaround,
+NOT in current GitHub docs. Treat required-status UNKNOWN as required:
+if branch protection/rulesets are not readable, assume every check this
+workflow produces may be required.
+
+NEVER BUY SPEED BY CHECKING LESS
+- The commit that merges must still be verified by exactly what verifies
+  it today. Unless the finding above IS that reduction, do not: delete or
+  narrow matrix legs so fewer configurations are tested; add
+  `continue-on-error`, `|| true`, or any other exit-code suppression;
+  narrow or remove a required status check, or change a job so a required
+  check stops reporting; skip tests behind a path/branch filter that do
+  cover the change; or cut test counts, timeouts, or retries in a way
+  that weakens the signal rather than the cost.
+- Not running a check against a change it cannot fail on is NOT checking
+  less, and several catalog fixes work exactly that way: a `paths:` /
+  `paths-ignore:` filter, a draft or job-level `if:`, changed-scope test
+  selection. Those stay in bounds as long as the commit that merges is
+  still verified by every check its own change could fail - follow the
+  guardrail on the catalog recipe where this prompt links one, because
+  that is the half it exists to protect.
+- A pipeline that finishes sooner because it verifies less is a
+  regression, not a win. If that is the only way to make this faster, say
+  so and stop.
+
+VERIFICATION BAR
+- A scoped local run is pre-flight only. Call the change verified only after the repository's own CI gate passes on the pushed branch, or after exactly the commands that gate CI pass on the change.
+
+Do: confirm the pattern at each location above, recover the intent from git
+history, and apply the catalog's fix recipe where it is safe. State the
+failure mode and how you have guarded it before shipping.
+```
+
+</details>
+
 > [!TIP]
-> **+2 more hygiene pattern(s) (15 occurrence(s)) not shown** - lower bill saving, kept in the findings JSON so nothing is dropped.
+> **+1 more hygiene pattern(s) (5 occurrence(s)) not shown** - lower bill saving, kept in the findings JSON so nothing is dropped.
 
 ## 🗄️ Data sources
 
@@ -1597,7 +1606,7 @@ failure mode and how you have guarded it before shipping.
 
 | Source | Coverage | Used for |
 | --- | --- | --- |
-| ci-speedup static scan (skill commit `2f048be`, scripts tree `26f8658c-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
+| ci-speedup static scan (skill commit `2f048be`, scripts tree `30236d2-dirty`) | All `.github/workflows/*.yml` under the analyzed tree (3827650) | Static pattern detection (full OPT catalog) |
 | gh runs/jobs API (timestamps) | 161 runs / 1630 jobs sampled | Critical-path + per-step P50 |
 | job logs | not run | Sampled only for a slow pole worth log-level inspection |
 | workflow YAML | 18 from the analyzed checkout | `on:` triggers, matrix/shard axes, job timeouts (detector inputs) |

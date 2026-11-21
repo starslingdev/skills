@@ -5762,6 +5762,8 @@ def _fix_meta_for_leaf(leaf: dict[str, Any] | None) -> dict[str, Any] | None:
     if not meta:
         return None
     resolved = dict(meta)
+    if not _BMF_ENABLED:
+        resolved.update(_BMF_LEAF_DEFAULTS.get(str((leaf or {}).get("fix_key", "")), {}))
     if (str((leaf or {}).get("fix_key") or "") == "emulated-image-compile"
             and (leaf or {}).get("builder_topology_unconfirmed") is True):
         resolved.update({
@@ -6179,7 +6181,7 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
 
     fix_key = str((leaf or {}).get("fix_key", ""))
     if fix_key in _JOB_EXPANDING_LEAVES:
-        out += [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE, ""]
+        out += [*_bmf_concurrency_lines(), ""]
     elif structural:
         out += ["Structural cost context: This pole also matched a structural catalog "
                 "pattern; account for its job or machine movement separately.",
@@ -6254,8 +6256,9 @@ def _build_agent_prompt(leaf: dict[str, Any] | None, pole: dict[str, Any],
         _floor = float(leaf["pre_test_floor_s"])
         constraints.append(
             f"- Measured pre-test compile floor: {_clock(_floor)}. Every added shard "
-            "repeats that floor; partition only the test work after it and include the "
-            "repeated compile in the runner-minute comparison.")
+            + ("repeats that floor; partition only the test work after it and include "
+               "the repeated compile in the runner-minute comparison." if _BMF_ENABLED
+               else "repeats that floor."))
     # A cache pole whose measured distribution demotes it (miss-tail / mostly-warm) carries
     # the context the agent must not re-derive wrong: the cache mostly hits, so the win is on
     # the miss-heavy tail, and a fork/cold benchmark would overstate it.
@@ -11790,7 +11793,7 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "crediting seconds."
         )
     if pat in {"OPT24", "OPT25"}:
-        body.append(_CONCURRENCY_ORDER_LINE)
+        body.append(_bmf_concurrency_lines()[0])
         go_member = next(
             (member for member in members if member.get("go_dominant_package")),
             None,
@@ -11826,7 +11829,7 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                     "repeats compilation."
                 )
         else:
-            body.append(_SHARD_RUNNER_MINUTE_LINE)
+            body.append(_bmf_concurrency_lines()[1])
     if pat == "OPT25":
         # The diagnosis/next step must travel with the agent hand-off, including
         # planner knobs. Use the same member as the credited magnitude.
@@ -15020,7 +15023,14 @@ def _account_weekly_block(value: Any) -> list[str]:
 
 
 def _bmf_held_back(finding: dict[str, Any]) -> bool:
-    """Whether this wall-clock lever can add runner use or unpriced runner cost."""
+    """Whether this wall-clock lever can add runner use or unpriced runner cost.
+
+    The catalog's minute-adding mechanisms are enumerated, never guessed from a
+    title: OPT24 sharding (every variant), OPT83's sibling-job split, an OPT81
+    move to another runner size (except a same-speed downsize), OPT25's
+    split-the-slow-leg case, OPT97's own-job move, and an OPT21 edge whose
+    measured dependency failures make downstream work start anyway. Levers that
+    only remove work keep their treatment whatever their sizing."""
     effect = finding.get("runner_minute_effect")
     effect = effect if isinstance(effect, dict) else {}
     direction = str(effect.get("direction") or "").lower()
@@ -15031,7 +15041,7 @@ def _bmf_held_back(finding: dict[str, Any]) -> bool:
     if (per_run is not None and per_run > 0) or (per_month is not None and per_month > 0):
         return direction not in {"saving", "saved", "neutral"}
     pattern = str(finding.get("pattern") or "")
-    if pattern == "OPT24":
+    if pattern in {"OPT24", "OPT97"}:
         return True
     if pattern == "OPT83":
         stamp = finding.get("independent_steps")
@@ -15041,40 +15051,207 @@ def _bmf_held_back(finding: dict[str, Any]) -> bool:
         runner = finding.get("faster_runner")
         runner = runner if isinstance(runner, dict) else {}
         return runner.get("kind") != "opt81_downsize"
-    mechanism = " ".join(str(finding.get(key) or "") for key in
-                         ("title", "fix_strategy", "fix_strategy_detail"))
-    if direction == "unsized" and re.search(
-            r"\b(?:shard(?:ing)?|split|sibling|matrix)\b", mechanism, re.I):
-        return True
+    if pattern == "OPT25":
+        case = finding.get("opt25_case")
+        if case is None:  # collected before the case was stamped: the title names it
+            return str(finding.get("title") or "") == "Matrix Leg Imbalance"
+        return case == "split-leg"
+    if pattern == "OPT21":
+        edge = finding.get("opt21_edge_sizing")
+        extra = _num(edge.get("extra_runner_min_per_run")) if isinstance(edge, dict) else None
+        return extra is not None and extra > 0
     return False
+
+
+# Log-leaf remedies whose catalog recipe adds jobs, shards or runners. In the
+# default mode the cross-job option is held back: a leaf with an in-job route
+# keeps only that route, and a shard-only leaf keeps its measured drill with the
+# remedy held. Keys mirror verify_report's `_VR_BMF_HELD_LEAVES`.
+_BMF_HELD_REMEDY = (
+    "Hold this remedy: its catalog fix adds jobs, shards or runners that repeat "
+    "checkout and setup and add runner minutes, this report recommends only changes "
+    "that save or preserve runner minutes, and a rerun with `--bmf` includes it. "
+    "Report the measured cause to the owner and change nothing for it.")
+_BMF_LEAF_DEFAULTS: dict[str, dict[str, str]] = {
+    "cargo-test-shard": {
+        "constraints": (
+            "Every added shard repeats compilation, checkout and setup, adding roughly "
+            "(N−1) × that floor in runner minutes. Keep the suite in its current job "
+            "and keep the full test count."),
+        "deliver": _BMF_HELD_REMEDY,
+    },
+    "android-emulator-shard": {
+        "constraints": (
+            "Every added emulator shard repeats checkout, setup and the AVD boot, adding "
+            "runner minutes. Keep the suite in its current job and keep the full "
+            "module and test count."),
+        "deliver": _BMF_HELD_REMEDY,
+    },
+    "playwright-parallel": {
+        "constraints": (
+            "If the invocations do run serially, restructure so specs run concurrently "
+            "in this job without dropping any project coverage or overrunning the "
+            "runner. Note CI's default worker count (often = CPU cores). Sharding across "
+            "separate CI jobs adds runner minutes and is held back in this report "
+            "(`--bmf` includes it)."),
+        "deliver": (
+            "Once you've confirmed the invocations run serially, run the specs in one "
+            "parallel invocation in this job without losing project coverage; "
+            "re-measure the e2e step."),
+    },
+    "pytest-no-xdist": {
+        "constraints": (
+            "These may be integration tests kept serial ON PURPOSE: parallel workers can "
+            "collide on fixed ports or a shared sqlite/Postgres DB, or interleave stdout "
+            "under `-s`. Recover the intent from git history before flipping it on. "
+            "Before adding `-n logical`, prove per-worker isolation (a unique "
+            "port/DB/tmp per `gw` worker); if coverage is collected (`--cov`), merge it "
+            "across workers (`coverage combine`) or the report goes partial. If "
+            "in-process isolation isn't feasible, stop: sharding across jobs adds runner "
+            "minutes and is held back in this report (`--bmf` includes it). Keep "
+            "deadline-bound or process-global tests in a serial pre-step, and record "
+            "the worker count that actually started rather than only the requested "
+            "setting."),
+        "deliver": (
+            "Run the suite across workers — add `-n logical` (xdist is already a dep) "
+            "once per-worker isolation is proven. Keep the full test count and (if "
+            "present) a complete merged coverage report; re-measure the step."),
+    },
+    "benchmark-serial-reruns": {
+        "constraints": (
+            "The reruns exist to produce stable medians - dropping N or skipping warm "
+            "passes REDUCES measurement coverage and can let a real perf regression "
+            "slip through. This is a measurement-policy change needing the owner's "
+            "sign-off, not a free win: keep a full-sample fallback and, before "
+            "lowering N, confirm the gate's medians still match (run old and new side "
+            "by side). Parallelising across runners adds runner minutes and is held "
+            "back in this report (`--bmf` includes it)."),
+        "deliver": (
+            "Cut the warm-rerun cost without weakening the regression signal: lower N "
+            "only to what the gate's statistics need. Verify the medians match the old "
+            "layout and re-measure the step."),
+    },
+    "gradle-test-parallelism": {
+        "constraints": (
+            "Tests run in parallel forks must stay ISOLATED: if they share one mutable "
+            "working dir (a single TestKit project dir), DB, or fixed port, forks "
+            "collide and flake or false-pass. Each fork needs its OWN fresh fixture, "
+            "the full test count must be preserved, and this is a test-infra change "
+            "needing the owner's sign-off - roll it out alongside the existing serial "
+            "task until pass/fail parity holds across several runs. Splitting the "
+            "suite across CI jobs adds runner minutes and is held back in this report "
+            "(`--bmf` includes it)."),
+        "deliver": (
+            "Parallelise the suite in this task - set `maxParallelForks` for in-task "
+            "fork parallelism, each fork with an isolated fixture; keep a full-suite "
+            "fallback, confirm pass/fail parity, and re-measure the step."),
+    },
+    "lighthouse-serial-audits": {
+        "constraints": (
+            "Lighthouse scores are noisy. `numberOfRuns` exists so the assertions gate "
+            "on a median, not on one jittery run, so cutting it toward 1 trades speed "
+            "for a flakier or falsely green budget. Lower it only to what the assertion "
+            "aggregation needs, and compare old and new medians side by side first. "
+            "The device passes may be deliberate (mobile and desktop budgets differ), "
+            "and every URL that carries a budget must keep one. Do NOT run two "
+            "Lighthouse passes at the same time on one runner: concurrent audits "
+            "compete for the same cores, which skews the scores the budget gates on, "
+            "and each `lhci collect` clears the shared `.lighthouseci/` report folder "
+            "when it starts. Moving passes onto separate runners repeats checkout, "
+            "install and build, so it adds runner minutes and is held back in this "
+            "report (`--bmf` includes it)."),
+        "deliver": (
+            "Cut the audit count to what the budget check needs: fewer runs per URL "
+            "only where the assertion aggregation still holds (medians compared old "
+            "against new), and a representative URL set per preset. Keep every budget "
+            "and assertion gating, confirm a deliberately regressed page still fails "
+            "the check, and re-measure the step."),
+    },
+}
+_BMF_ENABLED = True  # set per render(); True outside a render keeps helpers unchanged
+
+_CONCURRENCY_ORDER_LINE_DEFAULT = (
+    "Concurrency order: Use OPT88 to measure and fill the existing job's idle cores. "
+    "Before adding workers, confirm that they cannot interfere through a shared "
+    "external server."
+)
+_SHARD_RUNNER_MINUTE_LINE_DEFAULT = (
+    "Runner-minute effect: With safe in-job concurrency, runner minutes go down because "
+    "the same job finishes sooner. Extra shard jobs repeat checkout and setup and bill "
+    "each job, so this report holds that option back; rerun with `--bmf` to include it."
+)
+# OPT25's collector notes offer a raised shard count beside the neutral remedy.
+_OPT25_SHARD_COUNT_ALTERNATIVES = (
+    re.compile(r" or raise the shard count(?= —)"),
+    re.compile(r" Then raise this family's shard count\..*$", re.S),
+)
+
+
+def _bmf_default_view(finding: dict[str, Any]) -> dict[str, Any]:
+    """A non-held finding as the default mode renders it: OPT25's raise-the-shard-
+    count alternative is dropped, so only its neutral remedy is recommended."""
+    if str(finding.get("pattern") or "") != "OPT25":
+        return finding
+    me = finding.get("measured_evidence")
+    if not isinstance(me, dict) or not isinstance(me.get("note"), str):
+        return finding
+    note = me["note"]
+    for pattern in _OPT25_SHARD_COUNT_ALTERNATIVES:
+        note = pattern.sub("", note)
+    if note == me["note"]:
+        return finding
+    view = dict(finding)
+    view["measured_evidence"] = {**me, "note": note}
+    return view
+
+
+def _bmf_concurrency_lines() -> list[str]:
+    if _BMF_ENABLED:
+        return [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE]
+    return [_CONCURRENCY_ORDER_LINE_DEFAULT, _SHARD_RUNNER_MINUTE_LINE_DEFAULT]
+
+
+_LEAF_CROWN_RE = re.compile(r"<!-- ci-speedup:leaf-crown fix_key=(\S+) -->")
 
 
 def render(doc: dict[str, Any], *args, bmf: bool = False, **kwargs) -> str:
     """Include lifecycle context and apply the runner-minute recommendation policy."""
+    global _BMF_ENABLED
     findings = []
     held = 0
     for source in doc.get("findings") or []:
         finding = source
-        if isinstance(source, dict) and not bmf and _bmf_held_back(source):
-            finding = dict(source)
-            finding["_bmf_held_back"] = True
-            held += 1
+        if isinstance(source, dict) and not bmf:
+            if _bmf_held_back(source):
+                finding = dict(source)
+                finding["_bmf_held_back"] = True
+                held += 1
+            else:
+                finding = _bmf_default_view(source)
         findings.append(finding)
     original_findings = doc.get("findings")
     doc["findings"] = findings
+    previous_mode = _BMF_ENABLED
+    _BMF_ENABLED = bmf
     try:
         report = _render_core(doc, *args, **kwargs)
     finally:
+        _BMF_ENABLED = previous_mode
         if original_findings is None:
             doc.pop("findings", None)
         else:
             doc["findings"] = original_findings
+    if not bmf:
+        held += sum(1 for key in _LEAF_CROWN_RE.findall(report)
+                    if key in _BMF_LEAF_DEFAULTS)
     marker = f"<!-- ci-speedup:bmf enabled={'true' if bmf else 'false'} held={held} -->"
     disclosure = []
     if held:
-        noun = "lever" if held == 1 else "levers"
         disclosure = [
-            f"{held} wall-clock {noun} held back because they add runner minutes or "
+            f"{held} wall-clock lever held back because it adds runner minutes or "
+            "changes to an unpriced runner; rerun with `--bmf` to show it."
+            if held == 1 else
+            f"{held} wall-clock levers held back because they add runner minutes or "
             "change to an unpriced runner; rerun with `--bmf` to show them."
         ]
     first, separator, rest = report.partition("\n\n")
