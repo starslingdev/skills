@@ -17,7 +17,11 @@ dev = [
     # readable failure. Declared here so every environment (CI, .githooks/pre-commit,
     # a contributor laptop) learns it from ONE place instead of hardcoding the package
     # name in its own install step. See issue #31.
-    "pyyaml>=5.1",
+    # Capped below 6.0.4: PyYAML 6.0.4 resolves `<<: [*a, *b]` merge keys differently
+    # for mappings whose values are sequences, so ci-secure's data walker and node
+    # walker disagree (test_merge_keys_resolve_the_same_way_in_both_walkers). Remove
+    # the cap once ci-secure resolves merge keys itself (see the linked issue).
+    "pyyaml>=5.1,<6.0.4",
 ]
 
 [build-system]
