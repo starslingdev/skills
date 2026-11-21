@@ -186,7 +186,8 @@ _SCENARIOS = {
 # `_size_finding` starts reading something the class key does not.
 _SPECIAL_SETS = ("_SERIAL_GATE_PATTERNS", "_PRESTART_AXIS_PATTERNS",
                  "_EPHEMERAL_CACHE_SUSPECT", "_RUNNER_MIN_UPPER_BOUND",
-                 "_WALL_CLOCK_ONLY_NO_RUNNER_MIN")
+                 "_WALL_CLOCK_ONLY_NO_RUNNER_MIN",
+                 "_JOB_EXPANDING_EFFECT_PATTERNS")
 
 
 def _sizing_class(pattern: str) -> tuple:
@@ -504,6 +505,7 @@ def test_opt21_edge_sizing_ignores_an_unmeasured_unrelated_job():
 # class-wide guard can't go blind to a detector added later.
 _RUNTIME_MEASURED_COVERED = {
     "OPT19", "OPT21", "OPT24", "OPT25", "OPT49", "OPT50", "OPT51", "OPT100",
+    "OPT105",
     "OPT112",
 }
 # OPT46/OPT47/OPT64/OPT107 are run-elimination bill levers, OPT65 is exact billing
@@ -556,7 +558,8 @@ def test_runtime_measured_detectors_route_through_a_cap():
     # OPT19's cap is wired in collect() and separately guarded (invariant 5);
     # here we assert the per-detector inline sizers reference the shared cap.
     for detector in ("_detect_opt25_shard_imbalance", "_detect_opt49_step_outliers",
-                     "_detect_opt50_long_post_steps", "_detect_opt51_install_ratio"):
+                     "_detect_opt50_long_post_steps", "_detect_opt51_install_ratio",
+                     "_detect_opt105_hook_duplication"):
         body = _function_body(src, detector)
         # Match a real CALL, not a comment/docstring mention (a prose `_cap_wall_clock(`
         # in the detector's docstring must not satisfy the wiring backstop).
@@ -565,6 +568,17 @@ def test_runtime_measured_detectors_route_through_a_cap():
         assert called, (
             f"{detector} sets a wall-clock saving but does not route it through "
             "`_cap_wall_clock` — an inline over-credit can ship un-bounded")
+
+
+def test_opt105_repeated_hook_work_respects_physical_bound():
+    """The hook-work detector's measured step sum cannot exceed its own CI job."""
+    crit = {"long_pole_job": "checks", "long_pole_p50": 300.0,
+            "floor_p50": 100.0, "job_p50": {"checks": 300.0}}
+    capped, _note = cr._cap_wall_clock(900.0, "checks", crit)
+    finding = {"pattern": "OPT105", "wall_clock_p50_s": capped,
+               "affected_jobs": ["checks"]}
+    assert _physical_bound_violation(finding, crit) is None
+    assert capped == 200.0
 
 
 def _function_body(src: str, name: str) -> str:

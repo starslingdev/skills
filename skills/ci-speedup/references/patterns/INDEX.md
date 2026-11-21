@@ -29,6 +29,7 @@ This order is also the compiled file's order; contributors see `README.md`.
 - OPT16 — Within-Job Duplicate Commands (LOW, static) — same command twice in one job
 - OPT110 — Uploaded Artifact Has No Repository Consumer (MEDIUM, static) — upload name is never downloaded or consumed by release/deploy
 - OPT77 — Repeated Fixed Setup Across Independent Small Jobs (MEDIUM, data-driven) — small checks each pay full setup
+- OPT105 — Local Hook Work Is Repeated in Pull-Request CI (MEDIUM, data-driven) — measured PR steps repeat a resolved local-hook command
 - OPT113 — A Test Fixture Is Much Larger Than Its Contract Needs (MEDIUM, static) — test archives or hashes a full executable when bytes suffice
 ## Category 3 — Docker
 - OPT17 — Sleep-Based Container Readiness (MEDIUM, static) — sleep instead of healthchecks

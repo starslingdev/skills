@@ -16222,6 +16222,7 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
         data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
     except (OSError, json.JSONDecodeError):
         return Check(name, True, "findings unreadable", skipped=True)
+    data = _as_dict(data)
     findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
     guarded = [f for f in findings if isinstance(f.get("cache_sizing_guard"), dict)]
     cache_patterns = {"OPT4", "OPT6", "OPT9", "OPT61", "OPT62", "OPT96", "OPT101"}
@@ -17704,6 +17705,122 @@ def check_job_adding_prompts_state_runner_minute_effect(
         "; ".join(failures[:6]) if failures
         else f"{len(blocks)} coding-agent prompt(s) checked",
     )
+
+
+def check_wall_clock_runner_minute_effects(
+        report: str, findings_path: Path | None) -> Check:
+    """Re-derive signed OPT24 cost stamps and reject bare-zero disclosures."""
+    name = "wall-clock fixes state a signed runner-minute effect"
+    if findings_path is None or not findings_path.exists():
+        return Check(name, True, "findings JSON unavailable", skipped=True)
+    try:
+        data = json.loads(findings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return Check(name, True, "findings JSON unreadable", skipped=True)
+    failures: list[str] = []
+    data = _as_dict(data)
+    effect_schema = data.get("runner_minute_effect_schema") == 1
+    findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
+    priced_amounts: list[float] = []
+    for finding in findings:
+        pattern = str(finding.get("pattern") or "")
+        if pattern not in {"OPT24", "OPT25"}:
+            continue
+        if finding.get("positional_splitter_static"):
+            continue  # reassigns tests within existing shard jobs; adds no job
+        effect = _as_dict(finding.get("runner_minute_effect"))
+        if not effect and not effect_schema:
+            continue  # legacy recorded artifact predating signed-effect stamps
+        direction = effect.get("direction")
+        if direction == "neutral" and pattern == "OPT25":
+            # Rebalancing moves work between the legs that already run; only the
+            # split-the-slow-leg case adds a job (`opt25_case`).
+            if finding.get("opt25_case") == "split-leg":
+                failures.append("OPT25 split-leg adds a job but is stamped neutral")
+            elif not str(effect.get("reason") or "").strip():
+                failures.append("OPT25 neutral effect has no reason")
+            continue
+        if direction not in {"added_cost", "unsized"}:
+            failures.append(f"{pattern} has no signed or explicitly unsized effect")
+            continue
+        if direction == "unsized":
+            if not str(effect.get("reason") or "").strip():
+                failures.append(f"{pattern} unsized effect has no reason")
+            continue
+        floor = _num(effect.get("setup_floor_s"))
+        runs = _num(effect.get("runs_per_month"))
+        amount = _num(effect.get("runner_min_per_month"))
+        shards = _num(effect.get("assumed_shards"))
+        expected = (floor * (shards - 1) * runs / 60.0
+                    if None not in (floor, runs, shards) else None)
+        if (expected is None or amount is None or expected <= 0
+                or abs(amount - round(expected, 3)) > 0.0005):
+            failures.append(f"{pattern} added cost does not re-derive from floor*(N-1)*runs")
+        elif amount > 0:
+            priced_amounts.append(amount)
+    displayed_costs = [float(value) for value in re.findall(
+        r"Runner-minute effect:\s*\+([0-9]+(?:\.[0-9]+)?)\s+runner-min/month",
+        report,
+    )]
+    # A rendered prompt may group only the findings routed to one pole, so its
+    # subtotal can be any non-empty subset of the signed findings.  A bitset over
+    # thousandths keeps that exact without trusting arbitrary prose amounts, including
+    # small positive costs that would disappear if reduced to tenths.
+    effect_scale = 1000
+    reachable_costs = 1
+    for value in priced_amounts:
+        reachable_costs |= reachable_costs << int(round(value * effect_scale))
+    for amount in displayed_costs:
+        units = int(round(amount * effect_scale))
+        if units <= 0 or not (reachable_costs >> units) & 1:
+            failures.append(
+                f"displayed +{amount:g} runner-min/month is not backed by signed findings")
+    if "fix_key=emulated-image-compile" in report:
+        prompt = report[report.find("fix_key=emulated-image-compile"):]
+        if ("Runner-minute effect: saving" not in prompt
+                and "Runner-minute effect: not sized" not in prompt):
+            failures.append("emulated-image wall-clock lever has no sized/unsized effect")
+        # Re-derive every displayed saving from its own stated inputs, and bind
+        # its cap and volume to one measured cost-spine job.
+        jobs: dict[tuple[str, str], list[float]] = {}
+        for row in _as_list(_as_dict(data.get("runner_minute_spine")).get("rows")):
+            if not isinstance(row, dict):
+                continue
+            key = (str(row.get("workflow_file") or ""), str(row.get("job_name") or ""))
+            acc = jobs.setdefault(key, [0.0, 0.0])
+            acc[0] += _num(row.get("effective_monthly_job_volume")) or 0.0
+            acc[1] += _num(row.get("completed_billable_equiv_min_per_month")) or 0.0
+        num = r"([0-9]+(?:\.[0-9]+)?(?:e[+-]?[0-9]+)?)"
+        saving_re = re.compile(
+            rf"Runner-minute effect: saving ~{num} runner-min/month; modeled as "
+            rf"{num}s emulated minus {num}s native compile for each of ([0-9]+) "
+            rf"foreign architecture\(s\), across {num} runs/month, and capped at "
+            rf"the job's measured compute \({num} runner-min/month\)\.")
+        if re.search(r"Runner-minute effect:\s*saving\s+~", prompt) and not \
+                saving_re.search(prompt):
+            failures.append("emulated-image saving does not state its derivation")
+
+        def _close(a: float, b: float) -> bool:
+            return abs(a - b) <= max(0.05, 1e-5 * max(abs(a), abs(b)))
+
+        for m in saving_re.finditer(prompt):
+            shown, emu, nat, arches, volume, cap = (
+                float(m.group(1)), float(m.group(2)), float(m.group(3)),
+                int(m.group(4)), float(m.group(5)), float(m.group(6)))
+            if not any(_close(volume, v) and _close(cap, c) for v, c in jobs.values()):
+                failures.append("emulated-image saving cap/volume match no measured "
+                                "cost-spine job")
+            want = min((emu - nat * arches) * volume / 60.0, cap)
+            if nat <= 0 or arches <= 0 or want <= 0 or not _close(shown, round(want, 1)):
+                failures.append("emulated-image saving does not re-derive from emulated "
+                                "minus native seconds, runs and measured compute")
+    zero_effects = [float(value) for value in re.findall(
+        r"Runner-minute effect:\s*\+?([0-9]+(?:\.[0-9]+)?)\b", report)]
+    if any(value == 0 for value in zero_effects):
+        failures.append("report contains a bare zero runner-minute effect")
+    return Check(name, not failures,
+                 "; ".join(failures[:8]) if failures
+                 else "signed/unsized runner-minute effects re-derived")
 def check_commit_queue_work_credit(report: str, findings_path: Path | None,
                                    report_path: Path | None = None) -> Check:
     """Queue is in the developer wait, but only runner-pool findings own it.
@@ -18280,6 +18397,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_pole_anchors_resolve(report),
         check_rca_hands_off_never_prescribes(report),
         check_job_adding_prompts_state_runner_minute_effect(report, findings_path),
+        check_wall_clock_runner_minute_effects(report, findings_path),
         check_measured_cause_matches_rendered_timeline(report),
         check_skip_family_prompts_carry_pending_caveat(report),
         check_also_noticed_count_honest(report),

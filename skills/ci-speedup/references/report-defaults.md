@@ -684,6 +684,26 @@ option change for a one-off subprocess.
 
 **Approval status:** awaiting owner approval.
 
+### `opt25-universal-housekeeping`
+
+**Current value:** 60 seconds per matrix leg
+(`_OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S`). A shared step named as a setup action
+(`Run <owner>/setup-*@`), an artifact upload or download, an upload, or a
+cleanup counts as housekeeping at any duration.
+
+**Report statements:** whether work shared by every active matrix leg is treated
+as short housekeeping or retained as real work when diagnosing OPT25 imbalance.
+
+**Reason:** universally present setup and upload steps should not keep otherwise
+idle legs in the matrix, but a substantial shared test phase is useful work and
+must keep those legs in the comparison.
+
+**Proposed decision:** **Keep 60 seconds.** This matches the reader-facing
+bookkeeping cutoff while making longer shared work visible to the imbalance
+detector.
+
+**Approval status:** awaiting owner approval.
+
 ### `saving-caps`
 
 **Current value:** modeled cache savings use at most 90% of the available cache
@@ -871,6 +891,12 @@ implementation lands.
       "collect_runs.py:_MIN_TIMED_RUNS": 3
     }
   },
+  "opt25-universal-housekeeping": {
+    "decision": "opt25-universal-housekeeping",
+    "sources": {
+      "collect_runs.py:_OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S": 60.0
+    }
+  },
   "opt64-retried-runs": {
     "decision": "per-pattern-minimums",
     "sources": {
@@ -974,6 +1000,13 @@ implementation lands.
       "verify_report.py:_VR_OPT84_MIN_STEP_S": 20.0,
       "collect_runs.py:_OPT84_INSTALL_MIN_SHARE": 0.15,
       "verify_report.py:_VR_OPT84_INSTALL_MIN_SHARE": 0.15
+    }
+  },
+  "opt105-hook-duplication-minimums": {
+    "decision": "per-pattern-minimums",
+    "sources": {
+      "collect_runs.py:_OPT105_MIN_DUPLICATE_STEP_S": 20.0,
+      "collect_runs.py:_OPT105_MIN_JOB_SHARE": 0.15
     }
   },
   "opt106-profile-minimums": {
