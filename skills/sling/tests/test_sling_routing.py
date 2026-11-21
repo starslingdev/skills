@@ -1165,6 +1165,37 @@ def test_the_description_keeps_its_measured_trigger_properties():
     assert "re-run" in low or "rerun" in low, "the state-change cue is gone"
 
 
+def test_agent_owned_red_pr_check_triggers_before_raw_gh_logs():
+    """A coding agent encounters failures while driving its own PR, without a
+    user asking a diagnosis question.  The router-facing description must name
+    that autonomous entry point and the raw-log path it replaces."""
+    description = _FRONT["description"]
+    low = description.lower()
+    assert "check you are watching" in low and "goes red" in low, (
+        "the description only triggers on user questions, not a red check the "
+        "agent encounters while working on a PR")
+    assert "`gh pr checks`" in description, (
+        "the description does not name the command that exposes the red check")
+    assert "`gh run view --log`" in description, (
+        "the description does not steer agents away from raw gh log scraping")
+
+    first = _routing_table_rows()[0]
+    assert "pr" in first[0].lower() and "red" in first[0].lower(), (
+        f"red PR triage is not the routing table's first entry: {first[0]!r}")
+    assert "`gh pr checks" in first[2] and "`sling why" in first[2], (
+        "the first routing row must identify the failed PR check, then classify it")
+
+
+def test_evals_cover_an_agent_encountering_its_own_red_pr_check():
+    cases = {case["name"]: case for case in _EVALS["evals"]}
+    case = cases.get("agent-owned-pr-check-goes-red")
+    assert case is not None, "no eval covers an agent encountering a red check itself"
+    assert case["should_trigger"] is True
+    text = " ".join([case["prompt"], case["expected_output"], *case["assertions"]])
+    assert "sling why" in text and "gh run view --log" in text, (
+        "the eval must prefer classified diagnosis over raw gh log scraping")
+
+
 def test_no_hyphenated_term_is_split_by_the_yaml_fold():
     """A `>-` block folds newlines into spaces, so a term wrapped across the fold
     silently becomes two words in the value the router actually reads.
