@@ -558,6 +558,44 @@ def test_merge_precedence_does_not_come_from_the_installed_pyyaml(
     assert data == nodes == {"j": ["from-a"]}
 
 
+def test_job_level_merge_keys_resolve_like_the_loader() -> None:
+    """A `<<:` under `jobs:` follows the same rule as one in a step: a chained
+    merge inside a source is followed, a duplicate key inside a source takes
+    its last value, and own jobs win. Otherwise a merged-in job has no nodes
+    (its runs go unanchored) or the wrong ones (its findings get the wrong
+    lines)."""
+    data, nodes = _walker_leaves(textwrap.dedent("""\
+        x-jobs: &jobs
+          j: {steps: [{run: first-j}]}
+          j: {steps: [{run: last-j}]}
+        x-more: &more
+          k: {steps: [{run: chained-k}]}
+        x-jobs2: &jobs2
+          <<: *more
+          m: {steps: [{run: m}]}
+          j: {steps: [{run: later-source-j}]}
+        jobs:
+          <<: [*jobs, *jobs2]
+          own: {steps: [{run: own}]}
+        """))
+    assert data == {"j": ["last-j"], "k": ["chained-k"], "m": ["m"],
+                    "own": ["own"]}
+    assert nodes == data
+
+
+def test_self_referencing_merge_is_walked_not_recursed_forever() -> None:
+    """`&s {run: a, <<: *s}` merges a mapping into itself. The loader keeps
+    its own keys; the node walker must do the same instead of raising
+    RecursionError out of the scan."""
+    data, nodes = _walker_leaves(textwrap.dedent("""\
+        jobs:
+          j:
+            steps:
+              - &s {run: self, <<: *s}
+        """))
+    assert data == nodes == {"j": ["self"]}
+
+
 @pytest.mark.parametrize("steps", _lockstep_shapes())
 def test_node_walker_stays_in_lockstep_with_the_step_walker(steps) -> None:
     """Line attribution pairs the two walkers' outputs by position, so they
