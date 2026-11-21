@@ -113,7 +113,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install harness dependencies
-        run: pip install "pyyaml<6.0.4"
+        run: pip install pyyaml
 
       # Pinned. A contract-regression suite whose failure message says "the agent's behaviour
       # changed" must hold the runtime still; on `latest`, an upstream CLI release would read

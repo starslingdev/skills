@@ -86,7 +86,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - run: pip install "pyyaml<6.0.4"
+      - run: pip install pyyaml
       - name: Run ci-secure against this repo's workflows
         run: python3 .github/scripts/ci_secure_gate.py
         env:
@@ -137,7 +137,7 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
-      - run: pip install "pyyaml<6.0.4"
+      - run: pip install pyyaml
       - name: Run ci-secure against this repo's workflows
         run: python3 .github/scripts/ci_secure_gate.py
         env:
