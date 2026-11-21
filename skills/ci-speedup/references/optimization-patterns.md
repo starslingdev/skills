@@ -2760,7 +2760,7 @@ title_template: "The slowest platform compiles its own tests"
 **Fix recipe**:
 
 1. Build the test binaries for the slow target on a fast runner, cross-compiling, and upload them as an artifact (a test archive where the runner supports one).
-2. Download and run them on a native runner of the target platform; shard the run across several native runners when the test phase is still long.
+2. Download and run them on one native runner of the target platform. A `--bmf` report may offer sharding the remaining test phase across native runners when it is still the measured bottleneck; that optional route repeats checkout and setup on every shard, so treat it as added runner-minute cost, never as a bill saving.
 3. Where a native runner exists, prefer it to emulation: an emulated architecture is slower at both building and testing.
 4. Keep a fully native build-and-test of that platform somewhere, after merge or on a schedule, for anything the cross-built binary cannot cover.
 
@@ -4511,8 +4511,11 @@ other jobs, no wall-clock credit. Only an established merge-gating job is
 credited. Cap each sampled reduction against all same-run job completion times,
 including queue; an independent later-finishing job removes the credit.
 Incomplete completion data receives no credit. The existing workflow and
-cross-workflow floors then apply. No runner-minute saving: waiting is not
-execution.
+cross-workflow floors then apply. Waiting itself is not execution, so narrowing
+the group or adding capacity claims no runner-minute saving. Moving the step to
+its own job is different: it repeats job checkout and setup, so under `--bmf`
+that option carries a signed added runner-minute cost, or a true unsized reason
+when the added setup was not measured.
 
 **Relations**: Replaces the same workflow's same-job OPT43 finding; a finding
 naming other jobs, or another workflow's, is kept. The merge also accepts

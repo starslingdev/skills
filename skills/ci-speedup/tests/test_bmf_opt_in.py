@@ -279,3 +279,121 @@ def test_verifier_requires_the_mode_marker_when_a_lever_would_be_held(tmp_path):
     empty = tmp_path / "empty.json"
     empty.write_text(json.dumps({"findings": []}), encoding="utf-8")
     assert vr.check_bmf_runner_minute_filter("# report\n", empty).skipped is True
+
+
+def _option_report(finding: dict, *, bmf: bool) -> str:
+    return bp.render({
+        "repo": "demo/repo",
+        "scanned_at": "2026-11-21T00:00:00Z",
+        "findings": [finding],
+    }, bmf=bmf)
+
+
+def test_opt89_native_runner_sharding_is_held_by_default_and_signed_under_bmf(
+        tmp_path):
+    finding = {
+        "id": "opt89-static",
+        "pattern": "OPT89",
+        "severity": "HIGH",
+        "title": "The slowest platform compiles its own tests",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["arm"],
+        "evidence": (
+            "job `arm` compiles via `make` inside a QEMU-backed docker run "
+            "for `linux/arm64` on a hosted x64 runner"
+        ),
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
+
+    default = _option_report(finding, bmf=False)
+    opted_in = _option_report(finding, bmf=True)
+
+    assert "enabled=false held=1" in default
+    assert "shard the test run across native runners" not in default
+    assert "shard the test run across native runners" in opted_in
+    # The build-once handoff is the finding's main route; only the optional
+    # sharding adds runner minutes, so the signed cost names that option.
+    assert ("Runner-minute effect of the sharding option: added cost, unsized"
+            in opted_in)
+    assert "Runner-minute effect: added cost" not in opted_in
+    assert vr.check_bmf_runner_minute_filter(default, findings_path).ok is True
+    assert vr.check_bmf_runner_minute_filter(opted_in, findings_path).ok is True
+    unscoped = opted_in.replace("Runner-minute effect of the sharding option:",
+                                "Runner-minute effect:")
+    assert vr.check_bmf_runner_minute_filter(unscoped, findings_path).ok is False
+
+
+def test_opt97_bmf_own_job_recipe_states_added_runner_minute_cost(tmp_path):
+    finding = {
+        "id": "opt97-queue",
+        "pattern": "OPT97",
+        "severity": "MEDIUM",
+        "title": "Queue Caused by a One-at-a-Time Resource",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["test"],
+        "evidence": "job `test` has P90 queue 8m20s with a single-slot resource",
+        "wall_clock_p50_s": 120.0,
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
+
+    opted_in = _option_report(finding, bmf=True)
+
+    assert ("Runner-minute effect of moving the step to its own job: added cost, "
+            "unsized" in opted_in)
+    assert "No runner-minute saving" not in opted_in
+    assert vr.check_bmf_runner_minute_filter(opted_in, findings_path).ok is True
+
+    tampered = opted_in.replace(
+        "Runner-minute effect of moving the step to its own job: added cost, unsized",
+        "No runner-minute saving",
+    )
+    assert vr.check_bmf_runner_minute_filter(tampered, findings_path).ok is False
+
+
+def test_default_pre_start_wait_section_omits_a_held_opt97_card(tmp_path):
+    # A measured OPT97 carries positive savable wait, so it would render in the
+    # pre-start wait section; the default mode holds it, so the card must go.
+    finding = {
+        "id": "opt97-queue",
+        "pattern": "OPT97",
+        "severity": "MEDIUM",
+        "title": "Queue Caused by a One-at-a-Time Resource",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["test"],
+        "evidence": "job `test` has P90 queue 8m20s with a single-slot resource",
+        "wall_clock_p50_s": 120.0,
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
+
+    default = _option_report(finding, bmf=False)
+
+    assert "enabled=false held=1" in default
+    assert "<strong>OPT97 - " not in default
+    assert finding["evidence"] not in default
+    assert vr.check_bmf_runner_minute_filter(default, findings_path).ok is True
+    assert "<strong>OPT97 - " in _option_report(finding, bmf=True)
+
+
+def test_a_wholly_held_opt89_counts_once_in_renderer_and_verifier(tmp_path):
+    # An OPT89 whose stamped effect adds runner minutes is held as a whole;
+    # its sharding option must not be counted a second time.
+    finding = {
+        "id": "opt89-added",
+        "pattern": "OPT89",
+        "severity": "HIGH",
+        "title": "The slowest platform compiles its own tests",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["arm"],
+        "evidence": "job `arm` compiles inside an emulated linux/arm64 container run",
+        "runner_minute_effect": {"direction": "added_cost"},
+    }
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps({"findings": [finding]}), encoding="utf-8")
+
+    default = _option_report(finding, bmf=False)
+
+    assert "enabled=false held=1" in default
+    assert vr.check_bmf_runner_minute_filter(default, findings_path).ok is True
