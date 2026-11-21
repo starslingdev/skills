@@ -928,7 +928,8 @@ def select_tests(listing, shard, count):
     assert findings, "expected sorted positional splitter guidance"
     finding = findings[0]
     assert "stable hash" in finding.get("fix_strategy", ""), finding
-    assert "runner-minute effect: roughly neutral" in finding.get("size_note", ""), finding
+    assert "fewer shard timeouts and reruns" in finding.get("runner_min_unsized_reason", ""), finding
+    assert "neutral" not in finding.get("size_note", ""), finding
 
 
 def test_opt25_positional_splitter_keeps_stable_hash_partition_quiet(tmp_path: Path):

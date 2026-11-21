@@ -11550,14 +11550,16 @@ def _opt25_sorts_by_name(text: str, assignment: re.Match[str]) -> bool:
             or "localeCompare" in args)
 
 
-_OPT25_POSITIONAL_SIZE_NOTE = (
-    "runner-minute effect: roughly neutral for passing runs because the same "
-    "existing shard jobs run the same tests; any saving from fewer shard "
-    "timeouts and reruns is unsized, and the wall-clock saving is unsized until "
-    "CI per-test timings measure the imbalance")
+# The saving is real but unsized: passing runs cost the same, and what a stable
+# split saves (fewer shard timeouts and reruns) is unmeasured. Never describe it
+# as neutral beside "unsized" (tests/test_unsized_reason_guard.py).
 _OPT25_POSITIONAL_UNSIZED = (
-    "static source finding; the same shard jobs run the same tests, and no CI "
-    "per-test timings measure the imbalance or timeout reruns")
+    "passing runs execute the same tests in the same shard jobs, so any saving "
+    "comes from fewer shard timeouts and reruns, which no CI per-test timings "
+    "measure yet")
+_OPT25_POSITIONAL_SIZE_NOTE = (
+    f"runner-minute saving: unsized ({_OPT25_POSITIONAL_UNSIZED}); the wall-clock "
+    "saving is unsized until CI per-test timings measure the imbalance")
 
 
 def _opt25_positional_use(text: str, name: str) -> re.Match[str] | None:
@@ -11975,6 +11977,11 @@ def _detect_opt16_test_binary_builds(root: Path):
                 "size_note": ("runner-minute saving: unsized (static source proves "
                               "the repeated build shape but no build duration or monthly "
                               "execution count is measured)"),
+                # The group heading reads this; without it the heading says
+                # "no bill saving" for a real, unsized saving.
+                "runner_min_unsized_reason": (
+                    "static source proves the repeated build shape but no build "
+                    "duration or monthly execution count is measured"),
             })
         hits.append(("OPT16", first_path, hit))
     return hits, incomplete
@@ -13222,6 +13229,8 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
         f = _emit(entry, hit, wf, finding_idx)
         f["wall_clock_p50_s"] = round(total_s, 1)
         f["runner_min_saving"] = None
+        f["runner_min_unsized_reason"] = (
+            "test source does not tie the sleeps to a workflow's monthly run count")
         f["tier"] = 1
         f["realization"] = "direct"
         f["measured_signal"] = hit.evidence

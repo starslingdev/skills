@@ -548,7 +548,8 @@ def select_tests(listing, shard, count):
     assert finding.get("wall_clock_p50_s") is None, finding
     assert finding.get("runner_min_saving") is None, finding
     assert "stable hash" in finding.get("fix_strategy", ""), finding
-    assert "runner-minute effect: roughly neutral" in finding.get("size_note", ""), finding
+    assert "fewer shard timeouts and reruns" in finding.get("runner_min_unsized_reason", ""), finding
+    assert "neutral" not in finding.get("size_note", ""), finding
     failures = [check for check in checks if not check.skipped and not check.ok]
     assert failures == [], [(check.name, check.detail) for check in failures]
     # The rendered card must carry the recipe and a literally true cost line:
