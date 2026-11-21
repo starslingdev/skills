@@ -350,7 +350,7 @@ def test_render_toc_reframes_when_also_noticed_has_on_path_lever():
          "workflow_file": "other.yml", "affected_jobs": ["slow-test"],
          "runner_min_saving": 0, "wall_clock_p50_s": 120.0},
     ]}
-    out = bp.render(doc)
+    out = bp.render(doc, bmf=True)
     assert "sits ON the merge-gating critical path" in out, "the credited wall-clock lever should flag on-path"
     m = re.search(r"\*\*🧹 Also noticed\*\* -.*", out)
     assert m, "TOC 'Also noticed' pointer should render"
@@ -387,7 +387,7 @@ def test_render_does_not_frame_rare_demoted_job_on_path_in_appendix():
          "affected_jobs": ["Test pg_search on PostgreSQL 18 (pgrx - arm64)"],
          "runner_min_saving": 0, "wall_clock_p50_s": 100.4},
     ]}
-    out = bp.render(doc)
+    out = bp.render(doc, bmf=True)
     # The spine footnote demotes it as opt-in (present on a minority)...
     assert "opt-in" in out or "a typical PR doesn't wait" in out, \
         "the rare job should be demoted as opt-in in the spine footnote"
@@ -438,7 +438,7 @@ def test_spine_rare_pole_stays_catalog_covered_no_false_gap():
     logs = {pg: "compiling crate pgrx\nrunning suite\nfinished in 22m 31s\n"}
     assert bp._parse_log(logs[pg]) is None, "fixture log must match no detector (be a true gap-shape)"
 
-    out = bp.render(doc, logs)
+    out = bp.render(doc, logs, bmf=True)
     f = doc["findings"][0]
     # The finding IS stamped spine_rare (the regression scenario is real)...
     assert f.get("spine_rare") is True
@@ -634,7 +634,7 @@ def test_spine_rare_presence_clause_guards_always_present_frequency_demoted_leg(
          "line": 8, "workflow_file": "heavy.yml", "affected_jobs": [minority],
          "runner_min_saving": 0, "wall_clock_p50_s": 400.0},
     ]}
-    bp.render(doc)
+    bp.render(doc, bmf=True)
     leg_f = next(f for f in doc["findings"] if f["id"] == "leg")
     min_f = next(f for f in doc["findings"] if f["id"] == "min")
     # The always-present frequency-demoted leg must NOT be stamped (presence clause keeps it on-path).
@@ -669,7 +669,7 @@ def test_spine_rare_kept_guard_does_not_demote_a_job_also_on_the_typical_path():
          "line": 5, "workflow_file": "ci.yml", "affected_jobs": ["test"],
          "runner_min_saving": 0, "wall_clock_p50_s": 400.0},
     ]}
-    bp.render(doc)
+    bp.render(doc, bmf=True)
     assert not doc["findings"][0].get("spine_rare"), \
         "a job that also maps to a typical check must NOT be demoted opt-in (kept-guard)"
 
@@ -703,7 +703,7 @@ def test_spine_rare_demotes_a_cross_workflow_name_collision_with_a_rare_check():
          "line": 5, "workflow_file": "a.yml", "affected_jobs": ["Python 3.13"],
          "runner_min_saving": 0, "wall_clock_p50_s": 400.0},
     ]}
-    bp.render(doc)
+    bp.render(doc, bmf=True)
     assert doc["findings"][0].get("spine_rare") is True, \
         "a finding on a NAME the footnote demotes as opt-in/rare must be spine_rare even across workflows"
     assert bp._frames_on_path(doc["findings"][0]) is False, \
@@ -759,7 +759,7 @@ def test_spine_rare_stamps_exact_rare_leg_despite_typical_sibling_leg():
          "line": 5, "workflow_file": "test.yml", "affected_jobs": ["test (macos-latest)"],
          "runner_min_saving": 0, "wall_clock_p50_s": 400.0},
     ])
-    out = bp.render(doc)
+    out = bp.render(doc, bmf=True)
     assert doc["findings"][0].get("spine_rare") is True, \
         "the exact rare leg must be demoted even when a typical sibling leg shares its matrix base"
     assert bp._frames_on_path(doc["findings"][0]) is False
@@ -827,7 +827,7 @@ def test_rendered_tauri_shape_passes_the_spine_dropped_verify_gate_end_to_end(tm
          "evidence": "the `test` step is 90% of the slowest cluster job `test (windows-latest)`",
          "runner_min_saving": 100, "wall_clock_p50_s": 400.0},
     ])
-    out = bp.render(doc)
+    out = bp.render(doc, bmf=True)
     fp = tmp_path / "findings.json"
     fp.write_text(json.dumps(doc), encoding="utf-8")
     line = _spine_dropped_check_line(out, fp)
@@ -847,7 +847,7 @@ def test_dropped_check_gets_one_off_path_framing_and_passes_verify(tmp_path: Pat
         "runner_min_saving": 0, "wall_clock_p50_s": 400.0,
     }]
 
-    out = bp.render(doc)
+    out = bp.render(doc, bmf=True)
     fp = tmp_path / "findings.json"
     fp.write_text(json.dumps(doc), encoding="utf-8")
     line = _spine_dropped_check_line(out, fp)
@@ -880,7 +880,7 @@ def test_dropped_job_does_not_demote_a_finding_that_also_covers_a_kept_job(tmp_p
         "runner_min_saving": 0, "wall_clock_p50_s": 400.0,
     }]
 
-    out = bp.render(doc)
+    out = bp.render(doc, bmf=True)
     assert not doc["findings"][0].get("off_spine")
     appendix = out.split("## 🧹 Also noticed - residual hygiene", 1)[1]
     assert "sits ON the merge-gating critical path" in appendix
@@ -5181,7 +5181,7 @@ def test_pole_with_data_driven_catalog_match_is_not_a_coverage_gap():
                 "evidence": ["X"], "prompt": "REPO: o/r\ndo the thing"}
     md = bp.render(doc, {"main": "log that matches no leaf detector at all"}, {},
                    {"main": "https://github.com/o/r/actions/runs/9"}, "2026-06-08",
-                   analyses={"main": analysis})
+                       analyses={"main": analysis}, bmf=True)
     # (a) the pole no longer claims it's a coverage gap / no catalog match.
     assert "no catalog pattern matched this job's log" not in md
     assert "this is a coverage gap, not a clean job" not in md

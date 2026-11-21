@@ -56,7 +56,7 @@ EXCLUDE = "exclude"       # run/harness artifact → never a skill bug
 # The committed, reviewable TRIAGE ALLOWLIST. Keyed by the live `verify_report.Check.name` string
 # (what `run_checks` actually yields) so the classification can be applied at runtime and the
 # "every check is classified" invariant is directly testable; the originating `check_*` function
-# name is in the trailing comment for cross-reference with spec §2-A. 99 AUTO_SEED / 1 EXCLUDE /
+# name is in the trailing comment for cross-reference with spec §2-A. 101 AUTO_SEED / 1 EXCLUDE /
 # 3 TRIAGE — a new `verify_report` check makes `test_every_check_is_classified` go red until it's
 # classified here (so no check is ever left undisposed).
 TRIAGE_ALLOWLIST = {
@@ -72,6 +72,7 @@ TRIAGE_ALLOWLIST = {
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": AUTO_SEED,  # check_measured_cause_matches_rendered_timeline
     "TOC 'Also noticed' count == appendix rows + hidden pointer": AUTO_SEED,                        # check_also_noticed_count_honest
     "an unsized runner-minute saving never reads `no bill saving` or neutral": AUTO_SEED,  # check_no_bill_heading_for_unsized_saving
+    "default report holds back runner-minute-adding wall-clock levers": AUTO_SEED,
     "data basis disclosed; coverage gaps named, not silent": AUTO_SEED,                             # check_coverage_disclosed
     "PR gate sample stop reason matches its bounded collection facts": AUTO_SEED,                  # check_pr_sample_stop_reason
     "workflows missing from the sample are NAMED in the report": AUTO_SEED,                         # check_run_list_gaps_named
@@ -206,6 +207,7 @@ CHECK_CLASS = {
     "agent-prompt MEASURED CAUSE never asserts timeline steps the pole doesn't render": "fabricated-or-unsupported-finding",  # a canned cause asserts a timeline shape the report contradicts
     "TOC 'Also noticed' count == appendix rows + hidden pointer": "fabricated-or-unsupported-finding",  # a rendered count not backed by the data
     "an unsized runner-minute saving never reads `no bill saving` or neutral": "fabricated-or-unsupported-finding",  # a "no bill saving" claim the finding's own sizing does not support
+    "default report holds back runner-minute-adding wall-clock levers": "fabricated-or-unsupported-finding",
     "data basis disclosed; coverage gaps named, not silent": "coverage-gap-dead-end",     # exact match (the spec's own no-silent-drop framing)
     "PR gate sample stop reason matches its bounded collection facts": "coverage-gap-dead-end",  # the stated sampling boundary disagrees with its collection facts
     "workflows missing from the sample are NAMED in the report": "coverage-gap-dead-end",  # a workflow that vanished from the sample rendering as measured

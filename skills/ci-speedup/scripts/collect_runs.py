@@ -11308,6 +11308,11 @@ def _detect_opt25_shard_imbalance(
             wc_p50=wc, rm=None, size_note=size_note,
             realization=("direct" if wc > 0 else "none"), measured_evidence=me,
         ))
+        # Which remedy the finding carries: a split slow leg adds jobs that repeat
+        # setup (held back by default, #448); rebalancing and the atomic-unit split
+        # move the same work between the existing legs.
+        out[-1]["opt25_case"] = ("atomic-unit" if atomic
+                                 else "rebalance" if is_sharded else "split-leg")
         if family is not None:
             out[-1]["shard_family"] = family
             out[-1]["evidence"] = summary

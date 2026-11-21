@@ -270,7 +270,7 @@ def test_collect_excludes_repeated_compile_from_sharding_credit_and_report_verif
     jest = _finding(doc, "jest tests")
     assert jest["wall_clock_p50_s"] == 1400.0
 
-    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z", bmf=True)
     assert "| test compile log probe | 3 job log(s) read |" in report
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"
@@ -316,7 +316,7 @@ def _collect_and_verify(monkeypatch, tmp_path: Path, client_type: type[_Client])
         },
         "findings": [],
     }, "o/r", max_runs=2, shallow_runs=2)
-    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z", bmf=True)
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"
     findings_path.write_text(json.dumps(doc), encoding="utf-8")
@@ -396,7 +396,7 @@ def test_overlapping_go_package_times_leave_the_added_cost_unsized(
     assert "go_shard_extra_runner_s" not in go
     assert "overlap" in go["go_shard_extra_runner_unsized_reason"]
     assert "adds about 0s" not in go["evidence"]
-    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z")
+    report = bp.render(doc, captured_at="2026-11-07T00:00:00Z", bmf=True)
     findings_path = tmp_path / "findings.json"
     report_path = tmp_path / "report.md"
     findings_path.write_text(json.dumps(doc), encoding="utf-8")

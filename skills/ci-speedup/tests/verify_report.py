@@ -11075,6 +11075,10 @@ def check_opt83_parallel_steps(report: str, findings_path: Path | None) -> Check
         return Check(name, True, err, skipped=True)
     found = [f for f in _as_list(_as_dict(data).get("findings"))
              if isinstance(f, dict) and str(f.get("pattern") or "") == "OPT83"]
+    if "<!-- ci-speedup:bmf enabled=false " in report:
+        found = [f for f in found
+                 if _as_dict(f.get("independent_steps")).get("kind")
+                 != "opt83_separate_jobs"]
     cards = _vr_opt83_card_bodies(report)
     bad: list[str] = []
     # Every held-back gate is counted once AND listed once: the counter and the
@@ -17020,6 +17024,9 @@ def check_opt81_runner_comparison_rederived(report: str,
         return Check(name, True, err, skipped=True)
     found = [f for f in _as_list(data.get("findings"))
              if isinstance(f, dict) and f.get("pattern") == "OPT81"]
+    if "<!-- ci-speedup:bmf enabled=false " in report:
+        found = [f for f in found
+                 if _as_dict(f.get("faster_runner")).get("kind") == "opt81_downsize"]
     if not found:
         if '<a id="opt81-' in report:
             return Check(name, False, "the report renders an OPT81 card, but the run "
@@ -17248,11 +17255,14 @@ def check_default_branch_push_lane_isolated(
     # A post-merge finding whose saving is real but its monthly figure unsized
     # (OPT107 without a readable 30-day push count) says so; its group heading
     # never reads as "no bill saving".
+    # A default report holds minute-adding levers back, so their group never renders.
+    held_back = "<!-- ci-speedup:bmf enabled=false " in report
     unsized_patterns = sorted({
         str(f.get("pattern") or "")
         for f in _as_list(data.get("findings"))
         if isinstance(f, dict) and f.get("runner_min_unsized_reason")
         and not _num(f.get("runner_min_saving"))
+        and not (held_back and _vr_bmf_held_back(f))
     } - {""})
     for pattern in unsized_patterns:
         if any(line.startswith(f"<summary><strong>{pattern} - ")
@@ -18138,6 +18148,117 @@ def check_no_bill_heading_for_unsized_saving(report: str, findings_path) -> Chec
                  else f"{len(findings)} finding(s): no unsized saving reads `no bill saving`")
 
 
+_VR_BMF_MARKER_RE = re.compile(
+    r"<!-- ci-speedup:bmf enabled=(true|false) held=(\d+) -->")
+
+
+def _vr_bmf_held_back(finding: dict) -> bool:
+    """Independent copy of the engine's enumerated minute-adding mechanisms."""
+    effect = _as_dict(finding.get("runner_minute_effect"))
+    direction = str(effect.get("direction") or "").lower()
+    per_run = _num(effect.get("runner_min_per_run"))
+    per_month = _num(effect.get("runner_min_per_month"))
+    if direction in {"added", "added_cost", "cost", "increase"}:
+        return True
+    if ((per_run is not None and per_run > 0)
+            or (per_month is not None and per_month > 0)):
+        return direction not in {"saving", "saved", "neutral"}
+    pattern = str(finding.get("pattern") or "")
+    if pattern in {"OPT24", "OPT97"}:
+        return True
+    if pattern == "OPT83":
+        return _as_dict(finding.get("independent_steps")).get("kind") == "opt83_separate_jobs"
+    if pattern == "OPT81":
+        return _as_dict(finding.get("faster_runner")).get("kind") != "opt81_downsize"
+    if pattern == "OPT25":
+        case = finding.get("opt25_case")
+        if case is None:
+            return str(finding.get("title") or "") == "Matrix Leg Imbalance"
+        return case == "split-leg"
+    if pattern == "OPT21":
+        extra = _num(_as_dict(finding.get("opt21_edge_sizing")).get(
+            "extra_runner_min_per_run"))
+        return extra is not None and extra > 0
+    return False
+
+
+# Log leaves whose catalog remedy adds jobs, shards or runners; mirrors
+# blocking_path's `_BMF_LEAF_DEFAULTS` keys. In a default report their prompt's
+# DELIVER line may not split the work across jobs, runners or a matrix.
+_VR_BMF_HELD_LEAVES = frozenset({
+    "cargo-test-shard", "android-emulator-shard", "playwright-parallel",
+    "pytest-no-xdist", "benchmark-serial-reruns", "gradle-test-parallelism",
+    "lighthouse-serial-audits",
+})
+_VR_BMF_CROSS_JOB_RE = re.compile(
+    r"(?i)\b(?:shard|split|parallelis|parallelliz|spread|move)\w*\b[^.;]*"
+    r"\b(?:jobs?|runners?|matrix|emulators)\b")
+_VR_BMF_DELIVER_RE = re.compile(r"\nDELIVER & VERIFY\n((?:- .*\n?)+)")
+
+
+def _vr_bmf_disclosure(count: int) -> str:
+    if count == 1:
+        return ("1 wall-clock lever held back because it adds runner minutes or "
+                "changes to an unpriced runner; rerun with `--bmf` to show it.")
+    return (f"{count} wall-clock levers held back because they add runner minutes or "
+            "change to an unpriced runner; rerun with `--bmf` to show them.")
+
+
+def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
+    name = "default report holds back runner-minute-adding wall-clock levers"
+    markers = list(_VR_BMF_MARKER_RE.finditer(report))
+    try:
+        data = json.loads(Path(findings_path).read_text())
+    except (OSError, TypeError, ValueError):
+        data = None
+    held = ([f for f in _as_list(_as_dict(data).get("findings"))
+             if isinstance(f, dict) and _vr_bmf_held_back(f)]
+            if data is not None else [])
+    if not markers:
+        if held:
+            return Check(name, False, f"{len(held)} lever(s) the default mode holds back, "
+                         "but the report carries no bmf mode marker")
+        return Check(name, True, "legacy report has no bmf mode marker", skipped=True)
+    if len(markers) != 1:
+        return Check(name, False, f"expected one bmf mode marker, found {len(markers)}")
+    if data is None:
+        return Check(name, True, "findings JSON unavailable", skipped=True)
+    enabled = markers[0].group(1) == "true"
+    stamped = int(markers[0].group(2))
+    leaves = [key for key in _VR_LEAF_CROWN_RE.findall(report)
+              if key in _VR_BMF_HELD_LEAVES]
+    expected = 0 if enabled else len(held) + len(leaves)
+    bad = []
+    if stamped != expected:
+        bad.append(f"marker says {stamped} held, expected {expected}")
+    if expected and report.count(_vr_bmf_disclosure(expected)) != 1:
+        bad.append("the one-line held-back disclosure is missing or duplicated")
+    if not enabled:
+        for f in held:
+            fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_", str(f.get("id") or "x"))
+            pattern = str(f.get("pattern") or "")
+            if pattern == "OPT83" and f'<a id="opt83-{fid}"></a>' in report:
+                bad.append(f"held OPT83 {fid} still renders a recommendation card")
+            if pattern == "OPT81" and f'<a id="opt81-{fid}"></a>' in report:
+                bad.append(f"held OPT81 {fid} still renders a recommendation card")
+            evidence = str(f.get("evidence") or "").strip()
+            if len(evidence) >= 40 and evidence in report:
+                bad.append(f"held {pattern} {fid} still renders its evidence")
+        for pattern in ("OPT24", "OPT97"):
+            if (any(str(f.get("pattern")) == pattern for f in held)
+                    and f"<strong>{pattern} - " in report):
+                bad.append(f"held {pattern} still renders a recommendation card")
+        for match in _VR_BMF_DELIVER_RE.finditer(report):
+            # A sentence that names `--bmf` is the held-back notice itself.
+            for sentence in re.split(r"(?<=[.;])\s+", match.group(1)):
+                if _VR_BMF_CROSS_JOB_RE.search(sentence) and "`--bmf`" not in sentence:
+                    bad.append("a default prompt delivers a cross-job split: "
+                               + sentence.strip()[:80])
+    return Check(name, not bad, "; ".join(bad) if bad else
+                 ("--bmf recommendations enabled" if enabled
+                  else f"{expected} runner-minute-adding lever(s) held back"))
+
+
 def run_checks(report, report_path, findings_path, skill_repo, clone=None):
     return [
         check_primary_section_present(report, findings_path),
@@ -18152,6 +18273,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_skip_family_prompts_carry_pending_caveat(report),
         check_also_noticed_count_honest(report),
         check_no_bill_heading_for_unsized_saving(report, findings_path),
+        check_bmf_runner_minute_filter(report, findings_path),
         check_coverage_disclosed(report, findings_path),
         check_pr_sample_stop_reason(report, findings_path),
         check_run_list_gaps_named(report, findings_path),
