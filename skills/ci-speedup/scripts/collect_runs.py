@@ -11065,6 +11065,9 @@ def _size_opt25_next_step(finding: dict[str, Any], ctx: WallClockContext) -> Non
         "capped by the existing cross-workflow floor; this is not an extra credited saving.")
 
 
+_OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S = 60.0
+
+
 def _detect_opt25_shard_imbalance(
     wf_path: str, jobs_per_run: list[list[dict[str, Any]]], start_idx: int,
     crit: dict[str, Any], workflow_doc: dict[str, Any] | None = None,
@@ -11097,16 +11100,88 @@ def _detect_opt25_shard_imbalance(
             name.strip()))
 
     def _is_universal_housekeeping_step(name: str) -> bool:
+        # Anchored: "Run tests and upload coverage" is test work, not an upload.
         return not name.strip() or bool(_re.search(
-            r"(?i)(?:\b(?:artifact|cleanup|tear\s*down|upload)\b|"
-            r"^run\s+[\w.-]+/setup-[\w.-]+@)", name.strip()))
+            r"(?i)^(?:(?:upload|cleanup|clean\s*up|tear\s*down)\b|"
+            r"run\s+[\w.-]+/(?:setup-[\w.-]+|(?:upload|download)-artifact)@)",
+            name.strip()))
 
-    dominant_step_by_base: dict[str, str] = {}
-    step_seconds_by_base: dict[str, dict[str, float]] = {}
-    always_run_by_run: list[dict[str, set[str]]] = []
-    non_universal_names_by_base: dict[str, set[str]] = {}
+    def _step_semantic_identity(step: dict[str, Any]) -> tuple[str, str, str]:
+        return tuple(
+            " ".join(str(step.get(field) or "").split())
+            for field in ("name", "action", "run")
+        )
+
+    def _runner_added_step(step: dict[str, Any]) -> bool:
+        return bool(_re.search(
+            r"(?i)^(?:set up (?:job|runner)|complete (?:job|runner)|post )",
+            str(step.get("name") or "").strip()))
+
+    VersionToken = tuple[str, ...]
+    VersionIdentity = tuple[VersionToken, ...]
+    StepIdentity = tuple[Any, ...]
+
+    def _version_token(step: dict[str, Any]) -> VersionToken:
+        semantic = _step_semantic_identity(step)
+        number = step.get("number")
+        if isinstance(number, int) and not isinstance(number, bool):
+            return "number", str(number), *semantic
+        return "semantic", *semantic
+
+    version_by_run: list[dict[str, VersionIdentity]] = []
     for run_jobs in jobs_per_run:
-        active_names_by_base: dict[str, list[set[str]]] = {}
+        semantic_steps_by_base: dict[str, set[VersionToken]] = {}
+        for job in run_jobs:
+            job_name = str(job.get("name", ""))
+            matrix_base = _matrix_base_name(job_name)
+            if matrix_base != job_name:
+                base = matrix_base
+            elif job_name in suffix_base:
+                base = suffix_base[job_name]
+            else:
+                continue
+            semantic_steps_by_base.setdefault(base, set()).update(
+                _version_token(step)
+                for step in job.get("steps") or []
+                if isinstance(step, dict) and not _runner_added_step(step)
+            )
+        version_by_run.append({
+            base: tuple(sorted(steps))
+            for base, steps in semantic_steps_by_base.items()
+        })
+
+    def _step_identity(
+        step: dict[str, Any], position: int, version: VersionIdentity,
+        inferred: bool = False,
+    ) -> StepIdentity:
+        """Identify a step inside its observed workflow version.
+
+        Common-suffix groups are inferred from job names and can combine
+        separate workflow job definitions, whose step numbers are local to each
+        job, so their steps are matched by what they run, never by number."""
+        number = step.get("number")
+        if (not inferred and isinstance(number, int)
+                and not isinstance(number, bool)):
+            return version, "number", number
+        semantic = _step_semantic_identity(step)
+        if any(semantic):
+            return version, "semantic", semantic
+        return version, "position", position
+
+    def _step_seconds(step: dict[str, Any]) -> float | None:
+        started = _parse_dt(step.get("started_at"))
+        completed = _parse_dt(step.get("completed_at"))
+        if started is None or completed is None or completed < started:
+            return None
+        return (completed - started).total_seconds()
+
+    dominant_step_by_base: dict[str, StepIdentity] = {}
+    step_seconds_by_base: dict[str, dict[StepIdentity, float]] = {}
+    always_run_by_run: list[dict[str, set[StepIdentity]]] = []
+    non_universal_steps_by_base: dict[str, set[StepIdentity]] = {}
+    for run_jobs, versions in zip(jobs_per_run, version_by_run):
+        active_steps_by_base: dict[str, list[dict[StepIdentity, float | None]]] = {}
+        housekeeping_by_base: dict[str, list[set[StepIdentity]]] = {}
         for job in run_jobs:
             if str(job.get("conclusion") or "").lower() == "skipped":
                 continue
@@ -11118,23 +11193,46 @@ def _detect_opt25_shard_imbalance(
                 base = suffix_base[job_name]
             else:
                 continue
-            active_names_by_base.setdefault(base, []).append({
-                str(step.get("name") or "")
-                for step in job.get("steps") or []
+            inferred = matrix_base == job_name
+            version = versions.get(base, ())
+            active = [
+                (position, step)
+                for position, step in enumerate(job.get("steps") or [])
                 if (isinstance(step, dict)
                     and not _is_preparation_step(str(step.get("name") or ""))
                     and str(step.get("conclusion") or "").lower() != "skipped")
+            ]
+            active_steps_by_base.setdefault(base, []).append({
+                _step_identity(step, position, version, inferred): _step_seconds(step)
+                for position, step in active
             })
-        always_run_by_base: dict[str, set[str]] = {}
-        for base, active_names in active_names_by_base.items():
-            universal = set.intersection(*active_names) if active_names else set()
-            always_run_by_base[base] = universal
-            for names in active_names:
-                non_universal_names_by_base.setdefault(base, set()).update(
-                    names - universal)
+            # Setup actions, uploads and cleanup are housekeeping however long
+            # they take; only other shared work needs the duration test.
+            housekeeping_by_base.setdefault(base, []).append({
+                _step_identity(step, position, version, inferred)
+                for position, step in active
+                if _is_universal_housekeeping_step(str(step.get("name") or ""))
+            })
+        always_run_by_base: dict[str, set[StepIdentity]] = {}
+        for base, active_steps in active_steps_by_base.items():
+            universal = (set.intersection(*(set(steps) for steps in active_steps))
+                         if active_steps else set())
+            named_housekeeping = (
+                set.intersection(*housekeeping_by_base[base]) if active_steps else set())
+            short_universal = {
+                identity for identity in universal
+                if identity in named_housekeeping
+                or all((steps[identity] is not None
+                        and steps[identity] <= _OPT25_UNIVERSAL_HOUSEKEEPING_MAX_S)
+                       for steps in active_steps)
+            }
+            always_run_by_base[base] = short_universal
+            for steps in active_steps:
+                non_universal_steps_by_base.setdefault(base, set()).update(
+                    identity for identity in steps if identity not in short_universal)
         always_run_by_run.append(always_run_by_base)
 
-    for run_jobs in jobs_per_run:
+    for run_jobs, versions in zip(jobs_per_run, version_by_run):
         for job in run_jobs:
             job_name = str(job.get("name", ""))
             matrix_base = _matrix_base_name(job_name)
@@ -11144,7 +11242,9 @@ def _detect_opt25_shard_imbalance(
                 base = suffix_base[job_name]
             else:
                 continue
-            for step in job.get("steps") or []:
+            inferred = matrix_base == job_name
+            version = versions.get(base, ())
+            for position, step in enumerate(job.get("steps") or []):
                 if (not isinstance(step, dict)
                         or _is_preparation_step(str(step.get("name") or ""))
                         or str(step.get("conclusion") or "").lower() == "skipped"):
@@ -11153,20 +11253,21 @@ def _detect_opt25_shard_imbalance(
                 completed = _parse_dt(step.get("completed_at"))
                 if started is None or completed is None or completed <= started:
                     continue
-                step_name = str(step.get("name") or "")
+                step_identity = _step_identity(step, position, version, inferred)
                 seconds = (completed - started).total_seconds()
                 by_step = step_seconds_by_base.setdefault(base, {})
-                by_step[step_name] = by_step.get(step_name, 0.0) + seconds
+                by_step[step_identity] = by_step.get(step_identity, 0.0) + seconds
     for base, totals in step_seconds_by_base.items():
         if totals:
             distinctive_totals = {
-                name: seconds for name, seconds in totals.items()
-                if name in non_universal_names_by_base.get(base, set())}
+                identity: seconds for identity, seconds in totals.items()
+                if identity in non_universal_steps_by_base.get(base, set())}
             candidates = distinctive_totals or totals
             dominant_step_by_base[base] = max(
-                candidates, key=lambda step_name: (candidates[step_name], step_name))
+                candidates, key=lambda identity: (candidates[identity], identity))
 
-    for run_jobs, always_run_by_base in zip(jobs_per_run, always_run_by_run):
+    for run_jobs, always_run_by_base, versions in zip(
+            jobs_per_run, always_run_by_run, version_by_run):
         for j in run_jobs:
             name = str(j.get("name", ""))
             mbase = _matrix_base_name(name)
@@ -11174,36 +11275,43 @@ def _detect_opt25_shard_imbalance(
                 base = mbase
                 variant = name[len(mbase):].strip().strip("()")
                 sharded = bool(_SHARD_NAME_RE.search(variant))  # explicit shard/partition axis
+                inferred_suffix_group = False
             elif name in suffix_base:
                 base = suffix_base[name]
                 sharded = False  # prefix varies → distinct packages, not shards
+                inferred_suffix_group = True
             else:
                 continue  # neither convention matched → not a matrix job
-            steps = [step for step in j.get("steps") or [] if isinstance(step, dict)]
+            version = versions.get(base, ())
+            steps = [(position, step) for position, step in enumerate(j.get("steps") or [])
+                     if isinstance(step, dict)]
             work_steps = [
-                step for step in steps
+                (position, step) for position, step in steps
                 if not _is_preparation_step(str(step.get("name") or ""))]
             active_work_steps = [
-                step for step in work_steps
+                (position, step) for position, step in work_steps
                 if str(step.get("conclusion") or "").lower() != "skipped"]
-            dominant_name = dominant_step_by_base.get(base)
+            dominant_identity = dominant_step_by_base.get(base)
             distinctive_active_steps = [
-                step for step in active_work_steps
-                if (str(step.get("name") or "") == dominant_name
-                    or str(step.get("name") or "")
-                    not in always_run_by_base.get(base, set())
-                    or not _is_universal_housekeeping_step(
-                        str(step.get("name") or "")))]
-            dominant_steps = [step for step in work_steps
-                              if str(step.get("name") or "") == dominant_name]
-            # A differently named active step is positive evidence that this
-            # leg did real work (for example platform-specific test steps).
-            # Only use the dominant sibling step to confirm an otherwise
-            # workless leg; never discard that alternate work.
-            skipped_dominant = bool(dominant_name) and not distinctive_active_steps and (
-                not dominant_steps or all(
+                step for position, step in active_work_steps
+                if (_step_identity(step, position, version, inferred_suffix_group)
+                    == dominant_identity
+                    or _step_identity(step, position, version, inferred_suffix_group)
+                    not in always_run_by_base.get(base, set()))]
+            dominant_steps = [
+                step for position, step in work_steps
+                if _step_identity(step, position, version, inferred_suffix_group)
+                == dominant_identity]
+            # An active step identity that did not run on every leg is positive
+            # evidence that this leg did real work (for example platform-specific
+            # test steps). Only use the dominant sibling step to confirm an
+            # otherwise workless leg; never discard that alternate work.
+            skipped_dominant = (
+                dominant_identity is not None
+                and not distinctive_active_steps
+                and (not dominant_steps or all(
                     str(step.get("conclusion") or "").lower() == "skipped"
-                    for step in dominant_steps))
+                    for step in dominant_steps)))
             if (str(j.get("conclusion") or "").lower() == "skipped"
                     or skipped_dominant
                     or (work_steps and not active_work_steps)):
