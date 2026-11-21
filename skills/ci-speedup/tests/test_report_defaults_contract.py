@@ -38,6 +38,7 @@ REQUIRED_DECISIONS = {
 # approval"; a listed one must carry its approval and not the pending status.
 APPROVED_DECISIONS = {
     "go-package-dominance": "**Approval status:** owner-approved 2026-11-20 (60%).",
+    "account-weekly-paired-minimum": "**Approval status:** owner-approved 2026-11-20 (5).",
 }
 
 REQUIRED_VERIFIER_MIRRORS = {
@@ -105,7 +106,7 @@ REQUIRED_PROVISIONAL_SOURCES = {
 }
 
 REQUIRED_CURRENT_SOURCES = {
-    "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 2,
+    "before_after.py:_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS": 5,
     "blocking_path.py:_AGG_GATE_TRIVIAL_S": 30.0,
     "blocking_path.py:_ALSO_NOTICED_CAP": 12,
     "blocking_path.py:_CHAIN_MAKESPAN_DIVERGENCE_PCT": 25.0,

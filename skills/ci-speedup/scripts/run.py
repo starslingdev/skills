@@ -196,7 +196,7 @@ def main(argv: list[str] | None = None) -> int:
         "--account-weekly-series", type=Path, default=None,
         help="Optional JSON account export with weekly runner-hours, job counts, "
              "merged-PR counts, workload-change notes, and explicit paired before/"
-             "after run minutes. The skill normalizes and renders it; it never "
+             "after run minutes (at least 5 per side for a comparison). The skill normalizes and renders it; it never "
              "extrapolates one repository into an account total.")
     parser.add_argument("--skill-commit-sha", default=None,
                         help="Skill provenance sha for the report footer/catalog "

@@ -127,13 +127,13 @@ sample into an account total. Each supplied week must carry:
   context is rejected rather than presented as a speedup.
 
 The optional `paired_runs` input carries explicit before and after
-runner-minute observations. A before/after result requires at least **two paired
+runner-minute observations. A before/after result requires at least **five paired
 runs per side**, with equal counts, and a `workload_change` statement covering
 both sides, and compares the two medians. The report attributes the result to
 the supplied export: it is not a ci-speedup finding and is never counted in the
 report's savings. It states the effect as `runner-minute saving`, `runner-minute added cost`, or
-`runner-minute unchanged`; it never writes a bare signed zero. One observation
-per side remains visible as weekly context, but the paired comparison is
+`runner-minute unchanged`; it never writes a bare signed zero. Fewer than five
+observations per side remain visible as weekly context, but the paired comparison is
 withheld. This account view is descriptive runner-minute context and does not
 replace phase 7's push-wide wall-clock headline or change locked Decision 6.
 

@@ -46,12 +46,11 @@ _SETUP_CACHE_INPUT = re.compile(
 _VERIFY_LOG_JOB_CAP = 20
 _VERIFY_LOG_TOTAL_CHAR_CAP = 100_000
 
-# Two observations are the smallest paired population that can expose ordinary
-# run-to-run disagreement instead of presenting one unusually fast run as a
-# before/after result.  This is deliberately the same floor as phase 7's locked
-# fresh-run minimum, but it is named separately because an account export and a
-# branch rerun have different acquisition paths.
-_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS = 2
+# Five observations per side make each side's median meaningful rather than one
+# unusually fast or slow run presented as a before/after result.  This matches
+# OPT81's minimum of 5 runs per runner size (owner-approved 2026-11-20, decision
+# `account-weekly-paired-minimum` in references/report-defaults.md).
+_ACCOUNT_WEEKLY_MIN_PAIRED_RUNS = 5
 
 
 def summarize_account_weekly(payload: dict[str, Any]) -> dict[str, Any]:
