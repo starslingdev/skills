@@ -828,6 +828,10 @@ def test_branch_not_protected_is_a_readable_empty_required_check_configuration(
         ("required-checks-disabled", 404,
          "Required status checks not enabled", True, True),
         ("rulesets-unread", 404, "Branch not protected", False, False),
+        ("required-checks-disabled-rulesets-unread", 404,
+         "Required status checks not enabled", False, False),
+        ("required-checks-disabled-message-on-403", 403,
+         "Required status checks not enabled", True, False),
         ("forbidden", 403, "Resource not accessible by integration", True, False),
         ("ambiguous-not-found", 404, "Not Found", True, False),
     ]
