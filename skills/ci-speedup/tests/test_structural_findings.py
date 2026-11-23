@@ -3676,6 +3676,26 @@ def test_rank_spine_first_demotes_never_slowest_majority_check():
     assert order[0][0] == "Heavy" and order[-1][0] == "Light"    # never-slowest majority demoted
 
 
+def test_gate_share_uses_each_runs_measured_duration_before_p50_caps():
+    p50 = {"variable": 100.0, "steady": 90.0}
+    per_sha = ([{"variable": 120.0, "steady": 90.0}] * 2
+               + [{"variable": 40.0, "steady": 90.0}] * 4)
+
+    pole_freq = cr._observed_gate_frequencies(per_sha, set(p50))
+
+    assert pole_freq == {"variable": 2, "steady": 4}
+
+
+def test_non_emitted_gate_competitor_does_not_transfer_its_wins():
+    p50 = {"reported": 100.0}
+    per_sha = ([{"reported": 100.0, "withheld sibling": 200.0}] * 4
+               + [{"reported": 100.0, "withheld sibling": 50.0}] * 2)
+
+    pole_freq = cr._observed_gate_frequencies(per_sha, {"reported"})
+
+    assert pole_freq == {"reported": 2}
+
+
 def test_rank_spine_present_first_exempts_required_check():
     # A required check that is the pole on a MINORITY is still never demoted (it gates by
     # definition — branch protection blocks the merge until it passes).

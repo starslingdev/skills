@@ -23,9 +23,10 @@ import yaml
 
 def engine_facts(findings: dict[str, Any]) -> dict[str, Any]:
     critical = findings.get("pr_critical_path") or {}
-    checks = [
+    observed = critical.get("observed_gate_counts") or []
+    checks = ([row for row in observed if isinstance(row, dict)] if observed else [
         row for row in critical.get("checks") or []
-        if isinstance(row, dict) and row.get("required_reachable") is not False]
+        if isinstance(row, dict) and row.get("required_reachable") is not False])
     checks.sort(key=lambda row: (-int(row.get("pole_n") or 0), -float(row.get("p50_s") or 0), str(row.get("name") or "")))
     wall = critical.get("commit_wall_clock") or {}
     # The chain summary covers the representative PR population.  The direct

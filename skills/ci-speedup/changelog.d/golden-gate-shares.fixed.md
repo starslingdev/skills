@@ -1,0 +1,1 @@
+- **2026-11-23** — Derive golden-replay gate shares from each sampled run without transferring withheld sibling wins to an emitted gate (#486).

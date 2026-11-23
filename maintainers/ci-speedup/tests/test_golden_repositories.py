@@ -16,10 +16,8 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1] / "golden"
 _REPOSITORIES = {
     "home-assistant-core": (
-        "PR #318 covers the headline; #365 tracks hassfest share; #381 tracks pylint gates",
+        "PR #318 covers the headline; #381 tracks pylint gates",
         (
-            # Issue #365 tracks the independent engine/oracle hassfest share mismatch.
-            "gate share differs for 'CI / Check hassfest'",
             # Issue #381 tracks this independently recorded missing pylint gate.
             "frequent gate absent: 'CI / Check pylint'",
             # Issue #381 tracks this independently recorded missing test-lint gate.
@@ -29,16 +27,8 @@ _REPOSITORIES = {
         ),
     ),
     "vercel-nextjs": (
-        "PR #318 covers the headline follow-up; issue #363 tracks gate comparison",
+        "PR #318 covers the headline follow-up",
         (
-            # Issue #363 tracks the independently recorded missing prod gate.
-            "frequent gate absent: 'build-and-test / test prod (4/10) / build'",
-            # Issue #363 tracks the independently recorded missing dev gate.
-            "frequent gate absent: 'build-and-test / test dev (4/10) / build'",
-            # Issue #363 tracks the independently recorded missing optimizer gate.
-            "frequent gate absent: 'build-and-test / optimize-ci / PR Stack CI Gate'",
-            # Issue #363 tracks the 0.250 versus 0.036 turbopack share mismatch.
-            "gate share differs for 'build-and-test / test turbopack production (7/7) / build'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -141,14 +131,24 @@ def test_reference_oracle_does_not_import_the_engine() -> None:
 
 def test_known_red_reasons_name_the_public_issue_and_fix_pr() -> None:
     issue_by_name = {
-        "home-assistant-core": "#365",
-        "vercel-nextjs": "#363",
         "microsoft-playwright": "#364",
     }
     for name, issue in issue_by_name.items():
         reason, _markers = _REPOSITORIES[name]
         assert issue in reason
         assert "#318" in reason
+
+
+def test_resolved_gate_share_issues_are_not_known_differences() -> None:
+    reasons_and_markers = repr({
+        name: known for name, known in _REPOSITORIES.items()
+        if name in {"home-assistant-core", "vercel-nextjs"}
+    })
+
+    assert "#363" not in reasons_and_markers
+    assert "#365" not in reasons_and_markers
+    assert "gate share differs for 'CI / Check hassfest'" not in reasons_and_markers
+    assert "test turbopack production (7/7)" not in reasons_and_markers
 
 
 def test_home_assistant_pylint_gaps_name_their_own_issue() -> None:

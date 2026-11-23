@@ -2867,6 +2867,29 @@ def _pole_frequencies(per_sha_checks: list[dict[str, float]],
     return freq
 
 
+def _observed_gate_frequencies(
+    per_sha_checks: list[dict[str, float]],
+    candidates: "set[str] | frozenset[str]",
+) -> dict[str, int]:
+    """Count candidate wins without reassigning an excluded check's win.
+
+    The sampled job row is the evidence boundary. If a slower observed job is
+    outside the eligible gate set, the winner is unknown/withheld; a remaining
+    candidate must not inherit that PR and inflate its gate share.
+    """
+    freq = {name: 0 for name in candidates}
+    for row in per_sha_checks:
+        observed = {name: round(float(value), 1) for name, value in row.items()
+                    if isinstance(value, (int, float))}
+        if not observed:
+            continue
+        longest = max(observed.values())
+        for name, value in observed.items():
+            if name in candidates and value == longest:
+                freq[name] += 1
+    return freq
+
+
 def _rank_spine_present_first(
     pr_check_p50: dict[str, float],
     per_sha_checks: list[dict[str, float]],
@@ -36486,10 +36509,40 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _span_caps = _pole_caps(job_p50_all, job_bimodal_all)
     _job_graph = findings_doc.get("workflow_job_graph")
     _confirmed_gate_checks: frozenset[str] | None = None
+    _frequency_competitors: frozenset[str] | None = None
     if spine_required_scoped and req_names and _job_graph:
         _confirmed_gate_checks = frozenset(
             name for name in pr_check_p50
             if _pole_is_required_reachable(name, req_names, _job_graph, crit_by_wf))
+        # Required job templates can describe a family of non-emitted sibling
+        # checks (for example ``Check ${{ matrix.kind }}``). They still compete
+        # for the per-PR longest-job denominator: withholding those checks from
+        # the report must not transfer their wins to an emitted sibling.
+        _reachable_nodes = _required_reachable_jobs(
+            req_names, _job_graph, crit_by_wf)
+        _required_template_nodes = {
+            (str(wf), str(jid))
+            for wf, jobs in _job_graph.items()
+            for jid, meta in (jobs or {}).items()
+            if isinstance(meta, dict)
+            and not _name_template_is_degenerate(str(meta.get("name") or jid))
+            and any(_name_template_regex(str(meta.get("name") or jid)).match(required)
+                    for required in req_names)
+        }
+        _observed_names = {
+            name for row in _era_per_sha_checks for name in row
+        }
+        _frequency_competitors = frozenset(
+            name for name in _observed_names
+            if name in _confirmed_gate_checks or any(
+                not _name_template_is_degenerate(
+                    str(((_job_graph.get(wf) or {}).get(jid) or {}).get("name") or jid))
+                and _name_template_regex(
+                    str(((_job_graph.get(wf) or {}).get(jid) or {}).get("name") or jid)
+                ).match(name)
+                for wf, jid in (_reachable_nodes | _required_template_nodes)
+            )
+        )
     # Duration alone does not make a job bookkeeping. It must also have
     # actually finished last on a sampled PR (the distortion this filter is
     # meant to remove), and a confirmed required/needs-reachable chain remains
@@ -36556,6 +36609,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 # from poles without calling it bookkeeping, because it remains
                 # part of the confirmed gate chain.
                 _short_required_aggregators.add(_name)
+    _observed_candidate_p50 = dict(pr_check_p50)
     _short_pole_exclusions = _bookkeeping_checks | _short_required_aggregators
     pr_check_p50 = {
         name: span for name, span in pr_check_p50.items()
@@ -36569,6 +36623,18 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         name: span for name, span in _span_caps.items()
         if name not in _protected_short_gates
     }
+    _observed_frequency_rows = _era_per_sha_checks
+    if _frequency_competitors is not None:
+        _observed_frequency_rows = [
+            {name: value for name, value in row.items()
+             if name in _frequency_competitors}
+            for row in _era_per_sha_checks
+        ]
+    _observed_pole_freq = _observed_gate_frequencies(
+        _observed_frequency_rows,
+        set(_observed_candidate_p50) if _confirmed_gate_checks is None
+        else set(_observed_candidate_p50) & set(_confirmed_gate_checks),
+    )
     pr_checks_tuple, check_present, present_n_pr, check_pole_freq = _rank_spine_present_first(
         pr_check_p50, _gate_per_sha_checks, req_names, _rank_span_caps,
         _confirmed_gate_checks)
@@ -37733,6 +37799,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
              **({"minority_tail": _minority_tail_by_check[n]}
                 if n in _minority_tail_by_check else {})}
             for n, p in pr_checks_tuple],
+        "observed_gate_counts": [
+            {"name": name, "pole_n": count,
+             "p50_s": _observed_candidate_p50.get(name, 0.0)}
+            for name, count in sorted(_observed_pole_freq.items())
+            if count > 0
+            and int(sample_diag.get("partial_count") or 0) < len(_era_repr_shas)
+        ],
         # When a check is bimodal across PRs, wall-clock is sized as the EXPECTED
         # value over the per-PR critical paths (one population per sampled PR), so
         # a check that's the pole on only some PRs is credited proportionally.
