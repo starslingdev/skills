@@ -2469,8 +2469,13 @@ _CMD_PREFIX = (
 _YARN_OPT_VALUE = (
     r"(?:\"[^\"]*\"|'[^']*'|" + _NOT_ONE_QUOTED_WORD + r"[^\s;&|]+)"
 )
+# A directory option's value: a quoted word, or an unquoted word whose text may
+# include whole `${{ … }}` expressions (`apps/${{ matrix.package }}`). Each `$`
+# opens an expression or is a plain character, never both, so the value has one
+# parse and adds no backtracking inside the yarn option repeat.
 _INSTALL_DIR_VALUE = (
-    r"(?:\$\{\{[^}\n]*\}\}|" + _YARN_OPT_VALUE + r")"
+    r"(?:\"[^\"]*\"|'[^']*'|" + _NOT_ONE_QUOTED_WORD
+    + r"(?:\$\{\{[^}\n]*\}\}|\$(?!\{\{)|[^\s;&|$])+)"
 )
 _INSTALL_CMD_RE = re.compile(
     _CMD_START + _CMD_PREFIX +
@@ -2485,8 +2490,8 @@ _INSTALL_CMD_RE = re.compile(
     r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _INSTALL_DIR_VALUE
     + r")){0,1}\s+install(?![\w-])"
     r"|yarn(?!\s+-{0,2}(?:version|help|[vV]|h)(?![\w-]))"
-    r"(?:\s+-[\w-]+(?:=" + _YARN_OPT_VALUE + r"|[ ]"
-    r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _YARN_OPT_VALUE + r")?){0,32}"
+    r"(?:\s+-[\w-]+(?:=" + _INSTALL_DIR_VALUE + r"|[ ]"
+    r"(?!-[\w-]+(?:=[^\s;&|]+)?(?![^\s;&|]))" + _INSTALL_DIR_VALUE + r")?){0,32}"
     r"\s*(?:$|[\n;&|])"
     r")",
     re.MULTILINE,
@@ -2611,22 +2616,34 @@ def _cli_option_value(tokens: list[str], index: int) -> tuple[str | None, int]:
     """
     if index >= len(tokens) or tokens[index].startswith("-"):
         return None, index
-    parts = [tokens[index]]
-    index += 1
-    if parts[0].startswith("${{"):
-        while index < len(tokens) and not parts[-1].endswith("}}"):
-            parts.append(tokens[index])
-            index += 1
+    return _join_expression_tokens(tokens, index + 1, tokens[index])
+
+
+def _join_expression_tokens(
+    tokens: list[str], index: int, first: str,
+) -> tuple[str, int]:
+    """``first`` joined with the tokens that close an expression it opens.
+
+    An expression may sit inside a longer word (`apps/${{ matrix.package }}`),
+    so the join continues while the last `${{` has no `}}` after it.
+    """
+    parts = [first]
+    while index < len(tokens):
+        joined = " ".join(parts)
+        if joined.rfind("${{") <= joined.rfind("}}"):
+            break
+        parts.append(tokens[index])
+        index += 1
     return " ".join(parts), index
 
 
 def _install_directory_flag(command: str) -> tuple[bool, str | None]:
     """``(present, value)`` for an install's own directory option.
 
-    The value is ``None`` when the option is present but cannot be read
-    statically. That is deliberately distinct from an absent option: callers
-    fall back to the repository root for an unknowable directory rather than
-    guessing which nested manifest the package manager will load.
+    The value is ``None`` when the option is present without a value. That is
+    deliberately distinct from an absent option: callers report the target
+    pin of a missing or dynamic directory as unverifiable rather than
+    guessing which manifest the package manager will load.
     """
     # `_install_lines` stores the joined source line so its evidence remains
     # verbatim. Limit option parsing to the qualifying install segment: a later
@@ -2661,8 +2678,8 @@ def _install_directory_flag(command: str) -> tuple[bool, str | None]:
         if token == matched:
             value, i = _cli_option_value(tokens, i + 1)
             continue
-        value = token[len(matched) + 1:]
-        i += 1
+        value, i = _join_expression_tokens(
+            tokens, i + 1, token[len(matched) + 1:])
     return present, value
 
 
@@ -2704,7 +2721,9 @@ def _is_dependency_tree_install(segment: str) -> bool:
             if matched is None:
                 break
             if tokens[0] != matched:
-                tokens = tokens[1:]
+                _value, next_index = _join_expression_tokens(
+                    tokens, 1, tokens[0])
+                tokens = tokens[next_index:]
                 continue
             _value, next_index = _cli_option_value(tokens, 1)
             tokens = tokens[next_index:]
@@ -3814,6 +3833,12 @@ def _manager_condition_note(
         signals: list[str] = []
         if pin and pin[0] == "pnpm":
             signals.append(_pin_phrase(pin, pin_origin))
+        elif target_pin_unverifiable and allowlist in (
+                "permissive", "restrictive"):
+            signals.append(
+                "the target packageManager pin cannot be verified because "
+                "its directory is dynamic"
+            )
         if allowlist == "permissive":
             signals.append(
                 "and its committed allowlist still permits at least one "
