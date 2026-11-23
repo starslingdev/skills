@@ -743,3 +743,25 @@ def test_cargo_log_leaf_passes_the_compile_floor_to_the_agent_prompt() -> None:
     assert "Every added shard repeats that floor" in prompt
 
 
+
+class _UnknownVolumeSeparateSetupGoClient(_SeparateSetupGoClient):
+    """The per-run floor is measured, but the monthly run count is not."""
+
+    def json(self, endpoint: str, allow_missing: bool = False):
+        match = re.match(r"repos/o/r/actions/workflows/1/runs\?(.*)", endpoint)
+        if match and re.search(r"per_page=1(?![0-9])", match.group(1)):
+            self.queries += 1
+            return None
+        return super().json(endpoint, allow_missing)
+
+
+def test_go_per_run_cost_verifies_when_monthly_volume_is_unmeasured(
+        monkeypatch, tmp_path: Path) -> None:
+    # An unsized monthly line has no floor to compare against, but the rendered
+    # per-run amount is still the finding's own measured floor; the verifier
+    # must ground it in that floor rather than reject the report.
+    doc = _collect_and_verify(
+        monkeypatch, tmp_path, _UnknownVolumeSeparateSetupGoClient)
+    go = _finding(doc, "go tests")
+    assert go["go_shard_extra_runner_s"] == 900.0
+    assert go["runner_minute_effect"]["direction"] == "unsized"

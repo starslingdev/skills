@@ -17740,6 +17740,12 @@ def check_wall_clock_runner_minute_effects(
         pattern = str(finding.get("pattern") or "")
         if pattern not in {"OPT24", "OPT25"}:
             continue
+        if pattern == "OPT24" and finding.get("go_dominant_package"):
+            # A rendered per-run amount is grounded in its finding's own floor
+            # even when the monthly line is unsized (no measured run count).
+            measured = _num(finding.get("go_shard_extra_runner_s"))
+            if measured is not None:
+                go_per_run_floors.add(int(round(measured)))
         if finding.get("positional_splitter_static"):
             continue  # reassigns tests within existing shard jobs; adds no job
         effect = _as_dict(finding.get("runner_minute_effect"))
@@ -17777,8 +17783,6 @@ def check_wall_clock_runner_minute_effects(
             if per_run is None or floor is None or abs(per_run - floor) > 0.05:
                 failures.append(
                     "OPT24 Go per-run cost and monthly cost use different setup floors")
-            else:
-                go_per_run_floors.add(int(round(per_run)))
     displayed_go_costs = {
         int(round(seconds))
         for text in re.findall(
