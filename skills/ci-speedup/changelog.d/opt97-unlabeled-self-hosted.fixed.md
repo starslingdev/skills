@@ -1,0 +1,1 @@
+- **2026-11-23** — Let OPT97 evaluate unlabeled custom runner groups only when runner metadata corroborates a self-hosted pool (#490).

@@ -382,6 +382,44 @@ def test_hosted_pool_without_static_hint_is_left_to_opt43():
     assert findings == [opt43]
 
 
+def _custom_group_runs(labels, runner_name):
+    sample = runs()
+    for [job] in sample:
+        job['labels'] = list(labels)
+        job['runner_group_name'] = 'build-fleet'
+        job['runner_group_id'] = 42
+        job['runner_name'] = runner_name
+    return sample
+
+
+def test_custom_runner_group_with_self_hosted_runner_names_can_fire():
+    doc = {'jobs': {'test': {'runs-on': ['linux', 'x64'],
+                             'steps': [{'run': 'make test'}]}}}
+    sample = _custom_group_runs(['linux', 'x64'], 'ci-worker-01')
+
+    [finding] = detect(sample, doc)
+
+    assert finding['pattern'] == 'OPT97'
+    assert 'custom runner group `build-fleet`' in finding['evidence']
+
+
+@pytest.mark.parametrize('labels,runner_name', [
+    (['ubuntu-latest-8-cores'], 'ubuntu-latest-8-cores'),
+    (['linux', 'x64'], 'GitHub Actions hosted-runner'),
+    (['linux', 'x64'], None),
+])
+def test_custom_runner_group_without_self_hosted_evidence_stays_with_opt43(
+        labels, runner_name):
+    doc = {'jobs': {'test': {'runs-on': labels,
+                             'steps': [{'run': 'make test'}]}}}
+    sample = _custom_group_runs(labels, runner_name)
+    competition = rivals_from({WF: sample}, {WF: doc})
+
+    assert detect(sample, doc, competition=competition) == []
+    assert competition.calls == []
+    assert cr._detect_opt43_queue_time(WF, sample, 0, True)
+
+
 @pytest.mark.parametrize('hint', ['group', 'device'])
 def test_hosted_pool_with_static_hint_can_fire(hint):
     doc = copy.deepcopy(HOSTED_DOC)

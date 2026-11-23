@@ -24,8 +24,11 @@ or prove which hinted resource causes the wait.
 at least 300 seconds. An entry job under a workflow-level global group is timed
 from the run's creation (first attempt only): GitHub creates that run's jobs only
 when the group frees. Evaluate only a self-hosted label set or a population
-with a resource hint below. On hosted runners an account's concurrent-job limit
-raises queue and in-flight work together, so that queue stays with OPT43.
+with a resource hint below. An unlabeled custom runner group counts only when
+every sampled job has a non-GitHub runner name and the labels do not name a
+known GitHub-hosted size; missing or mixed metadata withholds the finding. On
+hosted runners an account's concurrent-job limit raises queue and in-flight
+work together, so that queue stays with OPT43.
 In-flight counts come from one bounded read of every run, any status, created
 in the population's window (three hours before its first sample to its last):
 at most 3 run-list pages, then job lists only for runs whose workflow could use
@@ -47,7 +50,9 @@ not reference the ref, head ref, PR number, commit SHA or run id. A job-level
 group replaces the workflow-level one; `${{ github.workflow }}` alone is global
 within its workflow. A label on exactly one repo-level runner when the
 repository's complete runner list is readable (organization runners are not
-visible, else unknown). Android-emulator runner actions, `xcrun simctl` or
+visible, else unknown). A consistent custom runner group whose sampled runner
+names do not use GitHub's hosted-runner form, unless its labels identify a
+known GitHub-hosted size. Android-emulator runner actions, `xcrun simctl` or
 `adb`. Matching ports or database names in job-local service containers do not
 establish a shared resource. Correlation is evidence to investigate, not proof
 of causation.

@@ -12137,11 +12137,39 @@ def _opt97_dense_competition(client, repo, labels, group, lo, hi, *, workflow_do
     return rivals, None
 
 
+_OPT97_GITHUB_RUNNER_NAME = re.compile(r"^GitHub Actions(?:\s|$)", re.I)
+
+
+def _opt97_custom_group_hint(samples, labels) -> str | None:
+    """Corroborate an unlabeled self-hosted pool without guessing from its group.
+
+    Larger GitHub-hosted runners also use custom groups. A known hosted size,
+    GitHub's hosted runner-name prefix, a missing runner name, or inconsistent
+    group metadata therefore withholds the hint.
+    """
+    runner_class = _opt81_runner_class(" ".join(labels))
+    if runner_class is not None and runner_class[0].startswith("github-"):
+        return None
+    groups = {str(row["job"].get("runner_group_name") or "").strip()
+              for row in samples}
+    names = [str(row["job"].get("runner_name") or "").strip()
+             for row in samples]
+    group = next(iter(groups), "")
+    if (len(groups) != 1 or not group or group.lower() == "github actions"
+            or not all(names)
+            or any(_OPT97_GITHUB_RUNNER_NAME.match(name) for name in names)):
+        return None
+    return f"custom runner group `{group}` with non-GitHub runner names"
+
+
 def _opt97_hints(samples, labels, runner_inventory):
     """Static hints naming the likely one-at-a-time resource."""
     hints = []
     if samples[0]["group"]:
         hints.append(f"global concurrency group `{samples[0]['group_text']}`")
+    custom_group = _opt97_custom_group_hint(samples, labels)
+    if custom_group:
+        hints.append(custom_group)
     if runner_inventory is not None:
         # The inventory is the repository's own runner list. Organization
         # runners serving the same label are not visible to it.
