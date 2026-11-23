@@ -825,7 +825,13 @@ def test_branch_not_protected_is_a_readable_empty_required_check_configuration(
 
     cases = [
         ("branch-not-protected", 404, "Branch not protected", True, True),
+        ("required-checks-disabled", 404,
+         "Required status checks not enabled", True, True),
         ("rulesets-unread", 404, "Branch not protected", False, False),
+        ("required-checks-disabled-rulesets-unread", 404,
+         "Required status checks not enabled", False, False),
+        ("required-checks-disabled-message-on-403", 403,
+         "Required status checks not enabled", True, False),
         ("forbidden", 403, "Resource not accessible by integration", True, False),
         ("ambiguous-not-found", 404, "Not Found", True, False),
     ]
@@ -837,7 +843,8 @@ def test_branch_not_protected_is_a_readable_empty_required_check_configuration(
             _doc(), "o/r", max_runs=20, shallow_runs=20,
             created_before="2026-01-02T00:00:00Z")
 
-        classic_read = status == 404 and message == "Branch not protected"
+        classic_read = status == 404 and message in {
+            "Branch not protected", "Required status checks not enabled"}
         assert doc["required_checks"] == ([] if classic_read else None)
         assert doc["required_checks_complete"] is classic_read
         assert doc["required_checks_classic_read"] is classic_read

@@ -10046,6 +10046,12 @@ def _ruleset_ref_in_scope(detail: dict[str, Any], branch: str | None) -> bool:
     return _hit(include_strs)
 
 
+_CLASSIC_PROTECTION_EMPTY_MESSAGES = frozenset({
+    "Branch not protected",
+    "Required status checks not enabled",
+})
+
+
 def _fetch_required_checks(
     client: "GhClient", repo: str, branch: str | None = "main",
     *, branch_rules: dict[str, Any] | None = None,
@@ -10150,10 +10156,12 @@ def _fetch_required_checks(
               and getattr(client, "failure_status", lambda _endpoint: None)(
                   protection_endpoint) == 404
               and getattr(client, "failure_message", lambda _endpoint: None)(
-                  protection_endpoint) == "Branch not protected"):
-            # GitHub's explicit 404 is a readable answer: this branch has no
-            # classic protection. A generic 404 can also mean the caller cannot
-            # read protection, so only the API's exact message closes the gap.
+                  protection_endpoint) in _CLASSIC_PROTECTION_EMPTY_MESSAGES):
+            # GitHub's explicit 404 is a readable empty answer: either this
+            # branch has no classic protection, or protection is enabled but
+            # required status checks are not. A generic 404 can also mean the
+            # caller cannot read protection, so only the API's exact messages
+            # close the gap.
             classic_read = True
             found_any = True
     else:
