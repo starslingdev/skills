@@ -4,4 +4,4 @@
   counts as the gate the PR waits on. Such a job is no longer dropped as bookkeeping or as a
   short required aggregator when its `needs:` reach a measured check of 60 s or more; when it is
   an aggregation sink, its drill points at its slowest upstream job. `verify_report` re-derives
-  the same rule from new per-PR start offsets (#TBD).
+  the same rule from new per-PR start offsets (#491).
