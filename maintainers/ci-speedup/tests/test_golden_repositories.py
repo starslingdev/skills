@@ -16,14 +16,10 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1] / "golden"
 _REPOSITORIES = {
     "home-assistant-core": (
-        "PR #318 covers the headline; #365 tracks hassfest share; #381 tracks pylint gates",
+        "PR #318 covers the headline; #365 tracks hassfest share",
         (
             # Issue #365 tracks the independent engine/oracle hassfest share mismatch.
             "gate share differs for 'CI / Check hassfest'",
-            # Issue #381 tracks this independently recorded missing pylint gate.
-            "frequent gate absent: 'CI / Check pylint'",
-            # Issue #381 tracks this independently recorded missing test-lint gate.
-            "frequent gate absent: 'CI / Check pylint on tests'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -51,10 +47,8 @@ _REPOSITORIES = {
         ),
     ),
     "microsoft-playwright": (
-        "PR #318 covers the headline follow-up; issue #364 tracks the MCP gate",
+        "PR #318 covers the headline follow-up",
         (
-            # Issue #364 tracks the independently recorded missing MCP gate.
-            "frequent gate absent: 'MCP / ubuntu-latest - chrome'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -83,6 +77,25 @@ def test_golden_harness_has_an_independent_oracle_and_recorder() -> None:
     ]
 
     assert not missing, f"missing golden-report tools: {', '.join(missing)}"
+
+
+def test_engine_facts_supplements_only_observed_missing_gates() -> None:
+    compare = _load("compare")
+    findings = {"pr_critical_path": {
+        "check_present_n_pr": 8,
+        "checks": [
+            {"name": "reported", "pole_n": 6, "p50_s": 100},
+            {"name": "raw-only", "pole_n": 0, "p50_s": 90},
+        ],
+        "observed_missing_gates": [
+            {"name": "raw-only", "pole_n": 3, "p50_s": 90},
+        ],
+    }}
+
+    facts = compare.engine_facts(findings)
+
+    assert facts["gates"]["reported"]["last_on"] == 6
+    assert facts["gates"]["raw-only"]["last_on"] == 3
 
 
 def test_recorder_redacts_unrelated_repository_links_from_checkout(tmp_path: Path) -> None:
@@ -143,7 +156,6 @@ def test_known_red_reasons_name_the_public_issue_and_fix_pr() -> None:
     issue_by_name = {
         "home-assistant-core": "#365",
         "vercel-nextjs": "#363",
-        "microsoft-playwright": "#364",
     }
     for name, issue in issue_by_name.items():
         reason, _markers = _REPOSITORIES[name]
@@ -154,9 +166,9 @@ def test_known_red_reasons_name_the_public_issue_and_fix_pr() -> None:
 def test_home_assistant_pylint_gaps_name_their_own_issue() -> None:
     reason, markers = _REPOSITORIES["home-assistant-core"]
 
-    assert "#381" in reason
-    assert "frequent gate absent: 'CI / Check pylint'" in markers
-    assert "frequent gate absent: 'CI / Check pylint on tests'" in markers
+    assert "#381" not in reason
+    assert "frequent gate absent: 'CI / Check pylint'" not in markers
+    assert "frequent gate absent: 'CI / Check pylint on tests'" not in markers
 
 
 def test_go_ethereum_review_expectation_names_the_required_gate() -> None:

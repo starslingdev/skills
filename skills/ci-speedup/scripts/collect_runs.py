@@ -2867,6 +2867,24 @@ def _pole_frequencies(per_sha_checks: list[dict[str, float]],
     return freq
 
 
+def _observed_gate_frequencies(
+    per_sha_checks: list[dict[str, float]],
+    candidates: "set[str] | frozenset[str]",
+) -> dict[str, int]:
+    """Count actual per-run longest jobs before aggregate P50 caps."""
+    freq = {name: 0 for name in candidates}
+    for row in per_sha_checks:
+        scoped = {name: round(float(value), 1) for name, value in row.items()
+                  if name in candidates and isinstance(value, (int, float))}
+        if not scoped:
+            continue
+        longest = max(scoped.values())
+        for name, value in scoped.items():
+            if value == longest:
+                freq[name] += 1
+    return freq
+
+
 def _rank_spine_present_first(
     pr_check_p50: dict[str, float],
     per_sha_checks: list[dict[str, float]],
@@ -21124,6 +21142,22 @@ def _required_reachable_jobs(
     return reachable
 
 
+def _required_name_templates(
+    req_names: "frozenset[str] | set[str]",
+    job_graph: dict[str, dict[str, dict[str, Any]]],
+) -> list[str]:
+    """Non-degenerate job-name templates that can publish a required context."""
+    return [
+        str(meta.get("name") or jid)
+        for jobs in job_graph.values()
+        for jid, meta in (jobs or {}).items()
+        if isinstance(meta, dict)
+        and not _name_template_is_degenerate(str(meta.get("name") or jid))
+        and any(_name_template_regex(str(meta.get("name") or jid)).match(required)
+                for required in req_names)
+    ]
+
+
 def _pole_is_required_reachable(
     pole_check: str | None,
     req_names: "frozenset[str] | set[str]",
@@ -36326,6 +36360,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # over-includes an independent sibling sharing a required file). The gating +
     # never-empty rules live in `_scope_spine_to_required` (pure, unit-tested); a drop is
     # recorded, never hidden.
+    _unscoped_pr_check_p50 = dict(pr_check_p50)
     pr_check_p50, dropped_non_required, spine_required_scoped = _scope_spine_to_required(
         pr_check_p50, required_checks, req_names, crit_by_wf,
         findings_doc.get("workflow_job_graph"),
@@ -36572,6 +36607,21 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     pr_checks_tuple, check_present, present_n_pr, check_pole_freq = _rank_spine_present_first(
         pr_check_p50, _gate_per_sha_checks, req_names, _rank_span_caps,
         _confirmed_gate_checks)
+    _observed_gate_candidates = (
+        set(pr_check_p50) if _confirmed_gate_checks is None
+        else set(pr_check_p50) & set(_confirmed_gate_checks)
+    )
+    _template_family_candidates: set[str] = set()
+    if spine_required_scoped and req_names and _job_graph:
+        _templates = _required_name_templates(req_names, _job_graph)
+        _template_family_candidates = {
+            name for name in _unscoped_pr_check_p50
+            if any(_name_template_regex(template).match(name)
+                   for template in _templates)
+        }
+        _observed_gate_candidates.update(_template_family_candidates)
+    _raw_pole_freq = _observed_gate_frequencies(
+        _era_per_sha_checks, _observed_gate_candidates)
     # Headline-crown recovery. The crowned `critical_path_check` (pr_checks_tuple[0]) is what the
     # report HEADLINES as the merge gate. When it maps to a workflow that run-list triage skipped
     # (jobs never fetched), the headline pole has no sampled job to drill and dead-ends ("no
@@ -37733,6 +37783,19 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
              **({"minority_tail": _minority_tail_by_check[n]}
                 if n in _minority_tail_by_check else {})}
             for n, p in pr_checks_tuple],
+        # A raw per-run winner can disappear when aggregate P50 caps are used
+        # for stable report ranking. Preserve only those otherwise-missing
+        # gates for the independent replay comparison; existing capped gate
+        # counts remain the report/sizing contract.
+        "observed_missing_gates": [
+            {"name": name, "pole_n": raw_count,
+             "p50_s": _unscoped_pr_check_p50.get(name,
+                                                   pr_check_p50.get(name, 0.0))}
+            for name, raw_count in sorted(_raw_pole_freq.items())
+            if raw_count > 0 and check_pole_freq.get(name, 0) == 0
+            and (name in _template_family_candidates
+                 or int(sample_diag.get("partial_count") or 0) >= len(_era_repr_shas))
+        ],
         # When a check is bimodal across PRs, wall-clock is sized as the EXPECTED
         # value over the per-PR critical paths (one population per sampled PR), so
         # a check that's the pole on only some PRs is credited proportionally.

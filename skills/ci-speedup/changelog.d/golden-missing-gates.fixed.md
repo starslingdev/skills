@@ -1,0 +1,1 @@
+- **2026-11-23** — Preserve raw frequent gates hidden by aggregate caps and required job-name templates in golden replay comparisons (#488).

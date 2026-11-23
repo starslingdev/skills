@@ -2886,6 +2886,27 @@ def test_name_template_regex_expands_matrix_placeholders():
     assert plain.match("Lint") and not plain.match("Lint and Format")  # no placeholder -> exact
 
 
+def test_required_name_templates_keep_ambiguous_gate_family_visible():
+    graph = {".github/workflows/ci.yml": {
+        "generic": {"name": "Check ${{ matrix.file }}"},
+        "literal": {"name": "Check hassfest"},
+    }}
+
+    templates = cr._required_name_templates({"Check hassfest"}, graph)
+
+    assert "Check ${{ matrix.file }}" in templates
+    assert any(cr._name_template_regex(template).match("Check pylint")
+               for template in templates)
+
+
+def test_observed_gate_frequency_uses_uncapped_per_run_winners():
+    rows = ([{"slow mode": 500.0, "steady": 100.0}] * 3
+            + [{"slow mode": 50.0, "steady": 100.0}] * 5)
+
+    assert cr._observed_gate_frequencies(rows, {"slow mode", "steady"}) == {
+        "slow mode": 3, "steady": 5}
+
+
 def test_check_to_job_node_resolves_a_matrix_leg_via_the_template_branch():
     # The matrix-template fallback in `_check_to_job_node` (the second loop, after exact
     # display-name match fails) for a PLAIN (non-reusable) job. A sharded check-run resolves

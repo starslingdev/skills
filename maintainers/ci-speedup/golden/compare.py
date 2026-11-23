@@ -26,6 +26,19 @@ def engine_facts(findings: dict[str, Any]) -> dict[str, Any]:
     checks = [
         row for row in critical.get("checks") or []
         if isinstance(row, dict) and row.get("required_reachable") is not False]
+    by_name = {str(row.get("name") or ""): row for row in checks}
+    for observed in critical.get("observed_missing_gates") or []:
+        if not isinstance(observed, dict):
+            continue
+        name = str(observed.get("name") or "")
+        if name in by_name:
+            replacement = dict(by_name[name])
+            replacement["pole_n"] = int(observed.get("pole_n") or 0)
+            checks[checks.index(by_name[name])] = replacement
+            by_name[name] = replacement
+        else:
+            checks.append(observed)
+            by_name[name] = observed
     checks.sort(key=lambda row: (-int(row.get("pole_n") or 0), -float(row.get("p50_s") or 0), str(row.get("name") or "")))
     wall = critical.get("commit_wall_clock") or {}
     # The chain summary covers the representative PR population.  The direct
