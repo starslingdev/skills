@@ -1,0 +1,1 @@
+- **2026-11-21** — Treat repeated plain 403 responses from late job fetches as a mid-run authentication interruption instead of minor sample thinning (#479).

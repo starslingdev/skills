@@ -761,6 +761,161 @@ def test_mid_run_auth_failure_trips_the_breaker_without_fetching_the_whole_plan(
     assert "the token stopped working" in stops[0].getMessage()
 
 
+def test_plain_403s_on_late_job_fetches_trip_the_auth_breaker(monkeypatch, caplog):
+    """Some expired tokens return only a plain Forbidden response. After run
+    discovery succeeded, the same response across consecutive run-job fetches
+    is an authentication interruption, not optional sample thinning."""
+    calls: list[list[str]] = []
+
+    def _run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _completed(returncode=0, stdout=_ok('{"workflow_runs": []}'))
+        return _completed(
+            returncode=1,
+            stdout=_gh_i("HTTP/2.0 403 Forbidden", body='{"message":"Forbidden"}'),
+            stderr="gh: HTTP 403",
+        )
+
+    _patch_run(monkeypatch, _run)
+    client = GhClient()
+    assert client.json("repos/o/r/actions/workflows/1/runs?per_page=100") == {
+        "workflow_runs": []}
+
+    results = [
+        client.json(f"repos/o/r/actions/runs/{run_id}/jobs?per_page=100",
+                    allow_missing=True)
+        for run_id in range(1, 6)
+    ]
+
+    assert results == [None] * 5
+    assert client.errors == 5
+    assert client.gave_up
+    assert client.auth_interrupted
+    assert len(calls) == 4
+    stops = [r for r in caplog.records
+             if "GIVING UP on the whole gh pass" in r.getMessage()]
+    assert len(stops) == 1
+    assert "token stopped working" in stops[0].getMessage()
+    data_sources = {"partial_kind": "sample_thinned"}
+    collect_runs._stamp_auth_interruption(data_sources, client)
+    assert data_sources["partial_kind"] == "collection_failed"
+    assert data_sources["auth_interrupted"] is True
+
+
+def test_plain_late_job_403s_count_each_paginated_gap_once(monkeypatch):
+    """The main sample's jobs fetch is paginated and NOT `allow_missing`, so
+    each plain 403 is already counted when it happens. Tripping the breaker on
+    the third must not count the first two a second time."""
+    calls: list[list[str]] = []
+
+    def _run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _completed(returncode=0, stdout=_ok('{"workflow_runs": []}'))
+        return _completed(
+            returncode=1,
+            stdout=_gh_i("HTTP/2.0 403 Forbidden", body='{"message":"Forbidden"}'),
+            stderr="gh: HTTP 403",
+        )
+
+    _patch_run(monkeypatch, _run)
+    client = GhClient()
+    assert client.json("repos/o/r/actions/workflows/1/runs?per_page=100") == {
+        "workflow_runs": []}
+
+    payloads = [collect_runs._fetch_run_jobs(client, "o/r", run_id)
+                for run_id in range(1, 6)]
+
+    assert payloads == [None] * 5
+    assert client.auth_interrupted
+    assert len(calls) == 4
+    assert client.job_fetch_failed_count == 5
+    assert client.errors == 5
+
+
+def test_rate_limited_plain_403s_on_job_fetches_never_trip_the_auth_breaker(
+        monkeypatch):
+    """A 403 that carries rate-limit evidence is a rate limit, even with a
+    bare Forbidden body; it must not be promoted to a dead token."""
+    monkeypatch.setattr(collect_runs.time, "sleep", lambda *_: None)
+    calls: list[list[str]] = []
+
+    def _run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _completed(returncode=0, stdout=_ok('{"workflow_runs": []}'))
+        return _completed(
+            returncode=1,
+            stdout=_gh_i("HTTP/2.0 403 Forbidden",
+                         headers="X-Ratelimit-Remaining: 0\r\n",
+                         body='{"message":"Forbidden"}'),
+            stderr="gh: HTTP 403",
+        )
+
+    _patch_run(monkeypatch, _run)
+    client = GhClient()
+    monkeypatch.setattr(client, "_rate_limit_wait", lambda *_a, **_k: 0)
+    client.json("repos/o/r/actions/workflows/1/runs?per_page=100")
+    client.json("repos/o/r/actions/runs/1/jobs?per_page=100", allow_missing=True)
+
+    assert not client.auth_interrupted
+
+
+def test_isolated_plain_job_403s_between_successes_never_trip(monkeypatch):
+    """A healthy token's one-off 403 on a run's jobs is reset by the next
+    success and never opens the breaker."""
+    calls: list[list[str]] = []
+
+    def _run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if len(calls) % 3 == 1:
+            return _completed(returncode=0, stdout=_ok('{"jobs": []}'))
+        return _completed(
+            returncode=1,
+            stdout=_gh_i("HTTP/2.0 403 Forbidden", body='{"message":"Forbidden"}'),
+            stderr="gh: HTTP 403",
+        )
+
+    _patch_run(monkeypatch, _run)
+    client = GhClient()
+    for run_id in range(1, 10):
+        client.json(f"repos/o/r/actions/runs/{run_id}/jobs?per_page=100",
+                    allow_missing=True)
+
+    assert not client.auth_interrupted
+    assert not client.gave_up
+    assert client.errors == 0
+
+
+def test_plain_403s_off_the_jobs_route_stay_unreadable(monkeypatch):
+    """Branch protection, rulesets and runners answer a non-admin token with a
+    403; repeats there are permission answers, not an expired credential."""
+    calls: list[list[str]] = []
+
+    def _run(cmd, *args, **kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return _completed(returncode=0, stdout=_ok("{}"))
+        return _completed(
+            returncode=1,
+            stdout=_gh_i("HTTP/2.0 403 Forbidden", body='{"message":"Forbidden"}'),
+            stderr="gh: HTTP 403",
+        )
+
+    _patch_run(monkeypatch, _run)
+    client = GhClient()
+    client.json("repos/o/r")
+    for endpoint in ("repos/o/r/branches/main/protection", "repos/o/r/rulesets",
+                     "repos/o/r/actions/runners"):
+        for _ in range(3):
+            assert client.json(endpoint, allow_missing=True) is None
+
+    assert not client.auth_interrupted
+    assert not client.gave_up
+    assert client.errors == 0
+
+
 def test_auth_interruption_reason_has_no_dangling_separator():
     client = GhClient()
     client.auth_interrupted = True
