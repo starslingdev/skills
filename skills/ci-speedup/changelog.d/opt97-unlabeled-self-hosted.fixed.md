@@ -1,0 +1,1 @@
+- **2026-11-23** — Let OPT97 evaluate an unlabeled custom runner group only when one persistent runner name serves several sampled jobs; custom-named larger GitHub-hosted runners, per-job runner names and mixed metadata stay with OPT43 (#490).
