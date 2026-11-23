@@ -1,0 +1,1 @@
+- **2026-11-23** — Treat GitHub's exact protected-branch-without-status-checks response as a readable empty required-check configuration (#489).
