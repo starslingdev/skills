@@ -353,7 +353,8 @@ def test_ci_helper_reads_pr_text_only_from_env():
     assert helper.count("mktemp") == 2
     assert "\"$PR_TITLE\"" in helper and "\"$PR_BODY\"" in helper
     assert "check_public_output.py" in helper
-    for flag in ('--target "$GITHUB_REPOSITORY"', "--text-file", '--base "origin/$BASE_REF"'):
+    for flag in ('--target "$GITHUB_REPOSITORY"', "--text-file", '--base "origin/$BASE_REF"',
+                 '--pr-author "${PR_AUTHOR:-}"'):
         assert flag in helper
     for repository in (
         "home-assistant/core", "vercel/next.js", "ethereum/go-ethereum",
@@ -381,4 +382,100 @@ def test_ci_runs_the_gate_once_per_suite_job(job_id):
         "BASE_REF": "${{ github.base_ref }}",
         "PR_TITLE": "${{ github.event.pull_request.title }}",
         "PR_BODY": "${{ github.event.pull_request.body }}",
+        # The Dependabot exemption keys on the event payload's author, never on PR text.
+        "PR_AUTHOR": "${{ github.event.pull_request.user.login }}",
     }
+
+
+# --- Dependabot exemption ----------------------------------------------------------
+# Dependabot PRs quote public upstream release notes. Exempt ONLY when the PR author
+# (event payload) is exactly dependabot[bot], and only its title/body plus the
+# messages of commits Dependabot itself authored or committed. Diffs stay strict.
+
+_BOT = "dependabot[bot]"
+_BOT_EMAIL = "49699333+dependabot[bot]@users.noreply.github.com"
+_GITHUB = ("GitHub", "noreply@github.com")
+_LOOKALIKES = ["someone", "dependabot[bot]-evil", "notdependabot[bot]", "Dependabot[bot]",
+               "dependabot", " dependabot[bot]", "dependabot[bot] ", "", None]
+_RELEASE_NOTES = f"Bumps foo.\n\nRelease notes: https://github.com/{_FOREIGN}/releases\n"
+
+
+def test_dependabot_pr_decision_is_exact_match():
+    assert checker.is_dependabot_pr(_BOT)
+    for login in _LOOKALIKES:
+        assert not checker.is_dependabot_pr(login), login
+
+
+@pytest.mark.parametrize(
+    ("pr_author", "author", "committer", "skip"),
+    [
+        (_BOT, (_BOT, _BOT_EMAIL), _GITHUB, True),       # Dependabot's real shape
+        (_BOT, ("Test", "t@example.invalid"), (_BOT, _BOT_EMAIL), True),
+        (_BOT, ("Test", "t@example.invalid"), _GITHUB, False),   # human commit on bot PR
+        (_BOT, (_BOT, "t@example.invalid"), _GITHUB, False),     # name alone is not enough
+        (_BOT, ("Test", _BOT_EMAIL), _GITHUB, False),            # email alone is not enough
+        *[(login, (_BOT, _BOT_EMAIL), _GITHUB, False) for login in _LOOKALIKES],
+    ],
+)
+def test_commit_message_skip_decision(pr_author, author, committer, skip):
+    assert checker.skip_commit_message(pr_author, author, committer) is skip
+
+
+def test_dependabot_pr_text_passes_and_says_so(public, capsys, tmp_path):
+    body = tmp_path / "body.md"
+    body.write_text(_RELEASE_NOTES, encoding="utf-8")
+    assert _main("--text-file", str(body), "--pr-author", _BOT) == 0
+    out = capsys.readouterr().out
+    assert "dependabot[bot] (event payload)" in out and "were skipped" in out
+
+
+@pytest.mark.parametrize("login", [l for l in _LOOKALIKES if l is not None])
+def test_same_pr_text_from_any_other_author_still_fails(public, capsys, tmp_path, login):
+    body = tmp_path / "body.md"
+    body.write_text(_RELEASE_NOTES, encoding="utf-8")
+    assert _main("--text-file", str(body), "--pr-author", login) == 1
+    captured = capsys.readouterr()
+    assert "text file 1:3" in captured.err and "skipped" not in captured.out
+
+
+def _bot_commit(message, files):
+    """Commit with Dependabot's author identity and GitHub's committer identity."""
+    for name, content in files.items():
+        Path(name).write_text(content, encoding="utf-8")
+    _git("add", *files)
+    _git("-c", f"user.name={_GITHUB[0]}", "-c", f"user.email={_GITHUB[1]}", "commit", "-q",
+         "--allow-empty", f"--author={_BOT} <{_BOT_EMAIL}>", "-m", message)
+    return _git("rev-parse", "--short", "HEAD")
+
+
+def test_dependabot_commit_message_is_skipped_on_dependabot_pr(repo, capsys):
+    _git("checkout", "-q", "-b", "feature")
+    _bot_commit(_RELEASE_NOTES, {"requirements.txt": "foo==2\n"})
+    assert _main("--base", "main", "--pr-author", _BOT) == 0
+    out = capsys.readouterr().out
+    assert "1 Dependabot-authored commit message(s) were skipped" in out
+
+
+@pytest.mark.parametrize("login", ["someone", "dependabot[bot]-evil", "notdependabot[bot]"])
+def test_dependabot_commit_message_still_fails_for_other_authors(repo, capsys, login):
+    _git("checkout", "-q", "-b", "feature")
+    sha = _bot_commit(_RELEASE_NOTES, {"requirements.txt": "foo==2\n"})
+    assert _main("--base", "main", "--pr-author", login) == 1
+    assert f"commit {sha} message:3" in capsys.readouterr().err
+
+
+def test_non_dependabot_commit_on_dependabot_pr_is_still_checked(repo, capsys):
+    _git("checkout", "-q", "-b", "feature")
+    _bot_commit(_RELEASE_NOTES, {"requirements.txt": "foo==2\n"})
+    human = _commit(f"follow-up\n\nsee {_FOREIGN}#9", {"notes.md": "x\n"})
+    assert _main("--base", "main", "--pr-author", _BOT) == 1
+    err = capsys.readouterr().err
+    assert f"commit {human} message:3" in err and err.count("message:") == 1
+
+
+def test_dependabot_commit_diff_is_still_checked(repo, capsys):
+    _git("checkout", "-q", "-b", "feature")
+    sha = _bot_commit("bump", {"docs.md": _LINK})
+    assert _main("--base", "main", "--pr-author", _BOT) == 1
+    err = capsys.readouterr().err
+    assert f"commit {sha} docs.md:1" in err and "added diff:docs.md:1" in err
