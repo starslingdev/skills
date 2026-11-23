@@ -3055,8 +3055,12 @@ already fetched; 0 when a check has no start) plus its span capped at the SAME j
 one starts after it and finishes last, so it is the pole. The cap still stops an inflatable
 check-run span (queue / re-run time) crowning a light check, while the offset keeps the wait on
 upstream jobs. `verify_report` re-derives the same rule from `populations` +
-`population_start_offsets_s` (or `chain_facts[].start_offsets_s`); co-last ties credit every
-tied check. Each
+`population_start_offsets_s` (or `chain_facts[].start_offsets_s`), and the renderer's displayed
+"gates N/M" (`_gate_counts`) uses the same rule; co-last ties credit every tied check. The
+sub-60s "finished last = bookkeeping" filter and the short-required-aggregator exclusion
+(`_short_pole_exclusion_sets`) both spare a short job whose `needs:` reach a measured check of
+60s or more in its workflow (`_long_needs_upstream`): it is the gate the PR waits on, and the
+renderer's aggregation-gate handling points its drill at the slowest upstream member. Each
 check carries its count as `pole_n` (and `present_on` for disclosure). A required check is
 exempt (gates by definition); inert below `_RARE_PRESENCE_MIN_PR` (6) PRs.
 

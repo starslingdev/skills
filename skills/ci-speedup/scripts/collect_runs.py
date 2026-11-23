@@ -2912,6 +2912,144 @@ def _pole_frequencies(per_sha_checks: list[dict[str, float]],
     return freq
 
 
+def _long_needs_upstream(
+    name: str,
+    pr_check_p50: dict[str, float],
+    span_caps: dict[str, float],
+    job_graph: "dict[str, dict[str, dict[str, Any]]] | None",
+    crit_by_wf: dict[str, dict[str, Any]],
+) -> "str | None":
+    """The slowest measured check of at least `GATE_BOOKKEEPING_CUTOFF_S` (capped) that `name`'s
+    job transitively `needs:` within its own workflow, or None. A short job behind such a chain
+    starts only after that work ends, so finishing last is the PR's real wait, not bookkeeping;
+    its lever is that upstream member (the renderer's aggregation-gate handling points there)."""
+    if not job_graph:
+        return None
+    node = _check_to_job_node(name, job_graph, crit_by_wf) or _check_to_job_node_scanned(
+        name, job_graph)
+    if node is None:
+        return None
+    wf, jid = node
+    jobs = job_graph.get(wf) or {}
+    closure: set[str] = set()
+    frontier = [str(n) for n in ((jobs.get(jid) or {}).get("needs") or [])]
+    while frontier:
+        n = frontier.pop()
+        if n in closure or n not in jobs:
+            continue
+        closure.add(n)
+        frontier.extend(str(x) for x in ((jobs.get(n) or {}).get("needs") or []))
+    best: "tuple[float, str] | None" = None
+    for other, span in pr_check_p50.items():
+        if other == name:
+            continue
+        eff = float(span_caps.get(other, span))
+        if eff < _GATE_BOOKKEEPING_CUTOFF_S:
+            continue
+        o_node = (_check_to_job_node(other, job_graph, crit_by_wf)
+                  or _check_to_job_node_scanned(other, job_graph))
+        if o_node is not None and o_node[0] == wf and o_node[1] in closure:
+            if best is None or (eff, other) > best:
+                best = (eff, other)
+    return best[1] if best else None
+
+
+def _short_pole_exclusion_sets(
+    pr_check_p50: dict[str, float],
+    _span_caps: dict[str, float],
+    _era_sha_intervals: "dict[str, dict[str, tuple[str, str]]]",
+    _era_check_wf_of: "Callable[[str], str | None]",
+    _confirmed_gate_checks: "frozenset[str] | None",
+    spine_required_scoped: bool,
+    req_names: "frozenset[str] | set[str]",
+    _job_graph: "dict[str, dict[str, dict[str, Any]]] | None",
+    crit_by_wf: dict[str, dict[str, Any]],
+) -> "tuple[set[str], set[str], set[str]]":
+    """The short checks kept off the pole basis: (bookkeeping, protected_short_gates,
+    short_required_aggregators). Bookkeeping = a sub-`GATE_BOOKKEEPING_CUTOFF_S` check that
+    finished last in its workflow on a sampled PR and is not a confirmed gate; protected =
+    the bookkeeping checks kept anyway because nothing substantive remains; short required
+    aggregators = tiny required jobs with `needs:`, excluded from poles but still part of the
+    confirmed gate chain. `bookkeeping` and `short_required_aggregators` are removed from the
+    spine by the caller. A short job whose `needs:` reach a substantive measured check in its
+    workflow (`_long_needs_upstream`) is in NEITHER: it finishes last because it waits on that
+    work, so it is the gate the PR waits on and stays a pole candidate."""
+    _behind_long_work = {
+        name for name, span in pr_check_p50.items()
+        if float(_span_caps.get(name, span)) < _GATE_BOOKKEEPING_CUTOFF_S
+        and _long_needs_upstream(name, pr_check_p50, _span_caps, _job_graph, crit_by_wf)
+    }
+    # Duration alone does not make a job bookkeeping. It must also have
+    # actually finished last on a sampled PR (the distortion this filter is
+    # meant to remove), and a confirmed required/needs-reachable chain remains
+    # real developer wait even when its stages are fast.
+    _bookkeeping_last_finishers: set[str] = set()
+    _bookkeeping_last_freq: dict[str, int] = defaultdict(int)
+    for _intervals in _era_sha_intervals.values():
+        _completed_by_wf: dict[str, dict[str, datetime]] = defaultdict(dict)
+        for _name, (_start, _end) in _intervals.items():
+            _ended = _parse_dt(_end)
+            if _name not in pr_check_p50 or _ended is None:
+                continue
+            _wf_key = _era_check_wf_of(_name) or f"<unmapped:{_name}>"
+            _completed_by_wf[_wf_key][_name] = _ended
+        for _completed in _completed_by_wf.values():
+            _latest = max(_completed.values())
+            for _name, _ended in _completed.items():
+                if _ended == _latest:
+                    _bookkeeping_last_finishers.add(_name)
+                    _bookkeeping_last_freq[_name] += 1
+    _bookkeeping_checks = {
+        name for name, span in pr_check_p50.items()
+        if float(_span_caps.get(name, span)) < _GATE_BOOKKEEPING_CUTOFF_S
+        and name in _bookkeeping_last_finishers
+        and (_confirmed_gate_checks is None or name not in _confirmed_gate_checks)
+        and name not in _behind_long_work
+    }
+    _protected_short_gates: set[str] = set()
+    if _confirmed_gate_checks is None and _bookkeeping_checks:
+        _remaining = set(pr_check_p50) - _bookkeeping_checks
+        _remaining_has_substantive = any(
+            float(_span_caps.get(name, pr_check_p50[name]))
+            >= _GATE_BOOKKEEPING_CUTOFF_S
+            for name in _remaining)
+        if (not _remaining_has_substantive
+                and not any(_bookkeeping_last_freq.get(name, 0) > 0
+                            for name in _remaining)):
+            # With no readable required set, duration alone must not erase the
+            # only observed gate and crown a faster check that finished last on
+            # zero sampled PRs. Preserve the most frequent last finisher; ties
+            # remain ties rather than depending on insertion order.
+            _best = max(_bookkeeping_last_freq.get(name, 0)
+                        for name in _bookkeeping_checks)
+            _protected_short_gates = {
+                name for name in _bookkeeping_checks
+                if _bookkeeping_last_freq.get(name, 0) == _best}
+            _bookkeeping_checks.difference_update(_protected_short_gates)
+    _short_required_aggregators: set[str] = set()
+    if spine_required_scoped and req_names and _job_graph:
+        for _name, _span in pr_check_p50.items():
+            if (_name not in req_names
+                    or _name in _behind_long_work
+                    or _name not in _bookkeeping_last_finishers
+                    or float(_span_caps.get(_name, _span)) >= _GATE_BOOKKEEPING_CUTOFF_S):
+                continue
+            _node = _check_to_job_node(_name, _job_graph, crit_by_wf)
+            if _node is None:
+                _node = _check_to_job_node_scanned(_name, _job_graph)
+            if _node is None:
+                continue
+            _wf, _jid = _node
+            _meta = (_job_graph.get(_wf) or {}).get(_jid) or {}
+            if _meta.get("needs"):
+                # A tiny required aggregation job is not the work a developer
+                # waits to optimize; its `needs:` dependencies are. Exclude it
+                # from poles without calling it bookkeeping, because it remains
+                # part of the confirmed gate chain.
+                _short_required_aggregators.add(_name)
+    return _bookkeeping_checks, _protected_short_gates, _short_required_aggregators
+
+
 def _rank_spine_present_first(
     pr_check_p50: dict[str, float],
     per_sha_checks: list[dict[str, float]],
@@ -36598,72 +36736,11 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         _confirmed_gate_checks = frozenset(
             name for name in pr_check_p50
             if _pole_is_required_reachable(name, req_names, _job_graph, crit_by_wf))
-    # Duration alone does not make a job bookkeeping. It must also have
-    # actually finished last on a sampled PR (the distortion this filter is
-    # meant to remove), and a confirmed required/needs-reachable chain remains
-    # real developer wait even when its stages are fast.
-    _bookkeeping_last_finishers: set[str] = set()
-    _bookkeeping_last_freq: dict[str, int] = defaultdict(int)
-    for _intervals in _era_sha_intervals.values():
-        _completed_by_wf: dict[str, dict[str, datetime]] = defaultdict(dict)
-        for _name, (_start, _end) in _intervals.items():
-            _ended = _parse_dt(_end)
-            if _name not in pr_check_p50 or _ended is None:
-                continue
-            _wf_key = _era_check_wf_of(_name) or f"<unmapped:{_name}>"
-            _completed_by_wf[_wf_key][_name] = _ended
-        for _completed in _completed_by_wf.values():
-            _latest = max(_completed.values())
-            for _name, _ended in _completed.items():
-                if _ended == _latest:
-                    _bookkeeping_last_finishers.add(_name)
-                    _bookkeeping_last_freq[_name] += 1
-    _bookkeeping_checks = {
-        name for name, span in pr_check_p50.items()
-        if float(_span_caps.get(name, span)) < _GATE_BOOKKEEPING_CUTOFF_S
-        and name in _bookkeeping_last_finishers
-        and (_confirmed_gate_checks is None or name not in _confirmed_gate_checks)
-    }
-    _protected_short_gates: set[str] = set()
-    if _confirmed_gate_checks is None and _bookkeeping_checks:
-        _remaining = set(pr_check_p50) - _bookkeeping_checks
-        _remaining_has_substantive = any(
-            float(_span_caps.get(name, pr_check_p50[name]))
-            >= _GATE_BOOKKEEPING_CUTOFF_S
-            for name in _remaining)
-        if (not _remaining_has_substantive
-                and not any(_bookkeeping_last_freq.get(name, 0) > 0
-                            for name in _remaining)):
-            # With no readable required set, duration alone must not erase the
-            # only observed gate and crown a faster check that finished last on
-            # zero sampled PRs. Preserve the most frequent last finisher; ties
-            # remain ties rather than depending on insertion order.
-            _best = max(_bookkeeping_last_freq.get(name, 0)
-                        for name in _bookkeeping_checks)
-            _protected_short_gates = {
-                name for name in _bookkeeping_checks
-                if _bookkeeping_last_freq.get(name, 0) == _best}
-            _bookkeeping_checks.difference_update(_protected_short_gates)
-    _short_required_aggregators: set[str] = set()
-    if spine_required_scoped and req_names and _job_graph:
-        for _name, _span in pr_check_p50.items():
-            if (_name not in req_names
-                    or _name not in _bookkeeping_last_finishers
-                    or float(_span_caps.get(_name, _span)) >= _GATE_BOOKKEEPING_CUTOFF_S):
-                continue
-            _node = _check_to_job_node(_name, _job_graph, crit_by_wf)
-            if _node is None:
-                _node = _check_to_job_node_scanned(_name, _job_graph)
-            if _node is None:
-                continue
-            _wf, _jid = _node
-            _meta = (_job_graph.get(_wf) or {}).get(_jid) or {}
-            if _meta.get("needs"):
-                # A tiny required aggregation job is not the work a developer
-                # waits to optimize; its `needs:` dependencies are. Exclude it
-                # from poles without calling it bookkeeping, because it remains
-                # part of the confirmed gate chain.
-                _short_required_aggregators.add(_name)
+    _bookkeeping_checks, _protected_short_gates, _short_required_aggregators = (
+        _short_pole_exclusion_sets(
+            pr_check_p50, _span_caps, _era_sha_intervals, _era_check_wf_of,
+            _confirmed_gate_checks, spine_required_scoped, req_names, _job_graph,
+            crit_by_wf))
     _short_pole_exclusions = _bookkeeping_checks | _short_required_aggregators
     pr_check_p50 = {
         name: span for name, span in pr_check_p50.items()

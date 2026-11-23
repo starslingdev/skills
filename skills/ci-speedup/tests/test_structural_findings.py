@@ -5370,6 +5370,128 @@ def test_vr_headline_gate_accepts_a_last_finishing_headline(tmp_path):
     assert res.ok and not res.skipped, res.detail
 
 
+def _finish_time_cp(n: int = 8) -> dict:
+    """A `pr_critical_path` whose stamped populations + start offsets describe the made-up
+    workflow: merge-reports finishes last on every PR, though unit has the longest span."""
+    return {
+        "sampled_pr_count": n, "check_present_n_pr": n,
+        "checks": [{"name": k, "p50_s": v, "workflow_file": ".github/workflows/ci.yml",
+                    "pole_n": n if k == "merge-reports" else 0, "present_on": n}
+                   for k, v in _FINISH_SPANS.items()],
+        "populations_n": n,
+        "populations": [[round(1 / n, 4), sorted(([k, v] for k, v in _FINISH_SPANS.items()),
+                                                  key=lambda kv: -kv[1])]] * n,
+        "population_start_offsets_s": [{"unit": 0.0, "merge-reports": 720.0, "lint": 0.0}] * n,
+    }
+
+
+def test_rendered_gate_counts_use_finish_time():
+    """The renderer's displayed "gates N/M" count and the verifier that re-derives it credit the
+    check that FINISHES last, from the same stamped start offsets, so the waterfall agrees with
+    the collector's `pole_n`."""
+    cp = _finish_time_cp()
+    pole_count, present, n = bp._gate_counts(cp)
+    assert n == 8 and pole_count == {"merge-reports": 8}
+    vr = _load_vr_module()
+    counts, npop, dropped = vr._populations_pole_counts(cp)
+    assert (counts, npop, dropped) == ({"merge-reports": 8}, 8, 0)
+    # The displayed count equals the collector's stamped pole_n for every check.
+    stamped = {c["name"]: c["pole_n"] for c in cp["checks"]}
+    assert all(pole_count.get(k, 0) == v for k, v in stamped.items())
+    # Without stamped offsets (older findings) both keep the span-only rule.
+    old = dict(cp)
+    old.pop("population_start_offsets_s")
+    assert bp._gate_counts(old)[0] == {"unit": 8}
+    assert vr._populations_pole_counts(old)[0] == {"unit": 8}
+
+
+def test_finish_time_helpers_stay_identical():
+    """Engine, renderer and verifier each carry a copy of the finish-time rule; pin them equal."""
+    import random
+    vr = _load_vr_module()
+    rng = random.Random(11)
+    for _ in range(300):
+        names = [f"c{i}" for i in range(rng.randint(1, 5))]
+        spans = {nm: float(rng.choice([0, 3, 20.5, 60, 120, 720])) for nm in names}
+        offs = {nm: float(rng.choice([0, 10, 700.1, 720])) for nm in names if rng.random() < 0.7}
+        assert cr._finish_times(spans, offs) == bp._finish_times(spans, offs) \
+            == vr._vr_finish_times(spans, offs)
+
+
+_FT_WF = ".github/workflows/ci.yml"
+# The made-up workflow's `needs:` graph: merge-reports collects both suites, so it starts
+# when the slower one (`unit`) ends.
+_FT_GRAPH = {_FT_WF: {
+    "unit": {"name": "unit", "needs": []},
+    "lint": {"name": "lint", "needs": []},
+    "merge-reports": {"name": "merge-reports", "needs": ["unit", "lint"]},
+}}
+_FT_CRIT = {_FT_WF: {"job_p50": dict(_FINISH_SPANS)}}
+
+
+def _ft_render_doc(kept: dict, pole_freq: dict, present: dict, n: int, required: list) -> tuple:
+    checks = [{"name": k, "p50_s": v, "workflow_file": _FT_WF, "pole_n": pole_freq.get(k, 0),
+               "present_on": present.get(k, 0)} for k, v in kept.items()]
+    doc = {"workflow_job_graph": _FT_GRAPH, "required_checks": required,
+           "pr_critical_path": {"checks": checks, "check_present_n_pr": n}}
+    poles = [{"check": k, "job": k, "workflow_file": _FT_WF, "p50_s": v}
+             for k, v in kept.items()]
+    return doc, poles
+
+
+def test_short_sink_behind_long_needs_is_the_credited_gate_end_to_end():
+    """End to end through the real short-check filter, the ranking and the renderer's pole
+    selection: a 20 s job whose `needs:` reach a 12-minute measured check is NOT dropped as
+    bookkeeping (nor as a short required aggregator). It is credited as the gate the PR waits
+    on, and the drill target is its slowest upstream member, `unit`."""
+    shas = [f"sha{i}" for i in range(8)]
+    intervals = {s: dict(_FINISH_INTERVALS) for s in shas}
+    per_sha = [dict(_FINISH_SPANS) for _ in shas]
+    caps = dict(_FINISH_SPANS)
+    graph_wf = (lambda _n: _FT_WF)
+    for required, scoped in (([], False), (["merge-reports"], True)):
+        req = frozenset(required)
+        confirmed = (frozenset(_FINISH_SPANS) if scoped else None)
+        bookkeeping, _protected, aggregators = cr._short_pole_exclusion_sets(
+            dict(_FINISH_SPANS), caps, intervals, graph_wf, confirmed, scoped, req,
+            _FT_GRAPH, _FT_CRIT)
+        dropped = bookkeeping | aggregators
+        assert "merge-reports" not in dropped, (required, bookkeeping, aggregators)
+        kept = {k: v for k, v in _FINISH_SPANS.items() if k not in dropped}
+        rows = [{k: v for k, v in m.items() if k not in dropped} for m in per_sha]
+        offsets = cr._pr_start_offsets(shas, intervals)
+        order, present, n, pole_freq = cr._rank_spine_present_first(
+            kept, rows, req, caps, confirmed, start_offsets=offsets)
+        assert pole_freq["merge-reports"] == 8 and pole_freq["unit"] == 0
+        doc, poles = _ft_render_doc(kept, pole_freq, present, n, required)
+        sink = next(p for p in poles if p["check"] == "merge-reports")
+        shape = bp._agg_gate_shape(sink, _FT_GRAPH, doc["pr_critical_path"]["checks"])
+        assert shape and bp._check_name(shape["slowest"]) == "unit"
+        selected, _ = bp._select_render_poles(doc, poles)
+        unit = next(p for p in selected if p["check"] == "unit")
+        # The drill target: unit inherits the sink's gate count and leads the drilled set.
+        assert unit["_upstream_gate_member"] and unit["_display_gate_count"] == 8
+        assert unit["_pole_group"] == "holds-up" and selected[0]["check"] == "unit"
+
+
+def test_short_job_with_no_long_upstream_stays_bookkeeping():
+    """A labeler / notifier / change detector that finishes last but whose `needs:` reach no
+    substantive measured check is still bookkeeping."""
+    wf = _FT_WF
+    graph = {wf: {"unit": {"name": "unit", "needs": []},
+                  "changes": {"name": "changes", "needs": []},
+                  "notify": {"name": "notify", "needs": ["changes"]}}}
+    crit = {wf: {"job_p50": {"unit": 720.0, "changes": 8.0, "notify": 5.0}}}
+    spans = {"unit": 720.0, "changes": 8.0, "notify": 5.0}
+    iv = {"unit": ("2026-01-05T10:00:00Z", "2026-01-05T10:12:00Z"),
+          "changes": ("2026-01-05T10:00:00Z", "2026-01-05T10:00:08Z"),
+          "notify": ("2026-01-05T10:12:30Z", "2026-01-05T10:12:35Z")}
+    bookkeeping, _p, _a = cr._short_pole_exclusion_sets(
+        spans, spans, {f"s{i}": dict(iv) for i in range(6)}, lambda _n: wf, None, False,
+        frozenset(), graph, crit)
+    assert "notify" in bookkeeping
+
+
 def _populations_from_maps(per_sha):
     """Per-PR {check: dur} maps → the slowest-first `populations` shape the verifier reads."""
     return [sorted(((k, v) for k, v in m.items()), key=lambda kv: -kv[1]) for m in per_sha]

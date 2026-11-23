@@ -8619,9 +8619,37 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
     return selected[:_TOP_WORKFLOWS], file_poles
 
 
+def _finish_times(spans: dict[str, float],
+                  offsets: "dict[str, float] | None") -> dict[str, float]:
+    """Each check's effective finish on one PR: span + start offset rebased on the earliest
+    start among `spans`' positive-span checks (no offset = 0), 0.1s-rounded. A verbatim copy of
+    `collect_runs._finish_times`, pinned equal by a test, so the displayed gate count credits
+    the same check the collector's `pole_n` does."""
+    offs = offsets or {}
+    timed = [offs[c] for c, v in spans.items() if c in offs and v > 0]
+    base = min(timed, default=0.0)
+    return {c: round(v + (offs[c] - base if c in offs and v > 0 else 0.0), 1)
+            for c, v in spans.items()}
+
+
+def _population_offsets(cp: dict[str, Any], idx: int) -> dict[str, float]:
+    """The stamped start offsets for population `idx` (index-aligned with `populations`), or {}
+    when none were stamped (older findings: the span-only rule)."""
+    raw = cp.get("population_start_offsets_s")
+    if not isinstance(raw, list) or len(raw) != len(cp.get("populations") or []):
+        return {}
+    row = raw[idx]
+    if not isinstance(row, dict):
+        return {}
+    return {str(k): float(v) for k, v in row.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and v >= 0}
+
+
 def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], int]:
-    """From the per-PR check populations: how often each check is the SLOWEST one
-    (the actual pole) and how often it is PRESENT at all, across the sampled PRs.
+    """From the per-PR check populations: how often each check is the one that FINISHES
+    LAST (the actual pole: start offset + capped span, from `population_start_offsets_s`;
+    span-only when none are stamped) and how often it is PRESENT at all, across the sampled PRs.
     Returns (pole_count, present_count, n_populations). A slow check that only
     runs on a few PRs has a low pole_count and must NOT be crowned over a check
     that gates almost every PR. When full populations were unnecessary, use the
@@ -8634,7 +8662,7 @@ def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], in
         if isinstance(c, dict) and c.get("required_reachable") is False
     }
     n = 0
-    for entry in cp.get("populations") or []:
+    for idx, entry in enumerate(cp.get("populations") or []):
         try:
             _share, cks = entry
             pos = [(str(nm), float(p)) for nm, p in cks
@@ -8646,7 +8674,8 @@ def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], in
         n += 1
         for nm, _p in pos:
             present[nm] = present.get(nm, 0) + 1
-        winner = max(pos, key=lambda kv: kv[1])[0]
+        fin = _finish_times(dict(pos), _population_offsets(cp, idx))
+        winner = max(pos, key=lambda kv: fin[kv[0]])[0]
         pole_count[winner] = pole_count.get(winner, 0) + 1
     if n == 0:
         checks = [row for row in (cp.get("checks") or []) if isinstance(row, dict)]

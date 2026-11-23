@@ -13317,9 +13317,11 @@ _GATE_FREQ_CONF_SUFFIX_RE = re.compile(
 
 
 def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
-    """(`{RAW check name: times it is the per-PR slowest}`, npop, dropped) re-derived from
-    `populations`, mirroring the engine's `_gate_counts` winner logic EXACTLY — `max` over each PR's
-    positive checks in populations order (so a tie credits exactly one check, no drift) AND keyed by
+    """(`{RAW check name: times it is the per-PR pole}`, npop, dropped) re-derived from
+    `populations`, mirroring the engine's `_gate_counts` winner logic EXACTLY — `max` FINISH time
+    (`_vr_finish_times` with the index-aligned `population_start_offsets_s`; span-only when none are
+    stamped) over each PR's positive checks in populations order (so a tie credits exactly one
+    check, no drift) AND keyed by
     the **raw** check name, NOT `_cmp_name`. The engine keys `pole_count`/`wf_gate` by raw name, so
     `_cmp_name` here (which strips an `@scope/` prefix) would COLLAPSE two distinct monorepo checks
     (`@a/pkg build` + `@b/pkg build`) into one bucket and double-count it against the engine — a false
@@ -13333,7 +13335,10 @@ def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
         for row in _as_list(cp.get("checks"))
         if isinstance(row, dict) and row.get("required_reachable") is False
     }
-    for entry in _as_list(cp.get("populations")):
+    pops = _as_list(cp.get("populations"))
+    raw_offs = _as_list(cp.get("population_start_offsets_s"))
+    aligned = len(raw_offs) == len(pops)
+    for idx, entry in enumerate(pops):
         try:
             _share, cks = entry
             pos = [(str(nm), float(p)) for nm, p in cks
@@ -13344,7 +13349,8 @@ def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
         if not pos:
             continue
         n += 1
-        winner = max(pos, key=lambda kv: kv[1])[0]
+        fin = _vr_finish_times(dict(pos), _vr_offsets(raw_offs[idx]) if aligned else {})
+        winner = max(pos, key=lambda kv: fin[kv[0]])[0]
         counts[winner] = counts.get(winner, 0) + 1
     return counts, n, dropped
 
