@@ -160,13 +160,13 @@ def test_ranking_is_identical_without_an_unpinnable_check_or_readable_required_s
     p50 = {"unit": 300.0, "merge-gate": 5.0}
     per_pr = [dict(p50) for _ in range(8)]
     legacy = cr._rank_spine_present_first(
-        p50, per_pr, frozenset({"merge-gate"}), caps={})
+        p50, per_pr, frozenset({"merge-gate"}))
 
     assert cr._rank_spine_present_first(
-        p50, per_pr, frozenset({"merge-gate"}), caps={},
+        p50, per_pr, frozenset({"merge-gate"}),
         confirmed_gate_checks=frozenset(p50)) == legacy
     assert cr._rank_spine_present_first(
-        p50, per_pr, frozenset({"merge-gate"}), caps={},
+        p50, per_pr, frozenset({"merge-gate"}),
         confirmed_gate_checks=None) == legacy
 
 

@@ -3048,19 +3048,21 @@ check that a typical PR never actually waits on headline. So the `pr_checks_tupl
 **two-tier by POLE FREQUENCY**: a check that is the ACTUAL critical path (the job a PR waits
 on: the one that FINISHES last) on fewer than `_POLE_RECUR_FLOOR` (2) sampled PRs is a one-path outlier and ranks below
 the genuine recurring gates, each tier by p50 desc. Pole frequency is
-`_pole_frequencies(per_sha_checks, set(pr_check_p50), caps, start_offsets)` — the per-PR argmax
-of each check's FINISH: its start offset (`_pr_start_offsets`, from the latest-attempt intervals
-already fetched; 0 when a check has no start) plus its span capped at the SAME job p50
-`populations` uses (`_pole_caps`). Checks are not all parallel: a short job that `needs:` a long
-one starts after it and finishes last, so it is the pole. The cap still stops an inflatable
-check-run span (queue / re-run time) crowning a light check, while the offset keeps the wait on
-upstream jobs. `verify_report` re-derives the same rule from `populations` +
-`population_start_offsets_s` (or `chain_facts[].start_offsets_s`), and the renderer's displayed
-"gates N/M" (`_gate_counts`) uses the same rule; co-last ties credit every tied check. The
-sub-60s "finished last = bookkeeping" filter and the short-required-aggregator exclusion
-(`_short_pole_exclusion_sets`) both spare a short job whose `needs:` reach a measured check of
-60s or more in its workflow (`_long_needs_upstream`): it is the gate the PR waits on, and the
-renderer's aggregation-gate handling points its drill at the slowest upstream member. Each
+`_pole_frequencies` over the stamped long-pole basis (`_pole_basis_rows`, one row per sampled
+PR, stamped as `pr_critical_path.pole_basis`): each check's MEASURED job time on that PR (start
+to finish, no queue, from the intervals already fetched) plus its start offset, and the winner is
+the check that FINISHES last (`_pole_basis_winners`). Checks are not all parallel: a job that
+`needs:` a slow setup job starts late and can finish after a longer job that started at once.
+Nothing is capped at a p50: a run counts at its measured time, clipped only above that check's
+own P95 across the sample, and a re-run attempt (`run_attempt` > 1) that started after every
+first-attempt check on the PR had finished sits out that PR (`_late_reruns`). Every spine check
+competes, confirmed or not: a PR an unconfirmed check finishes last on is that check's, never
+the next one's; confirmation only decides the display tier and the crown. A short collecting job
+that `needs:` long work stays off the basis as bookkeeping or a short required aggregator
+(`_short_pole_exclusion_sets`), so the upstream check it waited on is credited. `verify_report`
+re-derives `pole_n`, the headline and the rendered "finishes last on N/M" from the same stamped
+rows (`check_pole_counts_match_the_pole_basis`); the renderer's `_gate_counts` reads them too;
+co-last ties credit every tied check in `pole_n` and one check in the displayed count. Each
 check carries its count as `pole_n` (and `present_on` for disclosure). A required check is
 exempt (gates by definition); inert below `_RARE_PRESENCE_MIN_PR` (6) PRs.
 

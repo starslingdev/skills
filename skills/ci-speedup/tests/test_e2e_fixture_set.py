@@ -4429,7 +4429,10 @@ def test_busy_pr_job_population_orders_gates_by_month_like_share(
     poles = {row["name"]: row["pole_n"]
              for row in doc["pr_critical_path"]["checks"]}
     assert doc["pr_critical_path"]["sampled_pr_count"] == 154
-    assert [poles[name] for name in ("A", "B", "C", "D")] == [32, 17, 14, 1]
+    # D's one 600 s run is above D's own P95 (100 s over 154 runs), so it counts at 100 s and
+    # that PR is a five-way tie at 100 s, which credits every co-last check: A, B and C each
+    # gain that one PR. The shares keep their month-like order.
+    assert [poles[name] for name in ("A", "B", "C", "D")] == [33, 18, 15, 1]
     assert "154 PRs sampled (minimum target 100): target met" in report
     assert "154 of 100" not in report
     assert [check for check in checks if not check.skipped and not check.ok] == []

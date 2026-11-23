@@ -446,8 +446,8 @@ derived from the stacked model and is NOT a sum of per-finding deltas.
 
 ### Long poles → root-cause fixes (the consumer-facing framing)
 
-The merge gate is the check that **finishes last** on a **typical** PR (start offset +
-p50-capped span, so a short job that `needs:` a long one counts) — not the
+The merge gate is the check that **finishes last** on a **typical** PR (each run's measured
+job time plus its start offset, clipped only above that check's P95) — not the
 single slowest check overall. A check that's huge but **rare** (a label-gated
 benchmark, a path-conditional job that ran on a minority of sampled PRs) must not
 be crowned over a smaller check that gates most PRs. The spine is therefore ranked

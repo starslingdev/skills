@@ -13316,12 +13316,118 @@ _GATE_FREQ_CONF_SUFFIX_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2}) to (\d{4}-\d{2}-\d{2})\)")
 
 
+# --- The long-pole basis (`pr_critical_path.pole_basis`) -----------------------------------------
+# The collector ranks long poles by REAL finish order on each sampled PR: each run's measured job
+# time (start to finish, no queue) plus its start offset, clipped only at that check's P95, with a
+# re-run that started after every first-attempt check had finished sitting out, and every check
+# competing whether or not it is displayed or confirmed. These are this file's own copies of
+# `collect_runs._percentile` / `_finish_times` / `_late_reruns` / `_pole_basis_winners`, pinned
+# equal by tests/test_structural_findings.py, so `pole_n`, the headline and the rendered
+# "finishes last on N/M PRs" are re-derived from the stamped rows, never read back.
+_VR_POLE_BASIS_RULE = "finish_last_measured_p95_v1"
+
+
+def _vr_pole_percentile(values: list[float], pct: float) -> float:
+    """Linear-interpolated percentile; pct in [0, 100]. Empty -> 0.0 (collect_runs' rule)."""
+    if not values:
+        return 0.0
+    v = sorted(values)
+    k = (len(v) - 1) * pct / 100.0
+    lo, hi = int(k), min(int(k) + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (k - lo)
+
+
+def _vr_finish_times(spans: dict[str, float],
+                     offsets: "dict[str, float] | None") -> dict[str, float]:
+    """Each check's finish on one PR: clipped span + start offset rebased on the earliest start
+    among `spans`' positive-span checks; no offset means 0; 0.1s-rounded."""
+    offs = offsets or {}
+    timed = [offs[c] for c, v in spans.items() if c in offs and v > 0]
+    base = min(timed, default=0.0)
+    return {c: round(v + (offs[c] - base if c in offs and v > 0 else 0.0), 1)
+            for c, v in spans.items()}
+
+
+def _vr_late_reruns(row: dict) -> set[str]:
+    """A re-run attempt that started once every first-attempt check on the PR had finished."""
+    spans = row.get("spans_s") or {}
+    offs = row.get("offsets_s") or {}
+    retried = set(row.get("retried") or {})
+    first_ends = [offs[c] + v for c, v in spans.items() if c not in retried and c in offs]
+    if not retried or not first_ends:
+        return set()
+    last_end = max(first_ends)
+    return {c for c in retried if c in spans and c in offs and offs[c] >= last_end}
+
+
+def _vr_pole_basis_winners(rows: list[dict]) -> list[list[str]]:
+    """Per PR, every check that finishes last (ties all listed, in row order)."""
+    late = [_vr_late_reruns(row) for row in rows]
+    by_check: dict[str, list[float]] = {}
+    for row, drop in zip(rows, late):
+        for c, v in (row.get("spans_s") or {}).items():
+            if c not in drop:
+                by_check.setdefault(c, []).append(float(v))
+    p95 = {c: _vr_pole_percentile(vals, 95) for c, vals in by_check.items()}
+    out: list[list[str]] = []
+    for row, drop in zip(rows, late):
+        kept = {c: round(min(float(v), p95[c]), 1)
+                for c, v in (row.get("spans_s") or {}).items() if c not in drop}
+        if not kept:
+            out.append([])
+            continue
+        fin = _vr_finish_times(kept, row.get("offsets_s"))
+        mx = max(fin.values())
+        out.append([c for c in kept if fin[c] == mx])
+    return out
+
+
+def _vr_pole_basis(cp: dict) -> "list[dict] | None":
+    """The stamped `pole_basis.per_pr` rows (finite positive spans, finite non-negative offsets,
+    attempts > 1), or None when the findings predate it (the populations / chain-facts rules)."""
+    raw = cp.get("pole_basis")
+    if not isinstance(raw, dict) or raw.get("rule") != _VR_POLE_BASIS_RULE:
+        return None
+    rows = raw.get("per_pr")
+    if not isinstance(rows, list):
+        return None
+
+    def _num(v: object) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+    out: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        spans = {str(k): float(v) for k, v in _as_dict(row.get("spans_s")).items()
+                 if _num(v) and v > 0}
+        if not spans:
+            continue
+        out.append({
+            "spans_s": spans,
+            "offsets_s": {str(k): float(v) for k, v in _as_dict(row.get("offsets_s")).items()
+                          if _num(v) and v >= 0},
+            "retried": {str(k): v for k, v in _as_dict(row.get("retried")).items()
+                        if isinstance(v, int) and not isinstance(v, bool) and v > 1},
+        })
+    return out
+
+
+def _vr_pole_basis_frequencies(rows: list[dict],
+                               candidates: "set[str] | None" = None) -> dict[str, int]:
+    """`collect_runs._pole_frequencies` re-derived: every co-last check on a PR is credited."""
+    freq: dict[str, int] = {}
+    for winners in _vr_pole_basis_winners(rows):
+        for c in winners:
+            if candidates is None or c in candidates:
+                freq[c] = freq.get(c, 0) + 1
+    return freq
+
+
 def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
-    """(`{RAW check name: times it is the per-PR pole}`, npop, dropped) re-derived from
-    `populations`, mirroring the engine's `_gate_counts` winner logic EXACTLY — `max` FINISH time
-    (`_vr_finish_times` with the index-aligned `population_start_offsets_s`; span-only when none are
-    stamped) over each PR's positive checks in populations order (so a tie credits exactly one
-    check, no drift) AND keyed by
+    """(`{RAW check name: times it is the per-PR pole}`, npop, dropped) re-derived from the stamped
+    `pole_basis` when present (the finish-time rule above), else from `populations`, mirroring the engine's `_gate_counts` winner logic EXACTLY — `max` over each PR's
+    positive checks in populations order (so a tie credits exactly one check, no drift) AND keyed by
     the **raw** check name, NOT `_cmp_name`. The engine keys `pole_count`/`wf_gate` by raw name, so
     `_cmp_name` here (which strips an `@scope/` prefix) would COLLAPSE two distinct monorepo checks
     (`@a/pkg build` + `@b/pkg build`) into one bucket and double-count it against the engine — a false
@@ -13330,15 +13436,22 @@ def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
     shrinking denominator is surfaced, not silent."""
     counts: dict[str, int] = {}
     n = dropped = 0
+    basis = _vr_pole_basis(cp)
+    if basis is not None:
+        # The renderer's `_gate_counts` on the stamped long-pole basis: every check competes and a
+        # tie credits exactly one check (the first co-last one in row order).
+        raw_rows = _as_list(_as_dict(cp.get("pole_basis")).get("per_pr"))
+        dropped = sum(1 for r in raw_rows if not isinstance(r, dict))
+        for winners in _vr_pole_basis_winners(basis):
+            if winners:
+                counts[winners[0]] = counts.get(winners[0], 0) + 1
+        return counts, len(basis), dropped
     unconfirmed = {
         str(row.get("name") or row.get("check") or "")
         for row in _as_list(cp.get("checks"))
         if isinstance(row, dict) and row.get("required_reachable") is False
     }
-    pops = _as_list(cp.get("populations"))
-    raw_offs = _as_list(cp.get("population_start_offsets_s"))
-    aligned = len(raw_offs) == len(pops)
-    for idx, entry in enumerate(pops):
+    for entry in _as_list(cp.get("populations")):
         try:
             _share, cks = entry
             pos = [(str(nm), float(p)) for nm, p in cks
@@ -13349,8 +13462,7 @@ def _populations_pole_counts(cp: dict) -> tuple[dict[str, int], int, int]:
         if not pos:
             continue
         n += 1
-        fin = _vr_finish_times(dict(pos), _vr_offsets(raw_offs[idx]) if aligned else {})
-        winner = max(pos, key=lambda kv: fin[kv[0]])[0]
+        winner = max(pos, key=lambda kv: kv[1])[0]
         counts[winner] = counts.get(winner, 0) + 1
     return counts, n, dropped
 
@@ -13938,7 +14050,7 @@ def check_spine_heavy_check_disclosed(report: str, findings_path: Path | None) -
     wait (the floor gates first), so it is out of this property's scope; the #4 ceiling check guards
     the magnitude. A majority-co-occurring check absent from `checks[]` (no measured p50) can't be
     ranked and is invisible to the re-derivation (a rare artifact mismatch). A matrix SIBLING-LEG floor
-    (same matrix base AND same workflow file — mirroring the engine's `_same_matrix`) is excluded: the
+    (the same workflow file AND either the same trailing-paren matrix base or a leg the renderer's `_same_matrix` folds, e.g. a mid-name `test prod (6/10) / build`) is excluded: the
     pole already represents its own matrix and the matrix two-number note handles leg flooring. Every
     skip path is COUNTED and surfaced in the detail (no bare 'clean')."""
     name = "every drilled pole's binding floor is disclosed on the spine (no silent heavy-check drop)"
@@ -13991,7 +14103,11 @@ def check_spine_heavy_check_disclosed(report: str, findings_path: Path | None) -
         # `_same_matrix`, name+workflow_file), so a DISTINCT job merely sharing a paren-stripped stem
         # in a different workflow is NOT silently excluded. A real matrix leg shares both.
         same_wf = (not wf_by.get(floor_name)) or Path(wf).name == wf_by.get(floor_name)
-        if _matrix_base(floor_name) == _matrix_base(_cmp_name(pole)) and same_wf:
+        # A leg is what the renderer's `_same_matrix` folds into one matrix (mirrored above): a
+        # mid-name matrix parameter (`test prod (6/10) / build` beside `(8/10) / build`, a
+        # reusable-workflow leg) is as much a sibling leg as a trailing `(variant)` one.
+        if same_wf and (_matrix_base(floor_name) == _matrix_base(_cmp_name(pole))
+                        or _same_matrix(floor_name, _cmp_name(pole))):
             sibling += 1
             continue
         checked += 1
@@ -16341,64 +16457,20 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
 # silently no-op) — this class reads that single definition.
 
 
-def _vr_finish_times(spans: dict[str, float],
-                     offsets: "dict[str, float] | None") -> dict[str, float]:
-    """Verbatim mirror of `collect_runs._finish_times`: capped span + start offset relative to
-    the earliest start among `spans`' positive-span checks; no offset means 0; 0.1s-rounded."""
-    offs = offsets or {}
-    timed = [offs[c] for c, v in spans.items() if c in offs and v > 0]
-    base = min(timed, default=0.0)
-    return {c: round(v + (offs[c] - base if c in offs and v > 0 else 0.0), 1)
-            for c, v in spans.items()}
-
-
-def _vr_offsets(raw: object) -> dict[str, float]:
-    """One stamped `{check: start_offset_s}` dict, keeping only finite non-negative numbers."""
-    if not isinstance(raw, dict):
-        return {}
-    return {str(k): float(v) for k, v in raw.items()
-            if isinstance(v, (int, float)) and not isinstance(v, bool)
-            and math.isfinite(v) and v >= 0}
-
-
-def _populations_offsets_per_pr(cp: dict) -> list[dict[str, float]]:
-    """`population_start_offsets_s`, index-aligned with `_populations_per_pr(cp)` (same skip
-    rule). Empty dicts (span-only) when the collector stamped none or the list is misaligned."""
-    pops = _as_list(cp.get("populations"))
-    raw = _as_list(cp.get("population_start_offsets_s"))
-    aligned = len(raw) == len(pops)
-    out: list[dict[str, float]] = []
-    for idx, entry in enumerate(pops):
-        try:
-            _share, cks = entry
-            pos = [nm for nm, p in cks if float(p) > 0]
-        except (TypeError, ValueError):
-            continue
-        if pos:
-            out.append(_vr_offsets(raw[idx]) if aligned else {})
-    return out
-
-
 def _vr_pole_frequencies(per_pr: list[list[tuple[str, float]]],
-                         candidates: "set[str] | None" = None,
-                         offsets: "list[dict[str, float]] | None" = None) -> dict[str, int]:
-    """How many sampled PRs each check is the ACTUAL critical path on — the check that FINISHES
-    LAST (start offset + capped span) — re-derived from `populations` plus the index-aligned
-    `offsets` (`population_start_offsets_s`). The honest "is it the merge gate?" signal — the
-    exact mirror of `collect_runs._pole_frequencies`: restricted to `candidates` (the ranked check
-    set the engine argmaxes over) so verifier and engine argmax the SAME set, offsets rebased on
-    the earliest candidate start, a check with no start at offset 0, and TIES credit every
-    co-last check (not just `pr[0]`) so a co-equal gate isn't starved of credit. `populations`
-    magnitudes are already job-p50-capped, matching the engine's capped basis — so the two never
-    disagree on which check is the per-PR pole. `offsets=None` is the span-only rule."""
+                         candidates: "set[str] | None" = None) -> dict[str, int]:
+    """How many sampled PRs each check is the ACTUAL critical path (slowest) on, re-derived from
+    `populations` (`per_pr` is already slowest-first per PR). The honest "is it the merge gate?"
+    signal — the exact mirror of `collect_runs._pole_frequencies`: restricted to `candidates` (the
+    ranked check set the engine argmaxes over) so verifier and engine argmax the SAME set, and
+    TIES credit every co-slowest check (not just `pr[0]`) so a co-equal gate isn't starved of
+    credit. `populations` magnitudes are already job-p50-capped, matching the engine's capped
+    ranking basis — so the two never disagree on which check is the per-PR pole."""
     freq: dict[str, int] = {}
-    for idx, pr in enumerate(per_pr):
+    for pr in per_pr:
         scoped = [(nm, d) for nm, d in pr if candidates is None or nm in candidates]
         if not scoped:
             continue
-        if offsets is not None and idx < len(offsets):
-            fin = _vr_finish_times(dict(scoped), offsets[idx])
-            scoped = [(nm, fin[nm]) for nm, _d in scoped]
         mx = max(d for _, d in scoped)
         for nm, d in scoped:
             if d == mx:
@@ -16433,10 +16505,7 @@ def _vr_chain_fact_poles(cp: dict, candidates: "set[str] | None"
     path is at least as long as any one of its members, so it bounds every NON-chain check's
     capped span from above. When the slowest chain member (rounded to 0.1s, the engine's
     `_pole_frequencies` basis) strictly exceeds `runner_up_s`, it is the PR's pole on the same
-    caps the engine ranks with; ties among members credit each, as the engine does. With stamped
-    `start_offsets_s` the same bound runs on FINISH times (the engine's basis): members add their
-    rebased offset, and the non-member bound becomes `runner_up_s` + the latest non-member
-    offset. Otherwise the
+    caps the engine ranks with; ties among members credit each, as the engine does. Otherwise the
     pole may be a non-chain check and the PR is counted undetermined, so callers get a bound
     (lower .. lower + undetermined), never a guess."""
     lower: dict[str, int] = {}
@@ -16458,16 +16527,8 @@ def _vr_chain_fact_poles(cp: dict, candidates: "set[str] | None"
         scoped = {str(k): round(float(v), 1) for k, v in spans.items()
                   if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
                   and (candidates is None or str(k) in candidates)}
-        # Finish-time basis: a member's finish = its rebased start offset + its span (exact);
-        # a non-member's span is <= runner_up_s, so its finish is <= runner_up_s + its offset.
-        offs = {k: v for k, v in _vr_offsets(e.get("start_offsets_s")).items()
-                if candidates is None or k in candidates}
-        base = min(offs.values(), default=0.0)
-        rel = {k: v - base for k, v in offs.items()}
-        scoped = {k: round(v + rel.get(k, 0.0), 1) for k, v in scoped.items()}
-        others = max((v for k, v in rel.items() if k not in spans), default=0.0)
         top = max(scoped.values(), default=0.0)
-        if not scoped or top <= round(float(ru) + others, 1):
+        if not scoped or top <= round(float(ru), 1):
             undetermined += 1
             continue
         for k, v in scoped.items():
@@ -16523,9 +16584,17 @@ def check_headline_pole_actually_gates(report: str, findings_path: Path | None) 
     # stamps on EVERY run (a bound: some PRs' pole may be undetermined). `populations` is
     # bimodal-only, so reading it alone skipped this check on most fully sampled runs (bug 4).
     per_pr = _populations_per_pr(cp)
-    if len(per_pr) >= _VR_RARE_PRESENCE_MIN_PR:
-        freq, und, n_pr, basis = _vr_pole_frequencies(
-            per_pr, ranked or None, _populations_offsets_per_pr(cp)), 0, len(per_pr), \
+    pole_basis = _vr_pole_basis(cp)
+    if pole_basis is not None and len(pole_basis) >= _VR_RARE_PRESENCE_MIN_PR:
+        # Every spine check competes on the stamped basis, so a PR an unconfirmed check finishes
+        # last on is that check's, never the next confirmed one's. The engine still never crowns
+        # an unconfirmed check over a confirmed one, so only confirmed checks are weighed as
+        # gates the headline could have passed over (all of them when none is confirmed).
+        every = {str(c.get("name") or c.get("check")) for c in ranked_rows}
+        freq, und, n_pr, basis = (_vr_pole_basis_frequencies(pole_basis, ranked or every or None),
+                                  0, len(pole_basis), "pole_basis")
+    elif len(per_pr) >= _VR_RARE_PRESENCE_MIN_PR:
+        freq, und, n_pr, basis = _vr_pole_frequencies(per_pr, ranked or None), 0, len(per_pr), \
             "populations"
     else:
         freq, und, n_pr = _vr_chain_fact_poles(cp, ranked or None)
@@ -16577,6 +16646,38 @@ def check_headline_pole_actually_gates(report: str, findings_path: Path | None) 
                  f"per-PR data present but not readable: headline `{headline}` gates {span} PRs"
                  f"{via}, and the undetermined PRs decide whether it is a recurring gate — the "
                  "verdict can't be re-derived from the stamped per-PR data")
+
+
+def check_pole_counts_match_the_pole_basis(report: str, findings_path: Path | None) -> Check:
+    """Every stamped `checks[].pole_n` (on how many sampled PRs the check finishes last) must equal
+    the re-derivation from the stamped `pole_basis` rows: real finish order (measured job time +
+    start offset), only P95 outliers clipped, late re-runs out, every check competing. A count
+    that differs means the ranking credited a different check than the PR actually waited on."""
+    name = "stamped pole counts match the finish-time pole basis"
+    if findings_path is None:
+        return Check(name, True, "no --findings to re-derive pole counts from", skipped=True)
+    try:
+        data = _as_dict(json.loads(findings_path.read_text(encoding="utf-8")))
+    except (OSError, json.JSONDecodeError) as e:
+        return Check(name, True, f"findings unreadable: {e}", skipped=True)
+    cp = _as_dict(data.get("pr_critical_path"))
+    basis = _vr_pole_basis(cp)
+    if basis is None:
+        return Check(name, True, "findings predate the stamped pole basis", skipped=True)
+    rows = [c for c in _as_list(cp.get("checks")) if isinstance(c, dict)]
+    names = {str(c.get("name") or c.get("check") or "") for c in rows}
+    freq = _vr_pole_basis_frequencies(basis)
+    bad = [f"`{nm}` pole_n={c.get('pole_n')} but the pole basis gives {freq.get(nm, 0)}"
+           for c in rows
+           for nm in [str(c.get("name") or c.get("check") or "")]
+           if int(_num(c.get("pole_n")) or 0) != freq.get(nm, 0)]
+    stray = sorted(set(freq) - names)
+    if stray:
+        bad.append(f"pole basis credits check(s) absent from checks[]: {', '.join(stray[:5])}")
+    if bad:
+        return Check(name, False, "; ".join(bad[:6]))
+    return Check(name, True, f"all {len(rows)} pole count(s) re-derive from "
+                 f"{len(basis)} per-PR pole-basis row(s)")
 
 
 # Priced-dollar surface excised 2026-07-20 (the pre-public development archive
@@ -18794,6 +18895,7 @@ def run_checks(report, report_path, findings_path, skill_repo, clone=None):
         check_cache_framing_matches_distribution(report, findings_path),
         check_cache_sizing_guards(report, findings_path),
         check_headline_pole_actually_gates(report, findings_path),
+        check_pole_counts_match_the_pole_basis(report, findings_path),
     ]
 
 

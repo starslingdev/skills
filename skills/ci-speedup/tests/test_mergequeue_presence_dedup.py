@@ -347,9 +347,8 @@ def test_queue_inflation_demotes_the_heavy_gate_and_dedup_fixes_it():
 
     # And the spine crowns the heavy check as the headline merge gate.
     pr_check_p50 = {_HEAVY: _HEAVY_S, _LIGHT: _LIGHT_S}
-    caps = {_HEAVY: _HEAVY_S, _LIGHT: _LIGHT_S}
     order, present, n_pr, pole_freq = _rank_spine_present_first(
-        pr_check_p50, post_rows, req_names=frozenset(), caps=caps)
+        pr_check_p50, post_rows, req_names=frozenset())
     assert order[0][0] == _HEAVY, "the heavy suite is crowned the merge gate post-dedup"
     assert n_pr == _N
     # The heavy check is the actual pole on every PR (a recurring gate, not rare).

@@ -68,8 +68,9 @@ can't trust.
 
 The headline must be a check that ACTUALLY gates the merge, so the spine is ranked
 by **pole frequency** — how often a check is the job a PR waits on, i.e. the one that
-finishes last (start offset + p50-capped span, so a short job behind a `needs:` chain
-counts) — in two
+finishes last on that PR (each run's measured job time plus its start offset; only a run
+above the check's own P95, or a re-run that started after the PR's other checks had finished,
+is clipped or left out; every spine check competes) — in two
 tiers: checks that are the actual pole on ≥ 2 sampled PRs first (by p50), then
 one-path outliers (the actual pole on fewer, a label-gated benchmark or a single
 path-conditional run). A slow check that ran on 1/100 sampled PRs never headlines just

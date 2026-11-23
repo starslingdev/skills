@@ -86,6 +86,7 @@
       "rendered per-workflow gate frequency matches the populations re-derivation",
       "scanned date matches the date in the filename",
       "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)",
+      "stamped pole counts match the finish-time pole basis",
       "static-only banner matches CI shape",
       "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)",
       "the rendered era disclosure matches the enumerated config (no pre-only caveat over post-era checks)",

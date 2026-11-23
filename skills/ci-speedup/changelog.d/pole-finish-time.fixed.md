@@ -1,7 +1,10 @@
-- **2026-11-23** — The long-pole ranking and the report's "gates N/M" counts now credit each
-  sampled PR's pole to the check that finishes last (its start offset plus its p50-capped span)
-  instead of the longest span, so a short job that `needs:` a long one, and finishes after it,
-  counts as the gate the PR waits on. Such a job is no longer dropped as bookkeeping or as a
-  short required aggregator when its `needs:` reach a measured check of 60 s or more; when it is
-  an aggregation sink, its drill points at its slowest upstream job. `verify_report` re-derives
-  the same rule from new per-PR start offsets (#491).
+- **2026-11-23** — The long-pole ranking and the report's "finishes last on N/M PRs" counts now
+  follow each sampled PR's real finish order: a check counts at its measured job time (start to
+  finish, no queue) plus the time it started after the PR's first check, instead of the longest
+  span capped at the job's p50. Only a run above that check's own P95 is clipped, and a re-run
+  that started after every other check had finished sits out that PR. Every merge-gating check
+  competes, so a PR that a check the report cannot confirm as merge-blocking finishes last on is
+  counted for that check, not the next one. A job that waits on a slow setup job, or on whatever
+  a short collecting job waits on, now leads the long poles when it is what finishes last. The
+  findings carry the per-PR basis as `pr_critical_path.pole_basis`, and `verify_report`
+  re-derives every count from it (#491).
