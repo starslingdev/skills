@@ -114,6 +114,13 @@ push, so scan edits locally first.
 synthetic `owner/repo` slugs are routine. Commit messages and PR text stay
 strict. Never put a real private reference in a fixture.
 
+**Dependabot PRs.** Dependabot quotes public upstream release notes, which name
+upstream repositories. When the PR author in the event payload
+(`github.event.pull_request.user.login`, passed as `--pr-author`) is exactly
+`dependabot[bot]`, CI skips the PR title/body and the messages of commits whose
+author or committer is Dependabot (name and email), and prints one line saying
+so. Every other commit message and every file diff is still scanned.
+
 **Exceptions.** A cross-repository reference is allowed only when the user
 explicitly approves publishing that exact reference. Pass `--allow owner/repo`
 (repeatable); the gate fails closed unless that repository verifies `PUBLIC`.

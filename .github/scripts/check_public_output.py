@@ -181,10 +181,38 @@ def _scan_diff(diff: str, *, label: str, target: str, allowed: frozenset[str]) -
     return findings
 
 
+# Dependabot copies public upstream release notes (which name upstream repos and
+# users) into its PR text and commit messages, so those would fail every time.
+# The exemption is exact-match only: the PR author comes from the event payload
+# (`github.event.pull_request.user.login`, via env), never from PR text, and a
+# commit's message is skipped only when its author or committer IS Dependabot
+# (name and email both). File diffs are never exempt.
+DEPENDABOT_LOGIN = "dependabot[bot]"
+DEPENDABOT_IDENTITY = (DEPENDABOT_LOGIN, "49699333+dependabot[bot]@users.noreply.github.com")
+
+
+def is_dependabot_pr(pr_author: str | None) -> bool:
+    """True only when the PR author login is exactly Dependabot's."""
+    return pr_author == DEPENDABOT_LOGIN
+
+
+def skip_commit_message(
+    pr_author: str | None, author: tuple[str, str], committer: tuple[str, str]
+) -> bool:
+    """Whether a commit's message is exempt: a Dependabot PR's Dependabot commit.
+
+    `author` and `committer` are (name, email) pairs from git.
+    """
+    return is_dependabot_pr(pr_author) and DEPENDABOT_IDENTITY in (author, committer)
+
+
 _DIFF_FLAGS = ["--unified=0", "--no-color", "--no-ext-diff", "--no-renames"]
 
 
-def _scan_history(base: str, *, target: str, allowed: frozenset[str]) -> list[Finding]:
+def _scan_history(
+    base: str, *, target: str, allowed: frozenset[str], pr_author: str | None = None,
+    skipped: list[str] | None = None,
+) -> list[Finding]:
     """Scan every outgoing commit separately, then the net diff.
 
     Pushing a branch publishes every commit on it, so a reference added in
@@ -194,10 +222,17 @@ def _scan_history(base: str, *, target: str, allowed: frozenset[str]) -> list[Fi
     commits = _git_output(["rev-list", "--reverse", "--parents", f"{base}..HEAD"])
     for sha, *parents in (entry.split() for entry in commits.splitlines()):
         short = _git_output(["rev-parse", "--short", sha]).strip()
-        message = _git_output(["log", "-1", "--format=%B", sha])
-        findings += scan_text(
-            message, source=f"commit {short} message", target=target, allowed=allowed
-        )
+        name, email, cname, cemail = _git_output(
+            ["log", "-1", "--format=%an%x00%ae%x00%cn%x00%ce", sha]
+        ).rstrip("\n").split("\0")
+        if skip_commit_message(pr_author, (name, email), (cname, cemail)):
+            if skipped is not None:
+                skipped.append(short)
+        else:
+            message = _git_output(["log", "-1", "--format=%B", sha])
+            findings += scan_text(
+                message, source=f"commit {short} message", target=target, allowed=allowed
+            )
         if len(parents) > 1:
             continue  # merge: its content is covered by its parents and the net diff
         patch = _git_output(["show", "--format=", *_DIFF_FLAGS, sha, "--"])
@@ -221,6 +256,12 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--allow", action="append", default=[], metavar="OWNER/REPO",
         help="explicitly approved cross-repository reference; must verify PUBLIC",
+    )
+    parser.add_argument(
+        "--pr-author", metavar="LOGIN",
+        help="PR author login from the event payload (never from PR text); when exactly "
+        f"{DEPENDABOT_LOGIN}, the --text-file inputs (that PR's title/body) and the messages "
+        "of its Dependabot-authored commits are skipped; file diffs are still scanned",
     )
     return parser.parse_args(argv)
 
@@ -255,7 +296,10 @@ def main(argv: list[str] | None = None) -> int:
         for index, repo in enumerate(args.allow, start=1):
             _verify_public_target(repo, label=f"allowed repository {index}")
         allowed = frozenset(_canonical(repo) for repo in args.allow)
+        dependabot = is_dependabot_pr(args.pr_author)
         for index, path in enumerate(args.text_file, start=1):
+            if dependabot:
+                continue
             try:
                 text = path.read_text(encoding="utf-8")
             except (OSError, UnicodeError):
@@ -264,11 +308,23 @@ def main(argv: list[str] | None = None) -> int:
             findings += scan_text(
                 text, source=f"text file {index}", target=args.target, allowed=allowed
             )
+        skipped: list[str] = []
         if args.base:
-            findings += _scan_history(args.base, target=args.target, allowed=allowed)
+            findings += _scan_history(
+                args.base, target=args.target, allowed=allowed,
+                pr_author=args.pr_author, skipped=skipped,
+            )
     except RuntimeError as exc:
         print(f"privacy preflight error: {exc}", file=sys.stderr)
         return 2
+
+    if dependabot:
+        print(
+            f"privacy preflight: PR author is {DEPENDABOT_LOGIN} (event payload), so its "
+            f"title/body ({len(args.text_file)} text file(s)) and {len(skipped)} "
+            "Dependabot-authored commit message(s) were skipped: they quote public upstream "
+            "release notes. File diffs and all other commits were scanned."
+        )
 
     return _report(findings)
 
