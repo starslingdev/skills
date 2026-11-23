@@ -331,6 +331,91 @@ def test_automation_only_reads_only_directly_invoked_repo_test_scripts(tmp_path)
     assert pf_mod._automation_only(workflow("echo ./ci.sh"), tmp_path) is True
 
 
+def _delegated(tmp_path, step: str, files: dict[str, str],
+               job_extra: str = "") -> bool:
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text)
+    return pf_mod._automation_only(parsed((
+        "a.yml",
+        PR_ON + "jobs:\n  ci:\n" + job_extra + "    steps:\n      - " + step,
+    )), tmp_path)
+
+
+_TESTS_SH = "#!/bin/sh\nset -e\npython -m pytest -q\n"
+
+
+@pytest.mark.parametrize("step, files, job_extra", [
+    ("run: bash scripts/ci.sh\n", {"scripts/ci.sh": _TESTS_SH}, ""),
+    ("run: sh ./scripts/test.sh\n", {"scripts/test.sh": _TESTS_SH}, ""),
+    ("run: ./ci.sh --py ${{ matrix.py }}\n", {"ci.sh": _TESTS_SH}, ""),
+    ("run: ./ci.sh 2>&1 | tee ci.log\n", {"ci.sh": _TESTS_SH}, ""),
+    ("run: ./ci.sh\n", {"ci.sh": "#!/bin/sh\npoetry run pytest\n"}, ""),
+    ("run: ./ci.sh\n", {"ci.sh": "#!/bin/bash\nuv run pytest -q\n"}, ""),
+    ("run: ./ci.sh\n", {"ci.sh": "#!/bin/sh\nbundle exec rspec\n"}, ""),
+    ("run: ./ci.sh\n        working-directory: sub\n",
+     {"sub/ci.sh": _TESTS_SH}, ""),
+    ("run: ./ci.sh\n", {"sub/ci.sh": _TESTS_SH},
+     "    defaults:\n      run:\n        working-directory: sub\n"),
+    ("run: npm run ci\n",
+     {"package.json": '{"scripts": {"ci": "npm run lint && npm test"}}'}, ""),
+])
+def test_delegated_test_script_invocation_shapes_score(tmp_path, step, files,
+                                                       job_extra):
+    """The common ways a workflow hands its tests to a repository script."""
+    assert _delegated(tmp_path, step, files, job_extra) is False
+
+
+@pytest.mark.parametrize("step, files", [
+    # automation scripts: no test runner at command position
+    ("run: ./release.sh\n",
+     {"release.sh": "#!/bin/sh\nnpm publish\ngh release create v1\n"}),
+    ("run: ./scripts/label.sh\n",
+     {"scripts/label.sh": "#!/bin/sh\ngh issue edit 1 --add-label bug\n"}),
+    ("run: npm run release\n",
+     {"package.json": '{"scripts": {"release": "npm publish"}}'}),
+    # a runner name inside heredoc text is output, not a command
+    ("run: ./notes.sh\n",
+     {"notes.sh": "#!/bin/sh\ncat <<EOF\npytest results are posted here\nEOF\n"}),
+    # a non-shell script is not read as shell
+    ("run: ./scripts/triage.py\n",
+     {"scripts/triage.py": "#!/usr/bin/env python3\npytest = None\n"}),
+    # the step runs sub/ci.sh, not the root ci.sh
+    ("run: ./ci.sh\n        working-directory: sub\n",
+     {"ci.sh": _TESTS_SH, "sub/ci.sh": "#!/bin/sh\nnpm publish\n"}),
+    # a dynamic working directory cannot be resolved, so it is withheld
+    ("run: ./ci.sh\n        working-directory: ${{ matrix.dir }}\n",
+     {"ci.sh": _TESTS_SH}),
+    # outside the checkout, or not there at all
+    ("run: ./../ci.sh\n", {}),
+    ("run: /opt/ci.sh\n", {}),
+    ("run: ./missing.sh\n", {}),
+])
+def test_delegated_automation_or_unresolvable_scripts_still_refuse(
+        tmp_path, step, files):
+    assert _delegated(tmp_path, step, files) is True
+
+
+def test_delegated_script_outside_checkout_or_unreadable_refuses(
+        tmp_path, monkeypatch):
+    outside = tmp_path / "outside.sh"
+    outside.write_text(_TESTS_SH)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "ci.sh").symlink_to(outside)
+    assert _delegated(repo, "run: ./ci.sh\n", {}) is True
+
+    (repo / "ci.sh").unlink()
+    (repo / "ci.sh").write_text(_TESTS_SH)
+    assert _delegated(repo, "run: ./ci.sh\n", {}) is False
+
+    def unreadable(self, *a, **k):
+        raise PermissionError("unreadable")
+    monkeypatch.setattr(pf_mod.Path, "read_text", unreadable)
+    assert _delegated(repo, "run: ./ci.sh\n", {}) is True
+
+
 def test_automation_only_flag_drives_a_scorer_refusal(spec):
     """The collector sets doc.automation_only; compute_ci_score turns it into
     the automation_only refusal — no value, ahead of facts_unavailable."""

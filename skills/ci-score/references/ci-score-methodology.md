@@ -69,7 +69,12 @@ number:
   test is conservative: a repo is automation-only ONLY when it has no test
   signal (a test-like job **or** a test-runner command like `pytest` / `go
   test` / `npm test` — so a real test-only repo whose job is named `ci` still
-  scores), no build signal (build tool, a build-or-lint job or command, a
+  scores — or such a runner at command position inside a repository shell
+  script or package.json script a step directly invokes, such as `./ci.sh`,
+  `bash scripts/test.sh` or `npm run ci`; only the test runner is read from
+  the script, so an automation script that installs its own tooling stays
+  automation, and a script that cannot be resolved inside the checkout or
+  read leaves the refusal standing), no build signal (build tool, a build-or-lint job or command, a
   container-build action), AND no dependency-install command in any workflow —
   any one of those scores it, so a small-but-real gate (a lint-only job, a
   single build job) is never falsely refused. A setup-node/setup-bun action
