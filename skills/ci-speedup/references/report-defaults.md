@@ -738,7 +738,10 @@ budget used.
 **Reason:** a small measured cost can be a good trade for a large merge-wait
 reduction, but the cap must apply once per report rather than once per finding.
 Unsized findings, runner-size moves, and changes on an already queued
-self-hosted pool never spend the budget.
+self-hosted pool never spend the budget. An OPT21 edge spends its measured
+upper bound on extra downstream minutes per run, scaled by monthly runs. A
+queued pool is the runner label OPT43/OPT97 measured, in any workflow; a
+finding whose runner label is unknown while a pool queues stays held back.
 
 **Proposed decision:** **Keep one 5% report-wide budget, admitting sized
 findings by wall-clock seconds saved per added runner-minute.**

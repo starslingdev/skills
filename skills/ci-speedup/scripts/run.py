@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -380,8 +381,8 @@ def main(argv: list[str] | None = None) -> int:
         "--verify-cache-sensitive", action="store_true",
         help="Use three distinct default-branch pushes instead of warm reruns.")
     args = parser.parse_args(argv)
-    if args.minute_budget < 0:
-        parser.error("--minute-budget must be non-negative")
+    if not math.isfinite(args.minute_budget) or args.minute_budget < 0:
+        parser.error("--minute-budget must be a finite non-negative percentage")
 
     # Create the output directory up front. Without this, a fresh `--out
     # /tmp/run/findings.json` whose parent doesn't exist tracebacks on the first

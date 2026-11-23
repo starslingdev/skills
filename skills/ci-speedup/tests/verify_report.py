@@ -18383,6 +18383,9 @@ def _vr_budget_cost(finding: dict, data: dict) -> float | None:
     monthly = _num(effect.get("runner_min_per_month"))
     if monthly is None:
         per_run = _num(effect.get("runner_min_per_run"))
+        if per_run is None:
+            per_run = _num(_as_dict(finding.get("opt21_edge_sizing")).get(
+                "extra_runner_min_per_run"))
         volume = _num(_as_dict(data.get("per_workflow_monthly_volume")).get(
             str(finding.get("workflow_file") or "")))
         if per_run is not None and per_run > 0 and volume is not None and volume > 0:
@@ -18391,7 +18394,12 @@ def _vr_budget_cost(finding: dict, data: dict) -> float | None:
 
 
 def _vr_budget_samples(finding: dict, data: dict) -> int | None:
-    direct = _num(_as_dict(finding.get("runner_minute_effect")).get("sampled_runs"))
+    effect = _as_dict(finding.get("runner_minute_effect"))
+    direct = _num(effect.get("sampled_runs"))
+    if (direct is None and _num(effect.get("runner_min_per_month")) is None
+            and _num(effect.get("runner_min_per_run")) is None):
+        direct = _num(_as_dict(finding.get("opt21_edge_sizing")).get(
+            "dependency_sampled_runs"))
     if direct is not None and direct > 0:
         return int(direct)
     wf = str(finding.get("workflow_file") or "")
@@ -18405,17 +18413,47 @@ def _vr_budget_samples(finding: dict, data: dict) -> int | None:
     return max(values) if values else None
 
 
+def _vr_budget_labels(finding: dict, data: dict) -> set[str]:
+    wf = str(finding.get("workflow_file") or "")
+    jobs = {str(v) for v in _as_list(finding.get("affected_jobs"))}
+    labels = set()
+    for row in _as_list(_as_dict(data.get("runner_minute_spine")).get("rows")):
+        if not isinstance(row, dict) or str(row.get("workflow_file") or "") != wf:
+            continue
+        name = str(row.get("job_name") or "")
+        if name in jobs or any(name.startswith(job + " (") for job in jobs):
+            label = str(row.get("runner_label") or "").strip()
+            if label:
+                labels.add(label)
+    return labels
+
+
 def _vr_budget_queued_pool(finding: dict, data: dict) -> bool:
+    """Independent mirror: queue evidence binds to a runner label (a pool)."""
     if str(finding.get("pattern") or "") == "OPT97":
         return True
     wf = str(finding.get("workflow_file") or "")
     jobs = {str(v) for v in _as_list(finding.get("affected_jobs"))}
+    own = _vr_budget_labels(finding, data)
     for other in _as_list(data.get("findings")):
         if not isinstance(other, dict) or str(other.get("pattern") or "") not in {
                 "OPT43", "OPT97"}:
             continue
-        if str(other.get("workflow_file") or "") == wf and jobs & {
-                str(v) for v in _as_list(other.get("affected_jobs"))}:
+        same_wf = str(other.get("workflow_file") or "") == wf
+        if same_wf and jobs & {str(v) for v in _as_list(other.get("affected_jobs"))}:
+            return True
+        queued = _vr_budget_labels(other, data)
+        for label in _as_list(_as_dict(other.get("single_slot_queue")).get("labels")):
+            if str(label).strip():
+                queued.add(str(label).strip())
+        slow = str(_as_dict(other.get("queue_label_comparison")).get("slow_label") or "")
+        if slow.strip():
+            queued.add(slow.strip())
+        if not queued:
+            if same_wf:
+                return True
+            continue
+        if not own or own & queued:
             return True
     return False
 
@@ -18507,7 +18545,7 @@ def check_bmf_runner_minute_filter(report: str, findings_path) -> Check:
                 fid = re.sub(r"[^A-Za-z0-9_.:-]+", "_",
                              str(finding.get("id") or finding.get("pattern") or "finding"))
                 row = (f"| `{fid}` | +{_vr_budget_number(cost)} runner-min/mo "
-                       f"| {samples} sampled runs |")
+                       f"(estimate from {samples} sampled runs) |")
                 if report.count(row) != 1:
                     budget_bad.append(f"admitted finding {fid} lacks its signed added cost")
     admitted_ids = {id(finding) for finding, _cost, _samples in admitted}

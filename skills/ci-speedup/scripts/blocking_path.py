@@ -12030,7 +12030,11 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "crediting seconds."
         )
     if pat in {"OPT24", "OPT25"}:
-        body.append(_bmf_concurrency_lines()[0])
+        # A budget-admitted job-adding option is recommended in the default
+        # report, so it reads as under --bmf: shard order plus its signed cost.
+        budget_admitted = bool(members) and all(
+            member.get("_minute_budget_admitted") for member in members)
+        body.append(_bmf_concurrency_lines(budget_admitted)[0])
         go_member = next(
             (member for member in members if member.get("go_dominant_package")),
             None,
@@ -12065,9 +12069,10 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                     "checkout and setup and bill each job; the second runner also "
                     "repeats compilation."
                 )
-        elif _BMF_ENABLED:
-            # Under --bmf the job-adding option is shown, so it carries its signed
-            # runner-minute effect (#379); the default view holds it back.
+        elif _BMF_ENABLED or budget_admitted:
+            # Under --bmf (or once the minute budget admits it) the job-adding
+            # option is shown, so it carries its signed runner-minute effect
+            # (#379); the default view otherwise holds it back.
             body.append(_group_runner_minute_effect_line(members))
         else:
             body.append(_bmf_concurrency_lines()[1])
@@ -15489,8 +15494,8 @@ def _bmf_default_view(finding: dict[str, Any]) -> dict[str, Any]:
     return view
 
 
-def _bmf_concurrency_lines() -> list[str]:
-    if _BMF_ENABLED:
+def _bmf_concurrency_lines(budget_admitted: bool = False) -> list[str]:
+    if _BMF_ENABLED or budget_admitted:
         return [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE]
     return [_CONCURRENCY_ORDER_LINE_DEFAULT, _SHARD_RUNNER_MINUTE_LINE_DEFAULT]
 
@@ -15513,6 +15518,11 @@ def _minute_budget_cost(finding: dict[str, Any], doc: dict[str, Any]) -> float |
     monthly = _num(effect.get("runner_min_per_month"))
     if monthly is None:
         per_run = _num(effect.get("runner_min_per_run"))
+        if per_run is None:
+            # An OPT21 edge is sized by its measured upper bound on the extra
+            # downstream minutes per run when the dependency fails (#463).
+            per_run = _num(_as_dict(finding.get("opt21_edge_sizing")).get(
+                "extra_runner_min_per_run"))
         volume = _num(_as_dict(doc.get("per_workflow_monthly_volume")).get(
             str(finding.get("workflow_file") or "")))
         if per_run is not None and per_run > 0 and volume is not None and volume > 0:
@@ -15523,6 +15533,11 @@ def _minute_budget_cost(finding: dict[str, Any], doc: dict[str, Any]) -> float |
 def _minute_budget_samples(finding: dict[str, Any], doc: dict[str, Any]) -> int | None:
     effect = _as_dict(finding.get("runner_minute_effect"))
     direct = _num(effect.get("sampled_runs"))
+    if (direct is None and _num(effect.get("runner_min_per_month")) is None
+            and _num(effect.get("runner_min_per_run")) is None):
+        # The cost came from the OPT21 edge stamp: name that stamp's sample.
+        direct = _num(_as_dict(finding.get("opt21_edge_sizing")).get(
+            "dependency_sampled_runs"))
     if direct is not None and direct > 0:
         return int(direct)
     wf = str(finding.get("workflow_file") or "")
@@ -15534,19 +15549,53 @@ def _minute_budget_samples(finding: dict[str, Any], doc: dict[str, Any]) -> int 
     return max(values) if values else None
 
 
+def _minute_budget_job_labels(finding: dict[str, Any], doc: dict[str, Any]) -> set[str]:
+    """Runner labels the measured cost spine records for a finding's jobs."""
+    wf = str(finding.get("workflow_file") or "")
+    jobs = {str(v) for v in _as_list(finding.get("affected_jobs"))}
+    labels: set[str] = set()
+    for row in _as_list(_as_dict(doc.get("runner_minute_spine")).get("rows")):
+        if not isinstance(row, dict) or str(row.get("workflow_file") or "") != wf:
+            continue
+        name = str(row.get("job_name") or "")
+        if name in jobs or any(name.startswith(job + " (") for job in jobs):
+            label = str(row.get("runner_label") or "").strip()
+            if label:
+                labels.add(label)
+    return labels
+
+
 def _minute_budget_queued_pool(finding: dict[str, Any], doc: dict[str, Any]) -> bool:
-    """Fail closed when the proposed extra work lands on an already queued pool."""
+    """Fail closed when the proposed extra work lands on an already queued pool.
+
+    A pool is a runner label, so OPT43/OPT97 queue evidence in another workflow
+    still holds a finding whose jobs run on that label. A finding whose label is
+    unknown while any pool queues, or that shares a workflow with queue evidence
+    whose label is unknown, is held too."""
     if str(finding.get("pattern") or "") == "OPT97":
         return True
     wf = str(finding.get("workflow_file") or "")
     jobs = {str(v) for v in _as_list(finding.get("affected_jobs"))}
+    own_labels = _minute_budget_job_labels(finding, doc)
     for other in _as_list(doc.get("findings")):
         if not isinstance(other, dict) or str(other.get("pattern") or "") not in {
                 "OPT43", "OPT97"}:
             continue
-        if str(other.get("workflow_file") or "") != wf:
+        same_wf = str(other.get("workflow_file") or "") == wf
+        if same_wf and jobs & {str(v) for v in _as_list(other.get("affected_jobs"))}:
+            return True
+        queued = _minute_budget_job_labels(other, doc)
+        queued.update(str(v).strip() for v in _as_list(
+            _as_dict(other.get("single_slot_queue")).get("labels")) if str(v).strip())
+        slow = str(_as_dict(other.get("queue_label_comparison")).get(
+            "slow_label") or "").strip()
+        if slow:
+            queued.add(slow)
+        if not queued:
+            if same_wf:
+                return True
             continue
-        if jobs & {str(v) for v in _as_list(other.get("affected_jobs"))}:
+        if not own_labels or own_labels & queued:
             return True
     return False
 
@@ -15595,8 +15644,8 @@ def render(doc: dict[str, Any], *args, bmf: bool = False,
            minute_budget: float = _DEFAULT_MINUTE_BUDGET_PERCENT, **kwargs) -> str:
     """Include lifecycle context and apply the runner-minute recommendation policy."""
     global _BMF_ENABLED
-    if minute_budget < 0:
-        raise ValueError("minute_budget must be non-negative")
+    if not math.isfinite(minute_budget) or minute_budget < 0:
+        raise ValueError("minute_budget must be a finite non-negative percentage")
     admissions, budget_used, budget_limit, budget_total = (
         ([], 0.0, 0.0, None) if bmf
         else _minute_budget_admissions(doc, minute_budget))
@@ -15612,6 +15661,9 @@ def render(doc: dict[str, Any], *args, bmf: bool = False,
                 held += 1
             else:
                 finding = _bmf_default_view(source)
+                if id(source) in admitted_ids:
+                    finding = dict(finding)
+                    finding["_minute_budget_admitted"] = True
                 if _bmf_has_held_option(source):
                     held += 1
         findings.append(finding)
@@ -15656,12 +15708,12 @@ def render(doc: dict[str, Any], *args, bmf: bool = False,
                 "",
                 "## Runner-minute budget admissions",
                 "",
-                "| Finding | Added runner-minute cost | Sample |",
-                "| :--- | ---: | ---: |",
+                "| Finding | Added runner-minute cost |",
+                "| :--- | ---: |",
                 *[
                     f"| `{_flatten_cell(str(row['finding'].get('id') or row['finding'].get('pattern') or 'finding'))}` "
                     f"| +{_budget_number(row['cost'])} runner-min/mo "
-                    f"| {row['samples']} sampled runs |"
+                    f"(estimate from {row['samples']} sampled runs) |"
                     for row in admissions
                 ],
             ]
@@ -18784,8 +18836,8 @@ def main(argv: list[str] | None = None) -> int:
                          "monthly runner minutes in the default report (default: 5; "
                          "0 restores strict holdback).")
     args = ap.parse_args(argv)
-    if args.minute_budget < 0:
-        ap.error("--minute-budget must be non-negative")
+    if not math.isfinite(args.minute_budget) or args.minute_budget < 0:
+        ap.error("--minute-budget must be a finite non-negative percentage")
 
     def _split(spec: str, flag: str) -> tuple[str, str] | None:
         # A malformed spec (missing KEY=) silently producing an empty report is a

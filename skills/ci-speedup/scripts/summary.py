@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import shlex
 import sys
@@ -818,8 +819,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--minute-budget", type=float, default=5.0,
                     help="Added runner-minute budget percentage for the render command.")
     args = ap.parse_args(argv)
-    if args.minute_budget < 0:
-        ap.error("--minute-budget must be non-negative")
+    if not math.isfinite(args.minute_budget) or args.minute_budget < 0:
+        ap.error("--minute-budget must be a finite non-negative percentage")
     try:
         doc = json.loads(args.findings.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:

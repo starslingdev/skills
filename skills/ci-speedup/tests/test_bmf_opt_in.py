@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import sys
 import json
+import re
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
@@ -447,7 +448,8 @@ def test_default_budget_admits_only_the_more_efficient_finding(tmp_path):
     report = bp.render(doc)
 
     assert "minute-budget percent=5 used=30 limit=50 admitted=1" in report
-    assert "`efficient` | +30 runner-min/mo | 20 sampled runs" in report
+    assert ("`efficient` | +30 runner-min/mo (estimate from 20 sampled runs) |"
+            in report)
     assert "`less-efficient`" not in report.split("Runner-minute budget admissions", 1)[1]
     assert "enabled=false held=1" in report
     assert vr.check_bmf_runner_minute_filter(report, findings_path).ok is True
@@ -493,3 +495,110 @@ def test_verifier_rejects_a_forged_budget_total(tmp_path):
     assert vr.check_bmf_runner_minute_filter(report, findings_path).ok is True
     forged = report.replace("used=30 limit=50", "used=20 limit=50")
     assert vr.check_bmf_runner_minute_filter(forged, findings_path).ok is False
+
+
+def test_budget_sizes_an_opt21_edge_from_its_measured_extra_minutes(tmp_path):
+    # The issue's first case: a needs: edge whose dependency fails rarely. The
+    # collector sizes it in opt21_edge_sizing, not runner_minute_effect.
+    edge = {
+        "id": "edge",
+        "pattern": "OPT21",
+        "severity": "MEDIUM",
+        "title": "Unnecessary needs dependency",
+        "workflow_file": ".github/workflows/ci.yml",
+        "affected_jobs": ["test"],
+        "wall_clock_p50_s": 240.0,
+        "opt21_edge_sizing": {
+            "dependency": "lint", "dependent": "test",
+            "dependency_failed_runs": 1, "dependency_sampled_runs": 24,
+            "extra_runner_min_per_run": 0.5,
+        },
+    }
+    doc = _budget_doc([edge])
+    doc["per_workflow_monthly_volume"] = {".github/workflows/ci.yml": 40}
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+
+    report = bp.render(doc)
+
+    assert "minute-budget percent=5 used=20 limit=50 admitted=1" in report
+    assert ("| `edge` | +20 runner-min/mo (estimate from 24 sampled runs) |"
+            in report)
+    assert "enabled=false held=0" in report
+    assert vr.check_bmf_runner_minute_filter(report, findings_path).ok is True
+
+
+def _queued_pool_doc(candidate_label: str | None) -> dict:
+    candidate = _budget_finding("fanout", wall_s=300.0, monthly_cost=1.0)
+    candidate["affected_jobs"] = ["test"]
+    queue = {
+        "id": "pool", "pattern": "OPT97", "severity": "MEDIUM",
+        "title": "Queue Caused by a One-at-a-Time Resource",
+        "workflow_file": ".github/workflows/deploy.yml",
+        "affected_jobs": ["deploy"],
+        "wall_clock_p50_s": 0.0,
+        "single_slot_queue": {"labels": ["gpu-pool"]},
+    }
+    doc = _budget_doc([candidate, queue])
+    rows = doc["runner_minute_spine"]["rows"]
+    if candidate_label is None:
+        rows[0].pop("runner_label")
+    else:
+        rows[0]["runner_label"] = candidate_label
+    return doc
+
+
+def test_budget_holds_extra_work_on_a_pool_queued_by_another_workflow(tmp_path):
+    report = bp.render(_queued_pool_doc("gpu-pool"), minute_budget=1000)
+    assert "admitted=0" in report
+    unknown = bp.render(_queued_pool_doc(None), minute_budget=1000)
+    assert "admitted=0" in unknown
+    other_pool = _queued_pool_doc("ubuntu-latest")
+    findings_path = tmp_path / "findings.json"
+    findings_path.write_text(json.dumps(other_pool), encoding="utf-8")
+    elsewhere = bp.render(other_pool, minute_budget=1000)
+    assert "admitted=1" in elsewhere
+    assert vr.check_bmf_runner_minute_filter(elsewhere, findings_path).ok is True
+    for label in ("gpu-pool", None):
+        findings_path.write_text(json.dumps(_queued_pool_doc(label)), encoding="utf-8")
+        forged = elsewhere
+        assert vr.check_bmf_runner_minute_filter(forged, findings_path).ok is False
+
+
+def test_minute_budget_rejects_non_finite_percentages():
+    import pytest
+    doc = _budget_doc([_budget_finding("x", wall_s=60.0, monthly_cost=1.0)])
+    for value in (float("nan"), float("inf")):
+        with pytest.raises(ValueError):
+            bp.render(doc, minute_budget=value)
+        with pytest.raises(SystemExit):
+            bp.main(["--in", "unused.json", "--minute-budget", str(value)])
+
+
+def test_an_admitted_shard_card_states_its_cost_not_a_holdback():
+    shard = _budget_finding("shard", wall_s=200.0, monthly_cost=10.0,
+                            pattern="OPT24")
+    shard["title"] = "Test sharding"
+    shard["runner_minute_effect"].update(
+        {"runs_per_month": 100, "setup_floor_s": 6.0, "assumed_shards": 2})
+
+    report = bp.render(_budget_doc([shard]))
+
+    assert "admitted=1" in report
+    assert "so this report holds that option back" not in report
+    assert "Runner-minute effect: +10 runner-min/month added cost" in report
+
+
+def test_zero_budget_on_the_shipped_e2e_example_only_drops_the_budget_lines():
+    # End-to-end proof on a real findings document: with nothing admitted, the
+    # strict render must equal the default render minus exactly the budget
+    # marker and its one-line statement (byte for byte otherwise).
+    path = Path(__file__).resolve().parents[3] / "examples" / "microsoft-playwright" / "findings.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    default = bp.render(json.loads(json.dumps(doc)))
+    strict = bp.render(json.loads(json.dumps(doc)), minute_budget=0)
+    marker = re.search(r"\n<!-- ci-speedup:minute-budget [^\n]* admitted=0 -->", default)
+    summary_line = re.search(r"\n\nRunner-minute budget: [^\n]*measured runner-min/mo\)\.", default)
+    assert marker and summary_line
+    stripped = default.replace(marker.group(0), "", 1).replace(summary_line.group(0), "", 1)
+    assert strict == stripped
