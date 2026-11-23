@@ -842,6 +842,9 @@ class GhClient:
         self._had_successful_invoke = False
         self._consecutive_auth_failures = 0
         self._consecutive_plain_job_forbidden = 0
+        # Of those tentative plain 403s, how many were NOT already counted in
+        # `errors` (only `allow_missing` callers skip the count).
+        self._plain_job_forbidden_uncounted = 0
         self.auth_interrupted = False
         self.job_fetch_count = 0
         self.job_fetch_failed_count = 0
@@ -1470,6 +1473,7 @@ class GhClient:
                         self._had_successful_invoke = True
                         self._consecutive_auth_failures = 0
                         self._consecutive_plain_job_forbidden = 0
+                        self._plain_job_forbidden_uncounted = 0
                     return body
                 stderr = (r.stderr or "").strip()
                 try:
@@ -1505,22 +1509,28 @@ class GhClient:
                         self._consecutive_plain_job_forbidden += 1
                     else:
                         self._consecutive_plain_job_forbidden = 0
+                        self._plain_job_forbidden_uncounted = 0
                     plain_forbidden = self._consecutive_plain_job_forbidden
                     if plain_forbidden >= 3:
-                        # The first two were tentatively treated as optional.
-                        # Once the third proves an auth interruption, count
-                        # those missing job lists retroactively and preload the
-                        # existing auth breaker with the same evidence.
-                        if plain_forbidden == 3:
-                            self.errors += 2
+                        # The first two were tentatively treated as ordinary
+                        # 403s. Once the third proves an auth interruption,
+                        # count the ones an `allow_missing` caller left out of
+                        # `errors` (the paginated main-sample fetch already
+                        # counted its own), and preload the existing auth
+                        # breaker with the same evidence.
+                        self.errors += self._plain_job_forbidden_uncounted
+                        self._plain_job_forbidden_uncounted = 0
                         self._consecutive_auth_failures = max(
                             self._consecutive_auth_failures,
                             plain_forbidden - 1,
                         )
                         kind = "auth"
+                    elif self._had_successful_invoke and allow_missing:
+                        self._plain_job_forbidden_uncounted += 1
             else:
                 with self._lock:
                     self._consecutive_plain_job_forbidden = 0
+                    self._plain_job_forbidden_uncounted = 0
             if kind != "auth":
                 with self._lock:
                     self._consecutive_auth_failures = 0
