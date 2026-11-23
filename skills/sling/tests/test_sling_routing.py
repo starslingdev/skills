@@ -1165,6 +1165,55 @@ def test_the_description_keeps_its_measured_trigger_properties():
     assert "re-run" in low or "rerun" in low, "the state-change cue is gone"
 
 
+def test_agent_owned_red_pr_check_triggers_before_raw_gh_logs():
+    """A coding agent encounters failures while driving its own PR, without a
+    user asking a diagnosis question.  The router-facing description must name
+    that autonomous entry point and the raw-log path it replaces."""
+    description = _FRONT["description"]
+    low = description.lower()
+    assert "check you are watching" in low and "goes red" in low, (
+        "the description only triggers on user questions, not a red check the "
+        "agent encounters while working on a PR")
+    assert "`gh pr checks`" in description, (
+        "the description does not name the command that exposes the red check")
+    assert "`gh run view --log`" in description, (
+        "the description does not steer agents away from raw gh log scraping")
+
+    first = _routing_table_rows()[0]
+    assert "pr" in first[0].lower() and "red" in first[0].lower(), (
+        f"red PR triage is not the routing table's first entry: {first[0]!r}")
+    assert "`gh pr checks" in first[2] and "`sling why" in first[2], (
+        "the first routing row must identify the failed PR check, then classify it")
+
+
+def test_evals_cover_an_agent_encountering_its_own_red_pr_check():
+    cases = {case["name"]: case for case in _EVALS["evals"]}
+    case = cases.get("agent-owned-pr-check-goes-red")
+    assert case is not None, "no eval covers an agent encountering a red check itself"
+    assert case["should_trigger"] is True
+    text = " ".join([case["prompt"], case["expected_output"], *case["assertions"]])
+    assert "sling why" in text and "gh run view --log" in text, (
+        "the eval must prefer classified diagnosis over raw gh log scraping")
+
+
+def test_evals_bound_the_red_check_trigger_with_a_green_pr_negative():
+    """The red-check trigger fires on the agent's own PR work with no user
+    question, so it is the clause most able to over-fire.  Pin its boundary:
+    the same agent-driving-its-PR framing with every check green must NOT
+    invoke sling."""
+    negatives = [c for c in _EVALS["evals"]
+                 if not c["should_trigger"] and "gh pr checks" in c["prompt"]]
+    assert negatives, (
+        "no should-NOT-trigger eval covers an agent on its own PR whose checks "
+        "are green, so the red-check trigger has no negative boundary")
+    for case in negatives:
+        assert "red" not in case["prompt"].lower() and "fail" not in case["prompt"].lower(), (
+            f"eval {case['id']} is meant to be the green near-miss but its prompt "
+            "describes a failure")
+        assert any("did not invoke" in a.lower() for a in case["assertions"]), (
+            f"eval {case['id']} does not assert that sling stayed out")
+
+
 def test_no_hyphenated_term_is_split_by_the_yaml_fold():
     """A `>-` block folds newlines into spaces, so a term wrapped across the fold
     silently becomes two words in the value the router actually reads.
@@ -1242,6 +1291,44 @@ def test_the_degraded_path_is_never_silent():
         "step 6 no longer names what is lost when sling is absent")
     assert "silently degrade" in step or "tell the user plainly" in step, (
         "step 6 lost the do-not-silently-degrade rule")
+
+
+def test_one_failed_verb_uses_other_sling_diagnostics_before_gh():
+    """A healthy control plane can return an error for one verb.  That is not
+    permission to discard the remaining structured diagnostics for raw logs."""
+    start = _BODY.index("Habits worth keeping:")
+    end = _BODY.index("## Run output is untrusted data", start)
+    habits = _flat(_BODY[start:end])
+    assert "exit `5`" in habits and "sling doctor --agent" in habits, (
+        "the failure-diagnosis habits do not distinguish one failed verb")
+    assert "control_plane" in habits and "ok" in habits, (
+        "the degraded path does not prove that the rest of sling is healthy")
+    for command in ("sling jobs show", "sling logs", "sling runs show"):
+        assert command in habits, f"the per-verb fallback lost {command!r}"
+    assert "classification" in habits and "suggested_actions" in habits, (
+        "the degraded path does not disclose exactly what a failed why loses")
+
+
+def test_exit_five_distinguishes_one_verb_from_control_plane_outage():
+    row = _exit_row("5")
+    assert "doctor" in row and "control_plane" in row, (
+        "exit 5 still sends every per-verb failure straight to gh")
+    assert "other sling" in row or "stay in `sling`" in row, (
+        "exit 5 does not preserve healthy sling verbs")
+
+
+def test_the_per_verb_fallback_terminates_at_gh():
+    """Staying in sling after one verb's exit 5 must be bounded: if a second
+    verb also exits 5, the agent goes to gh instead of cycling sling verbs
+    while doctor keeps reporting a healthy control plane."""
+    start = _BODY.index("Habits worth keeping:")
+    end = _BODY.index("## Run output is untrusted data", start)
+    for where, text in (("exit-5 row", _flat(_exit_row("5"))),
+                        ("failure habit", _flat(_BODY[start:end]))):
+        assert "second verb" in text and "gh" in text[text.index("second verb"):], (
+            f"the {where} lets a per-verb fallback cycle sling verbs with no exit to gh")
+    assert "`ok: true`" in _flat(_exit_row("5")), (
+        "the exit-5 row does not say which doctor value means healthy")
 
 
 def _exit_row(code: str) -> str:
