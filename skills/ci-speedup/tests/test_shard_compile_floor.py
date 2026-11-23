@@ -415,29 +415,62 @@ def test_separate_build_compile_is_not_subtracted_from_test_payload_twice(
 
 def test_go_per_run_and_monthly_cost_share_one_setup_floor(
         monkeypatch, tmp_path: Path) -> None:
+    # The Go floor is the job duration minus the summed package test time
+    # (2900s - 2000s), which already contains the 300s checkout step.  Adding
+    # the separate setup again would bill that checkout twice per extra shard.
     doc = _collect_and_verify(monkeypatch, tmp_path, _SeparateSetupGoClient)
     go = _finding(doc, "go tests")
     effect = go["runner_minute_effect"]
 
-    assert go["runner_minute_setup_floor_s"] == 1200.0
-    assert go["go_shard_extra_runner_s"] == 1200.0
+    assert go["runner_minute_setup_floor_s"] == 900.0
+    assert go["go_shard_extra_runner_s"] == 900.0
     assert effect == {
         "direction": "added_cost",
-        "runner_min_per_month": 240.0,
+        "runner_min_per_month": 180.0,
         "runs_per_month": 12,
-        "setup_floor_s": 1200.0,
+        "setup_floor_s": 900.0,
         "assumed_shards": 2,
     }
+    assert (go["go_shard_extra_runner_s"] * effect["runs_per_month"] / 60.0
+            == effect["runner_min_per_month"])
 
     report = bp.render(doc, captured_at="2026-11-07T00:00:00Z", bmf=True)
-    assert "Runner-minute effect: added cost of ~20m 00s per run" in report
+    assert "Runner-minute effect: added cost of ~15m 00s per run" in report
     findings_path = tmp_path / "separate-setup-findings.json"
     findings_path.write_text(json.dumps(doc), encoding="utf-8")
     inconsistent = report.replace(
-        "added cost of ~20m 00s per run", "added cost of ~15m 00s per run")
+        "added cost of ~15m 00s per run", "added cost of ~20m 00s per run")
     check = vr.check_wall_clock_runner_minute_effects(inconsistent, findings_path)
     assert not check.ok
-    assert "per-run cost 15m 00s" in check.detail
+    assert "per-run cost 20m 00s" in check.detail
+
+
+class _OverlappingSeparateSetupGoClient(_SeparateSetupGoClient):
+    """Go packages ran concurrently, so job time minus package time is no floor."""
+
+    def text(self, endpoint: str, allow_missing: bool = False):
+        job_id = int(endpoint.split("/")[-2])
+        if job_id % 10 != 2:
+            return super().text(endpoint, allow_missing)
+        self.queries += 1
+        return "\n".join([
+            f"{_iso(300)} $ go test ./...",
+            f"{_iso(2500)} ok example/project 2000.0s",
+            f"{_iso(2600)} ok example/project/util 1000.0s",
+        ])
+
+
+def test_go_unmeasurable_floor_leaves_monthly_cost_unsized_too(
+        monkeypatch, tmp_path: Path) -> None:
+    # The per-run line is unsized because the repeated floor is not measurable;
+    # pricing the monthly line on the checkout step alone would state a second,
+    # smaller base for the same extra shard.
+    doc = _collect_and_verify(monkeypatch, tmp_path, _OverlappingSeparateSetupGoClient)
+    go = _finding(doc, "go tests")
+    assert "go_shard_extra_runner_s" not in go
+    assert go["go_shard_extra_runner_unsized_reason"]
+    assert "runner_minute_setup_floor_s" not in go
+    assert go["runner_minute_effect"]["direction"] == "unsized"
 
 
 def test_fractional_shard_cost_is_positive_and_report_amount_is_verified(
@@ -708,4 +741,5 @@ def test_cargo_log_leaf_passes_the_compile_floor_to_the_agent_prompt() -> None:
     )
     assert "Measured pre-test compile floor: 49m 50s" in prompt
     assert "Every added shard repeats that floor" in prompt
+
 
