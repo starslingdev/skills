@@ -7,9 +7,9 @@
     "report_must_contain": [],
     "report_must_not_contain": [],
     "rendered_pole_order": [
-      "test prod (6/10) / build",
-      "test turbopack production (7/7) / build",
-      "test cargo unit / build",
+      "test prod (8/10) / build",
+      "test turbopack production (2/7) / build",
+      "test unit windows (20) / build",
       "lint / build",
       "test prod (1/10, 18.3.1) / build"
     ],
