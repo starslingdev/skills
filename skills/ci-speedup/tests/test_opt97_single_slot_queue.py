@@ -420,6 +420,51 @@ def test_custom_runner_group_without_self_hosted_evidence_stays_with_opt43(
     assert cr._detect_opt43_queue_time(WF, sample, 0, True)
 
 
+def _group_runs(labels, names, groups='build-fleet'):
+    sample = runs()
+    for i, [job] in enumerate(sample):
+        job['labels'] = list(labels)
+        job['runner_group_name'] = groups(i) if callable(groups) else groups
+        job['runner_name'] = names(i) if callable(names) else names
+    return sample
+
+
+# An organization names its larger GitHub-hosted runners freely, so a runner
+# name without GitHub's prefix is not self-hosted evidence on its own.
+@pytest.mark.parametrize('labels,names,groups', [
+    (['linux-xl'], 'linux-xl', 'build-fleet'),
+    (['linux-xl'], lambda i: f'linux-xl_{i:012x}', 'build-fleet'),
+    (['linux-xl'], lambda i: f'linux-xl_{i:012x}', 'Default'),
+    (['linux', 'x64'], lambda i: f'runner-{1000 + i}', 'build-fleet'),
+    (['linux'], 'build-fleet', 'build-fleet'),
+    (['ubuntu-24.04'], 'ci-worker-01', 'build-fleet'),
+    (['macos-14-xlarge'], 'ci-worker-01', 'build-fleet'),
+    (['linux'], 'ci-worker-01',
+     lambda i: 'build-fleet' if i % 2 else 'GitHub Actions'),
+    (['linux'], lambda i: 'ci-worker-01' if i % 2 else f'GitHub Actions {1000 + i}',
+     'build-fleet'),
+], ids=['larger-plain-name', 'larger-instance-names', 'larger-default-group',
+        'unique-names', 'name-is-group', 'hosted-image-label', 'hosted-macos-size',
+        'mixed-groups', 'mixed-names'])
+def test_custom_group_needs_a_reused_persistent_runner(labels, names, groups):
+    doc = {'jobs': {'test': {'runs-on': labels, 'steps': [{'run': 'make test'}]}}}
+    sample = _group_runs(labels, names, groups)
+    competition = rivals_from({WF: sample}, {WF: doc})
+
+    assert detect(sample, doc, competition=competition) == []
+    assert competition.calls == []
+
+
+def test_custom_group_with_reused_runner_pool_can_fire():
+    doc = {'jobs': {'test': {'runs-on': ['linux', 'x64'],
+                             'steps': [{'run': 'make test'}]}}}
+    sample = _group_runs(['linux', 'x64'], lambda i: f'ci-worker-0{i % 2}')
+
+    [finding] = detect(sample, doc)
+
+    assert 'persistent runner `ci-worker-00`' in finding['evidence']
+
+
 @pytest.mark.parametrize('hint', ['group', 'device'])
 def test_hosted_pool_with_static_hint_can_fire(hint):
     doc = copy.deepcopy(HOSTED_DOC)
