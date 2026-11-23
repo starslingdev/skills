@@ -239,6 +239,7 @@ def test_adding_a_pattern_rewrites_the_plain_pattern_count_claim(tmp_path):
     root = _repo_copy(tmp_path)
     skill = root / "skills" / "ci-speedup"
     patterns = skill / "references" / "patterns"
+    grown = len(bc.scan.load_catalog(patterns)) + 1
     source = next(patterns.glob("opt33-*.md"))
     added = source.read_text(encoding="utf-8")
     (patterns / "opt999-catalog-count-probe.md").write_text(
@@ -260,8 +261,10 @@ def test_adding_a_pattern_rewrites_the_plain_pattern_count_claim(tmp_path):
     result = subprocess.run([sys.executable, str(script)], capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
     skill_doc = skill / "SKILL.md"
-    assert re.search(r"\(110 patterns\s+in 14 categories", skill_doc.read_text(encoding="utf-8"))
-    _stale(skill_doc, "(110 patterns\nin", "(1 patterns\nin")
+    claim = re.compile(r"\((\d+) patterns(\s+in \d+ categories)")
+    text = skill_doc.read_text(encoding="utf-8")
+    assert [int(n) for n, _ in claim.findall(text)] == [grown]
+    skill_doc.write_text(claim.sub(r"(1 patterns\2", text, count=1), encoding="utf-8")
     check = _check(root)
     assert check.returncode == 1, check.stdout + check.stderr
     assert "SKILL.md" in check.stdout + check.stderr
