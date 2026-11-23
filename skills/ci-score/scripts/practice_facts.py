@@ -207,6 +207,30 @@ _TEST_CMD_RE = re.compile(
     r"|\bmake\s+(?:test|check)\b"
     r"|(?:\./)?\bgradlew?\b[^\n]{0,120}?\btest\b|\bmvn\b[^\n]{0,120}?\btest\b",
     re.IGNORECASE)
+# A repository script a workflow line INVOKES: `./path ...`, or
+# `bash|sh|zsh|dash [-flags] path ...` (relative path). The path must be
+# static (no `$`); the arguments after it may be anything, since the script
+# runs whatever they are. A path that is only mentioned (`echo ./ci.sh`) is
+# not at command position and does not match.
+_DIRECT_REPO_SCRIPT_RE = re.compile(
+    r"^\s*(?:(?:bash|sh|zsh|dash)\s+(?:-[A-Za-z]+\s+)*"
+    r"(?P<arg>(?:\./)?[A-Za-z0-9_.\-][A-Za-z0-9_.\-/]*)"
+    r"|(?P<path>\./[A-Za-z0-9_.\-/]+))(?=\s|$|[;&|<>])")
+# `npm|pnpm|bun run <name>` / `yarn [run] <name>` at command position: the
+# package.json script it names is read the same way as a script file.
+_PKG_SCRIPT_RE = re.compile(
+    r"^\s*(?:(?:npm|pnpm|bun)\s+run(?:-script)?|yarn(?:\s+run)?)\s+"
+    r"(?P<name>[A-Za-z0-9_:.\-]+)(?=\s|$|[;&|<>])")
+# Wrappers that run the command after them unchanged; peeled before matching
+# a test runner at command position inside a delegated script.
+_CMD_WRAPPER_RE = re.compile(
+    r"^(?:exec|time|command|env(?:\s+-\S+)*|sudo(?:\s+-\S+)*"
+    r"|xvfb-run(?:\s+-\S+)*|(?:uv|poetry|pipenv|pdm|hatch|rye)\s+run"
+    r"|bundle\s+exec|npx|(?:pnpm|yarn)\s+exec)\s+")
+_ENV_ASSIGN_RE = re.compile(r"^(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)+")
+_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)(?P<tag>[A-Za-z_][A-Za-z0-9_]*)\1")
+_SHELL_SHEBANG_RE = re.compile(
+    r"^#!\s*\S*?(?:/|\benv\s+)(?:ba|z|da|k)?sh\b")
 
 
 def _has_dep_manifest(root: Path) -> bool:
@@ -253,6 +277,158 @@ def _has_test_command(step_sources: list[tuple[str, list[dict]]]) -> bool:
             script = with_.get("script")
             if isinstance(script, str) and _TEST_CMD_RE.search(_SHELL_COMMENT_RE.sub("", script)):
                 return True
+    return False
+
+
+def _strip_heredocs(code: str) -> str:
+    """Drop heredoc bodies: their lines are data fed to a command, not
+    commands (`cat <<EOF` ... `EOF`)."""
+    out: list[str] = []
+    tag: str | None = None
+    for line in code.splitlines():
+        if tag is not None:
+            if line.strip() == tag:
+                tag = None
+            continue
+        out.append(line)
+        m = _HEREDOC_RE.search(line)
+        if m:
+            tag = m.group("tag")
+    return "\n".join(out)
+
+
+def _commands_have_test_runner(code: str) -> bool:
+    """A test runner at shell-COMMAND position (after peeling env assignments
+    and pass-through wrappers such as `uv run` / `bundle exec`), never in
+    prose, echo output or heredoc text."""
+    clean = _SHELL_COMMENT_RE.sub("", _strip_heredocs(code))
+    for command in re.split(r"(?:&&|\|\||[;\n|])", clean):
+        command = command.strip()
+        while True:
+            peeled = _CMD_WRAPPER_RE.sub("", _ENV_ASSIGN_RE.sub("", command), count=1)
+            if peeled == command:
+                break
+            command = peeled
+        m = _TEST_CMD_RE.match(command)
+        if m and (m.end() == len(command) or command[m.end()].isspace()):
+            return True
+    return False
+
+
+def _script_has_test_command(path: Path, code: str) -> bool:
+    """A delegated SHELL script runs a test runner. A script with a non-shell
+    shebang (python, node, ...) is not shell, so it is not read as shell —
+    withheld, never guessed."""
+    first = code.split("\n", 1)[0]
+    if first.startswith("#!"):
+        if not _SHELL_SHEBANG_RE.match(first):
+            return False
+    elif path.suffix not in ("", ".sh", ".bash"):
+        return False
+    return _commands_have_test_runner(code)
+
+
+def _delegated_run_sources(
+        parsed: list[tuple[str, dict, str]], root: Path,
+) -> list[tuple[object, list[dict]]]:
+    """(default working-directory, steps) for every workflow job and local
+    composite action — the job's `defaults.run.working-directory` (else the
+    workflow's) applies to a step that names none."""
+    out: list[tuple[object, list[dict]]] = []
+
+    def run_wd(node: object) -> object:
+        if not isinstance(node, dict):
+            return None
+        defaults = node.get("defaults")
+        run = defaults.get("run") if isinstance(defaults, dict) else None
+        return run.get("working-directory") if isinstance(run, dict) else None
+
+    for rel, doc, _raw in parsed:
+        wf_wd = run_wd(doc)
+        for jid, job in _wf_jobs(doc).items():
+            job_wd = run_wd(job)
+            out.append((job_wd if job_wd is not None else wf_wd,
+                        _walk_steps(job.get("steps"), None, rel, job=jid)))
+    for rel, doc in _composite_action_docs(root, parsed=parsed):
+        if isinstance(doc.get("runs"), dict):
+            out.append((None, _composite_steps(doc, None, rel)))
+    return out
+
+
+def _inside(root_real: Path, base: Path, relative: str) -> Path | None:
+    """`base/relative` resolved, when it is a regular file inside the
+    checkout of a readable size; None (withheld) otherwise."""
+    rel = Path(relative)
+    if rel.is_absolute() or ".." in rel.parts:
+        return None
+    try:
+        candidate = (base / rel).resolve()
+        candidate.relative_to(root_real)
+        if not candidate.is_file() or candidate.stat().st_size > _SCRIPT_MAX_BYTES:
+            return None
+    except (OSError, ValueError):
+        return None
+    return candidate
+
+
+def _has_delegated_test_command(
+        root: Path, parsed: list[tuple[str, dict, str]]) -> bool:
+    """A workflow step that INVOKES a repository script (a `./` or `bash`/`sh`
+    path, or a package.json script via `npm run` / `yarn` / `pnpm run` /
+    `bun run`) whose commands include an unambiguous test runner.
+
+    Repository content is untrusted data used only for this boolean decision.
+    The script is resolved from the step's working directory; a dynamic path
+    or working directory, a script outside the checkout, a missing, oversized
+    or unreadable file, and a non-shell script are all withheld (the refusal
+    stands), never guessed about. Only the TEST signal is read from scripts:
+    build or install words in a script do not count, so an automation script
+    that installs its own tooling stays automation."""
+    try:
+        root_real = root.resolve()
+    except OSError:
+        return False
+    for default_wd, steps in _delegated_run_sources(parsed, root):
+        for step in steps:
+            run = step.get("run")
+            if not isinstance(run, str):
+                continue
+            wd = step.get("working-directory", default_wd)
+            if wd is None:
+                wd = "."
+            if not isinstance(wd, str) or "$" in wd:
+                continue
+            if Path(wd).is_absolute() or ".." in Path(wd).parts:
+                continue
+            base = root_real / wd
+            for line in _strip_heredocs(run).splitlines():
+                line = _SHELL_COMMENT_RE.sub("", line)
+                match = _DIRECT_REPO_SCRIPT_RE.match(line)
+                if match:
+                    candidate = _inside(
+                        root_real, base, match.group("arg") or match.group("path"))
+                    if candidate is None:
+                        continue
+                    try:
+                        code = candidate.read_text(encoding="utf-8", errors="replace")
+                    except (OSError, ValueError):
+                        continue
+                    if _script_has_test_command(candidate, code):
+                        return True
+                    continue
+                match = _PKG_SCRIPT_RE.match(line)
+                if match:
+                    manifest = _inside(root_real, base, "package.json")
+                    if manifest is None:
+                        continue
+                    try:
+                        scripts = json.loads(manifest.read_text(
+                            encoding="utf-8", errors="replace")).get("scripts")
+                    except (OSError, ValueError, AttributeError):
+                        continue
+                    body = scripts.get(match.group("name")) if isinstance(scripts, dict) else None
+                    if isinstance(body, str) and _commands_have_test_runner(body):
+                        return True
     return False
 
 
@@ -334,6 +510,8 @@ def _automation_only(parsed: list[tuple[str, dict, str]], root: Path) -> bool:
     step_sources = _step_sources(parsed, _composite_action_docs(root, parsed=parsed))
     if _has_test_command(step_sources):
         return False  # signal 1 (test-runner command)
+    if _has_delegated_test_command(root, parsed):
+        return False  # signal 1 (test runner in a directly invoked repo script)
     if _has_build_signal(parsed, root, step_sources):
         return False  # signal 2
     if _has_install_command(step_sources):
