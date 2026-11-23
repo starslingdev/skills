@@ -16335,20 +16335,64 @@ def check_cache_sizing_guards(report: str, findings_path: Path | None) -> Check:
 # silently no-op) — this class reads that single definition.
 
 
+def _vr_finish_times(spans: dict[str, float],
+                     offsets: "dict[str, float] | None") -> dict[str, float]:
+    """Verbatim mirror of `collect_runs._finish_times`: capped span + start offset relative to
+    the earliest start among `spans`' positive-span checks; no offset means 0; 0.1s-rounded."""
+    offs = offsets or {}
+    timed = [offs[c] for c, v in spans.items() if c in offs and v > 0]
+    base = min(timed, default=0.0)
+    return {c: round(v + (offs[c] - base if c in offs and v > 0 else 0.0), 1)
+            for c, v in spans.items()}
+
+
+def _vr_offsets(raw: object) -> dict[str, float]:
+    """One stamped `{check: start_offset_s}` dict, keeping only finite non-negative numbers."""
+    if not isinstance(raw, dict):
+        return {}
+    return {str(k): float(v) for k, v in raw.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+            and math.isfinite(v) and v >= 0}
+
+
+def _populations_offsets_per_pr(cp: dict) -> list[dict[str, float]]:
+    """`population_start_offsets_s`, index-aligned with `_populations_per_pr(cp)` (same skip
+    rule). Empty dicts (span-only) when the collector stamped none or the list is misaligned."""
+    pops = _as_list(cp.get("populations"))
+    raw = _as_list(cp.get("population_start_offsets_s"))
+    aligned = len(raw) == len(pops)
+    out: list[dict[str, float]] = []
+    for idx, entry in enumerate(pops):
+        try:
+            _share, cks = entry
+            pos = [nm for nm, p in cks if float(p) > 0]
+        except (TypeError, ValueError):
+            continue
+        if pos:
+            out.append(_vr_offsets(raw[idx]) if aligned else {})
+    return out
+
+
 def _vr_pole_frequencies(per_pr: list[list[tuple[str, float]]],
-                         candidates: "set[str] | None" = None) -> dict[str, int]:
-    """How many sampled PRs each check is the ACTUAL critical path (slowest) on, re-derived from
-    `populations` (`per_pr` is already slowest-first per PR). The honest "is it the merge gate?"
-    signal — the exact mirror of `collect_runs._pole_frequencies`: restricted to `candidates` (the
-    ranked check set the engine argmaxes over) so verifier and engine argmax the SAME set, and
-    TIES credit every co-slowest check (not just `pr[0]`) so a co-equal gate isn't starved of
-    credit. `populations` magnitudes are already job-p50-capped, matching the engine's capped
-    ranking basis — so the two never disagree on which check is the per-PR pole."""
+                         candidates: "set[str] | None" = None,
+                         offsets: "list[dict[str, float]] | None" = None) -> dict[str, int]:
+    """How many sampled PRs each check is the ACTUAL critical path on — the check that FINISHES
+    LAST (start offset + capped span) — re-derived from `populations` plus the index-aligned
+    `offsets` (`population_start_offsets_s`). The honest "is it the merge gate?" signal — the
+    exact mirror of `collect_runs._pole_frequencies`: restricted to `candidates` (the ranked check
+    set the engine argmaxes over) so verifier and engine argmax the SAME set, offsets rebased on
+    the earliest candidate start, a check with no start at offset 0, and TIES credit every
+    co-last check (not just `pr[0]`) so a co-equal gate isn't starved of credit. `populations`
+    magnitudes are already job-p50-capped, matching the engine's capped basis — so the two never
+    disagree on which check is the per-PR pole. `offsets=None` is the span-only rule."""
     freq: dict[str, int] = {}
-    for pr in per_pr:
+    for idx, pr in enumerate(per_pr):
         scoped = [(nm, d) for nm, d in pr if candidates is None or nm in candidates]
         if not scoped:
             continue
+        if offsets is not None and idx < len(offsets):
+            fin = _vr_finish_times(dict(scoped), offsets[idx])
+            scoped = [(nm, fin[nm]) for nm, _d in scoped]
         mx = max(d for _, d in scoped)
         for nm, d in scoped:
             if d == mx:
@@ -16383,7 +16427,10 @@ def _vr_chain_fact_poles(cp: dict, candidates: "set[str] | None"
     path is at least as long as any one of its members, so it bounds every NON-chain check's
     capped span from above. When the slowest chain member (rounded to 0.1s, the engine's
     `_pole_frequencies` basis) strictly exceeds `runner_up_s`, it is the PR's pole on the same
-    caps the engine ranks with; ties among members credit each, as the engine does. Otherwise the
+    caps the engine ranks with; ties among members credit each, as the engine does. With stamped
+    `start_offsets_s` the same bound runs on FINISH times (the engine's basis): members add their
+    rebased offset, and the non-member bound becomes `runner_up_s` + the latest non-member
+    offset. Otherwise the
     pole may be a non-chain check and the PR is counted undetermined, so callers get a bound
     (lower .. lower + undetermined), never a guess."""
     lower: dict[str, int] = {}
@@ -16405,8 +16452,16 @@ def _vr_chain_fact_poles(cp: dict, candidates: "set[str] | None"
         scoped = {str(k): round(float(v), 1) for k, v in spans.items()
                   if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
                   and (candidates is None or str(k) in candidates)}
+        # Finish-time basis: a member's finish = its rebased start offset + its span (exact);
+        # a non-member's span is <= runner_up_s, so its finish is <= runner_up_s + its offset.
+        offs = {k: v for k, v in _vr_offsets(e.get("start_offsets_s")).items()
+                if candidates is None or k in candidates}
+        base = min(offs.values(), default=0.0)
+        rel = {k: v - base for k, v in offs.items()}
+        scoped = {k: round(v + rel.get(k, 0.0), 1) for k, v in scoped.items()}
+        others = max((v for k, v in rel.items() if k not in spans), default=0.0)
         top = max(scoped.values(), default=0.0)
-        if not scoped or top <= round(float(ru), 1):
+        if not scoped or top <= round(float(ru) + others, 1):
             undetermined += 1
             continue
         for k, v in scoped.items():
@@ -16463,7 +16518,8 @@ def check_headline_pole_actually_gates(report: str, findings_path: Path | None) 
     # bimodal-only, so reading it alone skipped this check on most fully sampled runs (bug 4).
     per_pr = _populations_per_pr(cp)
     if len(per_pr) >= _VR_RARE_PRESENCE_MIN_PR:
-        freq, und, n_pr, basis = _vr_pole_frequencies(per_pr, ranked or None), 0, len(per_pr), \
+        freq, und, n_pr, basis = _vr_pole_frequencies(
+            per_pr, ranked or None, _populations_offsets_per_pr(cp)), 0, len(per_pr), \
             "populations"
     else:
         freq, und, n_pr = _vr_chain_fact_poles(cp, ranked or None)

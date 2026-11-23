@@ -5282,6 +5282,94 @@ def test_vr_pole_frequencies_matches_engine():
     assert vr._vr_pole_frequencies(capped_pops, {"light", "heavy"}) == {"heavy": 6}
 
 
+# A made-up workflow: `unit` (12 min) and a parallel `lint` (2 min) start together; a 20 s
+# `merge-reports` job `needs: unit`, so it starts when `unit` ends and FINISHES LAST.
+_FINISH_SPANS = {"unit": 720.0, "merge-reports": 20.0, "lint": 120.0}
+_FINISH_INTERVALS = {
+    "unit": ("2026-01-05T10:00:00Z", "2026-01-05T10:12:00Z"),
+    "merge-reports": ("2026-01-05T10:12:00Z", "2026-01-05T10:12:20Z"),
+    "lint": ("2026-01-05T10:00:00Z", "2026-01-05T10:02:00Z"),
+}
+
+
+def test_pole_frequencies_credits_the_check_that_finishes_last():
+    """The pole is the check a PR waits on: the one that FINISHES last, not the one with the
+    longest span. A short job that `needs:` a long one starts after it and ends last, so it is
+    credited; the long job it waited on is not. Its own span stays p50-capped, but the time it
+    spent waiting on its upstream job counts."""
+    shas = [f"sha{i}" for i in range(6)]
+    per_sha = [dict(_FINISH_SPANS) for _ in shas]
+    offsets = cr._pr_start_offsets(shas, {s: dict(_FINISH_INTERVALS) for s in shas})
+    assert offsets[0] == {"unit": 0.0, "merge-reports": 720.0, "lint": 0.0}
+    caps = dict(_FINISH_SPANS)
+    freq = cr._pole_frequencies(per_sha, set(_FINISH_SPANS), caps, start_offsets=offsets)
+    assert freq["merge-reports"] == 6
+    assert freq["unit"] == 0 and freq["lint"] == 0
+    # Missing start timestamps fall back to offset 0 for that check (the old span-only rule).
+    assert cr._pole_frequencies(per_sha, set(_FINISH_SPANS), caps)["unit"] == 6
+    # The span cap still applies to a check's OWN span: an inflated merge-reports span is clamped
+    # to its p50 before its start offset is added (720 + 20 = 740 still finishes last).
+    inflated = [dict(m, **{"merge-reports": 5000.0}) for m in per_sha]
+    eng = cr._pole_frequencies(inflated, set(_FINISH_SPANS), caps, start_offsets=offsets)
+    assert eng["merge-reports"] == 6
+    # TIES on finish time credit every co-last check.
+    tied_off = [{"unit": 0.0, "merge-reports": 700.0, "lint": 0.0}] * 6
+    eng_t = cr._pole_frequencies(per_sha, set(_FINISH_SPANS), caps, start_offsets=tied_off)
+    assert eng_t["unit"] == 6 and eng_t["merge-reports"] == 6
+
+
+def test_vr_pole_frequencies_matches_engine_on_finish_time():
+    """The verifier re-derives the finish-time pole from `populations` plus the stamped per-PR
+    start offsets and must agree with the engine, including candidate restriction (the earliest
+    start is taken over the candidate checks only) and a check with no start timestamp."""
+    vr = _load_vr_module()
+    shas = [f"sha{i}" for i in range(8)]
+    intervals = {s: dict(_FINISH_INTERVALS) for s in shas}
+    # Two PRs carry no start for merge-reports: it falls back to offset 0 there.
+    for s in shas[:2]:
+        intervals[s].pop("merge-reports")
+    # Two more PRs where `unit` self-skips to 30 s, so the gate is bimodal and populations stamp.
+    shas += ["x1", "x2"]
+    per_sha = [dict(_FINISH_SPANS) for _ in shas[:8]] + [{"unit": 30.0, "lint": 120.0}] * 2
+    caps = dict(_FINISH_SPANS)
+    offsets = cr._pr_start_offsets(shas, intervals)
+    pop_offsets: list = []
+    pops = cr._segment_pr_populations(
+        per_sha, dict(_FINISH_SPANS), caps, {},
+        start_offsets=offsets, population_offsets_out=pop_offsets)
+    assert len(pops) == 10 and len(pop_offsets) == len(pops)
+    per_pr = [list(checks) for _share, checks in pops]
+    for cands in (set(_FINISH_SPANS), {"merge-reports", "lint"}):
+        eng = cr._pole_frequencies(per_sha, cands, caps, start_offsets=offsets)
+        ver = vr._vr_pole_frequencies(per_pr, cands, pop_offsets)
+        for k in cands:
+            assert ver.get(k, 0) == eng.get(k, 0), (cands, k, ver.get(k, 0), eng.get(k, 0))
+    eng = cr._pole_frequencies(per_sha, set(_FINISH_SPANS), caps, start_offsets=offsets)
+    # merge-reports finishes last on the 6 PRs with its start; on the 2 without one it falls
+    # back to offset 0 (unit wins there); on the 2 short-unit PRs lint is the pole.
+    assert eng == {"merge-reports": 6, "unit": 2, "lint": 2}
+
+
+def test_vr_headline_gate_accepts_a_last_finishing_headline(tmp_path):
+    """End to end through the verifier check: a headline that finishes last on every PR is the
+    real gate, even though a longer job it `needs:` ran on the same PRs."""
+    vr = _load_vr_module()
+    n = 8
+    findings = {"required_checks": [], "pr_critical_path": {
+        "sampled_pr_count": n, "critical_path_check": "merge-reports",
+        "check_present_n_pr": n,
+        "checks": [{"name": k, "p50_s": v} for k, v in _FINISH_SPANS.items()],
+        "populations_n": n,
+        "populations": [[round(1 / n, 4), sorted(([k, v] for k, v in _FINISH_SPANS.items()),
+                                                  key=lambda kv: -kv[1])]] * n,
+        "population_start_offsets_s": [{"unit": 0.0, "merge-reports": 720.0, "lint": 0.0}] * n,
+    }}
+    path = tmp_path / "findings.json"
+    path.write_text(json.dumps(findings), encoding="utf-8")
+    res = vr.check_headline_pole_actually_gates("", path)
+    assert res.ok and not res.skipped, res.detail
+
+
 def _populations_from_maps(per_sha):
     """Per-PR {check: dur} maps → the slowest-first `populations` shape the verifier reads."""
     return [sorted(((k, v) for k, v in m.items()), key=lambda kv: -kv[1]) for m in per_sha]

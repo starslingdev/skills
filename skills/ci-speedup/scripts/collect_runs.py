@@ -2554,9 +2554,14 @@ def _stamp_chain_facts(
         intervals = {n: iv for n, iv in (sha_intervals.get(sha) or {}).items()
                      if n in spine_checks}
         ms = _pr_makespan(intervals, caps)
+        # Start offsets of this PR's positive-span spine checks, so `verify_report` can pin the
+        # finish-time pole `_pole_frequencies` credits (a check with no start is left out).
+        offs = _pr_start_offsets([sha], {sha: intervals})[0]
+        start_offsets = {n: o for n, o in offs.items() if (scoped.get(n) or 0) > 0}
         out.append({
             "sha": sha,
             **cf,
+            "start_offsets_s": start_offsets,
             "makespan_s": ms,
             # The basis describes a measurement — never stamped for one that
             # doesn't exist (makespan None when no interval survived).
@@ -2824,30 +2829,68 @@ def _partition_fileless_checks(
     return groundable, fileless
 
 
+def _pr_start_offsets(repr_shas: list[str],
+                      sha_intervals: "dict[str, dict[str, tuple[str, str]]]",
+                      ) -> list[dict[str, float]]:
+    """Per sampled PR (index-aligned with `repr_shas`), each check's START OFFSET in seconds:
+    its interval's start minus the earliest parseable start on that PR, rounded to 0.1s. Read
+    from the latest-attempt intervals already stashed beside the per-PR check maps (no extra gh
+    call). A check with no parseable start is simply absent, and `_finish_times` treats it as
+    starting with the PR's first check (offset 0, the pre-finish-time rule)."""
+    out: list[dict[str, float]] = []
+    for sha in repr_shas:
+        starts: dict[str, float] = {}
+        for name, iv in (sha_intervals.get(sha) or {}).items():
+            a = _parse_dt(iv[0] if iv else None)
+            if a is not None:
+                starts[name] = a.timestamp()
+        first = min(starts.values(), default=0.0)
+        out.append({n: round(s - first, 1) for n, s in starts.items()})
+    return out
+
+
+def _finish_times(spans: dict[str, float],
+                  offsets: "dict[str, float] | None") -> dict[str, float]:
+    """Each check's effective FINISH on one PR: its (already capped, 0.1s-rounded) span plus its
+    start offset relative to the earliest start among the checks in `spans` that carry one. Only
+    positive spans take an offset: a skipped or zero-length job can carry a late timestamp but is
+    never the work a PR waits on. No offset (no start timestamp) means 0, today's span-only
+    rule. Rounded to 0.1s; mirrored verbatim by `verify_report._vr_finish_times`."""
+    offs = offsets or {}
+    timed = [offs[c] for c, v in spans.items() if c in offs and v > 0]
+    base = min(timed, default=0.0)
+    return {c: round(v + (offs[c] - base if c in offs and v > 0 else 0.0), 1)
+            for c, v in spans.items()}
+
+
 def _pole_frequencies(per_sha_checks: list[dict[str, float]],
                       candidates: "set[str] | frozenset[str]",
-                      caps: dict[str, float] | None = None) -> dict[str, int]:
+                      caps: dict[str, float] | None = None,
+                      start_offsets: "list[dict[str, float]] | None" = None) -> dict[str, int]:
     """Per candidate check, on how many sampled PRs it is the ACTUAL critical path — i.e. the
-    SLOWEST candidate check that PR ran (its concurrent checks run in parallel, so the slowest
-    is the one the developer waits on). This is the honest "is it the merge gate?" signal behind
-    the recurrence floor: a check that is the slowest on many PRs genuinely gates; one that is
-    NEVER the slowest (however often it runs) is not the gate. Computed from the per-PR check
-    maps already in hand (no extra gh call).
+    candidate check that FINISHES LAST on that PR, the one the developer waits on. Checks do not
+    all run in parallel: a job that `needs:` another starts only when it ends, so a 20s
+    merge-results job behind a 12-minute test job finishes last and is what the PR waits on,
+    though its own span is tiny. This is the honest "is it the merge gate?" signal behind the
+    recurrence floor: a check that finishes last on many PRs genuinely gates; one that never
+    does (however long or often it runs) is not the gate. Computed from the per-PR check maps
+    and `start_offsets` (`_pr_start_offsets`, index-aligned) already in hand (no extra gh call).
 
-    Each per-PR span is CAPPED at `caps` (the job-p50 bound from `_pole_caps`) before the argmax
-    — the SAME de-inflation `_segment_pr_populations` applies to build `populations`. Without it
-    the ranker would argmax on raw check-run spans (inflatable by queue / re-run time), so a
-    queue-spiked light check could out-rank a real gate AND the headline could disagree with the
-    `populations` `verify_report.check_headline_pole_actually_gates` re-derives from. `caps=None`
-    (tests / legacy) means no capping.
+    A check's effective finish = its start offset (relative to the earliest start among that
+    PR's candidate checks) + its OWN span CAPPED at `caps` (the job-p50 bound from `_pole_caps`)
+    — the SAME de-inflation `_segment_pr_populations` applies to build `populations`. The cap
+    strips queue / re-run inflation of a check's own span, while time spent waiting on upstream
+    `needs:` jobs is kept in the offset. A check with no start timestamp takes offset 0 (the
+    span-only rule); `start_offsets=None` (tests / legacy) means span-only for every check, and
+    `caps=None` means no capping.
 
-    TIES credit EVERY co-slowest check on the PR (not just the first): two suites with identical
-    (capped) durations both genuinely gate that PR, so both earn the recurrence credit —
+    TIES credit EVERY co-last check on the PR (not just the first): two suites finishing at the
+    same (0.1s-rounded) moment both genuinely gate that PR, so both earn the recurrence credit —
     otherwise insertion order would starve one co-equal gate of all credit and wrongly demote it.
     The sum can therefore exceed the PR count (it is a per-check gate rate, not a partition). Kept
     behaviour-coupled to `verify_report._vr_pole_frequencies` by a self-test."""
     freq: dict[str, int] = {c: 0 for c in candidates}
-    for m in per_sha_checks:
+    for idx, m in enumerate(per_sha_checks):
         scoped: dict[str, float] = {}
         for c, v in m.items():
             # The caller already removed proven bookkeeping. Short required or
@@ -2860,6 +2903,8 @@ def _pole_frequencies(per_sha_checks: list[dict[str, float]],
                 scoped[c] = round(min(v, caps[c]) if caps and c in caps else v, 1)
         if not scoped:
             continue
+        if start_offsets is not None and idx < len(start_offsets):
+            scoped = _finish_times(scoped, start_offsets[idx])
         mx = max(scoped.values())
         for c, v in scoped.items():
             if v == mx:
@@ -2873,9 +2918,10 @@ def _rank_spine_present_first(
     req_names: "frozenset[str] | set[str]",
     caps: dict[str, float] | None = None,
     confirmed_gate_checks: "frozenset[str] | set[str] | None" = None,
+    start_offsets: "list[dict[str, float]] | None" = None,
 ) -> tuple[tuple[tuple[str, float], ...], dict[str, int], int, dict[str, int]]:
-    """Order the merge-wait spine so checks that ACTUALLY gate the merge — the slowest job a PR
-    waits on, on at least `_POLE_RECUR_FLOOR` sampled PRs — rank ABOVE one-path outliers, each
+    """Order the merge-wait spine so checks that ACTUALLY gate the merge — the job a PR
+    waits on (finishes last, `_pole_frequencies`), on at least `_POLE_RECUR_FLOOR` sampled PRs — rank ABOVE one-path outliers, each
     tier by p50 desc, so the headline pole is a genuine recurring gate, not a lightweight
     always-present check nor a single-PR giant. A required check gates by definition and is
     EXEMPT (never demoted). INERT (plain p50 order) below `_RARE_PRESENCE_MIN_PR` PRs, where the
@@ -2897,12 +2943,12 @@ def _rank_spine_present_first(
     # reachability was unreadable and preserves the historical basis exactly.
     gate_checks = (all_checks if confirmed_gate_checks is None
                    else all_checks & set(confirmed_gate_checks))
-    gate_freq = _pole_frequencies(per_sha_checks, gate_checks, caps)
+    gate_freq = _pole_frequencies(per_sha_checks, gate_checks, caps, start_offsets)
     pole_freq = {c: gate_freq.get(c, 0) for c in all_checks}
     tier_ok = n_pr >= _RARE_PRESENCE_MIN_PR
 
     def is_rare(c: str) -> bool:
-        # Rare == not a recurring actual gate: the slowest job on FEWER than the floor of sampled
+        # Rare == not a recurring actual gate: the last-finishing job on FEWER than the floor of sampled
         # PRs. Required checks gate by definition (exempt). Below the min-sample floor the
         # frequency is noise, so demote nothing (plain p50 order).
         if confirmed_gate_checks is not None and c not in confirmed_gate_checks:
@@ -5199,6 +5245,8 @@ def _segment_pr_populations(
     *,
     per_sha_check_runs_complete: list[bool] | None = None,
     population_completeness_out: list[bool] | None = None,
+    start_offsets: "list[dict[str, float]] | None" = None,
+    population_offsets_out: "list[dict[str, float]] | None" = None,
 ) -> list[PrPopulation]:
     """Return ONE population per sampled PR THAT RAN >=1 tracked check —
     (1/m, [(check, dur), ...]) for the checks that ran on that PR, where m is
@@ -5238,7 +5286,12 @@ def _segment_pr_populations(
     slow mode survives and can win its populations, while queue inflation above the
     slow mode is still clamped. Returns [] when too few PRs to form an expected
     value, or when no check is bimodal (the single aggregate path gives the same
-    answer)."""
+    answer).
+
+    `population_offsets_out`, when given, receives one dict per EMITTED population
+    (index-aligned): each of its checks' start offsets from `start_offsets`
+    (`_pr_start_offsets`), so `verify_report` can re-derive the same finish-time
+    pole `_pole_frequencies` credits. A check with no start is left out (offset 0)."""
     if len(per_sha_checks) < 6 or not pr_check_p50:
         return []
     job_bimodal_all = job_bimodal_all or {}
@@ -5254,6 +5307,7 @@ def _segment_pr_populations(
     # dropping empty maps keeps the share denominator honest (see docstring).
     capped: list[dict[str, float]] = []
     capped_complete: list[bool] = []
+    capped_offsets: list[dict[str, float]] = []
     for idx, m in enumerate(per_sha_checks):
         cm: dict[str, float] = {}
         for name, raw in m.items():
@@ -5264,6 +5318,9 @@ def _segment_pr_populations(
                 cm[name] = round(eff, 1)
         if cm:
             capped.append(cm)
+            row_offs = (start_offsets[idx] if start_offsets and idx < len(start_offsets)
+                        else {})
+            capped_offsets.append({n: row_offs[n] for n in cm if n in row_offs})
             capped_complete.append(bool(
                 per_sha_check_runs_complete
                 and idx < len(per_sha_check_runs_complete)
@@ -5300,6 +5357,8 @@ def _segment_pr_populations(
         pops.append((share, tuple(checks)))
     if population_completeness_out is not None:
         population_completeness_out.extend(capped_complete)
+    if population_offsets_out is not None:
+        population_offsets_out.extend(capped_offsets)
     return pops
 
 
@@ -36618,9 +36677,12 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
         name: span for name, span in _span_caps.items()
         if name not in _protected_short_gates
     }
+    # Per-PR start offsets (index-aligned with `_gate_per_sha_checks`) from the intervals already
+    # in hand, so the pole is the check that FINISHES last, not merely the longest span.
+    _gate_start_offsets = _pr_start_offsets(_era_repr_shas, _era_sha_intervals)
     pr_checks_tuple, check_present, present_n_pr, check_pole_freq = _rank_spine_present_first(
         pr_check_p50, _gate_per_sha_checks, req_names, _rank_span_caps,
-        _confirmed_gate_checks)
+        _confirmed_gate_checks, start_offsets=_gate_start_offsets)
     # Headline-crown recovery. The crowned `critical_path_check` (pr_checks_tuple[0]) is what the
     # report HEADLINES as the merge gate. When it maps to a workflow that run-list triage skipped
     # (jobs never fetched), the headline pole has no sampled job to drill and dead-ends ("no
@@ -36718,10 +36780,13 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     # that's only the pole when the gate self-skips earns its real wall-clock for
     # that population instead of being zeroed by a gate it never runs alongside.
     pr_check_population_complete: list[bool] = []
+    pr_check_population_offsets: list[dict[str, float]] = []
     pr_check_populations = _segment_pr_populations(
         _gate_per_sha_checks, pr_check_p50, job_p50_all, job_bimodal_all,
         per_sha_check_runs_complete=_era_check_runs_complete,
-        population_completeness_out=pr_check_population_complete)
+        population_completeness_out=pr_check_population_complete,
+        start_offsets=_gate_start_offsets,
+        population_offsets_out=pr_check_population_offsets)
     # Map each spine check to its producing workflow file (when it maps to a sampled job),
     # emitted per check so the renderer can tell a file-backed check from a fileless/external
     # one (a Socket/CLA bot) WITHOUT relying on whether the check happened to be drilled as a
@@ -37808,6 +37873,9 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
             for share, checks in pr_check_populations
         ],
         "population_check_runs_complete": pr_check_population_complete,
+        # Index-aligned with `populations`: each check's start offset (s) on that PR, so the
+        # verifier re-derives the finish-time pole the ranking credits.
+        "population_start_offsets_s": pr_check_population_offsets,
         # Checks excluded from the critical path as non-PR-gating (push/schedule-only
         # workflows whose check-run rode along on a sampled SHA) - recorded so the
         # exclusion is visible, never a silent drop.

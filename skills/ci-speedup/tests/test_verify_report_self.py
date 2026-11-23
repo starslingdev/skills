@@ -4096,6 +4096,51 @@ def test_vr_chain_fact_poles_agree_with_the_engine_argmax():
     assert pinned > 100   # the bound decides most PRs, so the agreement above is not vacuous
 
 
+def test_vr_chain_fact_poles_agree_with_the_engine_on_finish_time():
+    # Same soundness check with START OFFSETS in play: the engine credits the check that FINISHES
+    # last (start offset + capped span), and the stamped `start_offsets_s` let the chain-facts bound
+    # pin that same check. A `needs:` dependant starts when its parent ends, so it often finishes
+    # last while being shorter. Whenever the verifier pins a PR, it must be the engine's set.
+    import random
+    sys.path.insert(0, str(_VERIFY.parents[1] / "scripts"))
+    import collect_runs as cr  # noqa: E402
+    vr = _load_verify_report()
+    graph = {"ci.yml": {"build": {"needs": []}, "test": {"needs": ["build"]},
+                        "report": {"needs": ["test"]}, "lint": {"needs": []}}}
+    crit = {"ci.yml": {"job_p50": {"build": 50.0, "test": 80.0, "report": 10.0,
+                                   "lint": 20.0}}}
+    names = ["build", "test", "report", "lint", "bot-gate"]
+    caps = {"build": 60.0, "test": 100.0, "report": 15.0, "lint": 40.0}
+    rng = random.Random(7)
+    pinned = 0
+    for i in range(400):
+        checks = {n: float(rng.choice([0, 5, 10, 20, 40, 60, 80, 120])) for n in names
+                  if rng.random() < 0.85}
+        base = "2026-01-05T10:00:00+00:00"
+        iv = {}
+        for n in checks:
+            if rng.random() < 0.15:
+                continue   # no start timestamp: offset 0 for this check
+            off = float(rng.choice([0, 0, 10, 30, 60, 90, 150]))
+            start = cr._dt.datetime.fromisoformat(base) + cr._dt.timedelta(seconds=off)
+            end = start + cr._dt.timedelta(seconds=checks[n])
+            iv[n] = (start.isoformat(), end.isoformat())
+        facts = cr._stamp_chain_facts([f"s{i}"], [checks], set(names), caps, graph, crit,
+                                      {f"s{i}": iv})
+        if not facts:
+            continue
+        offsets = cr._pr_start_offsets([f"s{i}"], {f"s{i}": iv})
+        engine = cr._pole_frequencies([checks], set(names), caps, start_offsets=offsets)
+        truth = {n for n, c in engine.items() if c}
+        lower, und, n = vr._vr_chain_fact_poles({"chain_facts": facts}, set(names))
+        assert n == 1
+        if und:
+            continue
+        pinned += 1
+        assert set(lower) == truth, (checks, iv, facts, lower, truth)
+    assert pinned > 100
+
+
 def test_gate_frequency_claim_without_populations_fails(tmp_path: Path):
     # Bug 4 guard on the gate-frequency check: a rendered "gates N/M" claim on a 20-PR run with no
     # populations to re-derive it from is unverifiable → FAIL, not "no populations" SKIP.

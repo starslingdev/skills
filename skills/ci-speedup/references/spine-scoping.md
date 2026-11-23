@@ -67,7 +67,9 @@ can't trust.
 ## One-path poles are demoted, never the headline
 
 The headline must be a check that ACTUALLY gates the merge, so the spine is ranked
-by **pole frequency** — how often a check is the slowest job a PR waits on — in two
+by **pole frequency** — how often a check is the job a PR waits on, i.e. the one that
+finishes last (start offset + p50-capped span, so a short job behind a `needs:` chain
+counts) — in two
 tiers: checks that are the actual pole on ≥ 2 sampled PRs first (by p50), then
 one-path outliers (the actual pole on fewer, a label-gated benchmark or a single
 path-conditional run). A slow check that ran on 1/100 sampled PRs never headlines just

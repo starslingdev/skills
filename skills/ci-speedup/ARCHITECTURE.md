@@ -3045,13 +3045,18 @@ non-required `Validate build outputs` (a `lint.yml` sibling that required `Lint`
 scopes the spine).** The required filter is inert on a repo whose required set is
 unreadable/None (no admin) — there the spine is the raw PR-floor, and a raw-p50 sort lets a
 check that a typical PR never actually waits on headline. So the `pr_checks_tuple` sort is
-**two-tier by POLE FREQUENCY**: a check that is the ACTUAL critical path (the slowest job a PR
-ran) on fewer than `_POLE_RECUR_FLOOR` (2) sampled PRs is a one-path outlier and ranks below
+**two-tier by POLE FREQUENCY**: a check that is the ACTUAL critical path (the job a PR waits
+on: the one that FINISHES last) on fewer than `_POLE_RECUR_FLOOR` (2) sampled PRs is a one-path outlier and ranks below
 the genuine recurring gates, each tier by p50 desc. Pole frequency is
-`_pole_frequencies(per_sha_checks, set(pr_check_p50), caps)` — the per-PR argmax over the SAME
-job-p50-capped spans `populations` uses (`_pole_caps`), so an inflatable check-run span (queue
-/ re-run time) can't crown a light check and the headline can never disagree with the
-`populations` `verify_report` re-derives from; co-slowest ties credit every tied check. Each
+`_pole_frequencies(per_sha_checks, set(pr_check_p50), caps, start_offsets)` — the per-PR argmax
+of each check's FINISH: its start offset (`_pr_start_offsets`, from the latest-attempt intervals
+already fetched; 0 when a check has no start) plus its span capped at the SAME job p50
+`populations` uses (`_pole_caps`). Checks are not all parallel: a short job that `needs:` a long
+one starts after it and finishes last, so it is the pole. The cap still stops an inflatable
+check-run span (queue / re-run time) crowning a light check, while the offset keeps the wait on
+upstream jobs. `verify_report` re-derives the same rule from `populations` +
+`population_start_offsets_s` (or `chain_facts[].start_offsets_s`); co-last ties credit every
+tied check. Each
 check carries its count as `pole_n` (and `present_on` for disclosure). A required check is
 exempt (gates by definition); inert below `_RARE_PRESENCE_MIN_PR` (6) PRs.
 
