@@ -99,6 +99,7 @@
       "runner-minute cost spine source block is re-derivable",
       "scanned date matches the date in the filename",
       "shallow cost-spine sample is disclosed (re-derived from the stamped workflows)",
+      "stamped pole counts match the finish-time pole basis",
       "static-only banner matches CI shape",
       "the fetch plan matches its call sites (no unconsumed prefetches)",
       "the per-PR chain/makespan spine is bound to the kept config era (no dropped-era PR blends in)",

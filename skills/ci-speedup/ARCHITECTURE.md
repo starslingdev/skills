@@ -3045,13 +3045,24 @@ non-required `Validate build outputs` (a `lint.yml` sibling that required `Lint`
 scopes the spine).** The required filter is inert on a repo whose required set is
 unreadable/None (no admin) — there the spine is the raw PR-floor, and a raw-p50 sort lets a
 check that a typical PR never actually waits on headline. So the `pr_checks_tuple` sort is
-**two-tier by POLE FREQUENCY**: a check that is the ACTUAL critical path (the slowest job a PR
-ran) on fewer than `_POLE_RECUR_FLOOR` (2) sampled PRs is a one-path outlier and ranks below
+**two-tier by POLE FREQUENCY**: a check that is the ACTUAL critical path (the job a PR waits
+on: the one that FINISHES last) on fewer than `_POLE_RECUR_FLOOR` (2) sampled PRs is a one-path outlier and ranks below
 the genuine recurring gates, each tier by p50 desc. Pole frequency is
-`_pole_frequencies(per_sha_checks, set(pr_check_p50), caps)` — the per-PR argmax over the SAME
-job-p50-capped spans `populations` uses (`_pole_caps`), so an inflatable check-run span (queue
-/ re-run time) can't crown a light check and the headline can never disagree with the
-`populations` `verify_report` re-derives from; co-slowest ties credit every tied check. Each
+`_pole_frequencies` over the stamped long-pole basis (`_pole_basis_rows`, one row per sampled
+PR, stamped as `pr_critical_path.pole_basis`): each check's MEASURED job time on that PR (start
+to finish, no queue, from the intervals already fetched) plus its start offset, and the winner is
+the check that FINISHES last (`_pole_basis_winners`). Checks are not all parallel: a job that
+`needs:` a slow setup job starts late and can finish after a longer job that started at once.
+Nothing is capped at a p50: a run counts at its measured time, clipped only above that check's
+own P95 across the sample, and a re-run attempt (`run_attempt` > 1) that started after every
+first-attempt check on the PR had finished sits out that PR (`_late_reruns`). Every spine check
+competes, confirmed or not: a PR an unconfirmed check finishes last on is that check's, never
+the next one's; confirmation only decides the display tier and the crown. A short collecting job
+that `needs:` long work stays off the basis as bookkeeping or a short required aggregator
+(`_short_pole_exclusion_sets`), so the upstream check it waited on is credited. `verify_report`
+re-derives `pole_n`, the headline and the rendered "finishes last on N/M" from the same stamped
+rows (`check_pole_counts_match_the_pole_basis`); the renderer's `_gate_counts` reads them too;
+co-last ties credit every tied check in `pole_n` and one check in the displayed count. Each
 check carries its count as `pole_n` (and `present_on` for disclosure). A required check is
 exempt (gates by definition); inert below `_RARE_PRESENCE_MIN_PR` (6) PRs.
 

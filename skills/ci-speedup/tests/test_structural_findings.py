@@ -5250,7 +5250,7 @@ def test_vr_pole_frequencies_matches_engine():
     """`_vr_pole_frequencies` (from populations, slowest-first) must agree with the engine's
     `collect_runs._pole_frequencies` (from per-PR check maps) for the same PRs — else the invariant
     judges the headline against a pole count the engine never computed. Covers candidate
-    restriction, job-p50 capping, and co-slowest TIES (all three must match)."""
+    restriction and co-slowest TIES on spans with no start offsets (both must match)."""
     vr = _load_vr_module()
     # per-PR check maps (engine input) and the slowest-first populations shape (verifier input).
     per_sha = ([{"check-packages": 180.0, "heavy": 1400.0}] * 4
@@ -5269,17 +5269,9 @@ def test_vr_pole_frequencies_matches_engine():
     ver_t = vr._vr_pole_frequencies(_populations_from_maps(tied), {"A", "B"})
     assert eng_t == {"A": 5, "B": 5} and ver_t == {"A": 5, "B": 5}
 
-    # CAP: a raw span inflated above the job p50 is de-inflated before the argmax, so an inflated
-    # light check does NOT out-rank a stable heavier one (engine caps; populations are pre-capped
-    # so the verifier compares against already-capped magnitudes).
-    caps = {"light": 200.0, "heavy": 300.0}
-    inflated = [{"light": 900.0, "heavy": 300.0}] * 6   # light's raw span 900 > its p50 cap 200
-    eng_c = cr._pole_frequencies(inflated, {"light", "heavy"}, caps)
-    assert eng_c["heavy"] == 6 and eng_c["light"] == 0
-    # populations feed the verifier already capped (min(raw, cap)); it must agree.
-    capped_pops = _populations_from_maps([{k: min(v, caps[k]) for k, v in m.items()}
-                                          for m in inflated])
-    assert vr._vr_pole_frequencies(capped_pops, {"light", "heavy"}) == {"heavy": 6}
+    # The populations path is the verifier's rule for findings that predate the stamped
+    # `pole_basis`; the finish-time rule the engine ranks by now is pinned in
+    # tests/test_long_pole_finish_order.py (measured time, no p50 cap, P95 clip, late re-runs).
 
 
 def _populations_from_maps(per_sha):

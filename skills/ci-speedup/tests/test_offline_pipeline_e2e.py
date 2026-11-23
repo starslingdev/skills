@@ -1480,7 +1480,7 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
             "step(s) skipped (they run nothing) |") in report
     # T8: the POLE job (`ci.yml` ▸ `test`) runs a group, so its drill never says
     # the steps run one after another, and the verifier re-derived that.
-    _pole = re.search(r"^##\s+.*Long pole \d+: `ci\.yml` ▸ `CI / test`.*?(?=^##\s|\Z)",
+    _pole = re.search(r"^##\s+[^\n]*Long pole \d+: `ci\.yml` ▸ `CI / test`.*?(?=^##\s|\Z)",
                       report, re.S | re.M)
     assert _pole, re.findall(r"^##.*$", report, re.M)
     for _ph in ("one after another", "they run in sequence and roughly add up",
@@ -1525,7 +1525,11 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
     assert "loses up to" not in report, "a median is not an upper bound"
     _marker = f"<!-- opt80-tail:{_pole_id} -->"
     assert report.count(_marker) == 1, _marker
-    _pole1 = report.split('<a id="pole-1"></a>', 1)[1].split('<a id="pole-2"></a>', 1)[0]
+    # `CI / test` is not necessarily pole 1: the corpus's `prep` -> `verify` chain finishes after
+    # it on every sampled PR, so the finish-time order lists `verify` first. Take its own section.
+    _pole1 = next(sec for sec in re.split(r'<a id="pole-\d+"></a>', report)[1:]
+                  if "▸ `CI / test`" in sec.split("\n\n## ", 1)[-1].split("\n", 1)[0]
+                  or "▸ `CI / test`" in sec[:400])
     assert "▸ `CI / test`" in _pole1 and _marker in _pole1, (
         "the tail line must render inside the `CI / test` long-pole section")
     assert _tail in _pole1.split(_marker, 1)[1].split("\n\n", 1)[0], _pole1[:1200]

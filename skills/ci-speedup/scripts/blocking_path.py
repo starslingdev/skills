@@ -8619,9 +8619,103 @@ def _select_render_poles(doc: dict[str, Any], poles: list[dict[str, Any]]) -> tu
     return selected[:_TOP_WORKFLOWS], file_poles
 
 
+_POLE_BASIS_RULE = "finish_last_measured_p95_v1"
+
+
+def _pole_percentile(values: list[float], pct: float) -> float:
+    """Verbatim copy of `collect_runs._percentile` (linear interpolation; empty -> 0.0)."""
+    if not values:
+        return 0.0
+    v = sorted(values)
+    k = (len(v) - 1) * pct / 100.0
+    lo, hi = int(k), min(int(k) + 1, len(v) - 1)
+    return v[lo] + (v[hi] - v[lo]) * (k - lo)
+
+
+def _finish_times(spans: dict[str, float],
+                  offsets: "dict[str, float] | None") -> dict[str, float]:
+    """Verbatim copy of `collect_runs._finish_times`, pinned equal by a test: each check's
+    clipped span + its start offset rebased on the earliest start among `spans`' positive-span
+    checks (no offset = 0), 0.1s-rounded."""
+    offs = offsets or {}
+    timed = [offs[c] for c, v in spans.items() if c in offs and v > 0]
+    base = min(timed, default=0.0)
+    return {c: round(v + (offs[c] - base if c in offs and v > 0 else 0.0), 1)
+            for c, v in spans.items()}
+
+
+def _late_reruns(row: dict[str, Any]) -> set[str]:
+    """Verbatim copy of `collect_runs._late_reruns`: a re-run attempt that started once every
+    first-attempt check on the PR had finished sits out that PR's competition."""
+    spans = row.get("spans_s") or {}
+    offs = row.get("offsets_s") or {}
+    retried = set(row.get("retried") or {})
+    first_ends = [offs[c] + v for c, v in spans.items() if c not in retried and c in offs]
+    if not retried or not first_ends:
+        return set()
+    last_end = max(first_ends)
+    return {c for c in retried if c in spans and c in offs and offs[c] >= last_end}
+
+
+def _pole_basis_winners(rows: list[dict[str, Any]]) -> list[list[str]]:
+    """Verbatim copy of `collect_runs._pole_basis_winners` (with `_pole_percentile`): per PR,
+    every check that finishes last, P95-clipped, late re-runs out, every check competing."""
+    late = [_late_reruns(row) for row in rows]
+    by_check: dict[str, list[float]] = {}
+    for row, drop in zip(rows, late):
+        for c, v in (row.get("spans_s") or {}).items():
+            if c not in drop:
+                by_check.setdefault(c, []).append(float(v))
+    p95 = {c: _pole_percentile(vals, 95) for c, vals in by_check.items()}
+    out: list[list[str]] = []
+    for row, drop in zip(rows, late):
+        kept = {c: round(min(float(v), p95[c]), 1)
+                for c, v in (row.get("spans_s") or {}).items() if c not in drop}
+        if not kept:
+            out.append([])
+            continue
+        fin = _finish_times(kept, row.get("offsets_s"))
+        mx = max(fin.values())
+        out.append([c for c in kept if fin[c] == mx])
+    return out
+
+
+def _pole_basis_of(cp: dict[str, Any]) -> "list[dict[str, Any]] | None":
+    """The stamped `pole_basis.per_pr` rows, or None for older findings (the populations rule).
+    Rows keep only finite positive spans and finite non-negative offsets."""
+    raw = cp.get("pole_basis")
+    if not isinstance(raw, dict) or raw.get("rule") != _POLE_BASIS_RULE:
+        return None
+    rows = raw.get("per_pr")
+    if not isinstance(rows, list):
+        return None
+
+    def _num(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(v)
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        spans = {str(k): float(v) for k, v in (row.get("spans_s") or {}).items()
+                 if _num(v) and v > 0}
+        if not spans:
+            continue
+        out.append({
+            "spans_s": spans,
+            "offsets_s": {str(k): float(v) for k, v in (row.get("offsets_s") or {}).items()
+                          if _num(v) and v >= 0},
+            "retried": {str(k): v for k, v in (row.get("retried") or {}).items()
+                        if isinstance(v, int) and not isinstance(v, bool) and v > 1},
+        })
+    return out
+
+
 def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], int]:
-    """From the per-PR check populations: how often each check is the SLOWEST one
-    (the actual pole) and how often it is PRESENT at all, across the sampled PRs.
+    """How often each check is the one that FINISHES LAST on a sampled PR (the actual pole) and
+    how often it is PRESENT at all. Read from the collector's stamped `pole_basis` (measured job
+    time + start offset, P95 clip, late re-runs out, every check competing); older findings
+    without it keep the per-PR populations rule (slowest p50-capped span, unconfirmed checks out).
     Returns (pole_count, present_count, n_populations). A slow check that only
     runs on a few PRs has a low pole_count and must NOT be crowned over a check
     that gates almost every PR. When full populations were unnecessary, use the
@@ -8629,6 +8723,17 @@ def _gate_counts(cp: dict[str, Any]) -> tuple[dict[str, int], dict[str, int], in
     ({}, {}, 0) only when neither complete representation is recorded."""
     pole_count: dict[str, int] = {}
     present: dict[str, int] = {}
+    basis = _pole_basis_of(cp)
+    if basis is not None:
+        # The collector's own long-pole basis: every check competes (confirmed or not), and a
+        # tie credits exactly one check (the first in row order) so workflow sums never
+        # double-count a PR.
+        for row, winners in zip(basis, _pole_basis_winners(basis)):
+            for nm in row["spans_s"]:
+                present[nm] = present.get(nm, 0) + 1
+            if winners:
+                pole_count[winners[0]] = pole_count.get(winners[0], 0) + 1
+        return pole_count, present, len(basis)
     unconfirmed = {
         str(c.get("name", "")) for c in (cp.get("checks") or [])
         if isinstance(c, dict) and c.get("required_reachable") is False
@@ -16166,7 +16271,9 @@ def _render_core(doc: dict[str, Any], logs: dict[str, str] | None = None,
     for p in poles:
         wf = str(p.get("workflow_file") or "")
         count = wf_gate.get(wf, 0)
-        if _is_file_pole(p) and count > 0:
+        # An unconfirmed check's row renders no workflow gate frequency, so its count (it now
+        # competes, and can finish last) is not an ordered row a reader sees.
+        if _is_file_pole(p) and count > 0 and p.get("required_reachable") is not False:
             _displayed_gate_counts.append(count)
     _gate_order_is_supported = (
         _gate_order_supported(_displayed_gate_counts, npop, cp)

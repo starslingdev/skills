@@ -135,6 +135,7 @@ TRIAGE_ALLOWLIST = {
     "cache finding's framing matches its measured hit-rate distribution": AUTO_SEED,             # check_cache_framing_matches_distribution
     "cache savings pass budget, invalidation and transfer-cost guards": AUTO_SEED,               # check_cache_sizing_guards
     "headline critical-path check is an actual recurring gate": AUTO_SEED,                        # check_headline_pole_actually_gates
+    "stamped pole counts match the finish-time pole basis": AUTO_SEED,                            # check_pole_counts_match_the_pole_basis
     "every 'slowest ... waits on' framing phrase is a registered claim": AUTO_SEED,               # check_claims_cover_framing_vocabulary
     "Tier-2 R-rows carry re-derived wall-clock-neutral certificates": AUTO_SEED,                  # check_tier2_neutrality_derived
     "Tier-2 R-rows use measured sizing basis": AUTO_SEED,                                        # check_tier2_measured_basis
@@ -270,6 +271,7 @@ CHECK_CLASS = {
     "cache finding's framing matches its measured hit-rate distribution": "estimated-not-measured",  # framing not grounded in the measured distribution
     "cache savings pass budget, invalidation and transfer-cost guards": "estimated-not-measured",  # credited cache saving lacks its capacity/lifetime/net-cost proof
     "headline critical-path check is an actual recurring gate": "mis-ranked-lever",       # headline names a non-recurring (non-)gate
+    "stamped pole counts match the finish-time pole basis": "mis-ranked-lever",            # a pole count the finish-order basis does not give
     "every 'slowest ... waits on' framing phrase is a registered claim": "fabricated-or-unsupported-finding",  # a rendered framing sentence not backed by a registered claim
     "Tier-2 R-rows carry re-derived wall-clock-neutral certificates": "fabricated-or-unsupported-finding",  # a promoted row's proof is not backed by the data
     "Tier-2 R-rows use measured sizing basis": "estimated-not-measured",  # exact match: promoted bill rows must be measured, not modeled

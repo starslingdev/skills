@@ -59,13 +59,13 @@ def test_partition_excludes_fileless_label_gate_from_the_crowning_basis():
     # 8-day fileless span. (n_pr=1 < _RARE_PRESENCE_MIN_PR, so plain p50 order — no demotion.)
     ranked, _present, _n, _freq = cr._rank_spine_present_first(
         groundable, per_sha_checks=[{"CI / test": 600.0, "CI / lint": 120.0}],
-        req_names=frozenset(), caps={})
+        req_names=frozenset())
     assert ranked[0][0] == "CI / test"
     assert ranked[0][1] == 600.0
 
     # Counter-proof of the BUG: ranking the UN-partitioned basis (pre-fix) crowns the fileless span.
     ranked_pre, *_ = cr._rank_spine_present_first(
-        pr_check_p50, per_sha_checks=[dict(pr_check_p50)], req_names=frozenset(), caps={})
+        pr_check_p50, per_sha_checks=[dict(pr_check_p50)], req_names=frozenset())
     assert ranked_pre[0][0] == "Backport Labels Added"
 
 
@@ -115,7 +115,7 @@ def test_ambiguous_cross_workflow_gate_stays_in_the_crowning_basis_not_fileless(
     assert "Build" in groundable and "Build" not in fileless
     ranked, *_ = cr._rank_spine_present_first(
         groundable, per_sha_checks=[{"Build": 900.0, "lint": 30.0}],
-        req_names=frozenset(), caps={})
+        req_names=frozenset())
     assert ranked[0][0] == "Build"  # the real gate crowns, not `lint`
     # Counter-proof of the regression: had the spine left it a bare check-run span (mapper bailed ->
     # `pr_check_runs`, no scanned file), the partition would have dropped the real gate to fileless.

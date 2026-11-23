@@ -4061,10 +4061,22 @@ def test_vr_headline_pole_chain_fact_bound_too_loose_fails(tmp_path: Path):
                     findings=_b4_findings(chain_facts=mixed)) == "PASS"
 
 
-def test_vr_chain_fact_poles_agree_with_the_engine_argmax():
-    # Soundness of the chain-facts bound against the ENGINE's own definitions: for random PRs over
-    # a graph with a `needs:` chain, a matrix node and a fileless peer, whenever the verifier pins
-    # a PR's pole it is exactly `collect_runs._pole_frequencies`' argmax set, on the same caps.
+def _legacy_capped_poles(checks: dict, names: set, caps: dict) -> set:
+    """The retired engine rule `_vr_chain_fact_poles` still bounds for findings that predate the
+    stamped `pole_basis`: every check tied for the longest p50-capped, 0.1s-rounded span."""
+    scoped = {n: round(min(v, caps[n]) if n in caps else v, 1)
+              for n, v in checks.items() if n in names}
+    if not scoped:
+        return set()
+    mx = max(scoped.values())
+    return {n for n, v in scoped.items() if v == mx}
+
+
+def test_vr_chain_fact_poles_agree_with_the_legacy_capped_argmax():
+    # Soundness of the chain-facts bound, the verifier's path for findings that predate the
+    # stamped `pole_basis`: for random PRs over a graph with a `needs:` chain, a matrix node and a
+    # fileless peer, whenever the verifier pins a PR's pole it is exactly the retired engine rule's
+    # argmax set (`_legacy_capped_poles`), on the same caps.
     import random
     sys.path.insert(0, str(_VERIFY.parents[1] / "scripts"))
     import collect_runs as cr  # noqa: E402
@@ -4085,8 +4097,7 @@ def test_vr_chain_fact_poles_agree_with_the_engine_argmax():
         facts = cr._chain_facts_for_pr(checks, caps, graph, crit)
         if facts is None:
             continue
-        engine = cr._pole_frequencies([checks], set(names), caps)
-        truth = {n for n, c in engine.items() if c}
+        truth = _legacy_capped_poles(checks, set(names), caps)
         lower, und, n = vr._vr_chain_fact_poles({"chain_facts": [facts]}, set(names))
         assert n == 1
         if und:

@@ -31,14 +31,10 @@ _REPOSITORIES = {
     "vercel-nextjs": (
         "PR #318 covers the headline follow-up; issue #363 tracks gate comparison",
         (
-            # Issue #363 tracks the independently recorded missing prod gate.
-            "frequent gate absent: 'build-and-test / test prod (4/10) / build'",
-            # Issue #363 tracks the independently recorded missing dev gate.
-            "frequent gate absent: 'build-and-test / test dev (4/10) / build'",
-            # Issue #363 tracks the independently recorded missing optimizer gate.
+            # Issue #363: the oracle credits the longest job, and `PR Stack CI Gate` runs
+            # 25-45 minutes on 5 PRs. Every other job `needs:` it, so in real finish order
+            # (#491) the job that ends after it finishes last on those PRs instead.
             "frequent gate absent: 'build-and-test / optimize-ci / PR Stack CI Gate'",
-            # Issue #363 tracks the 0.250 versus 0.036 turbopack share mismatch.
-            "gate share differs for 'build-and-test / test turbopack production (7/7) / build'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -51,10 +47,8 @@ _REPOSITORIES = {
         ),
     ),
     "microsoft-playwright": (
-        "PR #318 covers the headline follow-up; issue #364 tracks the MCP gate",
+        "PR #318 covers the headline follow-up",
         (
-            # Issue #364 tracks the independently recorded missing MCP gate.
-            "frequent gate absent: 'MCP / ubuntu-latest - chrome'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -143,7 +137,6 @@ def test_known_red_reasons_name_the_public_issue_and_fix_pr() -> None:
     issue_by_name = {
         "home-assistant-core": "#365",
         "vercel-nextjs": "#363",
-        "microsoft-playwright": "#364",
     }
     for name, issue in issue_by_name.items():
         reason, _markers = _REPOSITORIES[name]
