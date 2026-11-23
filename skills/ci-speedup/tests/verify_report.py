@@ -17735,10 +17735,17 @@ def check_wall_clock_runner_minute_effects(
     effect_schema = data.get("runner_minute_effect_schema") == 1
     findings = [f for f in _as_list(data.get("findings")) if isinstance(f, dict)]
     priced_amounts: list[float] = []
+    go_per_run_floors: set[int] = set()
     for finding in findings:
         pattern = str(finding.get("pattern") or "")
         if pattern not in {"OPT24", "OPT25"}:
             continue
+        if pattern == "OPT24" and finding.get("go_dominant_package"):
+            # A rendered per-run amount is grounded in its finding's own floor
+            # even when the monthly line is unsized (no measured run count).
+            measured = _num(finding.get("go_shard_extra_runner_s"))
+            if measured is not None:
+                go_per_run_floors.add(int(round(measured)))
         if finding.get("positional_splitter_static"):
             continue  # reassigns tests within existing shard jobs; adds no job
         effect = _as_dict(finding.get("runner_minute_effect"))
@@ -17771,6 +17778,24 @@ def check_wall_clock_runner_minute_effects(
             failures.append(f"{pattern} added cost does not re-derive from floor*(N-1)*runs")
         elif amount > 0:
             priced_amounts.append(amount)
+        if pattern == "OPT24" and finding.get("go_dominant_package"):
+            per_run = _num(finding.get("go_shard_extra_runner_s"))
+            if per_run is None or floor is None or abs(per_run - floor) > 0.05:
+                failures.append(
+                    "OPT24 Go per-run cost and monthly cost use different setup floors")
+    displayed_go_costs = {
+        int(round(seconds))
+        for text in re.findall(
+            r"Runner-minute effect: added cost of ~([^\n.]+) per run for the "
+            r"assumed two-shard split",
+            report,
+        )
+        if (seconds := _parse_clock_to_s(text)) is not None
+    }
+    for displayed in displayed_go_costs - go_per_run_floors:
+        failures.append(
+            f"displayed OPT24 Go per-run cost {_fmt_clock(displayed)} does not "
+            "match its monthly setup floor")
     displayed_costs = [float(value) for value in re.findall(
         r"Runner-minute effect:\s*\+([0-9]+(?:\.[0-9]+)?)\s+runner-min/month",
         report,

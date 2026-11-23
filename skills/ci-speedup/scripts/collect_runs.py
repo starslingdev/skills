@@ -27021,12 +27021,20 @@ def _detect_opt24_long_test_no_sharding(
             # A compile inside the test step and checkout/install/build steps
             # outside it all repeat on every added shard.  The test-step log is
             # deliberately sliced so these two measurements do not overlap.
+            # The Go floor is job time minus summed package time, which already
+            # holds every separate step, so adding them again bills them twice.
             separate_setup = (float(decomp.get("setup_build_s", 0))
-                              if decomp is not None else 0.0)
+                              if decomp is not None and go_package is None
+                              else 0.0)
             finding["runner_minute_setup_floor_s"] = round(
                 pre_test_floor + separate_setup, 1)
         elif measure_first:
             finding["pre_test_floor_unmeasured"] = True
+        elif go_extra_unsized:
+            # The repeated floor is unmeasurable; pricing only the separate
+            # steps would give the monthly line a smaller base than the shard
+            # really repeats while the per-run line says unsized.
+            pass
         elif decomp is not None and decomp.get("setup_build_s", 0) > 0:
             finding["runner_minute_setup_floor_s"] = round(
                 float(decomp["setup_build_s"]), 1)
@@ -27036,7 +27044,10 @@ def _detect_opt24_long_test_no_sharding(
             if go_extra_unsized:
                 finding["go_shard_extra_runner_unsized_reason"] = go_extra_unsized
             else:
-                finding["go_shard_extra_runner_s"] = round(pre_test_floor or 0.0, 1)
+                # The per-run Go recipe and the monthly signed-cost stamp describe
+                # the same extra shard, so both read the one repeated floor.
+                finding["go_shard_extra_runner_s"] = finding[
+                    "runner_minute_setup_floor_s"]
         out.append(finding)
     return out
 

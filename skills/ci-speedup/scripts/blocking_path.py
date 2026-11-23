@@ -12054,7 +12054,7 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                     f"Runner-minute effect: added cost of ~{_clock(extra)} per run for "
                     "the assumed two-shard split. Extra shard jobs repeat checkout and "
                     "setup and bill each job; here the second runner repeats the "
-                    "measured pre-test floor."
+                    "measured floor outside the Go package test time."
                 )
             else:
                 reason = str(go_member.get("go_shard_extra_runner_unsized_reason")

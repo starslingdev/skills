@@ -1,0 +1,1 @@
+- **2026-11-23** — Made OPT24's Go per-run and monthly runner-minute costs use one repeated setup floor: job time outside the Go package test time, which already includes separate checkout and setup steps, so they are no longer counted twice; when that floor is not measurable both lines stay unsized (#481).
