@@ -12030,7 +12030,11 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
             "crediting seconds."
         )
     if pat in {"OPT24", "OPT25"}:
-        body.append(_bmf_concurrency_lines()[0])
+        # A budget-admitted job-adding option is recommended in the default
+        # report, so it reads as under --bmf: shard order plus its signed cost.
+        budget_admitted = bool(members) and all(
+            member.get("_minute_budget_admitted") for member in members)
+        body.append(_bmf_concurrency_lines(budget_admitted)[0])
         go_member = next(
             (member for member in members if member.get("go_dominant_package")),
             None,
@@ -12065,9 +12069,10 @@ def _hygiene_prompt(pat: str, title: str, members: list[dict[str, Any]],
                     "checkout and setup and bill each job; the second runner also "
                     "repeats compilation."
                 )
-        elif _BMF_ENABLED:
-            # Under --bmf the job-adding option is shown, so it carries its signed
-            # runner-minute effect (#379); the default view holds it back.
+        elif _BMF_ENABLED or budget_admitted:
+            # Under --bmf (or once the minute budget admits it) the job-adding
+            # option is shown, so it carries its signed runner-minute effect
+            # (#379); the default view otherwise holds it back.
             body.append(_group_runner_minute_effect_line(members))
         else:
             body.append(_bmf_concurrency_lines()[1])
@@ -15452,6 +15457,7 @@ _BMF_LEAF_DEFAULTS: dict[str, dict[str, str]] = {
     },
 }
 _BMF_ENABLED = True  # set per render(); True outside a render keeps helpers unchanged
+_DEFAULT_MINUTE_BUDGET_PERCENT = 5.0
 
 _CONCURRENCY_ORDER_LINE_DEFAULT = (
     "Concurrency order: Use OPT88 to measure and fill the existing job's idle cores. "
@@ -15488,8 +15494,8 @@ def _bmf_default_view(finding: dict[str, Any]) -> dict[str, Any]:
     return view
 
 
-def _bmf_concurrency_lines() -> list[str]:
-    if _BMF_ENABLED:
+def _bmf_concurrency_lines(budget_admitted: bool = False) -> list[str]:
+    if _BMF_ENABLED or budget_admitted:
         return [_CONCURRENCY_ORDER_LINE, _SHARD_RUNNER_MINUTE_LINE]
     return [_CONCURRENCY_ORDER_LINE_DEFAULT, _SHARD_RUNNER_MINUTE_LINE_DEFAULT]
 
@@ -15497,20 +15503,167 @@ def _bmf_concurrency_lines() -> list[str]:
 _LEAF_CROWN_RE = re.compile(r"<!-- ci-speedup:leaf-crown fix_key=(\S+) -->")
 
 
-def render(doc: dict[str, Any], *args, bmf: bool = False, **kwargs) -> str:
+def _minute_budget_total(doc: dict[str, Any]) -> float | None:
+    totals = _as_dict(_as_dict(doc.get("runner_minute_spine")).get("totals"))
+    value = _num(totals.get("completed_billable_equiv_min_per_month"))
+    if value is None:
+        # Older cost spines predate the completed/unfinished split; their
+        # all-runs billable total is still a measured monthly minute figure.
+        value = _num(totals.get("billable_equiv_min_per_month"))
+    return value if value is not None and value > 0 else None
+
+
+def _minute_budget_cost(finding: dict[str, Any], doc: dict[str, Any]) -> float | None:
+    effect = _as_dict(finding.get("runner_minute_effect"))
+    monthly = _num(effect.get("runner_min_per_month"))
+    if monthly is None:
+        per_run = _num(effect.get("runner_min_per_run"))
+        if per_run is None:
+            # An OPT21 edge is sized by its measured upper bound on the extra
+            # downstream minutes per run when the dependency fails (#463).
+            per_run = _num(_as_dict(finding.get("opt21_edge_sizing")).get(
+                "extra_runner_min_per_run"))
+        volume = _num(_as_dict(doc.get("per_workflow_monthly_volume")).get(
+            str(finding.get("workflow_file") or "")))
+        if per_run is not None and per_run > 0 and volume is not None and volume > 0:
+            monthly = per_run * volume
+    return monthly if monthly is not None and monthly > 0 else None
+
+
+def _minute_budget_samples(finding: dict[str, Any], doc: dict[str, Any]) -> int | None:
+    effect = _as_dict(finding.get("runner_minute_effect"))
+    direct = _num(effect.get("sampled_runs"))
+    if (direct is None and _num(effect.get("runner_min_per_month")) is None
+            and _num(effect.get("runner_min_per_run")) is None):
+        # The cost came from the OPT21 edge stamp: name that stamp's sample.
+        direct = _num(_as_dict(finding.get("opt21_edge_sizing")).get(
+            "dependency_sampled_runs"))
+    if direct is not None and direct > 0:
+        return int(direct)
+    wf = str(finding.get("workflow_file") or "")
+    rows = _as_list(_as_dict(doc.get("runner_minute_spine")).get("rows"))
+    values = [int(value) for row in rows if isinstance(row, dict)
+              and str(row.get("workflow_file") or "") == wf
+              and (value := _num(row.get("sampled_workflow_run_count"))) is not None
+              and value > 0]
+    return max(values) if values else None
+
+
+def _minute_budget_job_labels(finding: dict[str, Any], doc: dict[str, Any]) -> set[str]:
+    """Runner labels the measured cost spine records for a finding's jobs."""
+    wf = str(finding.get("workflow_file") or "")
+    jobs = {str(v) for v in _as_list(finding.get("affected_jobs"))}
+    labels: set[str] = set()
+    for row in _as_list(_as_dict(doc.get("runner_minute_spine")).get("rows")):
+        if not isinstance(row, dict) or str(row.get("workflow_file") or "") != wf:
+            continue
+        name = str(row.get("job_name") or "")
+        if name in jobs or any(name.startswith(job + " (") for job in jobs):
+            label = str(row.get("runner_label") or "").strip()
+            if label:
+                labels.add(label)
+    return labels
+
+
+def _minute_budget_queued_pool(finding: dict[str, Any], doc: dict[str, Any]) -> bool:
+    """Fail closed when the proposed extra work lands on an already queued pool.
+
+    A pool is a runner label, so OPT43/OPT97 queue evidence in another workflow
+    still holds a finding whose jobs run on that label. A finding whose label is
+    unknown while any pool queues, or that shares a workflow with queue evidence
+    whose label is unknown, is held too."""
+    if str(finding.get("pattern") or "") == "OPT97":
+        return True
+    wf = str(finding.get("workflow_file") or "")
+    jobs = {str(v) for v in _as_list(finding.get("affected_jobs"))}
+    own_labels = _minute_budget_job_labels(finding, doc)
+    for other in _as_list(doc.get("findings")):
+        if not isinstance(other, dict) or str(other.get("pattern") or "") not in {
+                "OPT43", "OPT97"}:
+            continue
+        same_wf = str(other.get("workflow_file") or "") == wf
+        if same_wf and jobs & {str(v) for v in _as_list(other.get("affected_jobs"))}:
+            return True
+        queued = _minute_budget_job_labels(other, doc)
+        queued.update(str(v).strip() for v in _as_list(
+            _as_dict(other.get("single_slot_queue")).get("labels")) if str(v).strip())
+        slow = str(_as_dict(other.get("queue_label_comparison")).get(
+            "slow_label") or "").strip()
+        if slow:
+            queued.add(slow)
+        if not queued:
+            if same_wf:
+                return True
+            continue
+        if not own_labels or own_labels & queued:
+            return True
+    return False
+
+
+def _minute_budget_admissions(
+    doc: dict[str, Any], percent: float,
+) -> tuple[list[dict[str, Any]], float, float, float | None]:
+    total = _minute_budget_total(doc)
+    if total is None or percent <= 0:
+        return [], 0.0, 0.0, total
+    limit = total * percent / 100.0
+    candidates: list[tuple[float, int, dict[str, Any], float, int]] = []
+    for index, finding in enumerate(_as_list(doc.get("findings"))):
+        if not isinstance(finding, dict) or not _bmf_held_back(finding):
+            continue
+        if str(finding.get("pattern") or "") == "OPT81":
+            continue
+        if _minute_budget_queued_pool(finding, doc):
+            continue
+        cost = _minute_budget_cost(finding, doc)
+        samples = _minute_budget_samples(finding, doc)
+        saved = _num(finding.get("wall_clock_p50_s"))
+        if cost is None or samples is None or saved is None or saved <= 0:
+            continue
+        candidates.append((saved / cost, index, finding, cost, samples))
+    admitted: list[dict[str, Any]] = []
+    used = 0.0
+    for _efficiency, _index, finding, cost, samples in sorted(
+            candidates, key=lambda row: (-row[0], row[1])):
+        if used + cost > limit + 1e-9:
+            continue
+        admitted.append({"finding": finding, "cost": cost, "samples": samples})
+        used += cost
+    return admitted, used, limit, total
+
+
+def _budget_number(value: float) -> str:
+    return f"{value:,.3f}".rstrip("0").rstrip(".")
+
+
+def _budget_machine_number(value: float) -> str:
+    return f"{value:.3f}".rstrip("0").rstrip(".")
+
+
+def render(doc: dict[str, Any], *args, bmf: bool = False,
+           minute_budget: float = _DEFAULT_MINUTE_BUDGET_PERCENT, **kwargs) -> str:
     """Include lifecycle context and apply the runner-minute recommendation policy."""
     global _BMF_ENABLED
+    if not math.isfinite(minute_budget) or minute_budget < 0:
+        raise ValueError("minute_budget must be a finite non-negative percentage")
+    admissions, budget_used, budget_limit, budget_total = (
+        ([], 0.0, 0.0, None) if bmf
+        else _minute_budget_admissions(doc, minute_budget))
+    admitted_ids = {id(row["finding"]) for row in admissions}
     findings = []
     held = 0
     for source in doc.get("findings") or []:
         finding = source
         if isinstance(source, dict) and not bmf:
-            if _bmf_held_back(source):
+            if _bmf_held_back(source) and id(source) not in admitted_ids:
                 finding = dict(source)
                 finding["_bmf_held_back"] = True
                 held += 1
             else:
                 finding = _bmf_default_view(source)
+                if id(source) in admitted_ids:
+                    finding = dict(finding)
+                    finding["_minute_budget_admitted"] = True
                 if _bmf_has_held_option(source):
                     held += 1
         findings.append(finding)
@@ -15539,9 +15692,35 @@ def render(doc: dict[str, Any], *args, bmf: bool = False, **kwargs) -> str:
             f"{held} wall-clock levers held back because they add runner minutes or "
             "change to an unpriced runner; rerun with `--bmf` to show them."
         ]
+    budget_lines: list[str] = []
+    if not bmf and minute_budget > 0 and budget_total is not None:
+        marker += (f"\n<!-- ci-speedup:minute-budget percent={_budget_machine_number(minute_budget)} "
+                   f"used={_budget_machine_number(budget_used)} limit={_budget_machine_number(budget_limit)} "
+                   f"admitted={len(admissions)} -->")
+        budget_lines = [
+            f"Runner-minute budget: +{_budget_number(budget_used)} of "
+            f"+{_budget_number(budget_limit)} runner-min/mo used "
+            f"({_budget_number(minute_budget)}% of "
+            f"{_budget_number(budget_total)} measured runner-min/mo).",
+        ]
+        if admissions:
+            budget_lines += [
+                "",
+                "## Runner-minute budget admissions",
+                "",
+                "| Finding | Added runner-minute cost |",
+                "| :--- | ---: |",
+                *[
+                    f"| `{_flatten_cell(str(row['finding'].get('id') or row['finding'].get('pattern') or 'finding'))}` "
+                    f"| +{_budget_number(row['cost'])} runner-min/mo "
+                    f"(estimate from {row['samples']} sampled runs) |"
+                    for row in admissions
+                ],
+            ]
     first, separator, rest = report.partition("\n\n")
-    report = ("\n\n".join([first, marker, *disclosure, rest])
-              if separator else "\n\n".join([report, marker, *disclosure]))
+    report = ("\n\n".join([first, marker, *disclosure, *budget_lines, rest])
+              if separator else "\n\n".join(
+                  [report, marker, *disclosure, *budget_lines]))
     block = pr_lifecycle.render(doc.get("pr_lifecycle"))
     first, separator, rest = report.partition("\n\n")
     report = (first + "\n\n" + block + "\n" + rest
@@ -18651,7 +18830,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bmf", action="store_true",
                     help="Show wall-clock levers that add runner minutes or use an "
                          "unpriced larger runner (hidden by default).")
+    ap.add_argument("--minute-budget", type=float,
+                    default=_DEFAULT_MINUTE_BUDGET_PERCENT,
+                    help="Maximum added runner-minutes as a percentage of measured "
+                         "monthly runner minutes in the default report (default: 5; "
+                         "0 restores strict holdback).")
     args = ap.parse_args(argv)
+    if not math.isfinite(args.minute_budget) or args.minute_budget < 0:
+        ap.error("--minute-budget must be a finite non-negative percentage")
 
     def _split(spec: str, flag: str) -> tuple[str, str] | None:
         # A malformed spec (missing KEY=) silently producing an empty report is a
@@ -18727,7 +18913,8 @@ def main(argv: list[str] | None = None) -> int:
                 "__analysis_parse_error__": f"the analysis JSON could not be read or parsed: {e}"
             }
     md = render(doc, logs, samples, log_runs, args.captured_at, steps, mags,
-                analyses=analyses, bmf=args.bmf)
+                analyses=analyses, bmf=args.bmf,
+                minute_budget=args.minute_budget)
     _report_unmatched_analysis_dispositions(doc, analyses)
     if args.out_path:
         args.out_path.write_text(md + "\n", encoding="utf-8")

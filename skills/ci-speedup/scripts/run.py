@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shlex
 import subprocess
@@ -347,6 +348,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--bmf", action="store_true",
                         help="Show wall-clock-only recommendations that add runner "
                              "minutes or use an unpriced larger runner.")
+    parser.add_argument("--minute-budget", type=float, default=5.0,
+                        help="Maximum added runner-minutes as a percentage of measured "
+                             "monthly runner minutes (default: 5; 0 restores strict "
+                             "holdback).")
     parser.add_argument("--catalog", default=None, help="Override catalog path.")
     parser.add_argument(
         "--account-weekly-series", type=Path, default=None,
@@ -376,6 +381,8 @@ def main(argv: list[str] | None = None) -> int:
         "--verify-cache-sensitive", action="store_true",
         help="Use three distinct default-branch pushes instead of warm reruns.")
     args = parser.parse_args(argv)
+    if not math.isfinite(args.minute_budget) or args.minute_budget < 0:
+        parser.error("--minute-budget must be a finite non-negative percentage")
 
     # Create the output directory up front. Without this, a fresh `--out
     # /tmp/run/findings.json` whose parent doesn't exist tracebacks on the first
@@ -606,7 +613,8 @@ def main(argv: list[str] | None = None) -> int:
         # whether --out was relative.
         try:
             print(build_summary(data, findings_path=str(args.out), out_path=report_path,
-                                root=args.root, bmf=args.bmf))
+                                root=args.root, bmf=args.bmf,
+                                minute_budget=args.minute_budget))
         except Exception as e:  # a summary failure must never fail the run
             print(f"(summary unavailable: {e}; findings at {args.out})", file=sys.stderr)
 
