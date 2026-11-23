@@ -3897,6 +3897,61 @@ def test_busy_pr_sample_uses_completed_commits_across_days_despite_non_pr_era(
     assert [check for check in checks if not check.skipped and not check.ok] == []
 
 
+def test_busy_pr_sample_skips_one_hour_in_flight_burst_past_unrelated_era(
+        monkeypatch, tmp_path):
+    """#306: the newest 20 PR commits are all in flight inside one hour, and an
+    unrelated schedule workflow carries a config era. The sample must be
+    completed commits spanning days, and that era must not end the walk."""
+    fixture = _busy_pr_sample_fixture(tmp_path)
+    responses_path = fixture / "responses.json"
+    recorded = json.loads(responses_path.read_text(encoding="utf-8"))
+    first_page = recorded["workflows"][0]["run_pages"][0]
+    burst_start = "2026-01-30T23:00:00Z"
+    for index, row in enumerate(first_page):
+        if index < 20:
+            start = f"2026-01-30T23:{index * 2:02d}:00Z"
+            row.update(status="in_progress", conclusion=None,
+                       created_at=start, run_started_at=start, updated_at=start)
+            completed_at = None
+        else:
+            start = f"2026-01-30T{(index - 20) // 4:02d}:{(index % 4) * 10:02d}:00Z"
+            end = start[:-3] + "05Z"
+            row.update(status="completed", conclusion="success",
+                       created_at=start, run_started_at=start, updated_at=end)
+            completed_at = end
+        job = recorded["jobs"][str(row["id"])][0]
+        job.update(created_at=start, started_at=start,
+                   completed_at=completed_at, conclusion=row["conclusion"])
+        recorded["checks"][row["head_sha"]] = ([{
+            "name": "gate", "started_at": start, "completed_at": completed_at,
+        }] if completed_at else [])
+    responses_path.write_text(json.dumps(recorded), encoding="utf-8")
+    run_root = tmp_path / "run-one-hour-burst"
+    run_root.mkdir()
+
+    doc, report, checks = run_fixture(fixture, monkeypatch, run_root)
+
+    cp = doc["pr_critical_path"]
+    assert cp["sampled_pr_count"] >= 100
+    assert cp["sample_partial_count"] == 0
+    assert cp["sample_distinct_days"] >= 5
+    assert cp["sample_candidate_era_door"] is False
+    assert cp["sample_stop_reason"] == "target_met"
+    assert cp["sample_candidate_pages_fetched"] >= 2
+    # Every sampled commit predates the in-flight burst, and the sample spans
+    # days rather than the burst's single hour.
+    assert cp["sample_span_last"] < burst_start
+    assert cp["sample_span_first"][:10] < cp["sample_span_last"][:10]
+    assert "workflow configuration boundary reached" not in report
+    # The fixture's jobs carry no steps or logs, so drill-phase checks are out
+    # of scope here; the PR-sample invariants must run and hold.
+    stop = [c for c in checks if c.name.startswith("PR gate sample stop reason")]
+    assert len(stop) == 1 and stop[0].ok and not stop[0].skipped, stop
+    failed = [c for c in checks if not c.skipped and not c.ok
+              and "sample" in c.name.lower()]
+    assert failed == [], [(c.name, c.detail) for c in failed]
+
+
 def test_pr_sample_uses_every_completed_candidate_on_cached_first_page(
         monkeypatch, tmp_path):
     fixture = _busy_pr_sample_fixture(tmp_path)
@@ -4723,7 +4778,8 @@ def test_pr_sample_stops_at_era_boundary_discovered_on_later_page(
     assert cp["sample_candidate_era_door"] is True
     assert cp["sample_complete"] is False
     assert [c for c in checks if not c.skipped and not c.ok] == []
-    assert "9 of 100 PRs sampled: era door" in report
+    assert "9 of 100 PRs sampled: workflow configuration boundary reached" in report
+    assert "era door" not in report
 
 
 def test_pr_sample_verifier_rejects_doctored_stop_reason(monkeypatch, tmp_path):

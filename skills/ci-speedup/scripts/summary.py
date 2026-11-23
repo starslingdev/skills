@@ -23,7 +23,7 @@ from typing import Any
 _DIR = Path(__file__).resolve().parent
 if str(_DIR) not in sys.path:
     sys.path.insert(0, str(_DIR))
-from pr_sample_contract import pr_sample_goal_text
+from pr_sample_contract import pr_sample_goal_text, pr_sample_stop_reason_label
 
 def _clock(s: Any) -> str:
     if s is None:
@@ -758,9 +758,8 @@ def build_summary(doc: dict[str, Any], findings_path: str = "FINDINGS.json",
         scope = (" — recency-only (external required suite, no PR carried it)"
                  if (cp.get("required_suite_unsatisfiable")
                      and stop_reason != "required_suite_empty") else "")
-        reason = str(cp.get("sample_stop_reason") or (
-            "target_met" if cp.get("sample_complete") else "candidates_exhausted"
-        )).replace("_", " ")
+        reason = pr_sample_stop_reason_label(cp.get("sample_stop_reason") or (
+            "target_met" if cp.get("sample_complete") else "candidates_exhausted"))
         out.append(
             f"Sample: {spr} of {tgt} PRs sampled: {reason} ({complete}{gap}){scope}.")
     # The gh API cost, from the same stamp the report's Data sources line quotes, so a

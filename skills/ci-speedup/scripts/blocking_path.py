@@ -51,7 +51,10 @@ from gate_frequency_contract import (
     POLE_HOLDS_UP_MIN_COUNT as _POLE_HOLDS_UP_MIN_COUNT,
 )
 import untrusted_wrap as uw  # same-skill module; BEGIN/END untrusted-log marking (#29)
-from pr_sample_contract import pr_sample_is_mostly_partial
+from pr_sample_contract import (
+    pr_sample_is_mostly_partial,
+    pr_sample_stop_reason_label,
+)
 from shell_prefix import SHELL_PREFIX_SRC  # same-skill module; one source for three detectors
 from workflow_steps import (  # same-skill module; step walker
     parallel_steps_disclosure, parallel_steps_used, parallel_steps_used_for)
@@ -7745,8 +7748,9 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                    f"floor — {_shown}{_more}. They can't hold the merge pole, so their "
                    "jobs weren't fetched (saving calls); their off-path hygiene/queue "
                    "figures are run-list-only, not job-level.")
-    stop_reason = str(cp.get("sample_stop_reason") or (
-        "target_met" if complete else "candidates_exhausted")).replace("_", " ")
+    stop_reason_code = str(cp.get("sample_stop_reason") or (
+        "target_met" if complete else "candidates_exhausted"))
+    stop_reason = pr_sample_stop_reason_label(stop_reason_code)
     partial_commits = cp.get("sample_partial_count")
     distinct_days = cp.get("sample_distinct_days")
     min_distinct_days = cp.get("sample_min_distinct_days")
@@ -7778,15 +7782,15 @@ def _provenance_block(doc: dict[str, Any], repo: str, captured_at: str) -> list[
                  + " and ".join(reasons))
     if not complete:
         short_reasons = {
-            "fetch failures": "some candidate or check-run history was unreadable",
-            "page cap": "the bounded candidate-page walk stopped before reaching the target",
-            "job list cap": "the bounded job-list read budget stopped before reaching the target",
-            "era door": "older PRs from a different workflow configuration were excluded",
-            "candidates exhausted": "the visible candidate history contained too few qualifying PRs",
-            "required suite empty": "no commit ran every observable required check",
-            "required checks unobservable": "the required checks were not present in Actions job lists",
+            "fetch_failures": "some candidate or check-run history was unreadable",
+            "page_cap": "the bounded candidate-page walk stopped before reaching the target",
+            "job_list_cap": "the bounded job-list read budget stopped before reaching the target",
+            "era_door": "older PRs from a different workflow configuration were excluded",
+            "candidates_exhausted": "the visible candidate history contained too few qualifying PRs",
+            "required_suite_empty": "no commit ran every observable required check",
+            "required_checks_unobservable": "the required checks were not present in Actions job lists",
         }
-        gate += (f" — ⚠️ **short sample** ({short_reasons.get(stop_reason, 'the sample target was not reached')}), "
+        gate += (f" — ⚠️ **short sample** ({short_reasons.get(stop_reason_code, 'the sample target was not reached')}), "
                  "so the gate ordering here is a floor, not the full picture")
     elif (evaluated and spr and evaluated >= spr * 3
           and not cp.get("required_suite_unsatisfiable")):
@@ -9893,9 +9897,9 @@ def _metadata_table(doc: dict[str, Any], repo: str) -> list[str]:
                      f"{_count_noun(runs, 'run')} / {_count_noun(jobs, 'job')}{wf_part}"))
     rows.append(("Runs window", _run_window(str(cutoff) if cutoff else scanned)))
     if isinstance(spr, int) and isinstance(tgt, int):
-        reason = str(cp.get("sample_stop_reason") or (
+        reason = pr_sample_stop_reason_label(cp.get("sample_stop_reason") or (
             "target_met" if cp.get("sample_complete", True)
-            else "candidates_exhausted")).replace("_", " ")
+            else "candidates_exhausted"))
         span_first = str(cp.get("sample_span_first") or "")[:10]
         span_last = str(cp.get("sample_span_last") or "")[:10]
         span = (f"; {span_first} to {span_last}"
