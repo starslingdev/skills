@@ -7365,6 +7365,44 @@ def test_opt45_groups_give_every_default_branch_and_tag_run_its_own_group():
     assert "replaces the older pending run" in _catalog_section("OPT45")
 
 
+def test_opt45_opt46_pending_run_rule_names_the_default_queue_setting():
+    """#493: one pending run per group is GitHub's DEFAULT (`concurrency.queue:
+    single`); `queue: max` lets up to 100 runs wait. An unqualified "GitHub keeps
+    at most one pending run" is false on a workflow that sets `queue: max`."""
+    rule = ("By default (`queue: single`), GitHub keeps at most one running and "
+            "one pending run in a concurrency group.")
+    for pat in ("OPT45", "OPT46"):
+        assert rule in " ".join(_catalog_section(pat).split()), pat
+
+
+def test_opt45_push_only_routing_lands_on_opt46_combined_block():
+    """#493: OPT45 sends a push-only workflow to OPT46's widened predicate. Kept
+    with OPT45's own group, that pairing must be exactly OPT46's combined block
+    (so default-branch and tag runs keep their run_id groups), and the routing
+    note must say to copy that block: OPT46's widened block as printed keeps the
+    shared branch group, which puts every default-branch push in one group."""
+    yaml = pytest.importorskip("yaml")
+
+    def recipes(pat):
+        out = []
+        for block in _yaml_blocks(_catalog_section(pat)):
+            conc = (yaml.safe_load(block) or {}).get("concurrency")
+            if isinstance(conc, dict) and conc.get("group"):
+                out.append(conc)
+        return out
+
+    combined = _opt46_combined_recipe()
+    assert {str(c["group"]) for c in recipes("OPT45")} == {combined["group"]}
+    widened = [c for c in recipes("OPT46")
+               if "refs/tags/" in str(c["cancel-in-progress"])]
+    assert widened
+    for conc in widened:
+        assert conc["cancel-in-progress"] == combined["cancel-in-progress"]
+    body = _catalog_section("OPT45")
+    routing = body[body.index("**Routing"):].split("\n\n", 1)[0]
+    assert "combined" in routing and "github.run_id" in routing, routing
+
+
 def test_opt45_opt46_groups_separate_same_named_fork_pull_requests():
     """#458: a bare ``head_ref`` is not a fork-safe concurrency identity."""
     yaml = pytest.importorskip("yaml")

@@ -88,8 +88,9 @@ concurrency:
 
 `push`, `merge_group`, `schedule`, and tag builds evaluate to `false` and run to completion. `merge_group` needs no separate carve-out here — cancelling a queued merge-group run can eject the PR from the merge queue, and this predicate already excludes it.
 
-**A non-cancelled group does not preserve every pending run.** GitHub keeps at
-most one running and one pending run in a concurrency group. If a third run
+**A non-cancelled group does not preserve every pending run.** By default
+(`queue: single`), GitHub keeps at most one running and one pending run in a
+concurrency group. If a third run
 joins while one is running and another is pending, the new run replaces the
 older pending run even when `cancel-in-progress` is false. When every
 default-branch commit and tag must receive its own validation *and* superseded
