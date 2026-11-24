@@ -7339,6 +7339,32 @@ def test_opt46_combined_group_validates_every_default_branch_and_tag_run():
              run_id=401) is False
 
 
+def test_opt45_groups_give_every_default_branch_and_tag_run_its_own_group():
+    """OPT45's detector fires on push-triggered workflows, so its recipe must not
+    put every default-branch push in one group: GitHub keeps one pending run per
+    group and a newer run replaces it even with cancel-in-progress false, so the
+    middle of three quick merges would never run."""
+    yaml = pytest.importorskip("yaml")
+    groups = []
+    for block in _yaml_blocks(_catalog_section("OPT45")):
+        concurrency = (yaml.safe_load(block) or {}).get("concurrency")
+        if isinstance(concurrency, dict) and concurrency.get("group"):
+            groups.append(str(concurrency["group"]))
+
+    assert groups
+    for group in groups:
+        for default in ("main", "master"):
+            merges = {_ghx_render(group, _ghx_ctx(
+                "push", ref=f"refs/heads/{default}", run_id=n,
+                default_branch=default)) for n in (101, 102, 103)}
+            assert len(merges) == 3, (group, merges)
+        tags = {_ghx_render(group, _ghx_ctx("push", ref="refs/tags/v1.1", run_id=n))
+                for n in (1, 2, 3)}
+        assert len(tags) == 3, (group, tags)
+    # The prose must state the one-pending-run rule the key exists for.
+    assert "replaces the older pending run" in _catalog_section("OPT45")
+
+
 def test_opt45_opt46_groups_separate_same_named_fork_pull_requests():
     """#458: a bare ``head_ref`` is not a fork-safe concurrency identity."""
     yaml = pytest.importorskip("yaml")
