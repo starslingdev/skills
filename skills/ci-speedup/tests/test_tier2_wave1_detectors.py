@@ -1490,6 +1490,8 @@ def test_opt46_pending_run_replacement_recipe_has_a_per_run_escape_hatch():
     assert finding["runner_min_saving"] > 0
     assert "runner-minute (bill) only" in finding["size_note"]
     assert "one pending run" in guardrail
+    # #493: one pending run is the default (`queue: single`), not a hard cap.
+    assert "By default (`queue: single`)" in guardrail
     assert "combined group" in guardrail
     # Feature-branch pushes are non-PR runs the combined key still cancels, so
     # the condition must name the runs it actually protects.
