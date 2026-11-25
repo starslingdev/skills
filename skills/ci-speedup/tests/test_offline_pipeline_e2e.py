@@ -1957,9 +1957,16 @@ def test_offline_pipeline_scan_collect_render_verify(tmp_path):
          "gate": "typescript_version_unreadable", "step": "Typecheck"}], data.get(
         "opt84_withheld_candidates")
     _row84 = next(ln for ln in report.splitlines() if "tool swap: held back" in ln)
-    # The shared row names both held-back steps; with a tie it states one reason.
-    assert "held back (prep (Build artifact), quality (Typecheck))" in _row84, _row84
-    assert bp._OPT84_WITHHOLD_PHRASES["script_unresolvable"] in _row84, _row84
+    # The row lists every dropped step with its own reason: both held-back
+    # steps, and the Lint step the table has no swap for.
+    for _where, _phrase in (
+            (".github/workflows/chained.yml / prep (Build artifact)",
+             bp._OPT84_WITHHOLD_PHRASES["script_unresolvable"]),
+            (".github/workflows/quality.yml / quality (Typecheck)",
+             bp._OPT84_WITHHOLD_PHRASES["typescript_version_unreadable"]),
+            (".github/workflows/quality.yml / quality (Lint)",
+             bp._OPT84_STEP_VERDICT_PHRASES["tool_not_in_table"])):
+        assert f"{_where}: {_phrase}" in _row84, _row84
     # One card, inside the style pole's section, after its OPT75 block if any.
     _s_pole = next(sec for sec in report.split("\n## ")
                    if "Long pole" in sec.splitlines()[0]
