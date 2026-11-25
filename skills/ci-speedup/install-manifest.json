@@ -146,6 +146,7 @@
     "scripts/scan.py",
     "scripts/shell_prefix.py",
     "scripts/summary.py",
+    "scripts/tsconfig.py",
     "scripts/untrusted_wrap.py",
     "scripts/wall_clock.py",
     "scripts/workflow_steps.py"
