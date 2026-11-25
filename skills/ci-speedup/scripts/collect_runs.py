@@ -1306,10 +1306,12 @@ class GhClient:
         with self._lock:
             self._blocked_until = max(self._blocked_until, time.time() + wait)
 
-    def _sleep_until_unblocked(self) -> None:
+    def _sleep_until_unblocked(self, *, retry_at_cap: bool = False) -> None:
         """Sleep off any block another worker (or a previous attempt) recorded.
         The single place a backoff is actually served, so a thread never
-        double-sleeps its own block.
+        double-sleeps its own block. A retry already clamped to the cap serves
+        that full wait even if publishing the deadline and logging took time;
+        other workers join the shared block at its remaining duration.
 
         RE-CHECKS after waking: another worker can EXTEND `_blocked_until` while this
         thread is asleep, and a single-shot sleep would wake straight back into the
@@ -1331,7 +1333,8 @@ class GhClient:
             if delay <= 0:
                 return
             served_until = until
-            served = min(delay, _GH_MAX_BACKOFF_S)
+            served = _GH_MAX_BACKOFF_S if retry_at_cap else min(delay, _GH_MAX_BACKOFF_S)
+            retry_at_cap = False  # any later extension uses its own remaining delay
             time.sleep(served)
             self._spend_backoff(served)
 
@@ -1386,8 +1389,10 @@ class GhClient:
             logger.debug("gh api %s: skipped — the client gave up (rate-limit "
                          "breaker tripped); counted as a coverage gap", endpoint)
             return None
+        retry_at_cap = False
         for attempt in range(1, _GH_MAX_ATTEMPTS + 1):
-            self._sleep_until_unblocked()
+            self._sleep_until_unblocked(retry_at_cap=retry_at_cap)
+            retry_at_cap = False
             if self.gave_up:            # the breaker can trip while we were asleep
                 self._bump(error=True)
                 return None
@@ -1539,6 +1544,7 @@ class GhClient:
                     if kind == "rate_limit":
                         wait = self._rate_limit_wait(headers, attempt)
                         self._record_block(wait)    # pauses every worker, not just this one
+                        retry_at_cap = wait == _GH_MAX_BACKOFF_S
                     else:
                         wait = (_GH_TRANSIENT_BASE_S * (2 ** (attempt - 1))
                                 + random.uniform(0, 0.5))
