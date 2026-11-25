@@ -1,0 +1,1 @@
+- **2026-11-25** — Report release-path hygiene when workflow and repository settings establish that publishing lacks the expected tag or review gate (#497).

@@ -198,11 +198,12 @@ def _responses(envs, *, rulesets=(), classic=_graphql(), protected=(),
     return out
 
 
-def _run(responses, *, repo="owner/repo", prereqs=True, tmp_path):
+def _run(responses, *, repo="owner/repo", prereqs=True, tmp_path,
+         workflow=_SAFE_WF):
     gh = _Gh(responses, prereqs=prereqs)
     wf = tmp_path / ".github" / "workflows"
     wf.mkdir(parents=True)
-    (wf / "ci.yml").write_text(_SAFE_WF)
+    (wf / "ci.yml").write_text(workflow)
     (tmp_path / ".github" / "CODEOWNERS").write_text(
         "/.github/workflows/ @sec-team\n")
     with mock.patch.object(cf, "_gh_utils", lambda: gh):
@@ -223,6 +224,168 @@ def _fact(out, fact_id):
 
 def _envs(out):
     return {e["name"]: e for e in out["push_access"]["environments"]}
+
+
+_PUBLISH_WF = """\
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - run: make build
+      - run: npm publish
+"""
+_TAG_FACT = "sec.release.tags-without-gate"
+_BRANCH_FACT = "sec.release.default-without-review"
+
+
+def _release_outcomes(out):
+    return {f["fact_id"]: f["outcome"] for f in out.get("release_path", [])}
+
+
+@pytest.mark.parametrize("permission", ["id-token", "contents"])
+def test_publish_tag_without_matching_ruleset_reports_a_hygiene_fact(
+        tmp_path, permission):
+    unrelated = _ruleset(10, ["refs/tags/nightly-*"], ["creation"], target="tag")
+    out, gh = _run(_responses([], rulesets=[unrelated]), tmp_path=tmp_path,
+                   workflow=_PUBLISH_WF.replace("id-token", permission))
+    assert _release_outcomes(out) == {_TAG_FACT: "fail"}
+    assert _TAG_FACT not in {item["fact_id"] for item in out["facts"]}
+    assert gh.paths().count(f"{R}/rulesets?includes_parents=true&per_page=100") == 1
+
+    report = _load_report().render({"findings": [], "security_score": out})
+    assert "### Release-path hygiene" in report
+    assert "Tag-triggered publishing without a gate" in report
+    assert "no active tag ruleset covers `v*`" in report
+
+
+@pytest.mark.parametrize("change", [
+    ("    steps:", "    environment: production\n    steps:"),
+    ("id-token: write", "id-token: none"),
+    ("make build", "echo skipped"),
+    ("npm publish", "npm publish --dry-run"),
+    ("npm publish", "gh release create test-tag --draft"),
+    ("npm publish", "cosign sign test-image"),
+    ("npm publish", "echo npm publish"),
+    ("      - uses: actions/checkout@v4\n", ""),
+    ("      - uses: actions/checkout@v4", "      - uses: actions/checkout@v4\n        with: {ref: main}"),
+    ("    steps:", "    if: false\n    steps:"),
+    ("tags: ['v*']", "tags: ['v*', '!v*']"),
+])
+def test_publish_tag_near_misses_stay_quiet(tmp_path, change):
+    out, _ = _run(_responses([]), tmp_path=tmp_path,
+                  workflow=_PUBLISH_WF.replace(*change))
+    assert "fail" not in _release_outcomes(out).values()
+
+
+@pytest.mark.parametrize("rule_ref, expected", [
+    ("refs/tags/v*", {}),
+    ("refs/tags/v2.*", {_TAG_FACT: "unmeasured"}),
+    ("~ALL", {}),
+])
+def test_tag_rules_distinguish_covered_from_partial_overlap(
+        tmp_path, rule_ref, expected):
+    ruleset = _ruleset(10, [rule_ref], ["creation"], target="tag")
+    out, _ = _run(_responses([], rulesets=[ruleset]), tmp_path=tmp_path,
+                  workflow=_PUBLISH_WF)
+    assert _release_outcomes(out) == expected
+
+
+def test_denied_tag_ruleset_read_is_not_treated_as_none(tmp_path):
+    responses = _responses([], extra={
+        f"{R}/rulesets?includes_parents=true&per_page=100": _ADMIN_403})
+    out, _ = _run(responses, tmp_path=tmp_path, workflow=_PUBLISH_WF)
+    assert _release_outcomes(out) == {_TAG_FACT: "unmeasured"}
+
+
+@pytest.mark.parametrize("count, reviewers, use_env, expected", [
+    (0, 0, True, {_BRANCH_FACT: "fail"}),
+    (0, 0, False, {_BRANCH_FACT: "fail"}),
+    (1, 0, True, {}),
+    (0, 1, True, {}),
+    (0, None, True, {_BRANCH_FACT: "unmeasured"}),
+    (None, 0, True, {_BRANCH_FACT: "unmeasured"}),
+])
+def test_default_branch_release_requires_both_sources(
+        tmp_path, count, reviewers, use_env, expected):
+    workflow = _PUBLISH_WF.replace("tags: ['v*']", "branches: [main]")
+    if use_env:
+        workflow = workflow.replace("    steps:", "    environment: production\n    steps:")
+    envs = [_env("production", _PROTECTED, reviewers=reviewers or 0)]
+    endpoints = {
+        f"{R}/rules/branches/main?per_page=100": [{"type": "pull_request",
+            "parameters": {"required_approving_review_count": count,
+                           "required_review_thread_resolution": False,
+                           "require_code_owner_review": False,
+                           "require_last_push_approval": False}}],
+        f"{R}/branches/main/protection": _api_error("gh: Branch not protected (HTTP 404)"),
+    }
+    if reviewers is None:
+        endpoints[f"{R}/environments?per_page=100"] = _ADMIN_403
+    out, _ = _run(_responses(envs, extra=endpoints), tmp_path=tmp_path,
+                  workflow=workflow)
+    assert _release_outcomes(out) == expected
+
+
+def test_classic_review_rule_can_cover_a_zero_approval_ruleset(tmp_path):
+    workflow = _PUBLISH_WF.replace("tags: ['v*']", "branches: [main]")
+    responses = _responses([], extra={
+        f"{R}/rules/branches/main?per_page=100": [{"type": "pull_request",
+            "parameters": {"required_approving_review_count": 0,
+                           "require_code_owner_review": False,
+                           "require_last_push_approval": False}}],
+        f"{R}/branches/main/protection": {"required_pull_request_reviews": {
+            "required_approving_review_count": 1}},
+    })
+    out, _ = _run(responses, tmp_path=tmp_path, workflow=workflow)
+    assert _release_outcomes(out) == {}
+
+
+def test_default_branch_release_environment_excludes_default_branch(tmp_path):
+    workflow = _PUBLISH_WF.replace("tags: ['v*']", "branches: [main]")
+    workflow = workflow.replace("    steps:", "    environment: production\n    steps:")
+    responses = _responses([_env("production", _CUSTOM)], extra={
+        f"{R}/rules/branches/main?per_page=100": [{"type": "pull_request",
+            "parameters": {"required_approving_review_count": 0,
+                           "require_code_owner_review": False,
+                           "require_last_push_approval": False}}],
+        f"{R}/branches/main/protection": _api_error("gh: Branch not protected (HTTP 404)"),
+        _dbp("production"): {"branch_policies": [{"type": "branch", "name": "release"}]},
+    })
+    out, _ = _run(responses, tmp_path=tmp_path, workflow=workflow)
+    assert _release_outcomes(out) == {}
+
+
+def test_release_requires_complete_approval_metadata(tmp_path):
+    workflow = _PUBLISH_WF.replace("tags: ['v*']", "branches: [main]")
+    responses = _responses([], extra={
+        f"{R}/rules/branches/main?per_page=100": [{"type": "pull_request",
+            "parameters": {"required_approving_review_count": 0}}],
+        f"{R}/branches/main/protection": _api_error("gh: Branch not protected (HTTP 404)"),
+    })
+    out, _ = _run(responses, tmp_path=tmp_path, workflow=workflow)
+    assert _release_outcomes(out) == {_BRANCH_FACT: "unmeasured"}
+
+
+def test_signing_release_on_default_branch_without_environment(tmp_path):
+    workflow = (_PUBLISH_WF.replace("tags: ['v*']", "branches: [main]")
+                .replace("npm publish", "cosign sign test-image"))
+    responses = _responses([], extra={
+        f"{R}/rules/branches/main?per_page=100": [],
+        f"{R}/branches/main/protection": {"required_pull_request_reviews": {
+            "required_approving_review_count": 0,
+            "require_code_owner_reviews": False,
+            "require_last_push_approval": False}},
+    })
+    out, _ = _run(responses, tmp_path=tmp_path, workflow=workflow)
+    assert _release_outcomes(out) == {_BRANCH_FACT: "fail"}
 
 
 # --- the example repository ---------------------------------------------------------
