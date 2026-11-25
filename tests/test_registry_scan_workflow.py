@@ -142,9 +142,22 @@ def test_workflow_exists_and_parses(workflow: dict):
     assert workflow["jobs"], "registry-scan.yml has no jobs"
 
 
-def test_registry_probe_runs_only_on_schedule_and_manual_dispatch(triggers: dict):
-    """No pull_request, push, or merge_group should spend scanner quota."""
-    assert set(triggers) == {"schedule", "workflow_dispatch"}
+def test_registry_probe_runs_only_on_schedule_and_manual_dispatch(triggers: dict, workflow_text: str):
+    """A weekly, non-blocking probe for the vendor recovering (#68).
+
+    The scanner has been blind since 2026-08-18 and its daily allowance is small, so
+    no pull_request, push or merge_group run may spend it or post a check. Re-adding
+    one of those triggers is #68's promotion, not a drive-by edit.
+    """
+    assert triggers.get("schedule"), "the probe must keep its weekly schedule"
+    for event in ("pull_request", "pull_request_target", "push", "merge_group"):
+        assert event not in triggers, (
+            f"registry-scan.yml has a {event} trigger; it is a scheduled probe until #68's "
+            f"promotion steps are followed")
+    assert set(triggers) == {"schedule", "workflow_dispatch"}, sorted(triggers)
+    lowered = workflow_text.lower()
+    assert "probe" in lowered and "#68" in workflow_text, (
+        "the workflow must say it is a probe and point at #68's promotion steps")
 
 
 def test_scheduled_run_exists(triggers: dict):
@@ -518,7 +531,10 @@ def test_missing_token_fails_rather_than_passing_quietly(workflow: dict):
 
 
 def test_probe_has_no_fork_coverage_job(workflow: dict):
+    """With no pull_request trigger there is no fork PR to report on; a leftover
+    fork job would be dead config that reads as live coverage."""
     assert "fork-not-scanned" not in workflow["jobs"]
+    assert not any("NOT RUN" in str(job.get("name", "")) for job in workflow["jobs"].values())
 
 
 def test_scanner_coverage_limits_are_documented(workflow_text: str):

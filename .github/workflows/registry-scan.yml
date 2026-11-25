@@ -2,7 +2,7 @@ name: Registry scan
 
 # Runs the same third-party security scanner that skill registries publish audits from
 # (Snyk Agent Scan) against the installable skill trees under `skills/`. A rule violation
-# fails the probe and alerts maintainers.
+# fails the run.
 #
 # WHAT THIS DOES NOT COVER. Registries run more than one scanner. This gate reproduces exactly
 # one of them (Snyk Agent Scan). It says nothing about Gen Agent Trust Hub — which publishes no
@@ -24,8 +24,11 @@ name: Registry scan
 # outcome, and both name the reset. The unlock is enabling Agent Scan on the Snyk tenant
 # and running the scanner with a tenant push key, not a different token.
 #
-# Weekly, non-blocking probe for the scanner service recovering. When the control
-# detects again and the scan goes green, follow the promotion steps in #68.
+# A WEEKLY, NON-BLOCKING PROBE for the vendor recovering (#68). The scanner went blind on
+# 2026-08-18 and its daily allowance is small, so this workflow runs only on its schedule and
+# by manual dispatch: no pull_request, push, or merge_group trigger, and no check on any PR.
+# When the red-proof control detects again and the scan goes green, #68's promotion steps
+# apply; restoring the PR and push triggers and a fork-PR path is part of that promotion.
 on:
   # The scanner's rule catalog changes without any commit of ours: a renamed, retired, or newly
   # added rule can turn a shipped skill red on its own. The weekly run is what notices.
@@ -106,8 +109,9 @@ jobs:
 
       # A missing token must never look like a clean scan. This is the whole point of the gate:
       # the failure we are guarding against is a security finding nobody saw, and a silently
-      # skipped security scan is that same failure wearing a green check. On internal pushes and
-      # PRs the secret is expected to exist, so its absence is a red build, not a quiet skip.
+      # skipped security scan is that same failure wearing a green check. On this repository's
+      # scheduled and dispatched runs the secret is expected to exist, so its absence is a red
+      # build, not a quiet skip.
       - name: Require SNYK_TOKEN
         run: |
           if [ -z "${SNYK_TOKEN}" ]; then
@@ -305,7 +309,7 @@ jobs:
               echo "(scan class \`${{ steps.gate.outputs.scan_class }}\`, control class"
               echo "\`${{ steps.red_proof.outputs.control_class }}\`)."
               echo ""
-              echo "It resets daily: re-run this check after the reset, or push again then."
+              echo "It resets daily: dispatch this workflow again after the reset."
               echo "The cap is a property of the public tier that \`SNYK_TOKEN\` authenticates"
               echo "against; the unlock is enabling Agent Scan on the Snyk tenant and running"
               echo "the scanner with a tenant push key, not a different token."
