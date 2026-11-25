@@ -78,8 +78,9 @@ def _eligible_jobs(commit: dict[str, Any], cutoff_s: int) -> tuple[list[dict[str
 
 def compute(recording: dict[str, Any], *,
             bookkeeping_cutoff_s: int = DEFAULT_BOOKKEEPING_CUTOFF_S,
-            gate_by_sha: dict[str, str] | None = None) -> dict[str, Any]:
-    """Compute month-wide gate shares and wait facts from normalized data."""
+            gate_by_sha: dict[str, str] | None = None,
+            gate_by_completion: bool = False) -> dict[str, Any]:
+    """Compute wait and gate facts, using duration for legacy month-wide snapshots."""
     if recording.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unsupported golden recording schema")
     commits = [row for row in recording.get("pr_commits") or [] if isinstance(row, dict)]
@@ -135,14 +136,24 @@ def compute(recording: dict[str, Any], *,
             _seconds(job.get("started_at"), job.get("completed_at")) or 0.0
             for job in jobs
         }
-        longest = max(durations.values(), default=0.0)
-        for job in jobs:
+        if gate_by_completion:
+            scores = [
+                _instant(job.get("completed_at"))
+                if job.get("conclusion") != "skipped"
+                and (_seconds(job.get("started_at"), job.get("completed_at")) or 0) > 0
+                else None
+                for job in jobs
+            ]
+        else:
+            scores = [durations[_check_name(job)] for job in jobs]
+        latest_or_longest = max((score for score in scores if score is not None), default=None)
+        for job, score in zip(jobs, scores):
             job_name = _check_name(job)
             leaf_name = str(job.get("name") or "")
             if forced_gate:
                 is_gate = forced_gate in {job_name, leaf_name}
             else:
-                is_gate = durations.get(job_name) == longest
+                is_gate = score is not None and score == latest_or_longest
             if not is_gate:
                 continue
             name = job_name

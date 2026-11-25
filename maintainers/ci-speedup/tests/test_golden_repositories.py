@@ -16,14 +16,8 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1] / "golden"
 _REPOSITORIES = {
     "home-assistant-core": (
-        "PR #318 covers the headline; #365 tracks hassfest share; #381 tracks pylint gates",
+        "PR #318 covers the headline follow-up",
         (
-            # Issue #365 tracks the independent engine/oracle hassfest share mismatch.
-            "gate share differs for 'CI / Check hassfest'",
-            # Issue #381 tracks this independently recorded missing pylint gate.
-            "frequent gate absent: 'CI / Check pylint'",
-            # Issue #381 tracks this independently recorded missing test-lint gate.
-            "frequent gate absent: 'CI / Check pylint on tests'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -134,22 +128,77 @@ def test_reference_oracle_does_not_import_the_engine() -> None:
 
 
 def test_known_red_reasons_name_the_public_issue_and_fix_pr() -> None:
-    issue_by_name = {
-        "home-assistant-core": "#365",
-        "vercel-nextjs": "#363",
-    }
-    for name, issue in issue_by_name.items():
+    for name in ("home-assistant-core", "vercel-nextjs"):
         reason, _markers = _REPOSITORIES[name]
-        assert issue in reason
         assert "#318" in reason
+    assert "#363" in _REPOSITORIES["vercel-nextjs"][0]
 
 
-def test_home_assistant_pylint_gaps_name_their_own_issue() -> None:
-    reason, markers = _REPOSITORIES["home-assistant-core"]
+def test_home_assistant_hassfest_patterns_exclude_unrelated_checks() -> None:
+    compare = _load("compare")
+    recording = _ROOT / "repositories" / "home-assistant-core"
+    patterns = compare._recorded_gate_job_patterns(
+        recording, compare._recorded_required_checks(recording)
+    )["CI"]
 
-    assert "#381" in reason
-    assert "frequent gate absent: 'CI / Check pylint'" in markers
-    assert "frequent gate absent: 'CI / Check pylint on tests'" in markers
+    def matches(name: str) -> bool:
+        return any(pattern.fullmatch(name) for pattern in patterns)
+
+    assert matches("Check hassfest")
+    assert matches("Check all requirements")
+    assert not any(matches(name) for name in (
+        "Check pylint", "Check pylint on tests", "Check mypy", "Check Dockerfile",
+    ))
+
+    # A concrete matrix leg can select the job, but cannot admit unrelated checks.
+    patterns = compare._recorded_gate_job_patterns(recording, {"CI / Check Dockerfile"})["CI"]
+    assert all(matches(name) for name in (
+        "Check Dockerfile", "Check Dockerfile.dev", "Check script/hassfest/docker/Dockerfile",
+    ))
+    assert not matches("Check Dockerfile.local")
+
+
+def test_recorded_gate_patterns_expand_literal_matrix_legs_and_keep_dynamic_wildcards(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    workflows = tmp_path / "checkout" / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text("""\
+name: CI
+jobs:
+  gate:
+    needs: [literal, dynamic]
+  literal:
+    name: Check ${{ matrix.file }} on ${{ matrix.os }}
+    strategy:
+      matrix:
+        file: [Dockerfile, Dockerfile.dev]
+        os: [linux, windows]
+        exclude:
+          - file: Dockerfile.dev
+            os: windows
+        include:
+          - file: Containerfile
+            os: linux
+  dynamic:
+    name: Generate ${{ matrix.target }}
+    strategy:
+      matrix: ${{ fromJSON(needs.info.outputs.matrix) }}
+""", encoding="utf-8")
+    patterns = compare._recorded_gate_job_patterns(tmp_path, {"CI / gate"})["CI"]
+
+    def matches(name: str) -> bool:
+        return any(pattern.fullmatch(name) for pattern in patterns)
+
+    assert all(matches(name) for name in (
+        "Check Dockerfile on linux", "Check Dockerfile on windows",
+        "Check Dockerfile.dev on linux", "Check Containerfile on linux",
+        "Generate runtime-selected-target",
+    ))
+    assert not any(matches(name) for name in (
+        "Check Dockerfile.dev on windows", "Check Containerfile on windows",
+        "Check DockerfileXdev on linux", "Generate ",
+    ))
 
 
 def test_go_ethereum_review_expectation_names_the_required_gate() -> None:
@@ -406,6 +455,9 @@ def test_engine_span_oracle_uses_every_recorded_run_without_engine_filtering(
     compare = _load("compare")
     recording = tmp_path / "recording"
     recording.mkdir()
+    (recording / "manifest.json").write_text(
+        json.dumps({"oracle_gate_basis": "completion-v1"}), encoding="utf-8"
+    )
     with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
         json.dump({
             "schema_version": 1,
@@ -417,26 +469,30 @@ def test_engine_span_oracle_uses_every_recorded_run_without_engine_filtering(
                     {"run_key": "docs-run", "workflow": "Docs",
                      "created_at": "2026-11-01T00:00:00Z"},
                     {"run_key": "ci-run", "workflow": "CI",
-                     "created_at": "2026-11-01T00:10:00Z"},
+                     "created_at": "2026-11-01T00:15:00Z"},
                 ],
                 "jobs": [
                     {"run_key": "docs-run", "workflow": "Docs", "name": "docs",
                      "started_at": "2026-11-01T00:00:00Z",
-                     "completed_at": "2026-11-01T00:01:00Z"},
+                     "completed_at": "2026-11-01T00:15:00Z"},
                     {"run_key": "ci-run", "workflow": "CI", "name": "gate",
-                     "started_at": "2026-11-01T00:10:00Z",
+                     "started_at": "2026-11-01T00:15:00Z",
+                     "completed_at": "2026-11-01T00:20:00Z"},
+                    {"run_key": "ci-run", "workflow": "CI", "name": "skipped",
+                     "conclusion": "skipped", "started_at": "2026-11-01T00:20:00Z",
                      "completed_at": "2026-11-01T00:20:00Z"},
                 ],
             }],
         }, stream)
     findings = {"pr_critical_path": {
-        "checks": [{"name": "CI / gate", "required_reachable": True}],
-        "chain_facts": [{"sha": "commit-1", "chain": ["CI / gate"]}],
+        "checks": [{"name": "Docs / docs", "required_reachable": True}],
+        "chain_facts": [{"sha": "commit-1", "chain": ["Docs / docs"]}],
     }}
 
     oracle = compare._oracle_for_engine_span(recording, findings)
 
     assert oracle["typical_pr_wait_s"] == 1200
+    assert oracle["gate_order"] == ["CI / gate"]
 
 
 def test_engine_span_oracle_derives_population_and_gates_without_chain_facts(

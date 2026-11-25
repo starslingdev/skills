@@ -15,6 +15,7 @@ import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
+from itertools import product
 from pathlib import Path
 from typing import Any
 
@@ -375,6 +376,84 @@ def _required_matches_job_template(
     return any(pattern.fullmatch(candidate) for candidate in candidates)
 
 
+_MATRIX_NAME_EXPRESSION = re.compile(r"\$\{\{\s*matrix\.([\w.-]+)\s*\}\}")
+
+
+def _literal_matrix_legs(matrix: Any) -> list[dict[str, Any]] | None:
+    """Expand literal GitHub matrix axes, exclusions, and additions."""
+    if not isinstance(matrix, dict):
+        return None
+
+    def literal(value: Any) -> bool:
+        if isinstance(value, dict):
+            return all(literal(item) for item in value.values())
+        if isinstance(value, list):
+            return all(literal(item) for item in value)
+        return value is None or isinstance(value, (bool, int, float)) or (
+            isinstance(value, str) and "${{" not in value)
+
+    axes = {name: values for name, values in matrix.items()
+            if name not in {"include", "exclude"}}
+    include = matrix.get("include", [])
+    exclude = matrix.get("exclude", [])
+    if (not all(isinstance(values, list) and literal(values) for values in axes.values())
+            or not all(isinstance(rows, list) and all(
+                isinstance(row, dict) and literal(row) for row in rows
+            ) for rows in (include, exclude))):
+        return None
+
+    # Bound static expansion to GitHub Actions' maximum jobs per matrix.
+    if math.prod(len(values) for values in axes.values()) > 256 or len(include) > 256:
+        return None
+    originals = [dict(zip(axes, values)) for values in product(*axes.values())] if axes else []
+    originals = [leg for leg in originals if not any(
+        all(key in leg and leg[key] == value for key, value in row.items())
+        for row in exclude
+    )]
+    legs = [dict(leg) for leg in originals]
+    for row in include:
+        targets = [index for index, original in enumerate(originals) if all(
+            key not in original or original[key] == value for key, value in row.items()
+        )]
+        if targets:
+            for index in targets:
+                legs[index].update(row)
+        else:
+            legs.append(dict(row))
+    return legs if len(legs) <= 256 else None
+
+
+def _recorded_job_displays(job_id: str, job: dict[str, Any]) -> list[str]:
+    template = str(job.get("name") or job_id)
+    if (not _MATRIX_NAME_EXPRESSION.search(template)
+            or "${{" in _MATRIX_NAME_EXPRESSION.sub("", template)):
+        return [template]
+    strategy = job.get("strategy")
+    legs = _literal_matrix_legs(strategy.get("matrix")) if isinstance(strategy, dict) else None
+    if legs is None:
+        return [template]
+
+    names = []
+    for leg in legs:
+        def substitute(match: re.Match[str]) -> str:
+            value: Any = leg
+            for key in match[1].split("."):
+                if not isinstance(value, dict) or key not in value:
+                    return match[0]
+                value = value[key]
+            if value is None:
+                return ""
+            if isinstance(value, bool):
+                return str(value).lower()
+            return str(value) if isinstance(value, (str, int, float)) else match[0]
+
+        display = _MATRIX_NAME_EXPRESSION.sub(substitute, template)
+        if "${{" in display:
+            return [template]
+        names.append(display)
+    return list(dict.fromkeys(names))
+
+
 def _recorded_gate_job_patterns(
         recording: Path,
         required_names: set[str],
@@ -396,7 +475,7 @@ def _recorded_gate_job_patterns(
             recording / "checkout").as_posix())
         jobs = payload["jobs"]
         displays = {
-            str(job_id): str(row.get("name") or job_id)
+            str(job_id): _recorded_job_displays(str(job_id), row)
             for job_id, row in jobs.items() if isinstance(row, dict)
         }
         needed_by: dict[str, list[str]] = {}
@@ -410,12 +489,12 @@ def _recorded_gate_job_patterns(
                 else [str(needs)] if needs else []
             )
         selected = {
-            job_id for job_id, display in displays.items()
+            job_id for job_id, names in displays.items()
             if any((_matches_required_job(
                         {"workflow": workflow, "name": display}, required)
                     or _required_matches_job_template(
                         workflow, display, required))
-                for required in required_names)
+                for display in names for required in required_names)
         }
         pending = list(selected)
         while pending:
@@ -426,7 +505,8 @@ def _recorded_gate_job_patterns(
                     pending.append(dependency)
         if selected:
             patterns[workflow] = [
-                _job_name_pattern(displays[job_id]) for job_id in sorted(selected)
+                _job_name_pattern(display) for job_id in sorted(selected)
+                for display in displays[job_id]
             ]
     return patterns
 
@@ -584,11 +664,16 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    manifest_path = recording / "manifest.json"
+    manifest = load(manifest_path) if manifest_path.is_file() else {}
     # The comparison aligns only the public timestamp span and bounded sample
     # size. Commit identities, eligible jobs, check names, durations, and each
-    # commit's slowest eligible gate all come from the recording, so the engine
-    # cannot provide its own answer to the oracle.
-    return module.compute(scoped, bookkeeping_cutoff_s=0)
+    # commit's gate all come from the recording, so the engine cannot provide
+    # its own answer to the oracle. Older baselines retain their duration metric.
+    return module.compute(
+        scoped, bookkeeping_cutoff_s=0,
+        gate_by_completion=manifest.get("oracle_gate_basis") == "completion-v1",
+    )
 
 
 def _fixture_name(endpoint: str) -> str:

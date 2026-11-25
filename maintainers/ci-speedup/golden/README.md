@@ -67,3 +67,10 @@ that mode exposes only run/job pairs with evidence instead of manufacturing a
 failed job read for every missing pair. Replay stamps the sample, gate share,
 gate order, and gate P50 comparisons as non-independent wherever those pages
 come from the same normalized month data as the oracle.
+
+Recordings can declare `oracle_gate_basis: completion-v1` in their manifest.
+For replay comparison, this credits the latest recorded completion among
+eligible jobs that ran. Zero-duration and skipped jobs cannot win; ties count
+for each check. Older baselines without the field keep the longest-duration
+metric until their expectations are reviewed for migration. Month-wide oracle
+snapshots remain unchanged.
