@@ -1511,6 +1511,24 @@ def test_go_parallel_source_proof_accepts_plain_literal_tables(tmp_path):
         "        })\n    }\n}\n")
     assert set(cr._go_parallel_source_candidates(tmp_path, {"TestCase"})) == {"TestCase"}
 
+def test_go_parallel_source_file_is_posix_on_windows(tmp_path, monkeypatch):
+    from pathlib import PureWindowsPath
+    source = tmp_path / "pkg" / "s_test.go"
+    source.parent.mkdir()
+    source.write_text("package s\n" + _go_test_func("TestCase"))
+    relative_to = Path.relative_to
+
+    def windows_relative_to(path, base, *args, **kwargs):
+        relative = relative_to(path, base, *args, **kwargs)
+        if path == source and base == tmp_path:
+            return PureWindowsPath(*relative.parts)
+        return relative
+
+    monkeypatch.setattr(Path, "relative_to", windows_relative_to)
+    found = cr._go_parallel_source_candidates(tmp_path, {"TestCase"})
+    assert found["TestCase"]["file"] == "pkg/s_test.go"
+
+
 def test_go_parallel_isolated_control_still_qualifies(tmp_path):
     (tmp_path / "s_test.go").write_text("package s\n" + _go_test_func("TestCase"))
     assert set(cr._go_parallel_source_candidates(tmp_path, {"TestCase"})) == {"TestCase"}

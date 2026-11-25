@@ -33726,7 +33726,7 @@ def _go_parallel_source_definitions(
                 continue
             definition: dict[str, Any] = {
                 "test": name,
-                "file": str(path.relative_to(root)),
+                "file": path.relative_to(root).as_posix(),
                 "line": text.count("\n", 0, match.start()) + 1,
                 "import_path": _go_import_path(root, path.parent),
                 "proof": None,
