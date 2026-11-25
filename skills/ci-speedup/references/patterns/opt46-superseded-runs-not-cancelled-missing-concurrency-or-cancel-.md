@@ -76,43 +76,39 @@ compute on cancelled runs. Leave it unsized until matched cancelled runs show
 that the runner was allocated and measure its compute; do not infer a number
 from the YAML.
 
-**Default (PR-scoped)** — correct whenever the racing runs are PR runs:
-
-```yaml
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request'
-    && github.head_ref != github.event.repository.default_branch }}
-```
-
-`push`, `merge_group`, `schedule`, and tag builds evaluate to `false` and run to completion. `merge_group` needs no separate carve-out here — cancelling a queued merge-group run can eject the PR from the merge queue, and this predicate already excludes it.
-
-**A non-cancelled group does not preserve every pending run.** By default
-(`queue: single`), GitHub keeps at most one running and one pending run in a
-concurrency group. If a third run
-joins while one is running and another is pending, the new run replaces the
-older pending run even when `cancel-in-progress` is false. When every
-default-branch commit and tag must receive its own validation *and* superseded
-feature-branch runs should still cancel, use one combined group: default-branch
-and tag runs select their unique `run_id`; feature-branch push and PR runs keep
-the shared short branch name that cancellation and OPT47 dedup require.
+**Default (PR-scoped)** — correct whenever the racing runs are PR runs.
+The PR-scoped predicate enables cancellation only on incoming pull requests.
 
 ```yaml
 concurrency:
   group: ${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && github.run_id || format('{0}/{1}', github.event.pull_request.head.repo.full_name || github.repository, github.head_ref || github.ref_name) }}
   cancel-in-progress: >-
-    ${{ github.event_name != 'merge_group'
-    && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
-    && github.head_ref != github.event.repository.default_branch
-    && !startsWith(github.ref, 'refs/tags/') }}
+    ${{ github.event_name == 'pull_request'
+    && github.head_ref != github.event.repository.default_branch }}
 ```
+
+`push`, `merge_group`, `schedule`, and tag builds set `cancel-in-progress` to `false`. `merge_group` needs no separate carve-out here — cancelling a queued merge-group run can eject the PR from the merge queue, and this predicate already excludes it.
+
+**A non-cancelled group does not preserve every pending run.** By default
+(`queue: single`), GitHub keeps at most one running and one pending run in a
+concurrency group. If a third run
+joins while one is running and another is pending, the new run replaces the
+older pending run even when `cancel-in-progress` is false. Both blocks use the
+same combined group: default-branch and tag runs select their unique `github.run_id`
+so they cannot replace one another; feature-branch push and PR runs share a
+repository-qualified branch key for cancellation and OPT47 dedup.
+
+If a dedicated default-branch workflow needs serial validation, use a shared
+group with `queue: max` and `cancel-in-progress: false`. GitHub allows up to
+100 pending runs and processes them in the order they start waiting. Keep this
+queue separate from feature-branch cancellation: `queue: max` cannot be
+combined with a `cancel-in-progress` value of `true`.
 
 Do not add `github.event_name` to this group when the same workflow handles
 both events: adding `github.event_name` to a `push` + `pull_request` workflow
 splits one branch into separate event groups,
 so the OPT47 push+PR duplicate runs can no longer supersede or cancel one
-another. The key above deliberately omits it. If every event truly must be
+another. Both blocks deliberately omit it. If every event truly must be
 independent, adding the event name is an explicit trade: it preserves those
 event-specific runs but gives up OPT47 dedup.
 
@@ -120,11 +116,11 @@ event-specific runs but gives up OPT47 dedup.
 
 Cancellation is decided by the **incoming** run's `cancel-in-progress`, and it kills every in-progress run in the group *regardless of their settings*. Repository qualification removes the fork-name collision. The `&& github.head_ref != github.event.repository.default_branch` term still protects an in-repository back-merge PR whose head branch is the default branch. `github.event.repository.default_branch` is present on **both** the `push` and the `pull_request` payloads (and on `pull_request` it is the base/upstream repo's default branch), so it needs no per-repo substitution. If pushes to another long-lived branch (`release/1.x`, `develop`, `production`) must never be cancelled, add an explicit `&& github.head_ref != '<branch>'` term per branch, exactly as the widened form's release-branch note below prescribes for `github.ref`.
 
-**Widened (Flavor A — waste is on feature-branch pushes)** — a `push`-triggered workflow (e.g. `branches-ignore: [main]`) gets *zero* benefit from the PR-scoped predicate, because it never sees a `pull_request` event. Cancel on every ref *except* the protected ones:
+**Widened (Flavor A — waste is on feature-branch pushes)** — a `push`-triggered workflow (e.g. `branches-ignore: [main]`) gets *zero* benefit from the PR-scoped predicate, because it never sees a `pull_request` event. The widened predicate also enables cancellation on feature-branch pushes.
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && github.run_id || format('{0}/{1}', github.event.pull_request.head.repo.full_name || github.repository, github.head_ref || github.ref_name) }}
   cancel-in-progress: >-
     ${{ github.event_name != 'merge_group'
     && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
@@ -138,7 +134,7 @@ Two terms that look redundant and are not:
 - `github.event_name != 'merge_group'` — a merge-group run's `github.ref` is a `gh-readonly-queue/...` ref, so the branch and tag terms alone would **not** exclude it, and cancelling it can eject the PR from the queue.
 - `github.head_ref != github.event.repository.default_branch` — if this workflow ever also sees `pull_request` events, a PR's `github.ref` is `refs/pull/N/merge`, which passes the branch test and the tag test. That is the same fork-PR-from-`main` hole described above; this term is its guard here.
 
-If the repo also protects long-lived **release** branches that must never be cancelled, add an explicit term (e.g. `&& !startsWith(github.ref, 'refs/heads/release/')`). `github.ref_protected` looks like a shortcut for that, but it is unreliable in **both** directions and this catalog does not recommend it: an *unprotected* default branch reads `false` (→ it gets cancelled — the bug), and repo **rulesets** increasingly target `~ALL` branches, which makes `ref_protected` `true` on ordinary feature branches (→ the predicate never fires and the saving is **zero**).
+If the repo also protects long-lived **release** branches that must never be cancelled, add an explicit term (e.g. `&& !startsWith(github.ref, 'refs/heads/release/')`). That term stops cancellation only: those pushes still share one group, where a newer pending run replaces an older one, so also add the branch to the group's `github.run_id` selector by appending `|| startsWith(github.ref, 'refs/heads/release/')` right after its `startsWith(github.ref, 'refs/tags/')` test. `github.ref_protected` looks like a shortcut for that, but it is unreliable in **both** directions and this catalog does not recommend it: an *unprotected* default branch reads `false` (→ it gets cancelled — the bug), and repo **rulesets** increasingly target `~ALL` branches, which makes `ref_protected` `true` on ordinary feature branches (→ the predicate never fires and the saving is **zero**).
 
 Keep the continuation lines at the **same indent** as `${{` (as above). YAML folds a `>-` block into one space-joined line only for lines at the base indent; a *more-indented* line keeps its newline, and an expression carrying literal newlines relies on undocumented lexer behavior — if it were ever read as a plain string, a non-empty string is truthy and the workflow would cancel on **every** event, which is exactly the failure this recipe exists to prevent. (`>-` also chomps the trailing newline; `|` / `>` would leave one, and `"false\n"` is truthy.) Equivalently, write the whole predicate on one line.
 

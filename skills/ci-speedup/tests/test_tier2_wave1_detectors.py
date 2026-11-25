@@ -155,6 +155,19 @@ def test_finding_seed_workflow_paths_excludes_source_file_findings():
     assert cr._finding_seed_workflow_paths("malformed", workflow_paths) == set()
 
 
+def test_finding_seed_workflow_paths_normalizes_windows_paths():
+    assert cr._finding_seed_workflow_paths([
+        {"workflow_file": r".github\workflows\ci.yml"},
+        {"workflow_file": r"tests\conftest.py"},
+    ], {".github/workflows/ci.yml"}) == {".github/workflows/ci.yml"}
+
+
+def test_finding_seed_workflow_paths_keeps_a_literal_backslash_api_path():
+    literal = ".github/workflows/a\\b.yml"
+    assert cr._finding_seed_workflow_paths(
+        [{"workflow_file": literal}], {literal}) == {literal}
+
+
 def test_runner_minute_spine_uses_billable_basis_and_occurrence_frequency():
     wf = ".github/workflows/ci.yml"
     runs = [
@@ -1496,7 +1509,7 @@ def test_opt46_pending_run_replacement_recipe_has_a_per_run_escape_hatch():
     # Feature-branch pushes are non-PR runs the combined key still cancels, so
     # the condition must name the runs it actually protects.
     assert "every non-PR commit" not in guardrail
-    assert "every default-branch commit and tag must be validated" in guardrail
+    assert "default-branch and tag runs select their unique `github.run_id`" in guardrail
     combined = ("${{ github.workflow }}-${{ (github.ref == "
                 "format('refs/heads/{0}', github.event.repository.default_branch) || "
                 "startsWith(github.ref, 'refs/tags/')) && github.run_id || "
@@ -1507,12 +1520,28 @@ def test_opt46_pending_run_replacement_recipe_has_a_per_run_escape_hatch():
     # stale copy keyed on the bare branch name.
     catalog = (Path(__file__).resolve().parents[1] / "references"
                / "optimization-patterns.md").read_text(encoding="utf-8")
-    assert f"group: {combined}" in catalog
+    opt46 = catalog.split("\n### OPT46 ", 1)[1].split("\n### OPT47 ", 1)[0]
+    assert re.findall(r"^  group: (.+)$", opt46, re.MULTILINE) == [combined, combined]
+    # Finding text is a second place users get the recipe. Pin the overlapping
+    # safety explanations alongside the exact key, so neither copy can drift.
+    catalog_prose = " ".join(opt46.split())
+    for first, last in [
+        ("The PR-scoped predicate", "incoming pull requests."),
+        ("The widened predicate", "feature-branch pushes."),
+        ("By default (`queue: single`)", "and OPT47 dedup."),
+        ("Do not add `github.event_name`", "supersede or cancel one another."),
+        ("If a dedicated default-branch workflow", "with a `cancel-in-progress` value of `true`."),
+    ]:
+        start = catalog_prose.index(first)
+        end = catalog_prose.index(last, start) + len(last)
+        assert catalog_prose[start:end] in guardrail
     assert "github.event.repository.default_branch" in guardrail
     assert "startsWith(github.ref, 'refs/tags/')" in guardrail
     assert "`github.run_id`" in guardrail
     assert "OPT47" in guardrail
     assert "`github.event_name`" in guardrail
+    assert "up to 100 pending runs" in guardrail
+    assert "`queue: max` cannot be combined with a `cancel-in-progress` value of `true`" in guardrail
 
     safe = {
         "on": {"push": {}, "pull_request": {}},

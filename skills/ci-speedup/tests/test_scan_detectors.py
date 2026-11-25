@@ -18,7 +18,7 @@ import json
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -60,6 +60,32 @@ def _patterns(data: dict) -> set[str]:
 def _scan_one(tmp_path: Path, content: str, name: str = "ci.yml") -> set[str]:
     _write_workflow(tmp_path, name, content)
     return _patterns(_scan(tmp_path))
+
+
+def test_scan_emits_posix_workflow_paths(tmp_path, monkeypatch):
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx playwright install --with-deps
+      - run: vitest run
+""")
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    relative_to = Path.relative_to
+
+    def windows_workflow_relative_to(path, root, *args, **kwargs):
+        relative = relative_to(path, root, *args, **kwargs)
+        if path == workflow and root == tmp_path:
+            return PureWindowsPath(*relative.parts)
+        return relative
+
+    monkeypatch.setattr(Path, "relative_to", windows_workflow_relative_to)
+    result = scan.scan(tmp_path, _SKILL_DIR / "references" / "patterns")
+    finding = next(f for f in result["findings"] if f["pattern"] == "OPT1")
+    assert finding["workflow_file"] == ".github/workflows/ci.yml"
+    assert list(result["workflow_job_graph"]) == [".github/workflows/ci.yml"]
 
 
 # =============================================================================
@@ -7087,8 +7113,7 @@ def test_opt46_per_run_non_pr_group_preserves_each_required_validation():
         if isinstance(conc, dict) and "github.run_id" in str(conc.get("group", "")):
             recipes.append(conc)
 
-    assert len(recipes) == 1, "OPT46 needs one copy-pasteable per-run escape hatch"
-    recipe = recipes[0]
+    assert len(recipes) == 2, "both OPT46 blocks must use per-run groups"
     combined = (
         "${{ github.workflow }}-${{ (github.ref == "
         "format('refs/heads/{0}', github.event.repository.default_branch) || "
@@ -7096,9 +7121,9 @@ def test_opt46_per_run_non_pr_group_preserves_each_required_validation():
         "format('{0}/{1}', github.event.pull_request.head.repo.full_name || "
         "github.repository, github.head_ref || github.ref_name) }}"
     )
-    assert recipe["group"] == combined
-    assert "github.event_name" not in recipe["group"]
-    assert "refs/tags/" in recipe["cancel-in-progress"]
+    assert all(recipe["group"] == combined for recipe in recipes)
+    assert all("github.event_name" not in recipe["group"] for recipe in recipes)
+    assert any("refs/tags/" in recipe["cancel-in-progress"] for recipe in recipes)
 
     body = _catalog_section("OPT46")
     assert "mutually exclusive for the same event" not in body
@@ -7108,8 +7133,8 @@ def test_opt46_per_run_non_pr_group_preserves_each_required_validation():
     # The literal contract above keeps an in-repo PR and feature push on the
     # same repo-qualified branch key (OPT47), while forks cannot collide and
     # default-branch and tag runs select run_id.
-    assert "github.event.pull_request.head.repo.full_name" in recipe["group"]
-    assert "github.head_ref || github.ref_name" in recipe["group"]
+    assert "github.event.pull_request.head.repo.full_name" in combined
+    assert "github.head_ref || github.ref_name" in combined
 
 
 # --- A real GitHub-expression evaluator for the OPT46 combined group key ------
@@ -7282,9 +7307,47 @@ def _opt46_combined_recipe() -> dict:
     yaml = pytest.importorskip("yaml")
     for block in _yaml_blocks(_catalog_section("OPT46")):
         conc = (yaml.safe_load(block) or {}).get("concurrency")
-        if isinstance(conc, dict) and "github.run_id" in str(conc.get("group", "")):
+        if (isinstance(conc, dict) and "github.run_id" in str(conc.get("group", ""))
+                and "refs/tags/" in conc.get("cancel-in-progress", "")):
             return conc
-    raise AssertionError("OPT46 has no per-run combined group recipe")
+    raise AssertionError("OPT46 has no widened recipe with the combined group key")
+
+
+def test_every_opt46_recipe_keeps_three_quick_default_branch_and_tag_runs():
+    yaml = pytest.importorskip("yaml")
+    recipes = [concurrency for block in _yaml_blocks(_catalog_section("OPT46"))
+               if (concurrency := (yaml.safe_load(block) or {}).get("concurrency"))]
+    assert len(recipes) >= 2
+    for recipe in recipes:
+        group = recipe["group"]
+        cancel = recipe["cancel-in-progress"].strip()[3:-2]
+        for default in ("main", "develop"):
+            for ref in (f"refs/heads/{default}", "refs/tags/v1.2.3"):
+                events = [_ghx_ctx("push", ref=ref, default_branch=default, run_id=n)
+                          for n in (101, 102, 103)]
+                groups = {_ghx_render(group, ctx) for ctx in events}
+                assert len(groups) == 3, (ref, groups)
+                assert not any(_ghx_eval(cancel, ctx) for ctx in events)
+
+
+def test_opt46_release_branch_note_also_keeps_every_pending_release_run():
+    """The widened block's release-branch note keeps release pushes from being
+    CANCELLED. A cancel term alone still leaves them in one shared group, where
+    a newer pending run replaces an older one, so the note must also route the
+    branch to `github.run_id`, and the term it prints must do exactly that."""
+    body = " ".join(_catalog_section("OPT46").split())
+    term = "|| startsWith(github.ref, 'refs/heads/release/')"
+    assert f"`{term}`" in body, "release-branch note must extend the run_id selector"
+    group = _opt46_combined_recipe()["group"]
+    anchor = "startsWith(github.ref, 'refs/tags/')"
+    assert group.count(anchor) == 1
+    extended = group.replace(anchor, f"{anchor} {term}")
+    runs = {_ghx_render(extended, _ghx_ctx("push", ref="refs/heads/release/1.x",
+                                           run_id=n)) for n in (1, 2, 3)}
+    assert len(runs) == 3, runs
+    feature = {_ghx_render(extended, _ghx_ctx("push", ref="refs/heads/feature/x",
+                                              run_id=n)) for n in (1, 2)}
+    assert len(feature) == 1, feature
 
 
 def test_opt46_combined_group_validates_every_default_branch_and_tag_run():
@@ -7375,12 +7438,8 @@ def test_opt45_opt46_pending_run_rule_names_the_default_queue_setting():
         assert rule in " ".join(_catalog_section(pat).split()), pat
 
 
-def test_opt45_push_only_routing_lands_on_opt46_combined_block():
-    """#493: OPT45 sends a push-only workflow to OPT46's widened predicate. Kept
-    with OPT45's own group, that pairing must be exactly OPT46's combined block
-    (so default-branch and tag runs keep their run_id groups), and the routing
-    note must say to copy that block: OPT46's widened block as printed keeps the
-    shared branch group, which puts every default-branch push in one group."""
+def test_opt45_push_only_routing_lands_on_opt46_widened_block():
+    """The quoted widened block must preserve OPT45's per-run protection."""
     yaml = pytest.importorskip("yaml")
 
     def recipes(pat):
@@ -7397,10 +7456,10 @@ def test_opt45_push_only_routing_lands_on_opt46_combined_block():
                if "refs/tags/" in str(c["cancel-in-progress"])]
     assert widened
     for conc in widened:
-        assert conc["cancel-in-progress"] == combined["cancel-in-progress"]
+        assert conc == combined
     body = _catalog_section("OPT45")
     routing = body[body.index("**Routing"):].split("\n\n", 1)[0]
-    assert "combined" in routing and "github.run_id" in routing, routing
+    assert "copy OPT46's **widened** block" in routing and "github.run_id" in routing, routing
 
 
 def test_opt45_opt46_groups_separate_same_named_fork_pull_requests():

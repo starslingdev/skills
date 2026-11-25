@@ -3036,8 +3036,8 @@ def _workflow_parse_errors_on_disk(parsed: list[tuple[str, dict, str]],
     have = {os.path.normpath(rel) for rel, _doc, _raw in parsed}
     wf_dir = root / ".github" / "workflows"
     files = sorted(set(wf_dir.glob("*.yml")) | set(wf_dir.glob("*.yaml")))
-    return [str(p.relative_to(root)) for p in files
-            if os.path.normpath(str(p.relative_to(root))) not in have]
+    rels = [p.relative_to(root).as_posix() for p in files]
+    return [rel for rel in rels if os.path.normpath(rel) not in have]
 
 
 def _practice_facts(parsed: list[tuple[str, dict, str]], root: Path,

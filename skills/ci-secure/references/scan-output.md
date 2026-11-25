@@ -156,7 +156,8 @@ and replaces the string with the full object.
   forbids a score, ratio or `N/100` anywhere the user sees. It is listed here
   so it is recognized as out of bounds rather than mistaken for a summary
   worth surfacing. Its `facts` rows ARE rendered (the hygiene table), and
-  so is one unscored key inside it, `security_score.push_access`, which the
+  so are its unscored `release_path` rows (under "Release-path hygiene") and
+  `security_score.push_access`, which the
   report shows under "If a push credential leaks":
   - `status` — `measured` / `unmeasured` (the environment list could not
     be read) / `not_checked` (no repository, no token, or the settings or
