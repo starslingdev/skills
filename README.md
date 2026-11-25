@@ -64,6 +64,8 @@ the full [data-handling policy](SECURITY.md).
 npx skills add starslingdev/skills --skill ci-speedup
 ```
 
+To upgrade ci-speedup, remove and re-add the skill so deleted files are removed from the install.
+
 Invoke it as `/ci-speedup` (`$ci-speedup` in Codex), or ask: *“Why is my CI
 slow?”*
 

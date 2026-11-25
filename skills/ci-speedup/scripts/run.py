@@ -63,6 +63,7 @@ from before_after import (  # noqa: E402
     summarize_account_weekly,
 )
 from pr_sample_contract import pr_sample_goal_text  # noqa: E402
+from installed_skill import has_extra_files, latest_release  # noqa: E402
 
 
 def _git_short_sha(repo_dir: Path, short: bool = True) -> str | None:
@@ -80,6 +81,21 @@ def _git_short_sha(repo_dir: Path, short: bool = True) -> str | None:
         return None
     sha = r.stdout.strip()
     return sha if r.returncode == 0 and sha else None
+
+
+def _skill_checkout_sha(scripts_dir: Path) -> str | None:
+    """Use a commit only for the source checkout's tracked skill entry point."""
+    try:
+        tracked = subprocess.run(
+            ["git", "-C", str(scripts_dir), "ls-files", "--full-name",
+             "--error-unmatch", "--", "run.py"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if tracked.returncode == 0 and tracked.stdout.strip() == "skills/ci-speedup/scripts/run.py":
+        return _git_short_sha(scripts_dir)
+    return None
 
 
 # The terminal provenance form: an installed skill copy with no git repo AND no
@@ -384,6 +400,20 @@ def main(argv: list[str] | None = None) -> int:
     if not math.isfinite(args.minute_budget) or args.minute_budget < 0:
         parser.error("--minute-budget must be a finite non-negative percentage")
 
+    skill_root = _DIR.parent
+    skill_checkout_sha = _skill_checkout_sha(_DIR)
+    # The stale-file check runs only for an installed copy. A maintainer's source
+    # checkout routinely holds untracked scratch files and test output that are not
+    # in the shipped inventory; warning there would be noise, and its provenance is
+    # the commit sha anyway. An install vendored inside a user's own git repository
+    # is still an installed copy (its run.py is not tracked at the skill's source
+    # path), so it is checked. The comparison covers the skill's top-level files and
+    # scripts/, references/ and evals/ only, where a stale file can be run or read as
+    # guidance; a stale file under tests/ is inert and is not reported.
+    if skill_checkout_sha is None and has_extra_files(skill_root):
+        print("WARNING: files from an older version of the skill are present; "
+              "remove and re-add the skill to upgrade", file=sys.stderr)
+
     # Create the output directory up front. Without this, a fresh `--out
     # /tmp/run/findings.json` whose parent doesn't exist tracebacks on the first
     # write (the partial-file write below) instead of just working — a papercut that
@@ -467,8 +497,9 @@ def main(argv: list[str] | None = None) -> int:
     # INSTALLED copy with no git repo — the skills-CLI lockfile's content hash as a
     # distinct `installed:` form. Never NULL, never a guessed remote sha (issue #2).
     # `_DIR` is `<skill_root>/scripts`, so `_DIR.parent` is the installed skill root.
-    skill_commit_sha = (args.skill_commit_sha or _git_short_sha(_DIR)
-                        or _skill_lock_provenance(_DIR.parent))
+    skill_commit_sha = (args.skill_commit_sha or skill_checkout_sha
+                        or _skill_lock_provenance(skill_root))
+    skill_release = latest_release(skill_root) if skill_commit_sha.startswith("installed:") else None
     commit_sha = args.commit_sha or _git_short_sha(Path(args.root), short=False)
     # NB the audited commit stays a CLEAN sha here. Uncommitted workflow edits are a real
     # provenance skew (collect_runs parses the working tree; the timings come from runs of
@@ -582,6 +613,8 @@ def main(argv: list[str] | None = None) -> int:
             }
         if account_weekly is not None:
             data["account_weekly"] = account_weekly
+        if skill_release is not None:
+            data["skill_release"] = skill_release
         timings = data.get("timings") if isinstance(data.get("timings"), dict) else {}
         # `run_start_epoch` is set by scan.py (the always-runs anchor); don't
         # override it here. The driver only adds its own scripted-phase span.

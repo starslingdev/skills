@@ -17,6 +17,9 @@ from pathlib import Path
 
 import pytest
 
+import blocking_path
+import verify_report
+
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
 # `run` is NOT a unique module name in this repo (ci-secure also ships
@@ -258,6 +261,108 @@ def test_run_explicit_skill_sha_still_wins_over_the_lockfile(monkeypatch, tmp_pa
     assert _arg_value(scan, "--skill-commit-sha") == "deadbee"
 
 
+@pytest.mark.parametrize("old_files", [None, "old modules", "old reference", "old fixture"])
+def test_installed_skill_checks_file_names_and_reports_release(
+        monkeypatch, tmp_path, capsys, old_files):
+    captured = _stub_steps(monkeypatch)
+    project = tmp_path / "project"
+    scripts = project / ".agents" / "skills" / "ci-speedup" / "scripts"
+    scripts.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    subprocess.run(["git", "-C", str(project), "-c", "user.name=CI",
+                    "-c", "user.email=ci@example.invalid", "commit", "-q", "--allow-empty",
+                    "-m", "Project checkout"], check=True)
+    skill = scripts.parent
+    (scripts / "run.py").touch()
+    (skill / "SKILL.md").touch()
+    (skill / "CHANGELOG.md").write_text(
+        "# Changelog\n## [Unreleased]\n\n## 2026-11-23 — Release\n\n## 2026-07-16 — Initial release\n",
+        encoding="utf-8")
+    fixtures = skill / "tests" / "fixtures"
+    fixtures.mkdir(parents=True)
+    (fixtures / "current.yml").touch()
+    # tests/ is outside the inventory by design, so current.yml is not listed.
+    known_files = ["CHANGELOG.md", "SKILL.md", "install-manifest.json", "scripts/run.py"]
+    (skill / "install-manifest.json").write_text(json.dumps({"files": known_files}),
+                                                 encoding="utf-8")
+    _write_lock(skill.parent / ".skill-lock.json",
+                {"ci-speedup": {"skillFolderHash": _REAL_HASH}})
+    (scripts / "__pycache__").mkdir()
+    (scripts / "__pycache__" / "run.pyc").touch()
+    (skill / "changelog.d").mkdir()
+    (skill / "changelog.d" / "example.fixed.md").touch()
+    if old_files == "old modules":
+        (scripts / "billing.py").write_text("raise AssertionError('stale file ran')\n",
+                                           encoding="utf-8")
+    elif old_files == "old reference":
+        (skill / "references").mkdir()
+        (skill / "references" / "runner-rates.json").touch()
+    elif old_files == "old fixture":
+        (fixtures / "removed.yml").touch()
+
+    original_open = Path.open
+
+    def checked_open(path, *args, **kwargs):
+        assert path.name not in {"billing.py", "runner-rates.json", "removed.yml"}
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", checked_open)
+    monkeypatch.setattr(run_mod, "_DIR", scripts)
+    out = tmp_path / "findings.json"
+
+    assert run_mod.main(["--root", str(project), "--out", str(out)]) == 0
+    assert capsys.readouterr().err.count(
+        "files from an older version of the skill are present; "
+        "remove and re-add the skill to upgrade"
+    ) == int(old_files in {"old modules", "old reference"})  # a stale test file is inert
+    assert _arg_value(_scan_cmd(captured), "--skill-commit-sha") == "installed:23f31c573ee0"
+    findings = json.loads(out.read_text(encoding="utf-8"))
+    # The pending changelog.d fragment means this copy is newer than that release.
+    assert findings["skill_release"] == "2026-11-23+unreleased"
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_old_installed_copy_without_readable_release_metadata_still_runs(
+        monkeypatch, tmp_path, capsys, unreadable):
+    _stub_steps(monkeypatch)
+    scripts = tmp_path / "ci-speedup" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts.parent / "install-manifest.json").write_text("incomplete", encoding="utf-8")
+    (scripts.parent / "CHANGELOG.md").write_text("## [Unreleased]\n", encoding="utf-8")
+    if unreadable:
+        original_open = Path.open
+
+        def unreadable_metadata(path, *args, **kwargs):
+            if path.name in {"install-manifest.json", "CHANGELOG.md"}:
+                raise OSError("unreadable metadata")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", unreadable_metadata)
+    monkeypatch.setattr(run_mod, "_DIR", scripts)
+    out = tmp_path / "findings.json"
+
+    assert run_mod.main(["--root", str(tmp_path), "--out", str(out)]) == 0
+    assert "skill_release" not in json.loads(out.read_text(encoding="utf-8"))
+    assert not capsys.readouterr().err
+
+
+def test_installed_report_shows_release_next_to_verifiable_folder_hash():
+    doc = {"skill_commit_sha": "installed:23f31c573ee0", "skill_release": "2026-11-23",
+           "scanned_at": "2026-11-25"}
+    top = "\n".join(blocking_path._metadata_table(doc, "public/example"))
+    sources = "\n".join(blocking_path._data_sources_footer(doc, "public/example"))
+    assert "`installed:23f31c573ee0` · latest release `2026-11-23`" in top
+    assert "(skill build `installed:23f31c573ee0`) · latest release `2026-11-23`" in sources
+    assert verify_report.check_skill_commit_provenance(sources, None).ok
+    doc["skill_release"] = "2026-11-23+unreleased"
+    sources = "\n".join(blocking_path._data_sources_footer(doc, "public/example"))
+    assert ("(skill build `installed:23f31c573ee0`) · latest release `2026-11-23` "
+            "plus unreleased changes") in sources
+    assert verify_report.check_skill_commit_provenance(sources, None).ok
+    doc["skill_release"] = "see `evil`+unreleased"
+    assert "latest release" not in "\n".join(blocking_path._metadata_table(doc, "public/example"))
+
+
 def test_git_short_sha_resolves_for_a_real_checkout():
     sha = run_mod._git_short_sha(_SCRIPTS)
     if sha is None:
@@ -345,3 +450,64 @@ def test_report_out_flag_overrides_the_default(monkeypatch, tmp_path):
                        "--report-out", str(custom)])
     assert rc == 0
     assert Path(seen["out_path"]) == custom
+
+
+def test_release_label_marks_unreleased_changes_after_the_latest_release(tmp_path):
+    """An install taken from main between releases is not that release: the label
+    must say the install carries changes newer than the heading it names."""
+    import installed_skill
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n## [Unreleased]\n\n### Fixed\n\n- **2026-11-20** — A fix (#1).\n\n"
+        "## 2026-07-16 — Initial public release\n- **2026-07-16** — Old (#0).\n",
+        encoding="utf-8")
+    assert installed_skill.latest_release(tmp_path) == "2026-07-16+unreleased"
+    assert installed_skill.release_suffix("2026-07-16+unreleased") == (
+        " · latest release `2026-07-16` plus unreleased changes")
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n## [Unreleased]\n\n## 2026-07-16 — Initial public release\n",
+        encoding="utf-8")
+    assert installed_skill.latest_release(tmp_path) == "2026-07-16"
+    (tmp_path / "changelog.d").mkdir()
+    (tmp_path / "changelog.d" / "README.md").touch()
+    assert installed_skill.latest_release(tmp_path) == "2026-07-16"
+    (tmp_path / "changelog.d" / "a-fix.fixed.md").write_text("- x (#2)\n", encoding="utf-8")
+    assert installed_skill.latest_release(tmp_path) == "2026-07-16+unreleased"
+
+
+@pytest.mark.parametrize("junk", [".DS_Store", "Thumbs.db", "desktop.ini"])
+def test_operating_system_metadata_files_are_not_reported_as_old_skill_files(tmp_path, junk):
+    """Finder / Explorer drop these into any folder a user browses; they are not
+    files from an older version of the skill, so the upgrade warning stays quiet."""
+    import installed_skill
+
+    names = ["install-manifest.json", "scripts/run.py"]
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "run.py").touch()
+    (tmp_path / "install-manifest.json").write_text(json.dumps({"files": names}),
+                                                    encoding="utf-8")
+    assert not installed_skill.has_extra_files(tmp_path)
+    (tmp_path / "scripts" / junk).touch()
+    (tmp_path / junk).touch()
+    assert not installed_skill.has_extra_files(tmp_path)
+    (tmp_path / "scripts" / "billing.py").touch()
+    assert installed_skill.has_extra_files(tmp_path)
+
+
+@pytest.mark.parametrize("path, listed", [
+    ("SKILL.md", True), ("CHANGELOG.md", True), ("install-manifest.json", True),
+    ("scripts/billing.py", True), ("references/runner-rates.json", True),
+    ("evals/evals.json", True),
+    ("tests/test_x.py", False), ("tests/fixtures/old.yml", False),
+    ("changelog.d/x.fixed.md", False), ("scripts/__pycache__/run.cpython-312.pyc", False),
+    ("references/.DS_Store", False),
+])
+def test_inventory_scope_is_runnable_code_and_guidance_only(path, listed):
+    """#7's risk is stale code and docs. tests/ (fixtures included) is inert in an
+    install, so it is outside both the shipped inventory and the extra-file check."""
+    from pathlib import PurePosixPath
+
+    import installed_skill
+
+    assert installed_skill.inventory_path(PurePosixPath(path)) is listed

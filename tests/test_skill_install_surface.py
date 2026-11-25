@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,7 @@ _MOVED_NAMES = {
     "loop-summary.schema.json",
     "draft_detector.py",
     "build_catalog.py",
+    "build_install_manifest.py",
     "aggregate_lessons.py",
     "ci-speedup-dogfood.js",
     "ci-speedup-dogfood.command.md",
@@ -68,6 +70,13 @@ _MOVED_NAMES = {
     "eval_baseline_summary.py",
     "test_eval_baseline_tools.py",
 }
+
+
+def test_install_manifest_matches_the_skill_file_inventory():
+    result = subprocess.run([
+        sys.executable, str(_MAINT / "scripts" / "build_install_manifest.py"), "--check",
+    ], cwd=_REPO, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_eval_baseline_lives_under_maintainers_never_in_the_install():
