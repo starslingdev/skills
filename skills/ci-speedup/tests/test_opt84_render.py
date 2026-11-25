@@ -33,7 +33,8 @@ _HELD_BACK = {
     "command_has_expression", "command_changes_directory", "script_unresolvable",
     "delegated_script_unresolved", "package_json_unreadable",
     "candidate_is_an_action", "eslint_config_unreadable",
-    "typescript_version_unreadable", "working_directory_unknown",
+    "typescript_version_unreadable", "typescript_project_unreadable",
+    "working_directory_unknown",
     "type_aware_lint_scan_missing", "type_aware_config_reader_failed",
     "install_layout_unreadable",
 }
@@ -404,6 +405,12 @@ def test_held_back_registry_row_and_phrases():
     assert bp._WITHHELD_PHRASES_BY_KEY[row.doc_key] is bp._OPT84_WITHHOLD_PHRASES
     for g, ph in bp._OPT84_WITHHOLD_PHRASES.items():
         assert ph and "_" not in ph, g
+    assert cr._OPT84_STEP_VERDICTS_DOC_KEY == bp._OPT84_STEP_VERDICTS_DOC_KEY == \
+        vr._VR_OPT84_STEP_VERDICTS_DOC_KEY
+    assert bp._OPT84_STEP_VERDICT_PHRASES == vr._VR_OPT84_STEP_VERDICT_PHRASES
+    assert set(bp._OPT84_STEP_VERDICT_PHRASES) == _VERDICTS - {
+        "pole_not_file_backed", "no_candidate_step",
+    }
 
 
 @pytest.mark.parametrize("gate", sorted(_HELD_BACK))
@@ -1081,7 +1088,7 @@ def test_scan_gates_hold_back_in_plain_english_on_both_sides():
     for g, want in _SCAN_GATE_PHRASES.items():
         assert bp._OPT84_WITHHOLD_PHRASES[g] == want, g
         assert vr._VR_OPT84_WITHHOLD_PHRASES[g] == want, g
-    assert len(bp._OPT84_WITHHOLD_PHRASES) == len(vr._VR_OPT84_HELD_BACK_GATES) == 18
+    assert len(bp._OPT84_WITHHOLD_PHRASES) == len(vr._VR_OPT84_HELD_BACK_GATES) == 19
 
 
 def test_step_gates_are_every_held_back_gate_but_the_pole_level_ones():

@@ -337,6 +337,123 @@ def test_tsc_noemit_with_typescript_5_is_the_tsc_row(run):
     assert out[0]["severity"] == "MEDIUM"
 
 
+def _collect_configured_typecheck(monkeypatch, tmp_path, run, configs):
+    import test_hook_duplication as fixture
+
+    root = tmp_path / "checkout"
+    root.mkdir()
+    yaml = (fixture._WORKFLOW_TEXT.replace("pnpm tsc --noEmit", run)
+            .replace("run: pnpm lint", "run: ruff check ."))
+    _repo(root, {"devDependencies": {"typescript": "^5.6.2"},
+                 "scripts": {"typecheck": "tsc -p tsconfig.json"}},
+          {fixture._WORKFLOW: yaml, **configs})
+    monkeypatch.setattr(cr, "GhClient", fixture._Client)
+    monkeypatch.setattr(cr, "_root_is_clone_of", lambda *_: True)
+    monkeypatch.setattr(cr, "_workflows_are_dirty", lambda *_: False)
+    doc = scan.scan(root, _SKILL_DIR / "references/patterns")
+    doc.update(repo="o/r", skill_commit_sha="installed:unversioned")
+    doc = cr.collect(doc, "o/r", max_runs=2, shallow_runs=2, root=root)
+    report = fixture.bp.render(doc, captured_at="2026-11-18T00:00:00Z")
+    assert fixture.bp._LAST_CLAIMS is not None
+    findings_path = tmp_path / "findings.json"
+    report_path = tmp_path / "report.md"
+    findings_path.write_text(json.dumps(doc), encoding="utf-8")
+    report_path.write_text(report, encoding="utf-8")
+    report_path.with_name("report.md.claims.json").write_text(
+        json.dumps(fixture.bp._LAST_CLAIMS.to_json()), encoding="utf-8")
+    failed = [(c.name, c.detail) for c in fixture.vr.run_checks(
+        report, report_path, findings_path, skill_repo=None) if not c.ok and not c.skipped]
+    assert not failed, failed
+    return doc, report
+
+
+@pytest.mark.parametrize("run", ["tsc", "tsc -p tsconfig.json", "npm run typecheck",
+                                 "pnpm run typecheck", "yarn run typecheck"])
+def test_opt84_collects_a_tsc_step_with_no_emit_in_inherited_config(monkeypatch, tmp_path, run):
+    doc, report = _collect_configured_typecheck(monkeypatch, tmp_path, run, {
+        "tsconfig.json": '{ "extends": "./config/base", }',
+        "config/base.json": '{ // This project type-checks without building.\n'
+                            '"compilerOptions": { "noEmit": true, } }',
+    })
+    swaps = [f for f in doc["findings"] if f.get("pattern") == "OPT84"]
+    assert len(swaps) == 1, doc["opt84_withheld_by_gate"]
+    assert _tool(swaps[0], "tsc")["fit"] == "drop-in"
+    assert swaps[0]["tool_swap"]["ceiling_s"] == 50.0
+    assert "TypeScript 7" in report
+
+
+def test_opt84_lists_the_reason_for_each_dropped_step(monkeypatch, tmp_path):
+    doc, report = _collect_configured_typecheck(monkeypatch, tmp_path, "tsc", {
+        "tsconfig.json": '{"compilerOptions": {"noEmit": false}}',
+    })
+    assert not any(f.get("pattern") == "OPT84" for f in doc["findings"])
+    row = next((ln for ln in report.splitlines() if "| tool swap: held back |" in ln), "")
+    assert "(Typecheck): tsc emits" in row
+    assert "(Lint): the step does not match a tool swap" in row
+
+
+@pytest.mark.parametrize(("run", "configs"), [
+    ("tsc", {}),
+    ("tsc", {"tsconfig.json": '{"extends": "./missing", "compilerOptions": {"noEmit": true}}'}),
+    ("tsc", {"tsconfig.json": '{"compilerOptions": {"noEmit": true}} /* unclosed'}),
+    ("tsc", {"tsconfig.json": '{"extends": "./tsconfig.json"}'}),
+    ("tsc", {"tsconfig.json": '{"extends": "@tsconfig/node20/tsconfig.json"}'}),
+    ("tsc -p ../tsconfig.json", {"tsconfig.json": '{"compilerOptions": {"noEmit": true}}'}),
+])
+def test_opt84_withholds_when_a_project_cannot_be_resolved(monkeypatch, tmp_path, run, configs):
+    doc, report = _collect_configured_typecheck(monkeypatch, tmp_path, run, configs)
+    assert not any(f.get("pattern") == "OPT84" for f in doc["findings"])
+    assert doc["opt84_withheld_by_gate"]["typescript_project_unreadable"] == 1
+    assert "(Typecheck): the TypeScript project configuration or one of its bases" in report
+
+
+@pytest.mark.parametrize("run", ["tsc -b", "tsc --noEmit false", "tsc src/index.ts", "vue-tsc"])
+def test_opt84_does_not_extend_to_other_tsc_modes(monkeypatch, tmp_path, run):
+    doc, _report = _collect_configured_typecheck(monkeypatch, tmp_path, run, {
+        "tsconfig.json": '{"compilerOptions": {"noEmit": true}}',
+    })
+    assert not any(f.get("pattern") == "OPT84" for f in doc["findings"])
+
+
+@pytest.mark.parametrize("run", ["pnpm turbo run typecheck", "npx nx run-many -t typecheck"])
+def test_opt84_does_not_add_tsc_project_support_to_task_runners(monkeypatch, tmp_path, run):
+    doc, _report = _collect_configured_typecheck(monkeypatch, tmp_path, run, {
+        "work/package.json": '{"scripts": {"typecheck": "tsc"}}',
+        "work/tsconfig.json": '{"compilerOptions": {"noEmit": true}}',
+    })
+    assert not any(f.get("pattern") == "OPT84" for f in doc["findings"])
+
+
+def test_opt84_respects_an_override_to_emit(monkeypatch, tmp_path):
+    doc, _report = _collect_configured_typecheck(monkeypatch, tmp_path, "tsc -p types", {
+        "types/tsconfig.json": '{"extends": ["../base", "./build.json"]}',
+        "base.json": '{"compilerOptions": {"noEmit": true}}',
+        "types/build.json": '{"compilerOptions": {"noEmit": false}}',
+    })
+    assert not any(f.get("pattern") == "OPT84" for f in doc["findings"])
+    assert doc["opt84_withheld_by_gate"]["tsc_emits_not_in_v1"] == 1
+
+
+def test_tsc_project_child_can_override_no_emit_to_false(tmp_path):
+    _repo(tmp_path, {}, {
+        "tsconfig.json": '{"extends": "./base", "compilerOptions": {"noEmit": false}}',
+        "base.json": '{"compilerOptions": {"noEmit": true}}',
+    })
+    assert cr.project_no_emit(tmp_path, "", None) is False
+
+
+def test_tsc_project_cannot_follow_a_symlink_out_of_the_checkout(tmp_path):
+    root = tmp_path / "checkout"
+    root.mkdir()
+    outside = tmp_path / "outside.json"
+    outside.write_text('{"compilerOptions": {"noEmit": true}}', encoding="utf-8")
+    try:
+        (root / "tsconfig.json").symlink_to(outside)
+    except OSError:
+        pytest.skip("this filesystem cannot create a symlink")
+    assert cr.project_no_emit(root, "", None) is None
+
+
 def test_tsc_row_needs_the_typescript6_alias_when_any_eslint_config_is_type_aware():
     block = _block(configs=[_config(), _config("web/eslint.config.js", type_aware="on")])
     out, _w, _c = _run({"run": "npx tsc --noEmit"}, block=block)
@@ -349,7 +466,7 @@ def test_tsc_already_on_typescript_7_is_silent():
     assert out == [] and withheld == {"target_already_in_use": 1} and cands == []
 
 
-@pytest.mark.parametrize("run", ["npx tsc -p tsconfig.build.json",
+@pytest.mark.parametrize("run", ["npx tsc src/index.ts",
                                  "tsc --build --noEmit", "tsc -b"])
 def test_emitting_tsc_is_a_v1_verdict(run):
     out, withheld, cands = _run({"run": run})
@@ -678,7 +795,8 @@ def test_gate_sets_are_pinned():
         "command_has_expression", "command_changes_directory", "script_unresolvable",
         "delegated_script_unresolved", "package_json_unreadable",
         "candidate_is_an_action", "eslint_config_unreadable",
-        "typescript_version_unreadable", "working_directory_unknown",
+        "typescript_version_unreadable", "typescript_project_unreadable",
+        "working_directory_unknown",
         "type_aware_lint_scan_missing", "type_aware_config_reader_failed",
         "install_layout_unreadable"})
     assert not cr._OPT84_VERDICT_GATES & cr._OPT84_HELD_BACK_GATES

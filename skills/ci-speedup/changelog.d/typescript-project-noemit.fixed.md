@@ -1,0 +1,1 @@
+- **2026-11-25** — Recognize TypeScript type checks configured through `tsconfig.json` and explain per step why OPT84 advice was held back (#501).

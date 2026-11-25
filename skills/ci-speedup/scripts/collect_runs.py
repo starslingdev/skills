@@ -96,6 +96,7 @@ from wall_clock import (  # noqa: E402
 # jobs API's `steps` with timestamps — is a different list and is not walked.)
 from workflow_steps import is_group_step, job_walk  # noqa: E402
 import joint_scenario as joint  # noqa: E402
+from tsconfig import project_no_emit  # noqa: E402
 
 
 # =============================================================================
@@ -23286,7 +23287,9 @@ _OPT84_CEILING_BASIS = (
 # (`[{workflow_file, job, gate, step?}]`). A STRING CONTRACT across the
 # collector, the renderer and the verifier.
 _OPT84_WITHHELD_DOC_KEY = "opt84_withheld_candidates"
-# Exits that are a VERDICT (nothing to say): counted, never listed.
+_OPT84_STEP_VERDICTS_DOC_KEY = "opt84_step_verdicts"
+# Exits where the audit reached a verdict. The Data sources row lists those
+# attached to a candidate step, kept separate from genuinely undecided steps.
 _OPT84_VERDICT_GATES = frozenset({
     "pole_not_file_backed",
     "no_candidate_step",
@@ -23315,6 +23318,7 @@ _OPT84_HELD_BACK_GATES = frozenset({
     "candidate_is_an_action",
     "eslint_config_unreadable",
     "typescript_version_unreadable",
+    "typescript_project_unreadable",
     "working_directory_unknown",
     # Pole-level, decided before any candidate work (as OPT82 does): the
     # findings doc has no `type_aware_lint` block, or the scan's reader crashed
@@ -23335,7 +23339,8 @@ _OPT84_STEP_GATES = frozenset({
     "command_changes_directory", "script_unresolvable",
     "delegated_script_unresolved", "package_json_unreadable",
     "candidate_is_an_action", "eslint_config_unreadable",
-    "typescript_version_unreadable", "working_directory_unknown",
+    "typescript_version_unreadable", "typescript_project_unreadable",
+    "working_directory_unknown",
     "install_layout_unreadable",
 })
 
@@ -24022,8 +24027,8 @@ def _opt84_binary(tokens: list[str]) -> str:
 
 def _opt84_classify(tokens: list[str]) -> "tuple[str | None, str | None]":
     """(row, kind) for one leaf: kind "row" (a table tool this row swaps),
-    "target" (the row's target already runs), "emits" (a `tsc` that is not a
-    `--noEmit` type-check), or (None, None) when the leaf is not in the table."""
+    "target" (the row's target already runs), "project" (needs a tsconfig
+    read), "emits" (outside the type-check-only forms), or (None, None)."""
     k = _opt84_install_kind(tokens)
     if k is not None:
         return "install", k
@@ -24040,13 +24045,18 @@ def _opt84_classify(tokens: list[str]) -> "tuple[str | None, str | None]":
             # a boolean option takes an explicit `true` / `false` after it, so
             # `--noEmit false` emits (the last one given wins).
             low = [a.lower() for a in args]
-            no_emit = False
+            no_emit = None
             for i, a in enumerate(low):
                 if a in ("--noemit", "-noemit"):
                     no_emit = not (i + 1 < len(low) and low[i + 1] == "false")
-            if "--build" in low or "-b" in low or "-build" in low or not no_emit:
+            if {"--build", "-b", "-build"}.intersection(low) or no_emit is False:
                 return row, "emits"
-            return row, "row"
+            if no_emit:
+                return row, "row"
+            if not args or (len(args) == 2 and low[0] in ("-p", "--project", "-project")
+                            and not args[1].startswith("-")):
+                return row, "project"
+            return row, "emits"
         need = spec["binaries"][b]
         if not need or any(a in need for a in args):
             return row, "row"
@@ -24095,7 +24105,8 @@ def _opt84_declared(block: dict[str, Any], wd: str, package: str) -> bool:
 
 def _opt84_any_row(leaves: list[dict[str, Any]]) -> bool:
     """Whether any leaf runs a table tool this pattern would swap."""
-    return any(_opt84_classify(lf.get("tokens") or [])[1] == "row" for lf in leaves)
+    return any(_opt84_classify(lf.get("tokens") or [])[1] in ("row", "project")
+               for lf in leaves)
 
 
 # What `_opt84_version` returns when a package.json on the upward walk (the
@@ -24558,6 +24569,8 @@ def _detect_opt84_tool_swap(
     withheld: dict[str, int] | None = None,
     withheld_candidates: list[dict[str, Any]] | None = None,
     seen: "set[tuple[str, str]] | None" = None,
+    *, root: Path | None = None,
+    step_verdicts: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """OPT84: on a drilled long pole, a heavy `scan` / `build` step whose command
     runs Prettier (check), ESLint or `tsc --noEmit`, each of which has a native
@@ -24567,8 +24580,9 @@ def _detect_opt84_tool_swap(
     `opt84_withheld_by_gate`): one count per pole for a pole-level exit, one
     per candidate step otherwise. A pole already seen (listed twice, or
     shared through `seen` with an earlier call) is skipped without a count.
-    A held-back exit (`_OPT84_HELD_BACK_GATES`) is also listed in
-    `withheld_candidates`, naming the job and the step.
+    An undecided exit (`_OPT84_HELD_BACK_GATES`) is listed in
+    `withheld_candidates`. Exits with a verdict and a named step are listed
+    in `step_verdicts`.
     `opt82_findings` are this run's OPT82 findings: an ESLint run OPT82 already
     reports on the same step is deferred to it."""
     def _no(gate: str, wf: str = "", job: str = "", step: "str | None" = None,
@@ -24591,6 +24605,9 @@ def _detect_opt84_tool_swap(
         ctx.pop("table_tool_seen", None)
         ctx.pop("install_seen", None)
         _opt84_count(withheld, withheld_candidates, gate, wf, job, step)
+        if step_verdicts is not None and step and gate in _OPT84_VERDICT_GATES:
+            step_verdicts.append({"workflow_file": wf, "job": job,
+                                  "gate": gate, "step": step})
         logger.debug("OPT84 %s %s %s: withheld by %s%s", wf, job, step or "", gate,
                      (" " + " ".join(f"{k}={v!r}" for k, v in ctx.items())) if ctx else "")
 
@@ -24837,9 +24854,21 @@ def _detect_opt84_tool_swap(
             found: list[tuple[str, dict[str, Any]]] = []
             targets: set[str] = set()
             emits = False
+            tsc_project_unreadable = False
             install_blocked: list[str] = []
             for lf in leaves:
                 row, kind = _opt84_classify(lf["tokens"])
+                if kind == "project":
+                    task_runner = (lf.get("task_runner") or {}).get("tool")
+                    if category == _OPT84_INSTALL_CATEGORY or task_runner in ("turbo", "nx"):
+                        continue
+                    args = _opt84_leaf_tokens(lf["tokens"])[1:]
+                    no_emit = project_no_emit(root, str(lf["wd"] or ""),
+                                              args[1] if args else None)
+                    if no_emit is None:
+                        tsc_project_unreadable = True
+                        continue
+                    kind = "row" if no_emit else "emits"
                 if kind == "target":
                     targets.add(str(row))
                 elif kind == "emits":
@@ -24862,7 +24891,7 @@ def _detect_opt84_tool_swap(
             found = [(r, lf) for r, lf in found if r not in targets]
             deferred = (wf, yaml_key, " ".join(name.split())) in opt82_steps
             tools: list[dict[str, Any]] = []
-            held: "str | None" = None
+            held = "typescript_project_unreadable" if tsc_project_unreadable else None
             install_held = False
             for row, lf in found:
                 spec_row = _OPT84_TABLE[row]
@@ -39333,6 +39362,8 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
     _o84_opt82 = [f for f in findings if str(f.get("pattern")) == "OPT82"]
     findings_doc.setdefault("opt84_withheld_by_gate", {})
     findings_doc.setdefault(_OPT84_WITHHELD_DOC_KEY, [])
+    step_verdicts: list[dict[str, Any]] = []
+    findings_doc[_OPT84_STEP_VERDICTS_DOC_KEY] = step_verdicts
     _o84_seen: set[tuple[str, str]] = set()
     for _o84_pole in list((findings_doc.get("pr_critical_path") or {}).get("poles") or []):
         try:
@@ -39341,7 +39372,7 @@ def collect(findings_doc: dict[str, Any], repo: str | None,
                 _o84_next,
                 withheld=findings_doc.setdefault("opt84_withheld_by_gate", {}),
                 withheld_candidates=findings_doc.setdefault(_OPT84_WITHHELD_DOC_KEY, []),
-                seen=_o84_seen)
+                seen=_o84_seen, root=root, step_verdicts=step_verdicts)
         except Exception as e:  # noqa: BLE001 — never take the data pass down
             _o84_p = _o84_pole if isinstance(_o84_pole, dict) else {}
             _o84_wf = str(_o84_p.get("workflow_file") or "")
