@@ -13,9 +13,13 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
+
+import blocking_path
+import verify_report
 
 _SCRIPTS = Path(__file__).resolve().parent.parent / "scripts"
 
@@ -256,6 +260,101 @@ def test_run_explicit_skill_sha_still_wins_over_the_lockfile(monkeypatch, tmp_pa
                           lock={"ci-speedup": {"skillFolderHash": _REAL_HASH}},
                           extra=["--skill-commit-sha", "deadbee"])
     assert _arg_value(scan, "--skill-commit-sha") == "deadbee"
+
+
+@pytest.mark.parametrize("old_files", [None, "old modules", "old fixture"])
+def test_installed_skill_checks_file_names_and_reports_release(
+        monkeypatch, tmp_path, capsys, old_files):
+    captured = _stub_steps(monkeypatch)
+    project = tmp_path / "project"
+    scripts = project / ".agents" / "skills" / "ci-speedup" / "scripts"
+    scripts.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(project)], check=True)
+    subprocess.run(["git", "-C", str(project), "-c", "user.name=CI",
+                    "-c", "user.email=ci@example.invalid", "commit", "-q", "--allow-empty",
+                    "-m", "Project checkout"], check=True)
+    skill = scripts.parent
+    (scripts / "run.py").touch()
+    (skill / "SKILL.md").touch()
+    (skill / "CHANGELOG.md").write_text(
+        "# Changelog\n## [Unreleased]\n\n## 2026-11-23 — Release\n\n## 2026-07-16 — Initial release\n",
+        encoding="utf-8")
+    fixtures = skill / "tests" / "fixtures"
+    fixtures.mkdir(parents=True)
+    (fixtures / "current.yml").touch()
+    known_files = ["CHANGELOG.md", "SKILL.md", "install-manifest.json",
+                   "scripts/run.py", "tests/fixtures/current.yml"]
+    digits = str.maketrans("".join(format(n, "x") for n in range(16)), "abcdefghijklmnop")
+    (skill / "install-manifest.json").write_text(json.dumps({"path_sha256_ap": [
+        sha256(name.encode("utf-8")).hexdigest().translate(digits) for name in known_files
+    ]}), encoding="utf-8")
+    _write_lock(skill.parent / ".skill-lock.json",
+                {"ci-speedup": {"skillFolderHash": _REAL_HASH}})
+    (scripts / "__pycache__").mkdir()
+    (scripts / "__pycache__" / "run.pyc").touch()
+    (skill / "changelog.d").mkdir()
+    (skill / "changelog.d" / "example.fixed.md").touch()
+    if old_files == "old modules":
+        (scripts / "billing.py").write_text("raise AssertionError('stale file ran')\n",
+                                           encoding="utf-8")
+        (skill / "references").mkdir()
+        (skill / "references" / "runner-rates.json").touch()
+    elif old_files == "old fixture":
+        (fixtures / "removed.yml").touch()
+
+    original_open = Path.open
+
+    def checked_open(path, *args, **kwargs):
+        assert path.name not in {"billing.py", "runner-rates.json", "removed.yml"}
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", checked_open)
+    monkeypatch.setattr(run_mod, "_DIR", scripts)
+    out = tmp_path / "findings.json"
+
+    assert run_mod.main(["--root", str(project), "--out", str(out)]) == 0
+    assert capsys.readouterr().err.count(
+        "files from an older version of the skill are present; "
+        "remove and re-add the skill to upgrade"
+    ) == int(old_files is not None)
+    assert _arg_value(_scan_cmd(captured), "--skill-commit-sha") == "installed:23f31c573ee0"
+    findings = json.loads(out.read_text(encoding="utf-8"))
+    assert findings["skill_release"] == "2026-11-23"
+
+
+@pytest.mark.parametrize("unreadable", [False, True])
+def test_old_installed_copy_without_readable_release_metadata_still_runs(
+        monkeypatch, tmp_path, capsys, unreadable):
+    _stub_steps(monkeypatch)
+    scripts = tmp_path / "ci-speedup" / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts.parent / "install-manifest.json").write_text("incomplete", encoding="utf-8")
+    (scripts.parent / "CHANGELOG.md").write_text("## [Unreleased]\n", encoding="utf-8")
+    if unreadable:
+        original_open = Path.open
+
+        def unreadable_metadata(path, *args, **kwargs):
+            if path.name in {"install-manifest.json", "CHANGELOG.md"}:
+                raise OSError("unreadable metadata")
+            return original_open(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", unreadable_metadata)
+    monkeypatch.setattr(run_mod, "_DIR", scripts)
+    out = tmp_path / "findings.json"
+
+    assert run_mod.main(["--root", str(tmp_path), "--out", str(out)]) == 0
+    assert "skill_release" not in json.loads(out.read_text(encoding="utf-8"))
+    assert not capsys.readouterr().err
+
+
+def test_installed_report_shows_release_next_to_verifiable_folder_hash():
+    doc = {"skill_commit_sha": "installed:23f31c573ee0", "skill_release": "2026-11-23",
+           "scanned_at": "2026-11-25"}
+    top = "\n".join(blocking_path._metadata_table(doc, "public/example"))
+    sources = "\n".join(blocking_path._data_sources_footer(doc, "public/example"))
+    assert "`installed:23f31c573ee0` · latest release `2026-11-23`" in top
+    assert "(skill build `installed:23f31c573ee0`) · latest release `2026-11-23`" in sources
+    assert verify_report.check_skill_commit_provenance(sources, None).ok
 
 
 def test_git_short_sha_resolves_for_a_real_checkout():

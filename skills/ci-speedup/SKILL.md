@@ -65,9 +65,9 @@ branch/enforcement scoping, pole `provenance`, one-path demotion, and the
 
 ## How the audit runs
 
-**Requirements:** an authenticated `gh` CLI (the run-history data pass calls the GitHub API)
-and `python3` 3.9+ with **PyYAML** (`pip install pyyaml`; the scanner's only third-party dep, otherwise stdlib). **If `gh` is missing or unauthenticated, phase 1's
-gate stops and guides the user first.**
+**Requirements:** authenticated `gh` for run history and `python3` 3.9+ with
+**PyYAML** (`pip install pyyaml`). Phase 1 stops if `gh` is missing or unauthenticated.
+**Upgrading:** remove and re-add the skill so obsolete files are dropped.
 
 **Detection, ranking, and every measured number are deterministic** — no agentic
 catalog walk, no LLM in detection, scoring, the spine, or the cross-run checks,

@@ -1,0 +1,1 @@
+- **2026-11-25** — Warn about obsolete files in installed copies, explain how to upgrade cleanly, and show the latest release beside the installed folder hash (#503).

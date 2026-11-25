@@ -42,6 +42,7 @@ if str(_DIR) not in sys.path:
     sys.path.insert(0, str(_DIR))
 
 import pr_lifecycle
+from installed_skill import release_suffix
 
 import claims  # same-skill module; typed claims layer (increment 1: headline family)
 from gate_frequency_contract import (
@@ -9752,7 +9753,7 @@ def _data_sources_footer(doc: dict[str, Any], repo: str,
         # render it as a plain identity string with NO scripts-tree token and (see
         # `_build_catalog_url` / `_metadata_table`) no fabricated commit URL, since
         # there is no resolvable sha to link. verify_report accepts this arm.
-        skill_part = f" (skill build `{skill_sha}`)"
+        skill_part = f" (skill build `{skill_sha}`)" + release_suffix(doc.get("skill_release"))
     else:
         _tree = _skill_scripts_tree_sha()
         _prov = f"skill commit `{skill_sha[:7]}{dirty}`" if skill_sha else ""
@@ -10020,7 +10021,7 @@ def _metadata_table(doc: dict[str, Any], repo: str) -> list[str]:
     if skill.startswith("installed:"):
         # Content-hash provenance for an installed skill copy (issue #2): not a
         # commit, so a plain identity string with NO commit permalink to fabricate.
-        skill_part = f" · ci-speedup skill build `{skill}`"
+        skill_part = f" · ci-speedup skill build `{skill}`" + release_suffix(doc.get("skill_release"))
     elif skill:
         link = f"[`{skill[:7]}{dirty}`](https://github.com/{_CATALOG_REPO}/commit/{skill})"
         skill_part = f" · ci-speedup skill commit {link}"
