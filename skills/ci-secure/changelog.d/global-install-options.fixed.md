@@ -1,0 +1,1 @@
+- **2026-11-25** — Recognize project dependency installs with global package-manager options before the install command (#500).

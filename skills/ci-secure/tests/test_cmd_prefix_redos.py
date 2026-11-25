@@ -137,6 +137,25 @@ def test_adversarial_line_finishes_in_linear_time(name: str) -> None:
         assert elapsed < _TIME_LIMIT_S, f"{name} x {n}: {elapsed:.2f}s"
 
 
+def test_install_matcher_walks_long_global_option_lists() -> None:
+    child = """
+import json, sys, time
+sys.path.insert(0, sys.argv[1])
+from _scan_import import load_scan
+matches = load_scan()._is_unprotected_install
+prefix = "npm " + "--no-audit " * 5000
+start = time.perf_counter()
+out = [matches(prefix + "ci"), matches(prefix + "run build")]
+print(json.dumps([out, time.perf_counter() - start]))
+"""
+    proc = subprocess.run([sys.executable, "-c", child, str(_TESTS)],
+                          capture_output=True, text=True,
+                          timeout=_SUBPROCESS_TIMEOUT_S, check=True)
+    matches, elapsed = json.loads(proc.stdout)
+    assert matches == [True, False]
+    assert elapsed < _TIME_LIMIT_S, f"global options: {elapsed:.2f}s"
+
+
 # ---------------------------------------------------------------------------
 # (b) Equivalence with the old pattern on realistic lines.
 # ---------------------------------------------------------------------------

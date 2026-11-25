@@ -1194,6 +1194,23 @@ def test_p1425_a_continued_install_without_the_flag_still_fires(tmp_path):
     ("pnpm i", True),
     ("pnpm install --frozen-lockfile", True),
     ("npm ci --ignore-scripts", False),
+    # --- global options before the install subcommand ---
+    ("npm --no-audit ci", True),
+    ("npm --prefix d --no-audit ci", True),
+    ("pnpm -C d --frozen-lockfile install", True),
+    ("npm --loglevel warn --no-audit ci", True),
+    ("npm --prefix=d --loglevel=warn ci", True),
+    ("npm --future-flag=on ci", True),
+    ("npm --future-flag install", False),
+    ("yarn --silent install", True),
+    ("npm --silent run build", False),
+    ("npm --loglevel install run build", False),
+    ("npm --future-flag run ci", False),
+    ("npm --no-audit --ignore-scripts ci", False),
+    ("npm --no-audit --global install npm", False),
+    ("npm --no-audit install @playwright/test", False),
+    ("yarn --silent --version", False),
+    ("echo npm --no-audit ci", False),
     # --- `--ignore-scripts` protects ITS command, not the whole line ---
     ("npm install --ignore-scripts && npm install", True),
     ("npm ci --ignore-scripts && npm test", False),
@@ -2108,6 +2125,8 @@ def test_p1425_install_directory_flags_select_the_nested_pin(
 @pytest.mark.parametrize(("command", "root_pin", "nested_pin"), [
     ("npm --prefix apps/web ci", "npm@11.0.0", "npm@10.9.0"),
     ("yarn --cwd apps/web install", "yarn@4.0.0", "yarn@1.22.22"),
+    ("npm --no-audit --prefix=apps/web ci", "npm@11.0.0", "npm@10.9.0"),
+    ("pnpm -C apps/web --frozen-lockfile install", "pnpm@10.25.0", "pnpm@9.15.0"),
 ])
 def test_p1425_directory_option_before_subcommand_selects_nested_pin(
     tmp_path, command, root_pin, nested_pin,
