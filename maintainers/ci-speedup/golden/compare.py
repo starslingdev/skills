@@ -664,16 +664,12 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    manifest_path = recording / "manifest.json"
-    manifest = load(manifest_path) if manifest_path.is_file() else {}
     # The comparison aligns only the public timestamp span and bounded sample
-    # size. Commit identities, eligible jobs, check names, durations, and each
-    # commit's gate all come from the recording, so the engine cannot provide
-    # its own answer to the oracle. Older baselines retain their duration metric.
-    return module.compute(
-        scoped, bookkeeping_cutoff_s=0,
-        gate_by_completion=manifest.get("oracle_gate_basis") == "completion-v1",
-    )
+    # size. Commit identities, eligible jobs, check names, completion times, and
+    # each commit's gate all come from the recording, so the engine cannot
+    # provide its own answer to the oracle. Every recording credits the job that
+    # finishes last, the real-finish-order definition the engine uses (#491).
+    return module.compute(scoped, bookkeeping_cutoff_s=0, gate_by_completion=True)
 
 
 def _fixture_name(endpoint: str) -> str:

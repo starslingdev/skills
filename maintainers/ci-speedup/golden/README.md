@@ -68,9 +68,9 @@ failed job read for every missing pair. Replay stamps the sample, gate share,
 gate order, and gate P50 comparisons as non-independent wherever those pages
 come from the same normalized month data as the oracle.
 
-Recordings can declare `oracle_gate_basis: completion-v1` in their manifest.
-For replay comparison, this credits the latest recorded completion among
-eligible jobs that ran. Zero-duration and skipped jobs cannot win; ties count
-for each check. Older baselines without the field keep the longest-duration
-metric until their expectations are reviewed for migration. Month-wide oracle
-snapshots remain unchanged.
+Replay comparison credits each commit's gate to the eligible job with the
+latest recorded completion, for every recording: "finishes last" means real
+finish order, the definition the engine uses since #491. Zero-duration and
+skipped jobs cannot win; ties count for each check. `oracle.py` run on its own
+keeps the longest-duration metric that produced the committed month-wide
+`oracle.json` snapshots, which remain unchanged.

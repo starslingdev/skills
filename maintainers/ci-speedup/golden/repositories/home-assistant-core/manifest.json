@@ -13,7 +13,6 @@
   "month_wide_completed_pr_commits": 10626,
   "month_wide_job_lists_recorded": 12108,
   "month_wide_pr_commits": 10627,
-  "oracle_gate_basis": "completion-v1",
   "origin": "public-github:home-assistant/core",
   "pole_log_note": "the public API returned no pole logs for this recording",
   "pole_logs_recorded": 0,

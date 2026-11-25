@@ -25,10 +25,9 @@ _REPOSITORIES = {
     "vercel-nextjs": (
         "PR #318 covers the headline follow-up; issue #363 tracks gate comparison",
         (
-            # Issue #363: the oracle credits the longest job, and `PR Stack CI Gate` runs
-            # 25-45 minutes on 5 PRs. Every other job `needs:` it, so in real finish order
-            # (#491) the job that ends after it finishes last on those PRs instead.
-            "frequent gate absent: 'build-and-test / optimize-ci / PR Stack CI Gate'",
+            # Issue #363: the 3 s `thank you, next` aggregator finishes last; the engine
+            # credits the long job it waits on, as #491 decided.
+            "independent leading gate absent: 'build-and-test / thank you, next'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -455,9 +454,6 @@ def test_engine_span_oracle_uses_every_recorded_run_without_engine_filtering(
     compare = _load("compare")
     recording = tmp_path / "recording"
     recording.mkdir()
-    (recording / "manifest.json").write_text(
-        json.dumps({"oracle_gate_basis": "completion-v1"}), encoding="utf-8"
-    )
     with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
         json.dump({
             "schema_version": 1,
@@ -694,7 +690,9 @@ def test_engine_span_oracle_includes_recorded_required_predecessors(
 
     oracle = compare._oracle_for_engine_span(recording, findings)
 
-    assert oracle["gate_order"][0] == "CI / slow tests"
+    # In real finish order (#491) the required verdict finishes last. The unrelated
+    # job ends later still, so the cohort must leave it out.
+    assert oracle["gate_order"] == ["CI / verdict"]
     assert all(row["check"] != "CI / unrelated" for row in oracle["gates"])
 
 
