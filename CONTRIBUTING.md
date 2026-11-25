@@ -75,13 +75,11 @@ Skill registries publish third-party security audits of every skill they list, a
 a skill can fail one without failing anything in this repo — the text a skill ships
 is the thing being scanned, so an illustrative example can read to a scanner as the
 attack it describes. `.github/workflows/registry-scan.yml` runs one of those
-scanners (Snyk Agent Scan) over the installable trees under `skills/` on internal
-pull requests that touch a skill or the scan itself, on every push to `main`, weekly
-on a schedule, and on demand, so a violation fails our build instead of appearing as
-a public FAIL badge days after release. A pull request that changes nothing under
-`skills/` (or the scan's own workflow, scripts and test) gets no scan and no check:
-the scanner's public tier has a small, undocumented daily allowance, and the push to
-`main` still scans every merge.
+scanners (Snyk Agent Scan) over the installable trees under `skills/` weekly on a
+schedule and on demand (`workflow_dispatch`). It is a probe for the scanner recovering
+from the blind state it has been in since 2026-08-18, so it posts no check on pull
+requests or pushes; issue #68 holds the steps for promoting it back to a pull-request
+gate once its red-proof control detects again.
 
 Two things about that gate are worth knowing before you rely on it.
 
@@ -117,10 +115,7 @@ it green, and the tests fail if one appears.
 
 The gate needs a `SNYK_TOKEN` repository secret (a free Snyk account). Without it
 the job fails loudly rather than passing quietly — a skipped security scan reported
-as green is the exact failure this gate exists to prevent. Fork pull requests cannot
-reach repository secrets, so they get a separate, clearly named check that reports
-the coverage gap; a maintainer re-runs the scan on an internal branch before merging
-fork changes under `skills/`.
+as green is the exact failure this gate exists to prevent.
 
 ## Adding or changing detection patterns
 
