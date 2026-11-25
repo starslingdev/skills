@@ -79,8 +79,14 @@ def _eligible_jobs(commit: dict[str, Any], cutoff_s: int) -> tuple[list[dict[str
 def compute(recording: dict[str, Any], *,
             bookkeeping_cutoff_s: int = DEFAULT_BOOKKEEPING_CUTOFF_S,
             gate_by_sha: dict[str, str] | None = None,
-            gate_by_completion: bool = False) -> dict[str, Any]:
-    """Compute wait and gate facts, using duration for legacy month-wide snapshots."""
+            gate_by_completion: bool = False,
+            collector_checks: set[str] | frozenset[str] = frozenset()) -> dict[str, Any]:
+    """Compute wait and gate facts, using duration for legacy month-wide snapshots.
+
+    With `gate_by_completion`, the gate is the last-finishing job that ran;
+    `collector_checks` (short jobs that only collect others) cannot win, so the
+    credit goes to the last-finishing check they waited on.
+    """
     if recording.get("schema_version") != SCHEMA_VERSION:
         raise ValueError("unsupported golden recording schema")
     commits = [row for row in recording.get("pr_commits") or [] if isinstance(row, dict)]
@@ -140,6 +146,7 @@ def compute(recording: dict[str, Any], *,
             scores = [
                 _instant(job.get("completed_at"))
                 if job.get("conclusion") != "skipped"
+                and _check_name(job) not in collector_checks
                 and (_seconds(job.get("started_at"), job.get("completed_at")) or 0) > 0
                 else None
                 for job in jobs

@@ -11,6 +11,7 @@ import math
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -511,6 +512,70 @@ def _recorded_gate_job_patterns(
     return patterns
 
 
+# A short job that only collects others is not what a PR waits on (#491).
+_COLLECTOR_MAX_P50_S = 60.0
+
+
+def _recorded_collector_checks(recording: Path, month: dict[str, Any]) -> set[str]:
+    """Name the recorded checks of short jobs that `needs:` two or more jobs.
+
+    The workflow snapshot supplies each job's `needs:`; the month recording
+    supplies its timings. A job is a collector when it needs at least two jobs
+    and its recorded P50 duration is under 60 s.
+    """
+    workflows = recording / "checkout" / ".github" / "workflows"
+    if not workflows.is_dir():
+        return set()
+    candidates: dict[tuple[str, str], list[re.Pattern[str]]] = {}
+    for path in sorted([*workflows.glob("*.yml"), *workflows.glob("*.yaml")]):
+        try:
+            payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError):
+            continue
+        if not isinstance(payload, dict) or not isinstance(payload.get("jobs"), dict):
+            continue
+        workflow = str(payload.get("name") or path.relative_to(
+            recording / "checkout").as_posix())
+        for job_id, row in payload["jobs"].items():
+            if not isinstance(row, dict):
+                continue
+            needs = row.get("needs")
+            if not isinstance(needs, list) or len({str(value) for value in needs}) < 2:
+                continue
+            candidates[(workflow, str(job_id))] = [
+                _job_name_pattern(display)
+                for display in _recorded_job_displays(str(job_id), row)
+            ]
+    if not candidates:
+        return set()
+    durations: dict[tuple[str, str], list[float]] = {key: [] for key in candidates}
+    names: dict[tuple[str, str], set[str]] = {key: set() for key in candidates}
+    for commit in month.get("pr_commits") or []:
+        if not isinstance(commit, dict):
+            continue
+        for job in commit.get("jobs") or []:
+            if not isinstance(job, dict) or job.get("conclusion") == "skipped":
+                continue
+            workflow = str(job.get("workflow") or "").strip()
+            name = str(job.get("name") or "").strip()
+            try:
+                seconds = (
+                    datetime.fromisoformat(str(job["completed_at"]).replace("Z", "+00:00"))
+                    - datetime.fromisoformat(str(job["started_at"]).replace("Z", "+00:00"))
+                ).total_seconds()
+            except (KeyError, TypeError, ValueError):
+                continue
+            for key, patterns in candidates.items():
+                if key[0] == workflow and any(pattern.fullmatch(name) for pattern in patterns):
+                    durations[key].append(seconds)
+                    names[key].add(f"{workflow} / {name}" if workflow and name else name)
+    return {
+        name for key, values in durations.items()
+        if values and statistics.median(values) < _COLLECTOR_MAX_P50_S
+        for name in names[key]
+    }
+
+
 def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[str, Any]:
     """Recompute independent facts over the same public sample definition.
 
@@ -668,8 +733,12 @@ def _oracle_for_engine_span(recording: Path, findings: dict[str, Any]) -> dict[s
     # size. Commit identities, eligible jobs, check names, completion times, and
     # each commit's gate all come from the recording, so the engine cannot
     # provide its own answer to the oracle. Every recording credits the job that
-    # finishes last, the real-finish-order definition the engine uses (#491).
-    return module.compute(scoped, bookkeeping_cutoff_s=0, gate_by_completion=True)
+    # finishes last, the real-finish-order definition the engine uses (#491),
+    # passing over short collector jobs to the last check they waited on.
+    return module.compute(
+        scoped, bookkeeping_cutoff_s=0, gate_by_completion=True,
+        collector_checks=_recorded_collector_checks(recording, month),
+    )
 
 
 def _fixture_name(endpoint: str) -> str:

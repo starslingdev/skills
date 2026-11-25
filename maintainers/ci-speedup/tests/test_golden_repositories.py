@@ -6,7 +6,7 @@ import ast
 import gzip
 import importlib.util
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import ModuleType
 
@@ -23,11 +23,8 @@ _REPOSITORIES = {
         ),
     ),
     "vercel-nextjs": (
-        "PR #318 covers the headline follow-up; issue #363 tracks gate comparison",
+        "PR #318 covers the headline follow-up",
         (
-            # Issue #363: the 3 s `thank you, next` aggregator finishes last; the engine
-            # credits the long job it waits on, as #491 decided.
-            "independent leading gate absent: 'build-and-test / thank you, next'",
             # Owner-reviewed headline text is handled by the pole-order card.
             "Bottom line does not contain reviewed text",
         ),
@@ -130,7 +127,6 @@ def test_known_red_reasons_name_the_public_issue_and_fix_pr() -> None:
     for name in ("home-assistant-core", "vercel-nextjs"):
         reason, _markers = _REPOSITORIES[name]
         assert "#318" in reason
-    assert "#363" in _REPOSITORIES["vercel-nextjs"][0]
 
 
 def test_home_assistant_hassfest_patterns_exclude_unrelated_checks() -> None:
@@ -449,6 +445,67 @@ def test_replay_records_pull_request_pages_for_every_workflow(tmp_path: Path) ->
         )).is_file()
 
 
+def _collector_recording(tmp_path: Path, verdict_s: int, verdict_needs: str) -> Path:
+    recording = tmp_path / "recording"
+    workflows = recording / "checkout" / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text(
+        "name: CI\njobs:\n"
+        "  lint:\n    name: lint\n"
+        "  build:\n    name: build\n"
+        "  test:\n    name: test\n    needs: [build]\n"
+        f"  verdict:\n    name: verdict\n    needs: {verdict_needs}\n"
+        "    if: always()\n",
+        encoding="utf-8",
+    )
+
+    def at(seconds: int) -> str:
+        instant = datetime(2026, 11, 1, tzinfo=timezone.utc) + timedelta(seconds=seconds)
+        return instant.isoformat().replace("+00:00", "Z")
+
+    commits = []
+    for index in range(3):
+        base = index * 3600
+        commits.append({
+            "sha": f"commit-{index}", "created_at": at(base), "completed": True,
+            "jobs": [
+                {"workflow": "CI", "name": "lint", "status": "completed",
+                 "started_at": at(base), "completed_at": at(base + 60)},
+                {"workflow": "CI", "name": "build", "status": "completed",
+                 "started_at": at(base), "completed_at": at(base + 120)},
+                {"workflow": "CI", "name": "test", "status": "completed",
+                 "started_at": at(base + 120), "completed_at": at(base + 720)},
+                {"workflow": "CI", "name": "verdict", "status": "completed",
+                 "started_at": at(base + 720),
+                 "completed_at": at(base + 720 + verdict_s)},
+            ],
+        })
+    with gzip.open(recording / "month-wide.json.gz", "wt", encoding="utf-8") as stream:
+        json.dump({"schema_version": 1, "pr_commits": commits}, stream)
+    return recording
+
+
+def test_engine_span_oracle_credits_the_check_a_short_collector_waits_on(
+        tmp_path: Path) -> None:
+    compare = _load("compare")
+    findings = {"pr_critical_path": {"sampled_pr_count": 3}}
+
+    # A 3 s job that `needs:` two or more jobs only collects them.
+    oracle = compare._oracle_for_engine_span(
+        _collector_recording(tmp_path / "collector", 3, "[lint, test]"), findings)
+    assert oracle["gate_order"] == ["CI / test"]
+
+    # A long job with the same needs does real work and is the gate.
+    oracle = compare._oracle_for_engine_span(
+        _collector_recording(tmp_path / "long", 300, "[lint, test]"), findings)
+    assert oracle["gate_order"] == ["CI / verdict"]
+
+    # A short job behind a single need is a real step, not a collector.
+    oracle = compare._oracle_for_engine_span(
+        _collector_recording(tmp_path / "single", 3, "[test]"), findings)
+    assert oracle["gate_order"] == ["CI / verdict"]
+
+
 def test_engine_span_oracle_uses_every_recorded_run_without_engine_filtering(
         tmp_path: Path) -> None:
     compare = _load("compare")
@@ -690,9 +747,10 @@ def test_engine_span_oracle_includes_recorded_required_predecessors(
 
     oracle = compare._oracle_for_engine_span(recording, findings)
 
-    # In real finish order (#491) the required verdict finishes last. The unrelated
-    # job ends later still, so the cohort must leave it out.
-    assert oracle["gate_order"] == ["CI / verdict"]
+    # The 10 s verdict only collects its two needs, so the credit goes to the
+    # last-finishing check it waited on (#491). The unrelated job ends later
+    # still, so the cohort must leave it out.
+    assert oracle["gate_order"] == ["CI / slow tests"]
     assert all(row["check"] != "CI / unrelated" for row in oracle["gates"])
 
 

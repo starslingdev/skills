@@ -71,6 +71,8 @@ come from the same normalized month data as the oracle.
 Replay comparison credits each commit's gate to the eligible job with the
 latest recorded completion, for every recording: "finishes last" means real
 finish order, the definition the engine uses since #491. Zero-duration and
-skipped jobs cannot win; ties count for each check. `oracle.py` run on its own
-keeps the longest-duration metric that produced the committed month-wide
-`oracle.json` snapshots, which remain unchanged.
+skipped jobs cannot win; ties count for each check. A collector job, one that
+`needs:` two or more jobs and whose recorded P50 duration is under 60 s, cannot
+win either, so the credit goes to the last-finishing check it waited on.
+`oracle.py` run on its own keeps the longest-duration metric that produced the
+committed month-wide `oracle.json` snapshots, which remain unchanged.
