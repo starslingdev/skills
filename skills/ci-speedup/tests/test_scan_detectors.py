@@ -7304,6 +7304,26 @@ def test_every_opt46_recipe_keeps_three_quick_default_branch_and_tag_runs():
                 assert not any(_ghx_eval(cancel, ctx) for ctx in events)
 
 
+def test_opt46_release_branch_note_also_keeps_every_pending_release_run():
+    """The widened block's release-branch note keeps release pushes from being
+    CANCELLED. A cancel term alone still leaves them in one shared group, where
+    a newer pending run replaces an older one, so the note must also route the
+    branch to `github.run_id`, and the term it prints must do exactly that."""
+    body = " ".join(_catalog_section("OPT46").split())
+    term = "|| startsWith(github.ref, 'refs/heads/release/')"
+    assert f"`{term}`" in body, "release-branch note must extend the run_id selector"
+    group = _opt46_combined_recipe()["group"]
+    anchor = "startsWith(github.ref, 'refs/tags/')"
+    assert group.count(anchor) == 1
+    extended = group.replace(anchor, f"{anchor} {term}")
+    runs = {_ghx_render(extended, _ghx_ctx("push", ref="refs/heads/release/1.x",
+                                           run_id=n)) for n in (1, 2, 3)}
+    assert len(runs) == 3, runs
+    feature = {_ghx_render(extended, _ghx_ctx("push", ref="refs/heads/feature/x",
+                                              run_id=n)) for n in (1, 2)}
+    assert len(feature) == 1, feature
+
+
 def test_opt46_combined_group_validates_every_default_branch_and_tag_run():
     """#446: one key must give every default-branch push and every tag its own
     group (no pending-run replacement) while feature branches and PRs share a
