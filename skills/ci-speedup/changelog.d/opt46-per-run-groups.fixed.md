@@ -1,0 +1,2 @@
+- **2026-11-25** — Give default-branch and tag runs their own group in both OPT46 recipes so a new pending run does not replace an older one (#502).
+- **2026-11-25** — OPT46's release-branch note now also routes release pushes to the `github.run_id` group, so a newer pending release run cannot replace an older one (#502).
