@@ -151,6 +151,11 @@ the gate they can already see, on a vector already in the ten, is capable
 of restricting anything.
 These either became scored config facts — where a one-line
 pass/fail is the honest weight for a presence fact — or were dropped.
+Release gating (P8.4) is back only as unscored release-path hygiene rows in
+the config hygiene section (a tag-triggered publish no tag ruleset or
+environment reviewer gates; a default-branch release needing zero approvals
+whose environment has no reviewers). They answer what one write-access
+account can ship, start inside, and are not an eleventh vector.
 
 **Three more from the old catalog, named here for completeness.** A rejection
 record is only usable if it accounts for every id the old catalog carried, and

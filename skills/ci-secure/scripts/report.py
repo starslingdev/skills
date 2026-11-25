@@ -2017,6 +2017,15 @@ def _security_score_block(security_score: dict[str, Any] | None) -> str:
     push_access = security_score.get("push_access")
     if push_rows or isinstance(push_access, dict):
         out += ["", _push_access_block(push_rows, push_access)]
+    raw_release = security_score.get("release_path")
+    release = ([f for f in raw_release if isinstance(f, dict)]
+               if isinstance(raw_release, list) else [])
+    if release:
+        out += ["", "### Release-path hygiene", "",
+                "These observations cover the release paths identified in "
+                "the workflows and settings read by this scan.", "",
+                "| | Check | Evidence |", "|---|---|---|"]
+        out += [_fact_row(f) for f in release]
     return "\n".join(out)
 
 

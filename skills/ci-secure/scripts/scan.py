@@ -8041,6 +8041,7 @@ def _compute_security_score(
                 # is the removed contract leaking back at the reader.
                 "reason": f"config-facts layer failed: {exc!r} — no config "
                           "fact could be checked", "registered": None,
+                "release_path": [],
                 # The unscored push-access lists, in their "not checked"
                 # shape: an inventory absent from a crashed run must not read
                 # as "no secrets exposed".
