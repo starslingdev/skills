@@ -1,8 +1,8 @@
 """The registry-scan gate's own shape is enforced, so it cannot rot silently.
 
 `.github/workflows/registry-scan.yml` runs a third-party security scanner over the
-installable skill trees, so a rule violation fails our build instead of surfacing
-as a public FAIL badge days after release. Almost every way that gate can decay is
+installable skill trees as a scheduled or manually dispatched probe. A rule
+violation fails the probe and alerts maintainers. Almost every way it can decay is
 invisible: a gate that stops reading the scan's document makes findings advisory, a
 widened ignore list hides a real finding, a deleted `schedule` stops catching
 rule-catalog changes that need no commit of ours, a drifted runner label quietly
@@ -142,76 +142,22 @@ def test_workflow_exists_and_parses(workflow: dict):
     assert workflow["jobs"], "registry-scan.yml has no jobs"
 
 
-def test_runs_on_pull_requests_and_pushes(triggers: dict):
-    """PRs are path-filtered; everything else is not.
+def test_registry_probe_runs_only_on_schedule_and_manual_dispatch(triggers: dict, workflow_text: str):
+    """A weekly, non-blocking probe for the vendor recovering (#68).
 
-    A PR that touches nothing the scan reads gets no scan and no check — a deliberate
-    trade against the scanner's daily allowance, which a day of unfiltered PR runs now
-    exhausts. The push to main still scans every merge, the schedule still notices a
-    rule-catalog change that needed no commit, and dispatch is there for a maintainer.
-    Filtering any of those three would turn the trade into a hole.
+    The scanner has been blind since 2026-08-18 and its daily allowance is small, so
+    no pull_request, push or merge_group run may spend it or post a check. Re-adding
+    one of those triggers is #68's promotion, not a drive-by edit.
     """
-    assert "pull_request" in triggers, "the gate must run on pull requests"
-    pr = triggers["pull_request"]
-    assert isinstance(pr, dict) and pr.get("paths"), (
-        "the pull_request trigger has no `paths:` filter, so every PR spends the day's "
-        "scanner allowance whether or not it touches a skill")
-    assert "push" in triggers, "the gate must run on pushes to main"
-    push = triggers["push"]
-    assert push.get("branches") == ["main"], "the push trigger must be scoped to main"
-    assert "paths" not in push and "paths-ignore" not in push, (
-        "the push trigger is path-filtered; a merge to main must always be scanned, "
-        "because it is the run that certifies what ships")
-    assert not isinstance(triggers.get("schedule"), dict) or "paths" not in triggers["schedule"], (
-        "the schedule must not be path-filtered")
-    dispatch = triggers.get("workflow_dispatch")
-    assert dispatch is None or not (isinstance(dispatch, dict) and "paths" in dispatch), (
-        "workflow_dispatch must not be path-filtered")
-
-
-def _matches_path_filter(pattern: str, path: str) -> bool:
-    """GitHub's `paths:` glob, reduced to what these patterns use: `**` crosses
-    directory separators, `*` does not."""
-    regex = "".join(
-        ".*" if token == "**" else "[^/]*" if token == "*" else re.escape(token)
-        for token in re.findall(r"\*\*|\*|[^*]+", pattern))
-    return re.fullmatch(regex, path) is not None
-
-
-def test_the_pull_request_path_filter_names_every_file_the_scan_depends_on(workflow: dict, triggers: dict):
-    """Derived from the workflow, not hand-listed, so a new script cannot be forgotten.
-
-    Everything the scan's behaviour depends on: the tree it scans, the workflow
-    itself, every local script a `run:` line invokes (and every sibling
-    `registry_scan_*.py` on disk, since the scripts import each other), and the test
-    file that pins the workflow's shape. A change to any of these on a PR must run
-    the scan; a filter that misses one lets that change merge on a green PR that
-    never scanned it.
-    """
-    patterns = triggers["pull_request"]["paths"]
-    scan_path = workflow["env"]["SCAN_PATH"]
-    depends_on = {
-        f"{scan_path}/some-skill/SKILL.md",
-        f"{scan_path}/some-skill/scripts/helper.py",
-        _WORKFLOW.relative_to(_REPO).as_posix(),
-        Path(__file__).resolve().relative_to(_REPO).as_posix(),
-    }
-    for step in _scan_job(workflow)["steps"]:
-        depends_on.update(re.findall(r"\.github/scripts/[\w./-]+\.py", step.get("run") or ""))
-    depends_on.update(
-        p.relative_to(_REPO).as_posix()
-        for p in (_REPO / ".github" / "scripts").glob("registry_scan_*.py"))
-    assert len(depends_on) >= 8, f"derivation found too little: {sorted(depends_on)}"
-
-    unmatched = sorted(
-        path for path in depends_on
-        if not any(_matches_path_filter(pattern, path) for pattern in patterns))
-    assert not unmatched, (
-        f"the pull_request path filter {patterns} does not cover: {unmatched}. A PR "
-        f"changing one of these would merge without the scan running.")
-    # And it must not be so wide that the trade buys nothing.
-    assert not any(_matches_path_filter(p, "README.md") for p in patterns), (
-        "the path filter matches README.md; a docs-only PR would still spend the allowance")
+    assert triggers.get("schedule"), "the probe must keep its weekly schedule"
+    for event in ("pull_request", "pull_request_target", "push", "merge_group"):
+        assert event not in triggers, (
+            f"registry-scan.yml has a {event} trigger; it is a scheduled probe until #68's "
+            f"promotion steps are followed")
+    assert set(triggers) == {"schedule", "workflow_dispatch"}, sorted(triggers)
+    lowered = workflow_text.lower()
+    assert "probe" in lowered and "#68" in workflow_text, (
+        "the workflow must say it is a probe and point at #68's promotion steps")
 
 
 def test_scheduled_run_exists(triggers: dict):
@@ -584,25 +530,11 @@ def test_missing_token_fails_rather_than_passing_quietly(workflow: dict):
     assert "exit 1" in text, "on an internal run, a missing token must fail the build"
 
 
-def test_fork_prs_report_the_coverage_gap(workflow: dict):
-    """Fork PRs cannot reach the token. The check that remains must not read as
-    'scanned, clean' — its own name has to carry the gap."""
-    fork_job = workflow["jobs"]["fork-not-scanned"]
-    assert "NOT RUN" in fork_job["name"]
-    assert "DID NOT RUN" in _steps_text(fork_job)
-
-
-def test_fork_report_is_confined_to_pull_requests(workflow: dict):
-    """`github.event.pull_request` is null on pushes, schedules, and dispatches, so a
-    bare `head.repo.full_name != github.repository` is TRUE on every one of them. Without
-    the event-name clause this job posts a green 'fork PR — no scan coverage' check
-    beside a scan that actually ran — the misreading its name exists to prevent."""
-    guard = workflow["jobs"]["fork-not-scanned"]["if"]
-    assert "github.event_name == 'pull_request'" in guard, (
-        "the fork coverage-gap report must be gated on the pull_request event, or it "
-        "fires on pushes and scheduled runs too"
-    )
-    assert "github.event.pull_request.head.repo.full_name != github.repository" in guard
+def test_probe_has_no_fork_coverage_job(workflow: dict):
+    """With no pull_request trigger there is no fork PR to report on; a leftover
+    fork job would be dead config that reads as live coverage."""
+    assert "fork-not-scanned" not in workflow["jobs"]
+    assert not any("NOT RUN" in str(job.get("name", "")) for job in workflow["jobs"].values())
 
 
 def test_scanner_coverage_limits_are_documented(workflow_text: str):

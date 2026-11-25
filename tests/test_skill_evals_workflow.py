@@ -57,8 +57,8 @@ def test_the_verdict_never_reports_on_a_fork_pull_request():
 
 
 def test_the_fork_gap_is_carried_by_a_check_whose_name_says_so():
-    """registry-scan.yml's pattern: report the gap rather than blocking an
-    outside contributor, but name the check so green cannot be misread."""
+    """Report the gap rather than blocking an outside contributor, but name
+    the check so green cannot be misread."""
     fork = _job("fork-did-not-run")
     name = str(fork.get("name", ""))
     assert "NOT RUN" in name, (

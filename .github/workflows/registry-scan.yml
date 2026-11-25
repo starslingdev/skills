@@ -1,8 +1,8 @@
 name: Registry scan
 
 # Runs the same third-party security scanner that skill registries publish audits from
-# (Snyk Agent Scan) against the installable skill trees under `skills/`, so a rule violation
-# fails our build instead of appearing as a public FAIL badge days after release.
+# (Snyk Agent Scan) against the installable skill trees under `skills/`. A rule violation
+# fails the run.
 #
 # WHAT THIS DOES NOT COVER. Registries run more than one scanner. This gate reproduces exactly
 # one of them (Snyk Agent Scan). It says nothing about Gen Agent Trust Hub — which publishes no
@@ -24,41 +24,20 @@ name: Registry scan
 # outcome, and both name the reset. The unlock is enabling Agent Scan on the Snyk tenant
 # and running the scanner with a tenant push key, not a different token.
 #
-# WHICH PULL REQUESTS ARE SCANNED. Only those that touch something the scan reads: a skill
-# tree, this workflow, the scripts it runs, or the test that pins its shape. A PR changing
-# nothing under those paths gets no scan and no `registry scan` check at all — not a green
-# one, none. That is a deliberate trade against the daily allowance above: a docs-only PR
-# used to spend the same calls as a skill change. The push to main is NOT filtered, so every
-# merge is still scanned; the schedule is not filtered either, because it is what notices a
-# rule-catalog change that needed no commit of ours. `tests/test_registry_scan_workflow.py`
-# derives the list of files the scan depends on from this file's own `run:` lines and fails
-# if the filter below misses one, so a new script cannot be forgotten here.
-#
-# NO merge_group TRIGGER, deliberately. `registry scan` cannot be a required check: the
-# path filter above leaves it absent on most PRs, and an absent required check blocks a
-# merge. Since the queue never waits for it, a merge_group run would only spend two more
-# calls of the daily allowance per queue entry, on a tree the PR run (or the push run after
-# merge) already scans.
+# A WEEKLY, NON-BLOCKING PROBE for the vendor recovering (#68). The scanner went blind on
+# 2026-08-18 and its daily allowance is small, so this workflow runs only on its schedule and
+# by manual dispatch: no pull_request, push, or merge_group trigger, and no check on any PR.
+# When the red-proof control detects again and the scan goes green, #68's promotion steps
+# apply; restoring the PR and push triggers and a fork-PR path is part of that promotion.
 on:
-  pull_request:
-    paths:
-      - "skills/**"
-      - ".github/workflows/registry-scan.yml"
-      - ".github/scripts/registry_scan_*.py"
-      - "tests/test_registry_scan_workflow.py"
-  push:
-    branches: [main]
   # The scanner's rule catalog changes without any commit of ours: a renamed, retired, or newly
   # added rule can turn a shipped skill red on its own. The weekly run is what notices.
   schedule:
     - cron: "23 7 * * 1" # Mondays, 07:23 UTC
   workflow_dispatch:
 
-# One in-flight run per ref per event — a new push cancels the previous, still-running run for
-# that branch. `github.event_name` is in the key because a push to main and the weekly scheduled
-# run share `refs/heads/main`: without it, a push would cancel the scheduled run, and a cancelled
-# run notifies nobody. The schedule is the only trigger that notices a rule-catalog change that
-# needed no commit of ours, so it must not be silently cancellable.
+# Keep at most one in-flight run per ref per event. A manual dispatch on main
+# should leave the scheduled probe running even though they share a ref.
 concurrency:
   group: registry-scan-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
@@ -97,10 +76,7 @@ env:
 jobs:
   scan:
     name: registry scan
-    # This repo dogfoods StarSling runners for its own CI (matching ci.yml). The runner is
-    # self-hosted, so never execute untrusted fork-PR code on it, and repository secrets —
-    # SNYK_TOKEN included — are not available to fork PRs anyway. Fork PRs get the
-    # `fork-not-scanned` job below, which reports the coverage gap instead of a green check.
+    # Match ci.yml's self-hosted runner and keep the fork safety guard for any future promotion.
     runs-on: starsling-ubuntu-26.04
     # The scan talks to a network service. A stalled request would otherwise hold a self-hosted
     # runner for the six-hour GitHub default with no signal.
@@ -109,7 +85,7 @@ jobs:
     # running the scan would send UNRELEASED skill text to a third-party scanner API — for a new
     # skill, the verdict minted on that first contact is the one it wears, so the scan is held
     # until launch. The guard also keeps a mirror's missing/foreign SNYK_TOKEN from painting
-    # every staged PR red with a scan that was never supposed to run there.
+    # a non-public copy red with a scan that was never supposed to run there.
     if: >-
       github.repository == 'starslingdev/skills' &&
       (github.event_name != 'pull_request' ||
@@ -133,8 +109,9 @@ jobs:
 
       # A missing token must never look like a clean scan. This is the whole point of the gate:
       # the failure we are guarding against is a security finding nobody saw, and a silently
-      # skipped security scan is that same failure wearing a green check. On internal pushes and
-      # PRs the secret is expected to exist, so its absence is a red build, not a quiet skip.
+      # skipped security scan is that same failure wearing a green check. On this repository's
+      # scheduled and dispatched runs the secret is expected to exist, so its absence is a red
+      # build, not a quiet skip.
       - name: Require SNYK_TOKEN
         run: |
           if [ -z "${SNYK_TOKEN}" ]; then
@@ -332,7 +309,7 @@ jobs:
               echo "(scan class \`${{ steps.gate.outputs.scan_class }}\`, control class"
               echo "\`${{ steps.red_proof.outputs.control_class }}\`)."
               echo ""
-              echo "It resets daily: re-run this check after the reset, or push again then."
+              echo "It resets daily: dispatch this workflow again after the reset."
               echo "The cap is a property of the public tier that \`SNYK_TOKEN\` authenticates"
               echo "against; the unlock is enabling Agent Scan on the Snyk tenant and running"
               echo "the scanner with a tenant push key, not a different token."
@@ -387,37 +364,3 @@ jobs:
             echo "**When this step stops failing, detection is back.**"
           } >> "${GITHUB_STEP_SUMMARY}"
           exit 1
-
-  fork-not-scanned:
-    # The name is the message: this check being green must not read as "scanned, clean".
-    name: registry scan NOT RUN (fork PR — no scan coverage)
-    # Inverse of the guard above: fork PRs cannot reach repository secrets, so the scanner has no
-    # token and cannot run. Failing an external contributor's PR for infrastructure they have no
-    # way to fix would be hostile, so this reports rather than blocks — but it reports loudly, and
-    # a maintainer must re-run the scan on an internal branch before merging any change to
-    # `skills/` that came from a fork.
-    # Both halves are load-bearing. On a push, a schedule, or a manual dispatch there is no
-    # `github.event.pull_request`, so the second clause alone would be true (null != repo) and
-    # this job would post a green "fork PR — no scan coverage" check next to a real scan that
-    # did run — the exact misreading the job's name exists to prevent.
-    if: >-
-      github.repository == 'starslingdev/skills' &&
-      github.event_name == 'pull_request' &&
-      github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Report the coverage gap
-        run: |
-          echo "::warning title=REGISTRY SCAN DID NOT RUN::Fork PRs have no SNYK_TOKEN, so no skill was scanned on this PR. This is a coverage gap, not a clean result — a maintainer must re-run the scan on an internal branch before merging changes under skills/."
-          echo "================================================================"
-          echo "  REGISTRY SCAN DID NOT RUN — NOTHING WAS SCANNED"
-          echo ""
-          echo "  This pull request comes from a fork. Fork runs have no access"
-          echo "  to the SNYK_TOKEN secret, so the registry scanner could not run"
-          echo "  and no skill was analysed."
-          echo ""
-          echo "  This is a coverage gap, NOT a clean result. Before merging any"
-          echo "  change under skills/ from a fork, a maintainer must push the"
-          echo "  branch to this repository and let the 'registry scan' job run."
-          echo "================================================================"

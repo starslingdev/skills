@@ -18,9 +18,8 @@
 #     required check here would be flaky, and a flaky gate gets disabled or ignored.
 #   - It cannot run on fork PRs at all: `pull_request` from a fork has no access to
 #     ANTHROPIC_API_KEY. A fork PR therefore gets no `skill evals` check and a separate check
-#     whose NAME is the message — `skill evals NOT RUN (fork PR — no agent session)` — exactly
-#     as registry-scan.yml reports its own fork gap. A green check called "skill evals" means
-#     every suite selected for that event completed successfully.
+#     whose NAME is the message — `skill evals NOT RUN (fork PR — no agent session)`. A green
+#     check called "skill evals" means every suite selected for that event completed successfully.
 #     `.github/workflows/claude.yml` shows the other pattern (comment-triggered, base-repo
 #     context) if on-demand fork coverage is ever wanted.
 #
@@ -319,9 +318,9 @@ jobs:
 
   # The name is the message: this check being green must not read as "the contract was
   # verified". Failing an external contributor's PR for a secret they have no way to reach
-  # would be hostile, so this reports rather than blocks — the same trade registry-scan.yml
-  # makes for its own fork gap — but a maintainer must run the evals on an internal branch
-  # before merging a fork change to SKILL.md, the references, or the scripts.
+  # would be hostile, so this reports rather than blocks — but a maintainer must run the evals
+  # on an internal branch before merging a fork change to SKILL.md, the references, or the
+  # scripts.
   fork-did-not-run:
     name: skill evals NOT RUN (fork PR — no agent session)
     if: >-
