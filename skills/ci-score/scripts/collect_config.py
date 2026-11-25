@@ -414,7 +414,10 @@ def main(argv: list[str] | None = None) -> int:
     # The score banner draws Unicode borders, including on legacy consoles.
     reconfigure = getattr(sys.stdout, "reconfigure", None)
     if callable(reconfigure):
-        reconfigure(encoding="utf-8", errors="replace")
+        try:
+            reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):  # a wrapped or detached stream keeps its encoding
+            pass
     parser = argparse.ArgumentParser(
         description="ci-score: score a local checkout's CI configuration")
     parser.add_argument("--repo", default=".",

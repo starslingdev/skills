@@ -142,6 +142,26 @@ def test_cli_prints_unicode_banner_with_cp1252_stdout(tmp_path):
     assert json.loads(out.read_text(encoding="utf-8"))["ci_score"]["refusal"] is None
 
 
+def test_cli_survives_a_stdout_that_refuses_reconfigure(tmp_path, monkeypatch, capsys):
+    root = _mk_repo(tmp_path)
+    out = tmp_path / "findings.json"
+    real = sys.stdout
+
+    class Locked:
+        def reconfigure(self, **_kwargs):
+            raise ValueError("stream cannot be reconfigured")
+
+        def write(self, text):
+            return real.write(text)
+
+        def flush(self):
+            real.flush()
+
+    monkeypatch.setattr(sys, "stdout", Locked())
+    assert cc_mod.main(["--repo", str(root), "--out", str(out)]) == 0
+    assert "CI SCORE" in capsys.readouterr().out
+
+
 def test_no_workflows_is_the_spec_refusal_not_an_error(tmp_path):
     root = _mk_repo(tmp_path, with_workflow=False)
     doc, code = cc_mod.collect(root)
