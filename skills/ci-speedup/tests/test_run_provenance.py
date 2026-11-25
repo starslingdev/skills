@@ -319,7 +319,8 @@ def test_installed_skill_checks_file_names_and_reports_release(
     ) == int(old_files is not None)
     assert _arg_value(_scan_cmd(captured), "--skill-commit-sha") == "installed:23f31c573ee0"
     findings = json.loads(out.read_text(encoding="utf-8"))
-    assert findings["skill_release"] == "2026-11-23"
+    # The pending changelog.d fragment means this copy is newer than that release.
+    assert findings["skill_release"] == "2026-11-23+unreleased"
 
 
 @pytest.mark.parametrize("unreadable", [False, True])
@@ -355,6 +356,13 @@ def test_installed_report_shows_release_next_to_verifiable_folder_hash():
     assert "`installed:23f31c573ee0` · latest release `2026-11-23`" in top
     assert "(skill build `installed:23f31c573ee0`) · latest release `2026-11-23`" in sources
     assert verify_report.check_skill_commit_provenance(sources, None).ok
+    doc["skill_release"] = "2026-11-23+unreleased"
+    sources = "\n".join(blocking_path._data_sources_footer(doc, "public/example"))
+    assert ("(skill build `installed:23f31c573ee0`) · latest release `2026-11-23` "
+            "plus unreleased changes") in sources
+    assert verify_report.check_skill_commit_provenance(sources, None).ok
+    doc["skill_release"] = "see `evil`+unreleased"
+    assert "latest release" not in "\n".join(blocking_path._metadata_table(doc, "public/example"))
 
 
 def test_git_short_sha_resolves_for_a_real_checkout():
@@ -444,3 +452,47 @@ def test_report_out_flag_overrides_the_default(monkeypatch, tmp_path):
                        "--report-out", str(custom)])
     assert rc == 0
     assert Path(seen["out_path"]) == custom
+
+
+def test_release_label_marks_unreleased_changes_after_the_latest_release(tmp_path):
+    """An install taken from main between releases is not that release: the label
+    must say the install carries changes newer than the heading it names."""
+    import installed_skill
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n## [Unreleased]\n\n### Fixed\n\n- **2026-11-20** — A fix (#1).\n\n"
+        "## 2026-07-16 — Initial public release\n- **2026-07-16** — Old (#0).\n",
+        encoding="utf-8")
+    assert installed_skill.latest_release(tmp_path) == "2026-07-16+unreleased"
+    assert installed_skill.release_suffix("2026-07-16+unreleased") == (
+        " · latest release `2026-07-16` plus unreleased changes")
+
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n## [Unreleased]\n\n## 2026-07-16 — Initial public release\n",
+        encoding="utf-8")
+    assert installed_skill.latest_release(tmp_path) == "2026-07-16"
+    (tmp_path / "changelog.d").mkdir()
+    (tmp_path / "changelog.d" / "README.md").touch()
+    assert installed_skill.latest_release(tmp_path) == "2026-07-16"
+    (tmp_path / "changelog.d" / "a-fix.fixed.md").write_text("- x (#2)\n", encoding="utf-8")
+    assert installed_skill.latest_release(tmp_path) == "2026-07-16+unreleased"
+
+
+@pytest.mark.parametrize("junk", [".DS_Store", "Thumbs.db", "desktop.ini"])
+def test_operating_system_metadata_files_are_not_reported_as_old_skill_files(tmp_path, junk):
+    """Finder / Explorer drop these into any folder a user browses; they are not
+    files from an older version of the skill, so the upgrade warning stays quiet."""
+    import installed_skill
+
+    digits = str.maketrans("".join(format(n, "x") for n in range(16)), "abcdefghijklmnop")
+    names = ["install-manifest.json", "scripts/run.py"]
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "run.py").touch()
+    (tmp_path / "install-manifest.json").write_text(json.dumps({"path_sha256_ap": [
+        sha256(n.encode()).hexdigest().translate(digits) for n in names]}), encoding="utf-8")
+    assert not installed_skill.has_extra_files(tmp_path)
+    (tmp_path / "scripts" / junk).touch()
+    (tmp_path / junk).touch()
+    assert not installed_skill.has_extra_files(tmp_path)
+    (tmp_path / "scripts" / "billing.py").touch()
+    assert installed_skill.has_extra_files(tmp_path)

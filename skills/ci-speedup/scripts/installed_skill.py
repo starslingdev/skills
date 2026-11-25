@@ -12,6 +12,10 @@ from pathlib import Path, PurePosixPath
 MANIFEST_NAME = "install-manifest.json"
 MANIFEST_FINGERPRINTS = "path_sha256_ap"
 _COPY_EXCLUSIONS = frozenset({".git", "__pycache__", "__pypackages__"})
+# Folder metadata Finder and Explorer write into any directory a user browses.
+# They are never skill files, so they are no sign of an older version.
+_OS_METADATA = frozenset({".DS_Store", "Thumbs.db", "desktop.ini"})
+_UNRELEASED = "+unreleased"
 _FRAGMENT = re.compile(r"[a-z0-9_-]+\.(?:added|changed|fixed|removed)\.md")
 _VERSION = r"(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|v?[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?)"
 _HEADING = re.compile(rf"^## +(?:\[({_VERSION})\]|({_VERSION}))(?=\s|$)", re.M)
@@ -21,7 +25,7 @@ _BASE16_ALPHABET = "abcdefghijklmnop"
 
 def inventory_path(path: PurePosixPath) -> bool:
     """Whether the path belongs to the durable installer inventory."""
-    if _COPY_EXCLUSIONS.intersection(path.parts):
+    if _COPY_EXCLUSIONS.intersection(path.parts) or path.name in _OS_METADATA:
         return False
     # Assembly moves these entries into CHANGELOG.md. Their presence is not
     # evidence about leftover executable or reference files.
@@ -67,13 +71,34 @@ def has_extra_files(root: Path) -> bool:
 
 
 def latest_release(root: Path) -> str | None:
-    """The newest dated or versioned release heading, ignoring Unreleased."""
-    heading = _HEADING.search(_read_metadata(root / "CHANGELOG.md") or "")
-    return (heading[1] or heading[2]) if heading else None
+    """The newest dated or versioned release heading, ignoring Unreleased.
+
+    An install taken between releases carries changes newer than that heading
+    (bullets under ``## [Unreleased]`` or pending ``changelog.d`` fragments), so
+    the label then ends in ``+unreleased`` instead of naming the release alone.
+    """
+    text = _read_metadata(root / "CHANGELOG.md") or ""
+    heading = _HEADING.search(text)
+    if not heading:
+        return None
+    label = heading[1] or heading[2]
+    pending = re.search(r"^\s*[-*] ", text[:heading.start()], re.M) is not None
+    if not pending:
+        try:
+            pending = any(_FRAGMENT.fullmatch(entry.name) and entry.is_file()
+                          and not entry.is_symlink()
+                          for entry in (root / "changelog.d").iterdir())
+        except OSError:
+            pending = False
+    return label + _UNRELEASED if pending else label
 
 
 def release_suffix(label: object) -> str:
     """Only render a release identifier, never arbitrary artifact text."""
-    if isinstance(label, str) and re.fullmatch(_VERSION, label):
-        return f" · latest release `{label}`"
+    if not isinstance(label, str):
+        return ""
+    base, unreleased = (label[:-len(_UNRELEASED)], True) if label.endswith(
+        _UNRELEASED) else (label, False)
+    if re.fullmatch(_VERSION, base):
+        return f" · latest release `{base}`" + (" plus unreleased changes" if unreleased else "")
     return ""

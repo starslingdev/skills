@@ -402,6 +402,12 @@ def main(argv: list[str] | None = None) -> int:
 
     skill_root = _DIR.parent
     skill_checkout_sha = _skill_checkout_sha(_DIR)
+    # The stale-file check runs only for an installed copy. A maintainer's source
+    # checkout routinely holds untracked scratch files and test output that are not
+    # in the shipped inventory; warning there would be noise, and its provenance is
+    # the commit sha anyway. An install vendored inside a user's own git repository
+    # is still an installed copy (its run.py is not tracked at the skill's source
+    # path), so it is checked.
     if skill_checkout_sha is None and has_extra_files(skill_root):
         print("WARNING: files from an older version of the skill are present; "
               "remove and re-add the skill to upgrade", file=sys.stderr)
