@@ -155,6 +155,19 @@ def test_finding_seed_workflow_paths_excludes_source_file_findings():
     assert cr._finding_seed_workflow_paths("malformed", workflow_paths) == set()
 
 
+def test_finding_seed_workflow_paths_normalizes_windows_paths():
+    assert cr._finding_seed_workflow_paths([
+        {"workflow_file": r".github\workflows\ci.yml"},
+        {"workflow_file": r"tests\conftest.py"},
+    ], {".github/workflows/ci.yml"}) == {".github/workflows/ci.yml"}
+
+
+def test_finding_seed_workflow_paths_keeps_a_literal_backslash_api_path():
+    literal = ".github/workflows/a\\b.yml"
+    assert cr._finding_seed_workflow_paths(
+        [{"workflow_file": literal}], {literal}) == {literal}
+
+
 def test_runner_minute_spine_uses_billable_basis_and_occurrence_frequency():
     wf = ".github/workflows/ci.yml"
     runs = [

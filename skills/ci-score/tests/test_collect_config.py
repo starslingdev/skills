@@ -25,9 +25,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -106,6 +107,59 @@ def test_happy_path_stamps_score_offline(tmp_path):
     assert doc["scanned_workflows"] == 1
     # the stamped facts cover the registry (facts_unavailable can't fire)
     assert len(doc["practice_facts"]) == 11
+
+
+def test_workflow_evidence_uses_posix_paths(tmp_path, monkeypatch):
+    root = _mk_repo(tmp_path)
+    workflow = root / ".github/workflows/ci.yml"
+    relative_to = Path.relative_to
+
+    def windows_workflow_relative_to(path, base, *args, **kwargs):
+        relative = relative_to(path, base, *args, **kwargs)
+        if path == workflow and base == root:
+            return PureWindowsPath(*relative.parts)
+        return relative
+
+    monkeypatch.setattr(Path, "relative_to", windows_workflow_relative_to)
+    doc, code = cc_mod.collect(root)
+    assert code == 0
+    assert doc["workflow_files"] == [".github/workflows/ci.yml"]
+    evidence_files = {p for fact in doc["practice_facts"].values() for p in fact["files"]}
+    assert ".github/workflows/ci.yml" in evidence_files
+    assert all("\\" not in path for path in evidence_files)
+
+
+def test_cli_prints_unicode_banner_with_cp1252_stdout(tmp_path):
+    root = _mk_repo(tmp_path)
+    out = tmp_path / "findings.json"
+    result = subprocess.run(
+        [sys.executable, str(_SKILL_DIR / "scripts/collect_config.py"),
+         "--repo", str(root), "--out", str(out)],
+        capture_output=True, env={**os.environ, "PYTHONIOENCODING": "cp1252:strict"},
+    )
+    assert result.returncode == 0, result.stderr.decode("ascii", errors="replace")
+    assert "┌" in result.stdout.decode("utf-8")
+    assert json.loads(out.read_text(encoding="utf-8"))["ci_score"]["refusal"] is None
+
+
+def test_cli_survives_a_stdout_that_refuses_reconfigure(tmp_path, monkeypatch, capsys):
+    root = _mk_repo(tmp_path)
+    out = tmp_path / "findings.json"
+    real = sys.stdout
+
+    class Locked:
+        def reconfigure(self, **_kwargs):
+            raise ValueError("stream cannot be reconfigured")
+
+        def write(self, text):
+            return real.write(text)
+
+        def flush(self):
+            real.flush()
+
+    monkeypatch.setattr(sys, "stdout", Locked())
+    assert cc_mod.main(["--repo", str(root), "--out", str(out)]) == 0
+    assert "CI SCORE" in capsys.readouterr().out
 
 
 def test_no_workflows_is_the_spec_refusal_not_an_error(tmp_path):

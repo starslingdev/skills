@@ -16145,6 +16145,10 @@ def _finding_seed_workflow_paths(
         if not isinstance(finding, dict):
             continue
         path = str(finding.get("workflow_file") or "")
+        if path not in workflow_paths:
+            # Findings from a Windows scan may still carry `\` separators; an
+            # API path that literally contains `\` (legal on POSIX) wins above.
+            path = path.replace("\\", "/")
         if path in workflow_paths or (
             path.startswith(".github/workflows/") and _wf_is_file_backed(path)
         ):
@@ -33766,7 +33770,7 @@ def _go_parallel_source_definitions(
                 continue
             definition: dict[str, Any] = {
                 "test": name,
-                "file": str(path.relative_to(root)),
+                "file": path.relative_to(root).as_posix(),
                 "line": text.count("\n", 0, match.start()) + 1,
                 "import_path": _go_import_path(root, path.parent),
                 "proof": None,
