@@ -18,7 +18,7 @@ import json
 import re
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 import pytest
 
@@ -60,6 +60,32 @@ def _patterns(data: dict) -> set[str]:
 def _scan_one(tmp_path: Path, content: str, name: str = "ci.yml") -> set[str]:
     _write_workflow(tmp_path, name, content)
     return _patterns(_scan(tmp_path))
+
+
+def test_scan_emits_posix_workflow_paths(tmp_path, monkeypatch):
+    _write_workflow(tmp_path, "ci.yml", """name: CI
+on: push
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - run: npx playwright install --with-deps
+      - run: vitest run
+""")
+    workflow = tmp_path / ".github/workflows/ci.yml"
+    relative_to = Path.relative_to
+
+    def windows_workflow_relative_to(path, root, *args, **kwargs):
+        relative = relative_to(path, root, *args, **kwargs)
+        if path == workflow and root == tmp_path:
+            return PureWindowsPath(*relative.parts)
+        return relative
+
+    monkeypatch.setattr(Path, "relative_to", windows_workflow_relative_to)
+    result = scan.scan(tmp_path, _SKILL_DIR / "references" / "patterns")
+    finding = next(f for f in result["findings"] if f["pattern"] == "OPT1")
+    assert finding["workflow_file"] == ".github/workflows/ci.yml"
+    assert list(result["workflow_job_graph"]) == [".github/workflows/ci.yml"]
 
 
 # =============================================================================

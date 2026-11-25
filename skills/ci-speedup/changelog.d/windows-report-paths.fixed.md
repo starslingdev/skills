@@ -1,0 +1,1 @@
+- **2026-11-25** — Use repository-relative POSIX paths in scan findings and seed run history from older Windows paths (#496).

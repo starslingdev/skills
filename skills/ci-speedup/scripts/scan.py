@@ -2680,7 +2680,7 @@ def _opt102_workflow_rel(root: Path, raw: str) -> str | None:
             if not _inside_scan_root(path):
                 continue
             if path.read_text(encoding="utf-8", errors="replace") == raw:
-                return str(path.relative_to(root))
+                return path.relative_to(root).as_posix()
         except OSError:
             continue
     return None
@@ -3249,14 +3249,15 @@ def _detect_opt102(doc: dict, raw: str) -> list[Hit]:
                                 candidate, _context = paths
                                 risky = _opt102_risky_stage(candidate, target)
                                 if risky is not None:
+                                    dockerfile_rel = candidate.relative_to(root).as_posix()
                                     line = _line_of_in_job(raw, str(job_name), marker)
                                     hits.append(Hit(
                                         line=line, affected_jobs=[str(job_name)],
                                         evidence=(f"job `{job_name}` builds {', '.join(foreign)} "
-                                                  f"from `{candidate.relative_to(root)}`; "
+                                                  f"from `{dockerfile_rel}`; "
                                                   f"compile stage `{risky[0]}` has no "
                                                   f"build-platform signal{runner_note}"),
-                                        match_text=str(candidate.relative_to(root)),
+                                        match_text=dockerfile_rel,
                                         snippet=_raw_line(raw, line)))
                 step_id = str(step.get("id") or "")
                 if step_id:
@@ -3675,7 +3676,7 @@ def _detect_opt114(doc: dict, raw: str) -> list[Hit]:
             if not shared or not verbs:
                 continue
             line = _line_of_in_job(raw, str(job_name), marker)
-            rel = candidate.relative_to(root)
+            rel = candidate.relative_to(root).as_posix()
             hits.append(Hit(
                 line=line,
                 affected_jobs=[str(job_name)],
@@ -3689,7 +3690,7 @@ def _detect_opt114(doc: dict, raw: str) -> list[Hit]:
                     "from the same image-build runner; unsized because this static "
                     "scan has no measured Docker-layer duration or 30-day job count."
                 ),
-                match_text=str(rel),
+                match_text=rel,
                 snippet=_raw_line(raw, line),
             ))
             break
@@ -8035,7 +8036,7 @@ def _detect_opt4_ephemeral_mounts(
                           "after every run; confirm the miss in its own build log before "
                           "crediting a saving"),
                 match_text=matched,
-                snippet=f"{dockerfile.relative_to(root)}: {matched}",
+                snippet=f"{dockerfile.relative_to(root).as_posix()}: {matched}",
                 facts={"static_cache_lint": True, "cache_family": "buildkit"},
             )))
     return out
@@ -9529,7 +9530,7 @@ def _isolated_test_source_facts(root: Path) -> dict[str, dict[str, str]]:
                     break
                 markers[test_name] = next(iter(values))
             if complete and len(set(markers.values())) == len(markers):
-                facts[str(path.relative_to(root))] = markers
+                facts[path.relative_to(root).as_posix()] = markers
                 marker_count += len(markers)
                 if len(facts) > 100 or marker_count > 1000:
                     return {}
@@ -9593,7 +9594,7 @@ def _read_test_runner_isolation_unguarded(root: Path) -> dict[str, Any]:
 
     def _rel(path: Path) -> str:
         try:
-            return str(path.relative_to(root))
+            return path.relative_to(root).as_posix()
         except ValueError:                                  # pragma: no cover
             return path.name
 
@@ -12386,7 +12387,7 @@ def _collect_workflow_files(root: Path) -> tuple[list[Path], list[dict]]:
     """Return (workflow files, scan_incomplete records)."""
     wf_dir = root / ".github" / "workflows"
     if not wf_dir.is_dir():
-        return [], [{"path": str(wf_dir), "kind": "no-workflows-dir",
+        return [], [{"path": wf_dir.relative_to(root).as_posix(), "kind": "no-workflows-dir",
                      "reason": "no .github/workflows directory"}]
     files = sorted(p for p in wf_dir.iterdir()
                    if p.is_file() and p.suffix in (".yml", ".yaml")
@@ -13085,7 +13086,7 @@ def scan(root: Path, catalog_path: Path, default_branch: str | None = None) -> d
     # cross-workflow / repo-context detectors need the whole set at once.
     parsed: list[tuple[str, dict, str]] = []
     for path in files:
-        rel = str(path.relative_to(root))
+        rel = path.relative_to(root).as_posix()
         # An unreadable / unparseable file is a coverage gap, not a clean scan.
         # Surface it loudly in `scan_incomplete`; never silently treat as clean.
         try:

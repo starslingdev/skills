@@ -147,7 +147,7 @@ def _read_workflows(root: Path, reasons: dict[str, str] | None = None) -> tuple[
     parsed: list[tuple[str, dict, str]] = []
     errors: list[str] = []
     for path in files:
-        rel = str(path.relative_to(root))
+        rel = path.relative_to(root).as_posix()
         try:
             raw = path.read_text(encoding="utf-8", errors="replace")
             doc = _workflow_yaml._load_strict_yaml(raw, workflow=True)
@@ -164,7 +164,7 @@ def _read_workflows(root: Path, reasons: dict[str, str] | None = None) -> tuple[
             errors.append(rel)
     logger.debug("workflows: %d file(s), %d parsed, %d errored",
                  len(files), len(parsed), len(errors))
-    return parsed, [str(p.relative_to(root)) for p in files], errors
+    return parsed, [p.relative_to(root).as_posix() for p in files], errors
 
 
 def collect(root: Path, spec_path: Path = _DEFAULT_SPEC) -> tuple[dict[str, Any], int]:
@@ -411,6 +411,10 @@ def _banner_lines(doc: dict[str, Any]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # The score banner draws Unicode borders, including on legacy consoles.
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if callable(reconfigure):
+        reconfigure(encoding="utf-8", errors="replace")
     parser = argparse.ArgumentParser(
         description="ci-score: score a local checkout's CI configuration")
     parser.add_argument("--repo", default=".",

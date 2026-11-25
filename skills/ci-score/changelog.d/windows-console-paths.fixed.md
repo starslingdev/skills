@@ -1,0 +1,1 @@
+- **2026-11-25** (#496) — **Fixed**: Write the score banner as UTF-8 on Windows and use forward slashes in workflow evidence.

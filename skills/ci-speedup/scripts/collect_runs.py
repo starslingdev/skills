@@ -16137,7 +16137,7 @@ def _finding_seed_workflow_paths(
     for finding in findings:
         if not isinstance(finding, dict):
             continue
-        path = str(finding.get("workflow_file") or "")
+        path = str(finding.get("workflow_file") or "").replace("\\", "/")
         if path in workflow_paths or (
             path.startswith(".github/workflows/") and _wf_is_file_backed(path)
         ):
