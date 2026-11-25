@@ -9121,6 +9121,7 @@ _OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 _OPT83_WITHHELD_DOC_KEY = "opt83_withheld_candidates"
 _OPT84_WITHHELD_DOC_KEY = "opt84_withheld_candidates"
+_OPT84_STEP_VERDICTS_DOC_KEY = "opt84_step_verdicts"
 _PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
 _OPT24_WITHHELD_DOC_KEY = "opt24_withheld_candidates"
 class WithheldRow(NamedTuple):
@@ -9448,6 +9449,9 @@ _OPT84_WITHHOLD_PHRASES: dict[str, str] = {
     "typescript_version_unreadable":
         "the TypeScript version could not be read, so whether the repo is "
         "already on the native compiler is unknown",
+    "typescript_project_unreadable":
+        "the TypeScript project configuration or one of its bases could not "
+        "be resolved, so whether tsc only checks types is unknown",
     "working_directory_unknown":
         "the slow step's working directory could not be placed inside the "
         "checkout, so which package.json applies is unknown",
@@ -9464,6 +9468,14 @@ _OPT84_WITHHOLD_PHRASES: dict[str, str] = {
     "type_aware_config_reader_failed":
         "the scan's lint-tooling reader failed, so the step's tools could not be "
         "checked",
+}
+_OPT84_STEP_VERDICT_PHRASES: dict[str, str] = {
+    "tool_not_in_table": "the step does not match a tool swap in the table",
+    "target_already_in_use": "the replacement tool is already in use",
+    "tsc_emits_not_in_v1": "tsc emits files or uses an unsupported type-check command",
+    "eslint_reported_by_opt82": "the type-aware lint finding already covers this ESLint step",
+    "install_swap_blocked":
+        "the install uses Yarn Plug'n'Play or a pnpm install hook the replacement does not carry",
 }
 # Every pattern's gate→phrase table, by doc key. OPT79's table is defined with
 # the rest of its code further down and registers itself there, so this one dict
@@ -9628,6 +9640,22 @@ def _withheld_candidates_line(doc: dict[str, Any] | None, key: str,
     commonly" of a tie is simply false), and left unhedged only when one gate
     accounts for the whole list."""
     rows = [r for r in ((doc or {}).get(key) or []) if isinstance(r, dict)]
+    if key == _OPT84_WITHHELD_DOC_KEY and doc is not None and _OPT84_STEP_VERDICTS_DOC_KEY in doc:
+        rows += [r for r in (doc.get(_OPT84_STEP_VERDICTS_DOC_KEY) or [])
+                 if isinstance(r, dict)]
+        if not rows:
+            return None
+        reasons = _OPT84_WITHHOLD_PHRASES | _OPT84_STEP_VERDICT_PHRASES
+        entries = set()
+        for r in rows:
+            wf, job, step = (_withheld_cell_text(_fence_safe(r.get(field) or ""))
+                             for field in ("workflow_file", "job", "step"))
+            where = f"{wf} / {job}" if wf else job
+            if step:
+                where += f" ({step})"
+            reason = reasons.get(str(r.get("gate")), _WITHHELD_UNMAPPED_PHRASE)
+            entries.add(f"{where}: {reason}")
+        return f"{len(entries)} {noun} held back: " + "; ".join(sorted(entries)) + "."
     if not rows:
         return None
     counts: dict[str, int] = {}

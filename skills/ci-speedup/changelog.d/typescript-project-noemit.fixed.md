@@ -1,0 +1,1 @@
+- **2026-11-25** — Recognize TypeScript type checks configured through `tsconfig.json`, including bases inherited from relative files and from packages installed under `node_modules`, and explain per step why OPT84 advice was held back (#501).
