@@ -145,14 +145,16 @@ from _scan_import import load_scan
 matches = load_scan()._is_unprotected_install
 prefix = "npm " + "--no-audit " * 5000
 start = time.perf_counter()
-out = [matches(prefix + "ci"), matches(prefix + "run build")]
+out = [matches(prefix + "ci"), matches(prefix + "run build"),
+       matches("npm " + "--future-flag value " * 5000 + "ci"),
+       matches("npm --prefix=${{ " + "x " * 5000 + "}} ci")]
 print(json.dumps([out, time.perf_counter() - start]))
 """
     proc = subprocess.run([sys.executable, "-c", child, str(_TESTS)],
                           capture_output=True, text=True,
                           timeout=_SUBPROCESS_TIMEOUT_S, check=True)
     matches, elapsed = json.loads(proc.stdout)
-    assert matches == [True, False]
+    assert matches == [True, False, True, True]
     assert elapsed < _TIME_LIMIT_S, f"global options: {elapsed:.2f}s"
 
 

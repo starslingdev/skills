@@ -1201,11 +1201,25 @@ def test_p1425_a_continued_install_without_the_flag_still_fires(tmp_path):
     ("npm --loglevel warn --no-audit ci", True),
     ("npm --prefix=d --loglevel=warn ci", True),
     ("npm --future-flag=on ci", True),
-    ("npm --future-flag install", False),
+    # An option this scanner does not know is ambiguous: boolean, or the
+    # owner of the next word. Report the install when either reading is one.
+    ("npm --future-flag install", True),
+    ("npm --future-flag ci", True),
+    ("pnpm --future-flag i", True),
+    ("npm --workspaces ci", True),
+    ("npm --include-workspace-root ci", True),
+    ("npm --future-flag val ci", True),
+    ("npm --future-flag run build", False),
+    ("yarn --emoji false", True),
+    ("yarn --unknown-flag", True),
+    ("npm -w packages/a ci", True),
+    ("npm install -w web", True),
+    ("pnpm install -w", True),
+    ("(npm --no-audit ci)", True),
     ("yarn --silent install", True),
     ("npm --silent run build", False),
     ("npm --loglevel install run build", False),
-    ("npm --future-flag run ci", False),
+    ("npm --future-flag run ci", True),
     ("npm --no-audit --ignore-scripts ci", False),
     ("npm --no-audit --global install npm", False),
     ("npm --no-audit install @playwright/test", False),
@@ -2127,6 +2141,9 @@ def test_p1425_install_directory_flags_select_the_nested_pin(
     ("yarn --cwd apps/web install", "yarn@4.0.0", "yarn@1.22.22"),
     ("npm --no-audit --prefix=apps/web ci", "npm@11.0.0", "npm@10.9.0"),
     ("pnpm -C apps/web --frozen-lockfile install", "pnpm@10.25.0", "pnpm@9.15.0"),
+    # npm's `-C` is its short form of `--prefix`.
+    ("npm -C apps/web ci", "npm@11.0.0", "npm@10.9.0"),
+    ("npm --no-audit -C apps/web ci", "npm@11.0.0", "npm@10.9.0"),
 ])
 def test_p1425_directory_option_before_subcommand_selects_nested_pin(
     tmp_path, command, root_pin, nested_pin,
@@ -2179,6 +2196,8 @@ def test_p1425_expression_directory_reports_target_pin_unverifiable(tmp_path):
     ("pnpm --dir=apps/${{ matrix.package }}/web install", "pnpm@10.25.0"),
     ("npm --prefix packages/${{ matrix.package }} ci", "npm@11.0.0"),
     ("npm ci --prefix packages/${{ matrix.package }}", "npm@11.0.0"),
+    ("npm --no-audit --prefix packages/${{ matrix.package }} ci", "npm@11.0.0"),
+    ("pnpm --frozen-lockfile -C apps/${{ matrix.package }} install", "pnpm@10.25.0"),
     ("yarn --cwd packages/${{ matrix.package }} install", "yarn@4.0.0"),
     # Bare `yarn` is an install too, with its directory from an expression.
     ("yarn --cwd ${{ matrix.package }}", "yarn@4.0.0"),

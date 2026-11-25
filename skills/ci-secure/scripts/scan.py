@@ -2579,6 +2579,20 @@ _INSTALL_SUBCOMMANDS = {
     "yarn": {"install"},
 }
 _INFORMATION_FLAGS = {"-h", "--help", "-v", "-V", "--version"}
+# Short options whose arity differs by manager: npm's `-w` is `--workspace
+# <name>`, pnpm's `-w` is the boolean `--workspace-root`.
+_MANAGER_VALUE_FLAGS = {"npm": {"-w"}}
+
+
+def _takes_value(manager: str, flag: str) -> bool | None:
+    """True / False when `flag`'s arity is known for `manager`, else None."""
+    if flag in _MANAGER_VALUE_FLAGS.get(manager, ()):
+        return True
+    if flag in _INSTALL_VALUE_FLAGS:
+        return True
+    if flag in _INSTALL_BOOLEAN_FLAGS:
+        return False
+    return None
 
 
 def _qualifying_install(command: str) -> list[str] | None:
@@ -2597,7 +2611,7 @@ def _install_manager(command: str) -> str | None:
 
 
 _INSTALL_DIRECTORY_FLAGS = {
-    "npm": {"--prefix"},
+    "npm": {"--prefix", "-C"},
     "pnpm": {"-C", "--dir"},
     "yarn": {"--cwd"},
 }
@@ -2706,18 +2720,29 @@ def _tree_install_argv(segment: str) -> list[str] | None:
             # Even for an unfamiliar option, `=` ends its value before the
             # next argument. A bare unknown option has no such boundary.
             _, i = _join_expression_tokens(tokens, i + 1, tokens[i])
-        elif flag in _INSTALL_VALUE_FLAGS:
+            continue
+        arity = _takes_value(manager, flag)
+        if arity:
             value, i = _cli_option_value(tokens, i + 1)
             if value is None:
                 return None
-        elif flag in _INSTALL_BOOLEAN_FLAGS:
+        elif arity is False:
             i += 1
+        elif (i + 1 < len(tokens) and not tokens[i + 1].startswith("-")
+              and tokens[i + 1].rstrip(")")
+              not in _INSTALL_SUBCOMMANDS[manager]):
+            # An unknown option is boolean or owns the next word. Read as
+            # boolean, a following install subcommand is an install; read as
+            # value-taking, the word after it is the subcommand. Report the
+            # install when either reading is one: the boolean reading of a
+            # non-install word ends here, so only the value reading continues.
+            i += 2
         else:
-            return None
+            i += 1
     if i == len(tokens):
         return tokens if manager == "yarn" and direct is not None else None
-    # Existing command-position matches also cover a closing subshell `)`.
-    subcommand = tokens[i].rstrip(")") if direct else tokens[i]
+    # Command-position matches also cover a closing subshell `)`.
+    subcommand = tokens[i].rstrip(")")
     if subcommand not in _INSTALL_SUBCOMMANDS[manager]:
         return None
     i += 1
@@ -2733,7 +2758,7 @@ def _tree_install_argv(segment: str) -> list[str] | None:
         if tok in _GLOBAL_FLAGS:
             return None
         if tok.startswith("-"):
-            if "=" in tok or tok in _INSTALL_BOOLEAN_FLAGS:
+            if "=" in tok or _takes_value(manager, tok) is False:
                 i += 1
                 continue
             # Known value-taking, or unknown — either way assume it consumes
