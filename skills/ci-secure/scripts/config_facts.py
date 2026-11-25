@@ -4653,7 +4653,9 @@ def _tag_rule_overlaps(pattern: str, rulesets: list[dict]) -> bool:
             raise _Unread("a tag ruleset's rules could not be read")
         if not includes:
             raise _Unread("a tag ruleset's include patterns could not be read")
-        if not rules:
+        # Only a creation rule stops a write credential pushing a NEW tag
+        # that matches the trigger; deletion or signature rules do not.
+        if not any(r["type"] == "creation" for r in rules):
             continue
         inc, exc = _ruleset_patterns(ruleset, "refs/tags/", "")
         literal_patterns = [p for p in inc + exc if p != _RULESET_ALL]
@@ -4667,6 +4669,12 @@ def _tag_rule_overlaps(pattern: str, rulesets: list[dict]) -> bool:
             return rule_prefix.startswith(prefix) or prefix.startswith(rule_prefix)
 
         if not any(may_match(p) for p in inc):
+            continue
+        bypass = _bypass_state(ruleset, "creation")
+        if bypass == "unknown":
+            raise _Unread("a tag ruleset's bypass list could not be read")
+        if bypass == "open":
+            possible_overlap = True
             continue
         if any(e == _RULESET_ALL or (not _is_glob(pattern) and e == pattern) for e in exc):
             continue
@@ -4755,9 +4763,26 @@ def _environment_accepts_release_branch(src: Any, env: dict, branch: str) -> boo
     return any(_glob_matches(p, branch, pathname=True) for p in patterns)
 
 
-def _release_environment(src: Any, job: dict, branch: str) -> str | None:
+def _environment_accepts_tags(src: Any, env: dict) -> bool:
+    policy = env.get("deployment_branch_policy")
+    if policy is None:
+        return True
+    if (isinstance(policy, dict) and policy.get("custom_branch_policies") is True
+            and policy.get("protected_branches") is False):
+        entries = src.branch_policies(env["name"])
+        if any(not isinstance(e, dict) or e.get("type") not in ("branch", "tag")
+               for e in entries):
+            raise _Unread("a deployment ref policy could not be read")
+        if not any(e["type"] == "tag" for e in entries):
+            return False  # no tag may deploy to it, so a tag run stops here
+    raise _Unread("the deployment environment's tag policy could not be judged")
+
+
+def _environment_gate(src: Any, job: dict, accepts) -> tuple[bool, str]:
+    """(gated, what the release has). Gated: the job's environment requires
+    a reviewer or does not accept the release ref. Unread raises."""
     if "environment" not in job:
-        return "no deployment environment"
+        return False, "no deployment environment"
     env = job["environment"]
     name = env.get("name") if isinstance(env, dict) else env
     if not isinstance(name, str) or not name or "${{" in name:
@@ -4773,10 +4798,24 @@ def _release_environment(src: Any, job: dict, branch: str) -> str | None:
             not isinstance(r, dict) or r.get("type") not in (
                 "required_reviewers", "wait_timer", "branch_policy") for r in protection):
         raise _Unread("the job's deployment environment protection could not be read")
-    if _reviewer_count(matches[0]) or not _environment_accepts_release_branch(
-            src, matches[0], branch):
-        return None
-    return "the deployment environment requires no reviewers"
+    if _reviewer_count(matches[0]) or not accepts(matches[0]):
+        return True, ""
+    return False, "a deployment environment with no required reviewers"
+
+
+def _any_gate(*checks) -> bool:
+    """True when one check establishes a gate. Otherwise an unread check
+    withholds the verdict, and only all-open answers return False."""
+    unread = None
+    for check in checks:
+        try:
+            if check():
+                return True
+        except _Unread as exc:
+            unread = unread or exc
+    if unread is not None:
+        raise unread
+    return False
 
 
 def _release_path_facts(scan: ModuleType, docs: list[tuple[str, dict]],
@@ -4810,43 +4849,60 @@ def _release_path_facts(scan: ModuleType, docs: list[tuple[str, dict]],
             if not (publishes or signs):
                 continue
             site = f"`{path}` (job `{_safe_path(name)}`)"
-            if publishes and isinstance(push, dict) and "tags" in push and runs_tree and \
-                    "environment" not in job and (
+            if publishes and isinstance(push, dict) and "tags" in push and runs_tree and (
                         job.get("permissions", doc.get("permissions")) == "write-all"
                         or set(scan._job_effective_write_scopes(doc, job)) & {"id-token", "contents"}):
                 try:
                     patterns = _release_patterns(push["tags"])
                     if "tags-ignore" in push:
                         raise _Unread("the push event has conflicting tag filters")
-                    rulesets = source().rulesets()
+                    src = source()
                 except _Unread as exc:
                     add(_TAG_RELEASE, "unmeasured", f"{site}: `{_safe_path(str(exc))}`")
                 else:
+                    gate = []
+
+                    def env_gated(src=src, job=job, gate=gate) -> bool:
+                        if not gate:
+                            gate.append(_environment_gate(
+                                src, job, lambda e: _environment_accepts_tags(src, e)))
+                        return gate[0][0]
+
                     for pattern in patterns:
                         try:
-                            if _tag_rule_overlaps(pattern, rulesets):
+                            if _any_gate(env_gated, lambda p=pattern, src=src:
+                                         _tag_rule_overlaps(p, src.rulesets())):
                                 continue
                         except _Unread as exc:
-                            add(_TAG_RELEASE, "unmeasured", f"{site}: {exc}")
+                            add(_TAG_RELEASE, "unmeasured", f"{site}: `{_safe_path(str(exc))}`")
                         else:
-                            add(_TAG_RELEASE, "fail", f"{site}: no active tag ruleset covers "
-                                f"`{pattern}`, and the job runs repository code with write "
-                                "permissions and no deployment environment")
+                            add(_TAG_RELEASE, "fail", f"{site}: no active tag ruleset restricts "
+                                f"creating tags matching `{pattern}`, and the job runs "
+                                "repository code with write permissions and has "
+                                f"{gate[0][1]}")
             if isinstance(push, dict) and any(k in push for k in ("tags", "tags-ignore")) \
                     and not any(k in push for k in ("branches", "branches-ignore")):
                 continue  # a tag-only workflow cannot run on the default branch
+            gate = []
             try:
                 src = source()
                 branch = src.default_branch()
-                if not _default_release_trigger(push, branch) or not _zero_release_approvals(src, branch):
+                if not _default_release_trigger(push, branch):
                     continue
-                environment = _release_environment(src, job, branch)
+
+                def env_gated(src=src, job=job, branch=branch, gate=gate) -> bool:
+                    gate.append(_environment_gate(
+                        src, job, lambda e: _environment_accepts_release_branch(src, e, branch)))
+                    return gate[0][0]
+
+                if _any_gate(lambda src=src, branch=branch:
+                             not _zero_release_approvals(src, branch), env_gated):
+                    continue
             except _Unread as exc:
                 add(_BRANCH_RELEASE, "unmeasured", f"{site}: `{_safe_path(str(exc))}`")
             else:
-                if environment:
-                    add(_BRANCH_RELEASE, "fail", f"{site}: the default-branch pull request "
-                        f"rule requires zero approvals, and this release uses {environment}")
+                add(_BRANCH_RELEASE, "fail", f"{site}: the default-branch pull request "
+                    f"rule requires zero approvals, and this release has {gate[0][1]}")
     return [{"fact_id": fid, "fact": labels[fid], "outcome": outcome,
              "evidence": _capped(list(dict.fromkeys(details)), 4)}
             for fid, outcomes in results.items() for outcome, details in outcomes.items()]

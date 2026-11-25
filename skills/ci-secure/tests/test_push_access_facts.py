@@ -263,7 +263,7 @@ def test_publish_tag_without_matching_ruleset_reports_a_hygiene_fact(
     report = _load_report().render({"findings": [], "security_score": out})
     assert "### Release-path hygiene" in report
     assert "Tag-triggered publishing without a gate" in report
-    assert "no active tag ruleset covers `v*`" in report
+    assert "no active tag ruleset restricts creating tags matching `v*`" in report
 
 
 @pytest.mark.parametrize("change", [
@@ -296,6 +296,102 @@ def test_tag_rules_distinguish_covered_from_partial_overlap(
     out, _ = _run(_responses([], rulesets=[ruleset]), tmp_path=tmp_path,
                   workflow=_PUBLISH_WF)
     assert _release_outcomes(out) == expected
+
+
+@pytest.mark.parametrize("ruleset, expected", [
+    # Evaluate and disabled rulesets enforce nothing.
+    (_ruleset(10, ["refs/tags/v*"], ["creation"], target="tag",
+              enforcement="evaluate"), {_TAG_FACT: "fail"}),
+    (_ruleset(10, ["refs/tags/v*"], ["creation"], target="tag",
+              enforcement="disabled"), {_TAG_FACT: "fail"}),
+    # A deletion-only ruleset does not stop a new matching tag.
+    (_ruleset(10, ["refs/tags/v*"], ["deletion"], target="tag"),
+     {_TAG_FACT: "fail"}),
+    # `**` coverage is not asserted, so it is withheld.
+    (_ruleset(10, ["refs/tags/**"], ["creation"], target="tag"),
+     {_TAG_FACT: "unmeasured"}),
+    # A bypass short of admin, or a bypass list this reader is not
+    # served, leaves the gate unestablished.
+    (_ruleset(10, ["refs/tags/v*"], ["creation"], target="tag", bypass=[
+        {"actor_type": "RepositoryRole", "actor_id": 4,
+         "bypass_mode": "always"}]), {_TAG_FACT: "unmeasured"}),
+    (_ruleset(10, ["refs/tags/v*"], ["creation"], target="tag", bypass=None),
+     {_TAG_FACT: "unmeasured"}),
+    (_ruleset(10, ["refs/tags/v*"], ["creation"], target="tag",
+              exclude=["refs/tags/v0*"]), {_TAG_FACT: "unmeasured"}),
+])
+def test_tag_ruleset_must_restrict_creation_to_gate(tmp_path, ruleset,
+                                                     expected):
+    out, _ = _run(_responses([], rulesets=[ruleset]), tmp_path=tmp_path,
+                  workflow=_PUBLISH_WF)
+    assert _release_outcomes(out) == expected
+
+
+@pytest.mark.parametrize("env, expected", [
+    (_env("release"), {_TAG_FACT: "fail"}),
+    (_env("release", reviewers=1), {}),
+    (_env("release", _PROTECTED), {_TAG_FACT: "unmeasured"}),
+])
+def test_tag_publish_environment_gates_only_with_reviewers(
+        tmp_path, env, expected):
+    workflow = _PUBLISH_WF.replace(
+        "    steps:", "    environment: release\n    steps:")
+    out, _ = _run(_responses([env]), tmp_path=tmp_path, workflow=workflow)
+    assert _release_outcomes(out) == expected
+    if expected == {_TAG_FACT: "fail"}:
+        report = _load_report().render({"findings": [],
+                                        "security_score": out})
+        assert "a deployment environment with no required reviewers" in report
+
+
+def test_tag_environment_accepting_only_branches_is_a_gate(tmp_path):
+    workflow = _PUBLISH_WF.replace(
+        "    steps:", "    environment: release\n    steps:")
+    responses = _responses([_env("release", _CUSTOM)], extra={
+        _dbp("release"): {"branch_policies": [{"type": "branch",
+                                               "name": "main"}]}})
+    out, _ = _run(responses, tmp_path=tmp_path, workflow=workflow)
+    assert _release_outcomes(out) == {}
+
+
+@pytest.mark.parametrize("change", [
+    ("npm publish", "npm test"),                          # tags, no publish
+    ("id-token: write", "contents: read"),                # read-only token
+    ("npm publish", "aws s3 sync dist s3://example.invalid"),  # OIDC, no publish
+])
+def test_tag_workflow_near_misses_are_silent(tmp_path, change):
+    out, _ = _run(_responses([]), tmp_path=tmp_path,
+                  workflow=_PUBLISH_WF.replace(*change))
+    assert _release_outcomes(out) == {}
+
+
+@pytest.mark.parametrize("answer", [
+    _api_error("gh: Not Found (HTTP 404)"),
+    '[{"id": 1, "name": "rs1"}',                          # cut-off page
+])
+def test_unreadable_tag_ruleset_list_withholds(tmp_path, answer):
+    responses = _responses([], extra={
+        f"{R}/rulesets?includes_parents=true&per_page=100": answer})
+    out, _ = _run(responses, tmp_path=tmp_path, workflow=_PUBLISH_WF)
+    assert _release_outcomes(out) == {_TAG_FACT: "unmeasured"}
+
+
+def test_denied_ruleset_detail_withholds(tmp_path):
+    ruleset = _ruleset(10, ["refs/tags/v*"], ["creation"], target="tag")
+    responses = _responses([], rulesets=[ruleset], extra={
+        f"{R}/rulesets/10?includes_parents=true": _ADMIN_403})
+    out, _ = _run(responses, tmp_path=tmp_path, workflow=_PUBLISH_WF)
+    assert _release_outcomes(out) == {_TAG_FACT: "unmeasured"}
+
+
+def test_environment_reviewers_settle_an_unreadable_branch(tmp_path):
+    workflow = (_PUBLISH_WF.replace("tags: ['v*']", "branches: [main]")
+                .replace("    steps:", "    environment: production\n    steps:"))
+    responses = _responses([_env("production", reviewers=1)], extra={
+        f"{R}/rules/branches/main?per_page=100": [],
+        f"{R}/branches/main/protection": _ADMIN_403})
+    out, _ = _run(responses, tmp_path=tmp_path, workflow=workflow)
+    assert _release_outcomes(out) == {}
 
 
 def test_denied_tag_ruleset_read_is_not_treated_as_none(tmp_path):
