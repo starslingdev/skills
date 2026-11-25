@@ -1,0 +1,1 @@
+- **2026-11-25** — Give default-branch and tag runs their own group in both OPT46 recipes so a new pending run does not replace an older one (#502).
