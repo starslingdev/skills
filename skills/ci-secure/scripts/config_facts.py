@@ -4535,6 +4535,379 @@ def _default_branch_review(repo: str | None, fetcher) -> tuple[str, str]:
                               f"could not be judged ({exc!r})")
 
 
+# --- release-path hygiene (advisory) -----------------------------------------
+
+_TAG_RELEASE = "sec.release.tags-without-gate"
+_BRANCH_RELEASE = "sec.release.default-without-review"
+_PUBLISH_ACTIONS = frozenset({
+    "pypa/gh-action-pypi-publish", "softprops/action-gh-release",
+    "ncipollo/release-action", "actions/create-release",
+})
+_RELEASE_COMMANDS = frozenset({
+    ("npm", "publish"), ("pnpm", "publish"), ("yarn", "publish"),
+    ("bun", "publish"), ("cargo", "publish"), ("twine", "upload"),
+    ("docker", "push"), ("oras", "push"),
+    ("gh", "release", "create"), ("gh", "release", "upload"),
+    ("python", "-m", "twine", "upload"),
+    ("python3", "-m", "twine", "upload"),
+})
+_RELEASE_SHELL_CONTROL = re.compile(
+    r"\s*(?:(?:if|elif|else|for|while|until|case|function)\b"
+    r"|[A-Za-z_]\w*[ \t]*\([ \t]*\))")
+
+
+def _release_commands(scan: ModuleType, step: dict) -> list[list[str]]:
+    run = step.get("run")
+    if not isinstance(run, str) or step.get("shell") not in (None, "bash", "sh"):
+        return []
+    args = []
+    for _, _, line in scan._shell_commands(run.splitlines()):
+        # A quote-aware segment split alone would make commands in a shell
+        # conditional or a here-doc look like unconditional release steps.
+        if (scan._heredoc_delimiter(line)
+                or len(scan._install_command_segments(line)) != 1
+                or _RELEASE_SHELL_CONTROL.match(line)):
+            return []
+        tokens = scan._strip_command_prefix(scan._shell_tokens(line))
+        if tokens:
+            args.append(tokens)
+    return args
+
+
+def _release_job(scan: ModuleType, job: dict) -> tuple[bool, bool, bool]:
+    """Whether the job visibly signs/publishes and runs the checked-out tree."""
+    if job.get("if") not in (None, True):
+        return False, False, False
+    publishes = signs = runs_tree = checked_out = False
+    # Only sequential steps can establish that a checkout supplies the code
+    # used by a later step. A conditional checkout is not evidence of that.
+    steps = job.get("steps")
+    for step in steps if isinstance(steps, list) else []:
+        if (not isinstance(step, dict) or step.get("if") not in (None, True)
+                or "parallel" in step or "background" in step):
+            continue
+        uses = step.get("uses")
+        action = uses.split("@", 1)[0].lower() if isinstance(uses, str) else ""
+        if isinstance(uses, str) and "@" not in uses and not uses.startswith("./"):
+            action = ""
+        with_ = step.get("with", {})
+        if action == "actions/checkout":
+            checked_out = (isinstance(with_, dict) and not with_.get("path")
+                           and with_.get("repository") in (None, "${{ github.repository }}")
+                           and with_.get("ref") in (None, "${{ github.ref }}"))
+        if action in _PUBLISH_ACTIONS and isinstance(with_, dict):
+            publishes |= all(with_.get(key) in (None, False, "false")
+                             for key in ("dry-run", "draft"))
+        if action == "docker/build-push-action" and isinstance(with_, dict):
+            publishes |= with_.get("push") in (True, "true")
+        if checked_out and action.startswith("./"):
+            runs_tree = True
+        for args in _release_commands(scan, step):
+            if any(a.startswith(("--dry-run", "--dryrun")) for a in args[1:]):
+                continue
+            if "--draft" not in args[1:] and "-d" not in args[1:]:
+                publishes |= any(tuple(args[:len(cmd)]) == cmd for cmd in _RELEASE_COMMANDS)
+            signs |= args[:2] == ["cosign", "sign"]
+            if checked_out and "working-directory" not in step and not job.get("defaults"):
+                program = args[0]
+                runs_tree |= (program.startswith("./")
+                              or program == "make" and all(
+                                  not a.startswith("-") and "=" not in a
+                                  for a in args[1:]))
+                runs_tree |= (program in {"bash", "sh", "python", "python3", "node"}
+                              and len(args) > 1 and args[1].startswith("./"))
+    return publishes, signs, runs_tree
+
+
+def _release_patterns(raw: Any) -> list[str]:
+    # Trigger filters and rulesets use different glob dialects. Only the
+    # common literal/asterisk subset is used to assert either condition.
+    if (not isinstance(raw, list) or not raw or any(
+            not isinstance(p, str) or not re.fullmatch(r"[A-Za-z0-9_./*-]+", p)
+            for p in raw)):
+        raise _Unread("the ref filters could not be classified")
+    return raw
+
+
+def _tag_rule_overlaps(pattern: str, rulesets: list[dict]) -> bool:
+    """True for a fully covered pattern. Partial/unknown overlap is unread."""
+    possible_overlap = False
+    for ruleset in rulesets:
+        target, enforcement = ruleset.get("target"), ruleset.get("enforcement")
+        if target in ("branch", "push") or enforcement in ("disabled", "evaluate"):
+            continue
+        if target != "tag" or enforcement != "active":
+            raise _Unread("a ruleset's target or enforcement is unknown")
+        conditions = ruleset.get("conditions")
+        ref = conditions.get("ref_name") if isinstance(conditions, dict) else None
+        if not isinstance(ref, dict):
+            raise _Unread("a tag ruleset's ref conditions could not be read")
+        includes, excludes = ref.get("include"), ref.get("exclude")
+        if any(not isinstance(seq, list) or any(
+                not isinstance(p, str) or (p != _RULESET_ALL and not p.startswith("refs/tags/"))
+                for p in seq) for seq in (includes, excludes)):
+            raise _Unread("a tag ruleset's ref conditions could not be read")
+        rules = ruleset.get("rules")
+        if not isinstance(rules, list) or any(
+                not isinstance(r, dict) or not r.get("type") for r in rules):
+            raise _Unread("a tag ruleset's rules could not be read")
+        if not includes:
+            raise _Unread("a tag ruleset's include patterns could not be read")
+        # Only a creation rule stops a write credential pushing a NEW tag
+        # that matches the trigger; deletion or signature rules do not.
+        if not any(r["type"] == "creation" for r in rules):
+            continue
+        inc, exc = _ruleset_patterns(ruleset, "refs/tags/", "")
+        literal_patterns = [p for p in inc + exc if p != _RULESET_ALL]
+        if literal_patterns:
+            _release_patterns(literal_patterns)
+
+        def may_match(rule: str) -> bool:
+            if rule == _RULESET_ALL:
+                return True
+            rule_prefix, prefix = _glob_prefix(rule), _glob_prefix(pattern)
+            return rule_prefix.startswith(prefix) or prefix.startswith(rule_prefix)
+
+        if not any(may_match(p) for p in inc):
+            continue
+        bypass = _bypass_state(ruleset, "creation")
+        if bypass == "unknown":
+            raise _Unread("a tag ruleset's bypass list could not be read")
+        if bypass == "open":
+            possible_overlap = True
+            continue
+        if any(e == _RULESET_ALL or (not _is_glob(pattern) and e == pattern) for e in exc):
+            continue
+        if any((p == _RULESET_ALL or ("**" not in p and _covers(p, pattern))) for p in inc) \
+                and not any(may_match(e) for e in exc):
+            return True
+        possible_overlap = True
+    if possible_overlap:
+        raise _Unread("a tag ruleset overlaps part of this trigger or its coverage is unclear")
+    return False
+
+
+def _default_release_trigger(push: Any, branch: str) -> bool:
+    if push is None:
+        return True
+    if not isinstance(push, dict):
+        raise _Unread("the push event filters could not be read")
+    if "branches" in push and "branches-ignore" in push:
+        raise _Unread("the push event has conflicting branch filters")
+    if "paths" in push and "paths-ignore" in push:
+        raise _Unread("the push event has conflicting path filters")
+    if "paths-ignore" in push and "**" in _release_patterns(push["paths-ignore"]):
+        return False
+    if "paths" in push:
+        _release_patterns(push["paths"])
+    for key in ("branches", "branches-ignore"):
+        if key in push:
+            match = any(_glob_matches(p, branch) for p in _release_patterns(push[key]))
+            return match if key == "branches" else not match
+    return not ("tags" in push or "tags-ignore" in push)
+
+
+def _zero_release_approvals(src: Any, branch: str) -> bool:
+    rules = src.branch_rules(branch)
+    if any(r["type"] == "update" for r in rules):
+        return False  # the scope does not reason about actors who bypass this
+    known = {"creation", "deletion", "required_linear_history", "merge_queue",
+             "required_signatures", "pull_request", "required_status_checks",
+             "non_fast_forward", "commit_message_pattern", "commit_author_email_pattern",
+             "committer_email_pattern", "branch_name_pattern", "code_scanning",
+             "code_quality", "copilot_code_review"}
+    if any(not isinstance(r["type"], str) or r["type"] not in known for r in rules):
+        raise _Unread("the branch has an active rule this check could not classify")
+    params = [(r.get("parameters"), "require_code_owner_review")
+              for r in rules if r["type"] == "pull_request"]
+    classic = src.classic_protection(branch)
+    if classic is not None and classic.get("required_pull_request_reviews") is not None:
+        params.append((classic["required_pull_request_reviews"], "require_code_owner_reviews"))
+    for p, codeowners_key in params:
+        count = p.get("required_approving_review_count") if isinstance(p, dict) else None
+        if type(count) is not int or count < 0:
+            raise _Unread("a pull request rule's required approval count could not be read")
+        if count:
+            return False
+        review_options = (p.get(codeowners_key), p.get("require_last_push_approval"))
+        if any(not isinstance(v, bool) for v in review_options):
+            raise _Unread("a pull request rule's review settings could not be read")
+        if any(review_options):
+            return False
+    # Match the explicit zero-approval pull request rule in the release path.
+    return bool(params)
+
+
+def _environment_accepts_release_branch(src: Any, env: dict, branch: str) -> bool:
+    policy = env.get("deployment_branch_policy")
+    if policy is None:
+        return True
+    if not isinstance(policy, dict):
+        raise _Unread("the deployment branch policy could not be read")
+    protected = policy.get("protected_branches")
+    custom = policy.get("custom_branch_policies")
+    if not (isinstance(protected, bool) and isinstance(custom, bool)) or protected == custom:
+        raise _Unread("the deployment branch policy could not be read")
+    if protected:
+        if src.classic_protection(branch) is not None:
+            return True
+        # The environment falls back to all branches if the repository has
+        # no classic protection rules. A ruleset-only branch does not count.
+        return not src.classic_rules()
+    patterns = []
+    for entry in src.branch_policies(env["name"]):
+        if not isinstance(entry, dict) or entry.get("type") not in ("branch", "tag"):
+            raise _Unread("a deployment ref policy could not be read")
+        if entry["type"] == "branch":
+            patterns.extend(_release_patterns([entry.get("name")]))
+    return any(_glob_matches(p, branch, pathname=True) for p in patterns)
+
+
+def _environment_accepts_tags(src: Any, env: dict) -> bool:
+    policy = env.get("deployment_branch_policy")
+    if policy is None:
+        return True
+    if (isinstance(policy, dict) and policy.get("custom_branch_policies") is True
+            and policy.get("protected_branches") is False):
+        entries = src.branch_policies(env["name"])
+        if any(not isinstance(e, dict) or e.get("type") not in ("branch", "tag")
+               for e in entries):
+            raise _Unread("a deployment ref policy could not be read")
+        if not any(e["type"] == "tag" for e in entries):
+            return False  # no tag may deploy to it, so a tag run stops here
+    raise _Unread("the deployment environment's tag policy could not be judged")
+
+
+def _environment_gate(src: Any, job: dict, accepts) -> tuple[bool, str]:
+    """(gated, what the release has). Gated: the job's environment requires
+    a reviewer or does not accept the release ref. Unread raises."""
+    if "environment" not in job:
+        return False, "no deployment environment"
+    env = job["environment"]
+    name = env.get("name") if isinstance(env, dict) else env
+    if not isinstance(name, str) or not name or "${{" in name:
+        raise _Unread("the job's deployment environment is not a literal name")
+    envs = src.environments()
+    if any(not isinstance(e.get("name"), str) for e in envs):
+        raise _Unread("the deployment environment list could not be read")
+    matches = [e for e in envs if e["name"].casefold() == name.casefold()]
+    if len(matches) != 1:
+        raise _Unread("the job's deployment environment could not be read")
+    protection = matches[0].get("protection_rules")
+    if not isinstance(protection, list) or any(
+            not isinstance(r, dict) or r.get("type") not in (
+                "required_reviewers", "wait_timer", "branch_policy") for r in protection):
+        raise _Unread("the job's deployment environment protection could not be read")
+    if _reviewer_count(matches[0]) or not accepts(matches[0]):
+        return True, ""
+    return False, "a deployment environment with no required reviewers"
+
+
+def _any_gate(*checks) -> bool:
+    """True when one check establishes a gate. Otherwise an unread check
+    withholds the verdict, and only all-open answers return False."""
+    unread = None
+    for check in checks:
+        try:
+            if check():
+                return True
+        except _Unread as exc:
+            unread = unread or exc
+    if unread is not None:
+        raise unread
+    return False
+
+
+def _release_path_facts(scan: ModuleType, docs: list[tuple[str, dict]],
+                        repo: str | None, fetcher: Any) -> list[dict]:
+    labels = {_TAG_RELEASE: "Tag-triggered publishing without a gate",
+              _BRANCH_RELEASE: "Default-branch release without an approving review"}
+    results: dict[str, dict[str, list[str]]] = {}
+
+    def add(fid: str, outcome: str, detail: str) -> None:
+        results.setdefault(fid, {}).setdefault(outcome, []).append(detail)
+
+    def source() -> Any:
+        if not repo:
+            raise _Unread("repository settings were not available to this scan")
+        try:
+            src, _ = fetcher(repo)
+        except Exception:                                     # noqa: BLE001
+            _log.debug("release path settings could not be read", exc_info=True)
+            raise _Unread("repository settings were not available to this scan") from None
+        if src is None:
+            raise _Unread("repository settings were not available to this scan")
+        return src
+
+    for path, doc in docs:
+        triggers = _on_mapping(doc)
+        if not triggers or "push" not in triggers:
+            continue
+        push = triggers["push"]
+        for name, job in _jobs(doc):
+            publishes, signs, runs_tree = _release_job(scan, job)
+            if not (publishes or signs):
+                continue
+            site = f"`{path}` (job `{_safe_path(name)}`)"
+            if publishes and isinstance(push, dict) and "tags" in push and runs_tree and (
+                        job.get("permissions", doc.get("permissions")) == "write-all"
+                        or set(scan._job_effective_write_scopes(doc, job)) & {"id-token", "contents"}):
+                try:
+                    patterns = _release_patterns(push["tags"])
+                    if "tags-ignore" in push:
+                        raise _Unread("the push event has conflicting tag filters")
+                    src = source()
+                except _Unread as exc:
+                    add(_TAG_RELEASE, "unmeasured", f"{site}: `{_safe_path(str(exc))}`")
+                else:
+                    gate = []
+
+                    def env_gated(src=src, job=job, gate=gate) -> bool:
+                        if not gate:
+                            gate.append(_environment_gate(
+                                src, job, lambda e: _environment_accepts_tags(src, e)))
+                        return gate[0][0]
+
+                    for pattern in patterns:
+                        try:
+                            if _any_gate(env_gated, lambda p=pattern, src=src:
+                                         _tag_rule_overlaps(p, src.rulesets())):
+                                continue
+                        except _Unread as exc:
+                            add(_TAG_RELEASE, "unmeasured", f"{site}: `{_safe_path(str(exc))}`")
+                        else:
+                            add(_TAG_RELEASE, "fail", f"{site}: no active tag ruleset restricts "
+                                f"creating tags matching `{pattern}`, and the job runs "
+                                "repository code with write permissions and has "
+                                f"{gate[0][1]}")
+            if isinstance(push, dict) and any(k in push for k in ("tags", "tags-ignore")) \
+                    and not any(k in push for k in ("branches", "branches-ignore")):
+                continue  # a tag-only workflow cannot run on the default branch
+            gate = []
+            try:
+                src = source()
+                branch = src.default_branch()
+                if not _default_release_trigger(push, branch):
+                    continue
+
+                def env_gated(src=src, job=job, branch=branch, gate=gate) -> bool:
+                    gate.append(_environment_gate(
+                        src, job, lambda e: _environment_accepts_release_branch(src, e, branch)))
+                    return gate[0][0]
+
+                if _any_gate(lambda src=src, branch=branch:
+                             not _zero_release_approvals(src, branch), env_gated):
+                    continue
+            except _Unread as exc:
+                add(_BRANCH_RELEASE, "unmeasured", f"{site}: `{_safe_path(str(exc))}`")
+            else:
+                add(_BRANCH_RELEASE, "fail", f"{site}: the default-branch pull request "
+                    f"rule requires zero approvals, and this release has {gate[0][1]}")
+    return [{"fact_id": fid, "fact": labels[fid], "outcome": outcome,
+             "evidence": _capped(list(dict.fromkeys(details)), 4)}
+            for fid, outcomes in results.items() for outcome, details in outcomes.items()]
+
+
 # --- the fact table -----------------------------------------------------------
 
 def compute_config_facts(
@@ -4816,6 +5189,7 @@ def compute_config_facts(
     # the two sentences every run states. Rendered under the report's "If a
     # push credential leaks" sub-heading; never part of the aggregate.
     out["push_access"] = push_block
+    out["release_path"] = _release_path_facts(scan, docs, repo, settings)
     return out
 
 

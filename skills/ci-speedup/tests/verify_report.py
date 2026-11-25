@@ -1510,6 +1510,7 @@ _VR_OPT81_WITHHELD_DOC_KEY = "opt81_withheld_candidates"
 _VR_OPT82_WITHHELD_DOC_KEY = "opt82_withheld_candidates"
 _VR_OPT83_WITHHELD_DOC_KEY = "opt83_withheld_candidates"
 _VR_OPT84_WITHHELD_DOC_KEY = "opt84_withheld_candidates"
+_VR_OPT84_STEP_VERDICTS_DOC_KEY = "opt84_step_verdicts"
 _VR_PARALLEL_STEPS_WITHHELD_DOC_KEY = "parallel_steps_withheld_candidates"
 _VR_OPT24_WITHHELD_DOC_KEY = "opt24_withheld_candidates"
 # (doc key, Data sources row label, counted noun, "Used for" cell) — as
@@ -1822,6 +1823,9 @@ _VR_OPT84_WITHHOLD_PHRASES = {
     "typescript_version_unreadable":
         "the TypeScript version could not be read, so whether the repo is "
         "already on the native compiler is unknown",
+    "typescript_project_unreadable":
+        "the TypeScript project configuration or one of its bases could not "
+        "be resolved, so whether tsc only checks types is unknown",
     "working_directory_unknown":
         "the slow step's working directory could not be placed inside the "
         "checkout, so which package.json applies is unknown",
@@ -1836,6 +1840,14 @@ _VR_OPT84_WITHHOLD_PHRASES = {
     "type_aware_config_reader_failed":
         "the scan's lint-tooling reader failed, so the step's tools could not be "
         "checked",
+}
+_VR_OPT84_STEP_VERDICT_PHRASES = {
+    "tool_not_in_table": "the step does not match a tool swap in the table",
+    "target_already_in_use": "the replacement tool is already in use",
+    "tsc_emits_not_in_v1": "tsc emits files or uses an unsupported type-check command",
+    "eslint_reported_by_opt82": "the type-aware lint finding already covers this ESLint step",
+    "install_swap_blocked":
+        "the install uses Yarn Plug'n'Play or a pnpm install hook the replacement does not carry",
 }
 # The OPT84 held-back gates decided on a candidate STEP: an entry under one of
 # these names its step (`step`), and an entry under any other (a pole-level
@@ -2010,6 +2022,19 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
                             f"step, but that gate is decided "
                             f"{'on a candidate step' if want_step else 'on the pole'}"
                             ), ""
+        detailed = (key == _VR_OPT84_WITHHELD_DOC_KEY
+                    and _VR_OPT84_STEP_VERDICTS_DOC_KEY in _as_dict(data))
+        if detailed:
+            verdicts = data[_VR_OPT84_STEP_VERDICTS_DOC_KEY]
+            if not isinstance(verdicts, list) or any(
+                    not isinstance(v, dict) or not isinstance(v.get("gate"), str)
+                    or v["gate"] not in _VR_OPT84_STEP_VERDICT_PHRASES
+                    or not all(isinstance(v.get(field), str) and v[field].strip()
+                               for field in ("workflow_file", "job", "step"))
+                    for v in verdicts):
+                return "OPT84 step verdict entries must name a workflow, job, step and verdict", ""
+            rows.extend(verdicts)
+            phrases = phrases | _VR_OPT84_STEP_VERDICT_PHRASES
         # Both the Coverage cell AND the "Used for" cell. Held as a field
         # nothing read, the third column could be rewritten to anything — in
         # lockstep on both sides, since the renderer and this file are pinned
@@ -2023,25 +2048,30 @@ def _withheld_disclosure_violation(report: str, findings_path: Path | None
                 return (f"Data sources row '{label}' declares candidates held back, "
                         f"but the run recorded none under {key}"), ""
             continue
-        counts: dict[str, int] = {}
-        for r in rows:
-            counts[r["gate"]] = counts.get(r["gate"], 0) + 1
-        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-        top = ranked[0][0]
-        entries = _vr_withheld_entries(rows, key)
-        jobs = ", ".join(entries[:_VR_WITHHELD_JOBS_SHOWN])
-        if len(entries) > _VR_WITHHELD_JOBS_SHOWN:
-            jobs += f", and {len(entries) - _VR_WITHHELD_JOBS_SHOWN} more"
-        # The reason is only the COMMONEST gate's, while the count and the named
-        # entries cover every candidate — so it is hedged whenever a second gate
-        # contributed, and hedged differently when the top two are tied, because
-        # "most commonly" is false of a tie. The renderer carries the same rule.
-        lead = ""
-        if len(ranked) > 1:
-            lead = (_VR_WITHHELD_TIED_LEAD if ranked[1][1] == ranked[0][1]
-                    else _VR_WITHHELD_MODAL_LEAD)
-        # Counted over distinct entries, like the names and the overflow.
-        expected = f"{len(entries)} {noun} held back ({jobs}): {lead}{phrases[top]}."
+        if detailed:
+            entries = set()
+            for r in rows:
+                wf = _vr_withheld_cell_text(_fence_safe(r.get("workflow_file") or ""))
+                job = _vr_withheld_cell_text(_fence_safe(r["job"]))
+                step = _vr_withheld_cell_text(_fence_safe(r.get("step") or ""))
+                where = " / ".join(part for part in (wf, job) if part)
+                entries.add(f"{where}{' (' + step + ')' if step else ''}: {phrases[r['gate']]}")
+            expected = f"{len(entries)} {noun} held back: " + "; ".join(sorted(entries)) + "."
+        else:
+            counts: dict[str, int] = {}
+            for r in rows:
+                counts[r["gate"]] = counts.get(r["gate"], 0) + 1
+            ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+            top = ranked[0][0]
+            entries = _vr_withheld_entries(rows, key)
+            jobs = ", ".join(entries[:_VR_WITHHELD_JOBS_SHOWN])
+            if len(entries) > _VR_WITHHELD_JOBS_SHOWN:
+                jobs += f", and {len(entries) - _VR_WITHHELD_JOBS_SHOWN} more"
+            lead = ""
+            if len(ranked) > 1:
+                lead = (_VR_WITHHELD_TIED_LEAD if ranked[1][1] == ranked[0][1]
+                        else _VR_WITHHELD_MODAL_LEAD)
+            expected = f"{len(entries)} {noun} held back ({jobs}): {lead}{phrases[top]}."
         if not m:
             return (f"{len(rows)} {noun} were held back ({key}) but the Data sources "
                     f"table has no '{label}' row - an undecided candidate reads as "
@@ -11787,6 +11817,16 @@ def check_opt84_tool_swap(report: str, findings_path: Path | None) -> Check:
     for g in counter:
         if g not in _VR_OPT84_HELD_BACK_GATES | _VR_OPT84_VERDICT_GATES:
             bad.append(f"counted gate {g!r} is not an OPT84 gate")
+    if _VR_OPT84_STEP_VERDICTS_DOC_KEY in doc:
+        verdicts = [v for v in _as_list(doc[_VR_OPT84_STEP_VERDICTS_DOC_KEY])
+                    if isinstance(v, dict)]
+        for gate in _VR_OPT84_STEP_VERDICT_PHRASES:
+            n_listed = sum(v.get("gate") == gate for v in verdicts)
+            n_counted = int(_num(counter.get(gate)) or 0)
+            # A non-JavaScript pole can receive tool_not_in_table before a
+            # candidate step is selected. Other listed verdicts are step-only.
+            if n_listed > n_counted or (gate != "tool_not_in_table" and n_listed != n_counted):
+                bad.append(f"step verdict {gate}: counted {n_counted}, listed {n_listed}")
     if not found:
         if cards:
             bad.append("the report renders an OPT84 card, but the run recorded no "

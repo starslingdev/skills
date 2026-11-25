@@ -2496,6 +2496,12 @@ _INSTALL_CMD_RE = re.compile(
     r")",
     re.MULTILINE,
 )
+# Only locate the manager in command position here. Walking the options in
+# argv below avoids putting another ambiguous repeat in `_INSTALL_CMD_RE`.
+_OPTIONED_INSTALL_MANAGER_RE = re.compile(
+    _CMD_START + _CMD_PREFIX + r"(?<![\w./-])(?P<cmd>npm|pnpm|yarn)(?=[ \t]+-)",
+    re.MULTILINE,
+)
 _IGNORE_SCRIPTS_RE = re.compile(r"--ignore-scripts(?![\w-])")
 
 # --- what makes an install a DEPENDENCY-TREE install --------------------------
@@ -2548,7 +2554,7 @@ _INSTALL_BOOLEAN_FLAGS = {
     "--no-fund", "--dry-run", "--global-style", "--package-lock-only",
     "--prefer-offline", "--prefer-online", "--offline", "--audit", "--fund",
     "--strict-peer-deps", "--install-links", "--foreground-scripts",
-    "--verbose", "--silent", "--quiet", "--json", "--long", "--parseable",
+    "--verbose", "--silent", "-s", "--quiet", "--json", "--long", "--parseable",
     "--no-package-lock", "--no-bin-links",
     # pnpm
     "--frozen-lockfile", "--no-frozen-lockfile", "--prod", "--dev",
@@ -2567,40 +2573,45 @@ _PKG_SPEC_RE = re.compile(
     r"^(?:(?:git\+|https?://|file:|link:|github:|npm:|workspace:).+"
     r"|(?:@[A-Za-z0-9._-]+/)?[A-Za-z0-9._-]+(?:@[^\s]+)?)$"
 )
-_INSTALL_SUBCOMMANDS = {"install", "i", "ci"}
+_INSTALL_SUBCOMMANDS = {
+    "npm": {"ci", "install", "i"},
+    "pnpm": {"install", "i"},
+    "yarn": {"install"},
+}
+_INFORMATION_FLAGS = {"-h", "--help", "-v", "-V", "--version"}
+# Short options whose arity differs by manager: npm's `-w` is `--workspace
+# <name>`, pnpm's `-w` is the boolean `--workspace-root`.
+_MANAGER_VALUE_FLAGS = {"npm": {"-w"}}
 
 
-def _qualifying_install_segment(command: str) -> str | None:
-    """First dependency-tree install whose lifecycle scripts remain active."""
-    return next(
-        (segment for segment in _install_command_segments(command)
-         if _INSTALL_CMD_RE.search(segment)
-         and not _IGNORE_SCRIPTS_RE.search(segment)
-         and _is_dependency_tree_install(segment)),
-        None,
-    )
+def _takes_value(manager: str, flag: str) -> bool | None:
+    """True / False when `flag`'s arity is known for `manager`, else None."""
+    if flag in _MANAGER_VALUE_FLAGS.get(manager, ()):
+        return True
+    if flag in _INSTALL_VALUE_FLAGS:
+        return True
+    if flag in _INSTALL_BOOLEAN_FLAGS:
+        return False
+    return None
+
+
+def _qualifying_install(command: str) -> list[str] | None:
+    """Arguments of the first unprotected dependency-tree install."""
+    for segment in _install_command_segments(command):
+        tokens = _tree_install_argv(segment)
+        if tokens is not None:
+            return tokens
+    return None
 
 
 def _install_manager(command: str) -> str | None:
     """Which package manager the qualifying install in `command` invokes."""
-    segment = _qualifying_install_segment(command)
-    if segment is None:
-        return None
-    m = _INSTALL_CMD_RE.search(segment)
-    if m is None:
-        return None
-    # `cmd`, not `group(0)`: the match now opens with the command-position
-    # anchor and any `sudo` / `VAR=value` prefix, and reading the manager off
-    # that prefix would name the wrong tool.
-    head = m.group("cmd").lstrip()
-    for name in ("npm", "pnpm", "yarn"):
-        if head.startswith(name):
-            return name
-    return None      # pragma: no cover - the regex has only three arms
+    tokens = _qualifying_install(command)
+    return tokens[0] if tokens else None
 
 
 _INSTALL_DIRECTORY_FLAGS = {
-    "npm": {"--prefix"},
+    "npm": {"--prefix", "-C"},
     "pnpm": {"-C", "--dir"},
     "yarn": {"--cwd"},
 }
@@ -2628,11 +2639,13 @@ def _join_expression_tokens(
     so the join continues while the last `${{` has no `}}` after it.
     """
     parts = [first]
-    while index < len(tokens):
-        joined = " ".join(parts)
-        if joined.rfind("${{") <= joined.rfind("}}"):
-            break
-        parts.append(tokens[index])
+    opened = first.rfind("${{") > first.rfind("}}")
+    while opened and index < len(tokens):
+        part = tokens[index]
+        parts.append(part)
+        start, end = part.rfind("${{"), part.rfind("}}")
+        if start >= 0 or end >= 0:
+            opened = start > end
         index += 1
     return " ".join(parts), index
 
@@ -2649,17 +2662,7 @@ def _install_directory_flag(command: str) -> tuple[bool, str | None]:
     # verbatim. Limit option parsing to the qualifying install segment: a later
     # command on that line may carry its OWN `--dir`/`--cwd`, which cannot move
     # an install that already ran.
-    install_segment = _qualifying_install_segment(command)
-    if install_segment is None:
-        return False, None
-    m = _INSTALL_CMD_RE.search(install_segment)
-    if m is None:
-        return False, None
-    try:
-        tokens = shlex.split(
-            install_segment[m.start("cmd"):], comments=False)
-    except ValueError:
-        tokens = install_segment[m.start("cmd"):].split()
+    tokens = _qualifying_install(command)
     if not tokens:
         return False, None
     manager = tokens[0]
@@ -2683,17 +2686,18 @@ def _install_directory_flag(command: str) -> tuple[bool, str | None]:
     return present, value
 
 
-def _is_dependency_tree_install(segment: str) -> bool:
-    """Is the install matched in `segment` a DEPENDENCY-TREE install?
+def _tree_install_argv(segment: str) -> list[str] | None:
+    """Arguments of an install with lifecycle scripts on, if it uses the tree.
 
-    False for a global install (`-g` / `--global`) and for one that names an
+    Withhold for a global install (`-g` / `--global`) and for one that names an
     explicit package spec — see the block comment above. True for the bare
     tree installs the catalog is about: `npm ci`, `npm install`,
     `pnpm install --frozen-lockfile`, `yarn install`, `yarn --cwd packages/app`.
     """
-    m = _INSTALL_CMD_RE.search(segment)
-    if m is None:
-        return False
+    direct = _INSTALL_CMD_RE.search(segment)
+    m = direct or _OPTIONED_INSTALL_MANAGER_RE.search(segment)
+    if m is None or _IGNORE_SCRIPTS_RE.search(segment):
+        return None
     # Slice at the COMMAND, not at the whole match: the match now includes the
     # command-position anchor and any prefix, and `tokens[0]` must be the
     # package manager for the flag walk below to line up.
@@ -2704,33 +2708,44 @@ def _is_dependency_tree_install(segment: str) -> bool:
         # Unbalanced quotes across a fragment boundary — fall back to a plain
         # split rather than dropping the command entirely.
         tokens = tail.split()
-    if not tokens:
-        return False
+    if not tokens or tokens[0] not in _INSTALL_SUBCOMMANDS:
+        return None
     manager = tokens[0]
-    tokens = tokens[1:]                                   # the manager itself
-    # Each manager accepts its working-directory option before the subcommand,
-    # for example `pnpm -C apps/web install`. Consume those option/value pairs
-    # before identifying the install subcommand, or `install` is misread as a
-    # named package and the privileged dependency-tree install disappears.
-    if manager in _INSTALL_DIRECTORY_FLAGS:
-        directory_flags = _INSTALL_DIRECTORY_FLAGS[manager]
-        while tokens:
-            matched = next((flag for flag in directory_flags
-                            if tokens[0] == flag
-                            or tokens[0].startswith(flag + "=")), None)
-            if matched is None:
-                break
-            if tokens[0] != matched:
-                _value, next_index = _join_expression_tokens(
-                    tokens, 1, tokens[0])
-                tokens = tokens[next_index:]
-                continue
-            _value, next_index = _cli_option_value(tokens, 1)
-            tokens = tokens[next_index:]
-    subcommand = None
-    if tokens and tokens[0] in _INSTALL_SUBCOMMANDS:
-        subcommand = tokens[0]
-        tokens = tokens[1:]                               # ci / install / i
+    i = 1
+    while i < len(tokens) and tokens[i].startswith("-"):
+        flag, eq, _ = tokens[i].partition("=")
+        if flag in _GLOBAL_FLAGS or flag in _INFORMATION_FLAGS:
+            return None
+        if eq:
+            # Even for an unfamiliar option, `=` ends its value before the
+            # next argument. A bare unknown option has no such boundary.
+            _, i = _join_expression_tokens(tokens, i + 1, tokens[i])
+            continue
+        arity = _takes_value(manager, flag)
+        if arity:
+            value, i = _cli_option_value(tokens, i + 1)
+            if value is None:
+                return None
+        elif arity is False:
+            i += 1
+        elif (i + 1 < len(tokens) and not tokens[i + 1].startswith("-")
+              and tokens[i + 1].rstrip(")")
+              not in _INSTALL_SUBCOMMANDS[manager]):
+            # An unknown option is boolean or owns the next word. Read as
+            # boolean, a following install subcommand is an install; read as
+            # value-taking, the word after it is the subcommand. Report the
+            # install when either reading is one: the boolean reading of a
+            # non-install word ends here, so only the value reading continues.
+            i += 2
+        else:
+            i += 1
+    if i == len(tokens):
+        return tokens if manager == "yarn" and direct is not None else None
+    # Command-position matches also cover a closing subshell `)`.
+    subcommand = tokens[i].rstrip(")")
+    if subcommand not in _INSTALL_SUBCOMMANDS[manager]:
+        return None
+    i += 1
     # Two shapes where a POSITIONAL cannot mean "one named package", so the
     # named-install exclusion must not fire on it:
     #   `npm ci foo`   — `ci` installs the whole lockfile whatever follows it;
@@ -2738,13 +2753,12 @@ def _is_dependency_tree_install(segment: str) -> bool:
     #                    scan time, and guessing them into an exclusion is a
     #                    silent drop. Only an explicit `-g` still excludes.
     positionals_can_exclude = subcommand != "ci" and "${{" not in tail
-    i = 0
     while i < len(tokens):
         tok = tokens[i]
         if tok in _GLOBAL_FLAGS:
-            return False
+            return None
         if tok.startswith("-"):
-            if "=" in tok or tok in _INSTALL_BOOLEAN_FLAGS:
+            if "=" in tok or _takes_value(manager, tok) is False:
                 i += 1
                 continue
             # Known value-taking, or unknown — either way assume it consumes
@@ -2756,9 +2770,9 @@ def _is_dependency_tree_install(segment: str) -> bool:
             i += 1
             continue
         if positionals_can_exclude and _PKG_SPEC_RE.match(tok):
-            return False
+            return None
         i += 1
-    return True
+    return tokens
 # `secrets.NAME` in any of the job's own text. github.token is excluded: it is
 # present in every job by construction, so treating it as a payoff would make
 # the payoff leg vacuous — the catalog says "beyond github.token".
@@ -2991,14 +3005,9 @@ def _is_unprotected_install(command: str) -> bool:
     command and the second install is a finding.
 
     A global or single-package install is not this vector and is excluded here
-    too — see `_is_dependency_tree_install`.
+    too — see `_tree_install_argv`.
     """
-    return any(
-        _INSTALL_CMD_RE.search(seg)
-        and not _IGNORE_SCRIPTS_RE.search(seg)
-        and _is_dependency_tree_install(seg)
-        for seg in _install_command_segments(command)
-    )
+    return _qualifying_install(command) is not None
 
 
 def _scalar_has_unprotected_install(scalar: str) -> bool:
@@ -3321,10 +3330,7 @@ def _segments_before_install(
             continue
         counted = False
         for seg in _install_command_segments(cmd):
-            if (not counted
-                    and _INSTALL_CMD_RE.search(seg)
-                    and not _IGNORE_SCRIPTS_RE.search(seg)
-                    and _is_dependency_tree_install(seg)):
+            if not counted and _tree_install_argv(seg) is not None:
                 if seen == ordinal:
                     return out
                 seen += 1
@@ -3914,7 +3920,7 @@ def _correlation_install_scripts_in_privileged_job(
 
     The install leg is a DEPENDENCY-TREE install only — a global tool bootstrap
     (`npm i -g corepack@0.31`) or a named single-package install is excluded;
-    see `_is_dependency_tree_install`.
+    see `_tree_install_argv`.
 
     Which manager version a runner resolves is NOT knowable from workflow YAML,
     so this detector does not quietly stand down on the platform defaults — it
@@ -8041,6 +8047,7 @@ def _compute_security_score(
                 # is the removed contract leaking back at the reader.
                 "reason": f"config-facts layer failed: {exc!r} — no config "
                           "fact could be checked", "registered": None,
+                "release_path": [],
                 # The unscored push-access lists, in their "not checked"
                 # shape: an inventory absent from a crashed run must not read
                 # as "no secrets exposed".

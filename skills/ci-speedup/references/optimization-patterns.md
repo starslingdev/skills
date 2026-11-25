@@ -4599,7 +4599,7 @@ concurrency:
 
 GitHub decides cancellation from the **incoming** run's `cancel-in-progress`, and it cancels every in-progress run in the group *regardless of their settings*. The repository-qualified key prevents a fork PR from colliding with an upstream push merely because their branches share a name. The `&& github.head_ref != github.event.repository.default_branch` term still protects in-repository back-merge PRs whose head is the default branch. `github.event.repository.default_branch` is present on **both** the `push` and the `pull_request` payloads, so it needs no per-repo substitution. If pushes to another long-lived branch (`release/1.x`, `develop`) must never be cancelled, add an explicit `&& github.head_ref != '<branch>'` term per branch (a general protected-branch set-membership test is not expressible in a substitution-free one-liner).
 
-**Routing (mechanical — check the trigger set the finding's evidence line reports)**: if the workflow has **no `pull_request` trigger** (the detector also fires on `push` alone), `${{ github.event_name == 'pull_request' }}` is never true, the block cancels nothing, and the runner-minute saving is **zero**. In that case keep this group and use OPT46's **widened** predicate instead of this one: that pairing is exactly OPT46's combined block, which keeps the `github.run_id` group for default-branch and tag runs, so copy that block rather than the widened block's shared branch group.
+**Routing (mechanical — check the trigger set the finding's evidence line reports)**: if the workflow has **no `pull_request` trigger** (the detector also fires on `push` alone), `${{ github.event_name == 'pull_request' }}` is never true, the block cancels nothing, and the runner-minute saving is **zero**. In that case copy OPT46's **widened** block: it combines the same group key, including `github.run_id` for default-branch and tag runs, with a predicate that cancels superseded feature-branch pushes.
 
 **Folded-scalar discipline**: keep the `>-` continuation line at the **same indent** as `${{` (as above) so YAML folds it into one space-joined line; a more-indented line keeps its newline, and an expression carrying a literal newline is not a documented expression — see OPT46's note below for why a mis-folded predicate degrades to a truthy *string* and cancels on **every** event. Equivalently, write the predicate on one line.
 
@@ -4684,43 +4684,39 @@ compute on cancelled runs. Leave it unsized until matched cancelled runs show
 that the runner was allocated and measure its compute; do not infer a number
 from the YAML.
 
-**Default (PR-scoped)** — correct whenever the racing runs are PR runs:
-
-```yaml
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
-  cancel-in-progress: >-
-    ${{ github.event_name == 'pull_request'
-    && github.head_ref != github.event.repository.default_branch }}
-```
-
-`push`, `merge_group`, `schedule`, and tag builds evaluate to `false` and run to completion. `merge_group` needs no separate carve-out here — cancelling a queued merge-group run can eject the PR from the merge queue, and this predicate already excludes it.
-
-**A non-cancelled group does not preserve every pending run.** By default
-(`queue: single`), GitHub keeps at most one running and one pending run in a
-concurrency group. If a third run
-joins while one is running and another is pending, the new run replaces the
-older pending run even when `cancel-in-progress` is false. When every
-default-branch commit and tag must receive its own validation *and* superseded
-feature-branch runs should still cancel, use one combined group: default-branch
-and tag runs select their unique `run_id`; feature-branch push and PR runs keep
-the shared short branch name that cancellation and OPT47 dedup require.
+**Default (PR-scoped)** — correct whenever the racing runs are PR runs.
+The PR-scoped predicate enables cancellation only on incoming pull requests.
 
 ```yaml
 concurrency:
   group: ${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && github.run_id || format('{0}/{1}', github.event.pull_request.head.repo.full_name || github.repository, github.head_ref || github.ref_name) }}
   cancel-in-progress: >-
-    ${{ github.event_name != 'merge_group'
-    && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
-    && github.head_ref != github.event.repository.default_branch
-    && !startsWith(github.ref, 'refs/tags/') }}
+    ${{ github.event_name == 'pull_request'
+    && github.head_ref != github.event.repository.default_branch }}
 ```
+
+`push`, `merge_group`, `schedule`, and tag builds set `cancel-in-progress` to `false`. `merge_group` needs no separate carve-out here — cancelling a queued merge-group run can eject the PR from the merge queue, and this predicate already excludes it.
+
+**A non-cancelled group does not preserve every pending run.** By default
+(`queue: single`), GitHub keeps at most one running and one pending run in a
+concurrency group. If a third run
+joins while one is running and another is pending, the new run replaces the
+older pending run even when `cancel-in-progress` is false. Both blocks use the
+same combined group: default-branch and tag runs select their unique `github.run_id`
+so they cannot replace one another; feature-branch push and PR runs share a
+repository-qualified branch key for cancellation and OPT47 dedup.
+
+If a dedicated default-branch workflow needs serial validation, use a shared
+group with `queue: max` and `cancel-in-progress: false`. GitHub allows up to
+100 pending runs and processes them in the order they start waiting. Keep this
+queue separate from feature-branch cancellation: `queue: max` cannot be
+combined with a `cancel-in-progress` value of `true`.
 
 Do not add `github.event_name` to this group when the same workflow handles
 both events: adding `github.event_name` to a `push` + `pull_request` workflow
 splits one branch into separate event groups,
 so the OPT47 push+PR duplicate runs can no longer supersede or cancel one
-another. The key above deliberately omits it. If every event truly must be
+another. Both blocks deliberately omit it. If every event truly must be
 independent, adding the event name is an explicit trade: it preserves those
 event-specific runs but gives up OPT47 dedup.
 
@@ -4728,11 +4724,11 @@ event-specific runs but gives up OPT47 dedup.
 
 Cancellation is decided by the **incoming** run's `cancel-in-progress`, and it kills every in-progress run in the group *regardless of their settings*. Repository qualification removes the fork-name collision. The `&& github.head_ref != github.event.repository.default_branch` term still protects an in-repository back-merge PR whose head branch is the default branch. `github.event.repository.default_branch` is present on **both** the `push` and the `pull_request` payloads (and on `pull_request` it is the base/upstream repo's default branch), so it needs no per-repo substitution. If pushes to another long-lived branch (`release/1.x`, `develop`, `production`) must never be cancelled, add an explicit `&& github.head_ref != '<branch>'` term per branch, exactly as the widened form's release-branch note below prescribes for `github.ref`.
 
-**Widened (Flavor A — waste is on feature-branch pushes)** — a `push`-triggered workflow (e.g. `branches-ignore: [main]`) gets *zero* benefit from the PR-scoped predicate, because it never sees a `pull_request` event. Cancel on every ref *except* the protected ones:
+**Widened (Flavor A — waste is on feature-branch pushes)** — a `push`-triggered workflow (e.g. `branches-ignore: [main]`) gets *zero* benefit from the PR-scoped predicate, because it never sees a `pull_request` event. The widened predicate also enables cancellation on feature-branch pushes.
 
 ```yaml
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref_name }}
+  group: ${{ github.workflow }}-${{ (github.ref == format('refs/heads/{0}', github.event.repository.default_branch) || startsWith(github.ref, 'refs/tags/')) && github.run_id || format('{0}/{1}', github.event.pull_request.head.repo.full_name || github.repository, github.head_ref || github.ref_name) }}
   cancel-in-progress: >-
     ${{ github.event_name != 'merge_group'
     && github.ref != format('refs/heads/{0}', github.event.repository.default_branch)
@@ -4746,7 +4742,7 @@ Two terms that look redundant and are not:
 - `github.event_name != 'merge_group'` — a merge-group run's `github.ref` is a `gh-readonly-queue/...` ref, so the branch and tag terms alone would **not** exclude it, and cancelling it can eject the PR from the queue.
 - `github.head_ref != github.event.repository.default_branch` — if this workflow ever also sees `pull_request` events, a PR's `github.ref` is `refs/pull/N/merge`, which passes the branch test and the tag test. That is the same fork-PR-from-`main` hole described above; this term is its guard here.
 
-If the repo also protects long-lived **release** branches that must never be cancelled, add an explicit term (e.g. `&& !startsWith(github.ref, 'refs/heads/release/')`). `github.ref_protected` looks like a shortcut for that, but it is unreliable in **both** directions and this catalog does not recommend it: an *unprotected* default branch reads `false` (→ it gets cancelled — the bug), and repo **rulesets** increasingly target `~ALL` branches, which makes `ref_protected` `true` on ordinary feature branches (→ the predicate never fires and the saving is **zero**).
+If the repo also protects long-lived **release** branches that must never be cancelled, add an explicit term (e.g. `&& !startsWith(github.ref, 'refs/heads/release/')`). That term stops cancellation only: those pushes still share one group, where a newer pending run replaces an older one, so also add the branch to the group's `github.run_id` selector by appending `|| startsWith(github.ref, 'refs/heads/release/')` right after its `startsWith(github.ref, 'refs/tags/')` test. `github.ref_protected` looks like a shortcut for that, but it is unreliable in **both** directions and this catalog does not recommend it: an *unprotected* default branch reads `false` (→ it gets cancelled — the bug), and repo **rulesets** increasingly target `~ALL` branches, which makes `ref_protected` `true` on ordinary feature branches (→ the predicate never fires and the saving is **zero**).
 
 Keep the continuation lines at the **same indent** as `${{` (as above). YAML folds a `>-` block into one space-joined line only for lines at the base indent; a *more-indented* line keeps its newline, and an expression carrying literal newlines relies on undocumented lexer behavior — if it were ever read as a plain string, a non-empty string is truthy and the workflow would cancel on **every** event, which is exactly the failure this recipe exists to prevent. (`>-` also chomps the trailing newline; `|` / `>` would leave one, and `"false\n"` is truthy.) Equivalently, write the whole predicate on one line.
 
@@ -7080,14 +7076,14 @@ Its command is split on `&&`, `||`, `;`, `|` and newlines. A package-manager scr
 |---|---|---|
 | `prettier --check`, `-c`, `--list-different` or `-l`; `pretty-quick --check` | Prettier → oxfmt | drop-in, or run both when a `package.json` from the step's directory up to the root declares a Prettier plugin (`prettier-plugin-*`) or a Prettier config this audit reads lists `plugins` (oxfmt may not carry them), or when a Prettier config file this audit does not open (`.prettierrc.js`, `prettier.config.*`) applies, since its plugins and options are unknown. A `package.json` or Prettier config on that walk that cannot be read holds the step back (see below) |
 | `eslint` | ESLint → oxlint | run both (the dual-run recipe) when any applicable config has: custom local rules; the `tailwindcss` plugin; a framework plugin; any other plugin oxlint does not carry natively (`convex`, for example); a `react-hooks/exhaustive-deps` rule; type-aware parsing that is on or cannot be resolved; plugins and local rules the read could not see; or a shareable config or config import the read did not follow. Command-line flags that bring in rules or parsers the config does not show (`--rulesdir`, `--plugin`, `--rule`, `--parser`, `--ext`) also mean run both. Drop-in only when the config was read in full and none of these is present. Either way the risk is HIGH whenever the card reports this row. Deferred to OPT82 when OPT82 already reports that step: the ESLint row's fit reads "see OPT82 first" and it adds no high risk; a step whose only table tool is that ESLint run gets no card (a verdict, below) |
-| `tsc` with `--noEmit` (also `-p ... --noEmit`; the flag is matched in any letter case, as `tsc` accepts it) | `tsc --noEmit` → TypeScript 7 | drop-in for a type-check-only step; a `tsc` that emits is not in v1 |
+| `tsc` with `--noEmit`, or bare `tsc` / `tsc -p ...` with `compilerOptions.noEmit: true` in its resolved project | type-check-only `tsc` → TypeScript 7 | drop-in for a type-check-only step. The config read follows `extends`: relative files, and packages installed under `node_modules` in the checkout. An unreadable project file, or a base it cannot resolve when nothing later sets `noEmit`, holds the recommendation back. Build mode and emitting commands stay outside this row |
 | `npm ci`, `npm install` / `npm i`, `pnpm install` / `pnpm i`, `yarn`, `yarn install`, with flags only (a bare `yarn` is read only when the step's own `run:` writes it; one a script runs is not seen) | npm / pnpm / Yarn install → `bun install` | always run both (the side-by-side recipe below), with the caveats the repo root shows as the reasons: its lockfile's migration, dependency install scripts, the runtime staying Node, a `pnpm-workspace.yaml`'s packages and catalogs, a Windows runner. A global install (`-g`) or one naming packages (`npm install foo`) is not the repo's dependency install |
 
 The install row reads the package-manager files of the install's own directory and of every directory above it up to the repo root (the scan's `package_manager` read of the root and `package_manager_dirs` for each other directory with a `package.json`: lockfiles, `packageManager` field, `pnpm-workspace.yaml`, `.npmrc`, pnpm hook files and Yarn's `.yarnrc.yml` / Plug'n'Play loader). The nearest directory with a lockfile names the lockfile, and the nearest `.yarnrc.yml` that sets `nodeLinker` decides it, as Yarn's own nearer-wins config does. It is already done (`target_already_in_use`) when a `bun.lock` or `bun.lockb` is the nearest lockfile, the nearest `packageManager` names `bun@`, or the step itself runs `bun install`. It is blocked (`install_swap_blocked`, a verdict) when Yarn Plug'n'Play is on (a committed `.pnp.cjs`; or `nodeLinker` set to `pnp`, or unset, Yarn's `pnp` default, where Yarn 2+ is in use: a `.yarnrc.yml` or a `packageManager` of `yarn@2` or later): bun's documented linkers are hoisted and isolated, both into `node_modules`, and its Yarn migration does not carry `nodeLinker`. It is also blocked by a pnpm install hook (`.pnpmfile.cjs` / `.pnpmfile.mjs`, or a `pnpmfile` setting in `.npmrc` or `pnpm-workspace.yaml`), which rewrites packages at install time and is not among the settings bun's pnpm migration carries.
 
 The Babel, Webpack and `bun check` rows are recipe only in v1: listed in the swap table, never detected. Several leaves of the same tool in one step (the same `eslint` run reached in several workspace packages, for example) are one tool row on the card, not one row per leaf.
 
-These verdicts are counted only, never listed: the pole is not backed by a workflow file (no workflow or job to tie it to; `pole_not_file_backed`); no candidate step (checked first, on the pole's measured steps, before any workflow or YAML gate; a pole whose check maps to more than one workflow carries no measured steps today, so in practice the candidate check cannot clear it and it is held back below); none of the step's tools is in the table; the target is already in use (the same step already runs `oxfmt` or `oxlint`, `eslint-plugin-oxlint` or a declared `oxlint` / `oxfmt` sits on the step's manifest walk, or `typescript` 7 or later is declared; for the install row, bun is already the repo's package manager, above); the install swap is blocked by Yarn Plug'n'Play or a pnpm install hook (`install_swap_blocked`); a `tsc` that emits; a step whose only table tool is an ESLint run OPT82 already reports (other tools on that step still qualify, and the card then shows the ESLint row as "see OPT82 first").
+The Data sources row **tool swap: held back** lists each dropped candidate step with its own reason. Verdicts include: none of the step's tools is in the table; the target is already in use (the same step already runs `oxfmt` or `oxlint`, `eslint-plugin-oxlint` or a declared `oxlint` / `oxfmt` sits on the step's manifest walk, or `typescript` 7 or later is declared; for the install row, bun is already the repo's package manager, above); the install swap is blocked by Yarn Plug'n'Play or a pnpm install hook; a `tsc` that emits or uses an unsupported command; a step whose only table tool is an ESLint run OPT82 already reports (other tools on that step still qualify, and the card shows the ESLint row as "see OPT82 first"). A verdict reached before a step is selected, such as a pole not tied to a workflow file or a pole with no candidate step, is counted without a named step.
 
 What "not in the table" covers depends on the repo. In a repo with no JavaScript manifest at all, a generic runner (`make`, `just`, `pre-commit`, `concurrently`, `ng`, `gulp`, `docker` and the like) and any `uses:` action are this verdict, while a direct leaf such as `npx prettier --check .` still fires. In a repo with a JavaScript manifest, a generic runner may run any of the table's tools behind its own configuration, so it is held back (below), and so is an action this audit does not know; only an action on the known allow-list (checkout, `setup-*`, cache, CodeQL, Docker and similar, none of which lints, formats or type-checks) is the verdict. A manifest that exists but cannot be read is held back, never this verdict. A nameless step GitHub names `Run <command>` whose command runs only non-JavaScript tools (`cargo clippy`, `go test`, `uv sync`; a wrapper such as `sudo`, `uv run` or `bundle exec` is read through to what it runs) is this verdict in any repo, even when the step itself cannot be matched in its job (an expression in the command, or two steps sharing that name), but never when the workflow file or the job cannot be matched; when the step is not matched only the first line of its `run:` is visible, so a later line that runs a table tool goes unseen.
 
@@ -7103,7 +7099,8 @@ What "not in the table" covers depends on the repo. In a repo with no JavaScript
 | ESLint found, but the applicable config is unreadable, truncated, missing, or ambiguous between nested flat configs (read the way OPT82 reads it, including `ESLINT_USE_FLAT_CONFIG=false`) | the fit (plain, dual-run or deferred) cannot be decided |
 | ESLint found, but the repository scan behind the report carries no ESLint config read (`type_aware_lint_scan_missing`), or the scan's ESLint config reader failed (`type_aware_config_reader_failed`) | whether type-aware rules are on, and so the fit, is unknown |
 | Prettier found, but a `package.json` or a Prettier config on the step's walk cannot be read | whether a plugin makes the fit "run both" is unknown |
-| `tsc --noEmit` found, but no `package.json` declares `typescript`, the declared version is unreadable, a `>=` range (which TypeScript 7 already satisfies), or not a plain semver range, or the manifest walk was truncated, never reached the step's directory, or hit an unreadable manifest | whether the repo is already on 7 is unknown |
+| bare `tsc` or `tsc -p ...` whose project or inherited config cannot be resolved from the local checkout | whether the step only checks types is unknown |
+| type-check-only `tsc` found, but no `package.json` declares `typescript`, the declared version is unreadable, a `>=` range (which TypeScript 7 already satisfies), or not a plain semver range, or the manifest walk was truncated, never reached the step's directory, or hit an unreadable manifest | whether the repo is already on 7 is unknown |
 | the step's working directory is outside the checkout | the manifest to read is unknown |
 | an install row found, but the scan carries no package-manager read of the install's directory or one above it (one whose `package.json` the walk found, or ground it never looked at), or a `package.json`, `.yarnrc.yml`, `.npmrc` or `pnpm-workspace.yaml` there could not be read (or `nodeLinker` is set through `${...}` interpolation) | whether bun is already in use, or a caveat blocks the swap, is unknown |
 
