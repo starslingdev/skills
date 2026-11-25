@@ -1,0 +1,1 @@
+- **2026-11-25** — Wait exactly the backoff cap for a far-future GitHub rate-limit reset and let other workers wait only the remaining time (#499).

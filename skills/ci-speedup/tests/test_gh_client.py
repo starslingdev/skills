@@ -991,16 +991,39 @@ def test_an_almost_expired_reset_still_waits_githubs_one_minute_floor(monkeypatc
 def test_a_huge_reset_is_clamped_to_the_max_backoff(monkeypatch, no_sleep):
     """A PRIMARY-limit reset can be an hour out. Hanging the whole audit on it is
     worse than spending the attempt budget and surfacing a loud gap."""
+    now = 1_800_000_000.0
+    monkeypatch.setattr(collect_runs.time, "time", lambda: now)
     _patch_run(monkeypatch, _script([
-        _completed(returncode=1, stderr=_SECONDARY,
+        _completed(returncode=1, stderr=_PRIMARY,
                    stdout=_gh_i("HTTP/2.0 403 Forbidden",
-                                headers=f"X-Ratelimit-Reset: {int(time.time()) + 3600}\r\n")),
+                                headers=f"X-Ratelimit-Reset: {int(now) + 3600}\r\n")),
     ]))
     client = GhClient()
+    record_block = client._record_block
+
+    def record_then_advance(wait):
+        nonlocal now
+        record_block(wait)
+        # Simulate work between publishing the block and serving it.
+        now += 0.125
+
+    monkeypatch.setattr(client, "_record_block", record_then_advance)
     assert client.json("repos/o/r") is None
     assert all(s <= collect_runs._GH_MAX_BACKOFF_S for s in no_sleep)
-    assert no_sleep[0] == pytest.approx(collect_runs._GH_MAX_BACKOFF_S)
+    assert no_sleep[0] == collect_runs._GH_MAX_BACKOFF_S
     assert client.errors == 1, "an exhausted rate limit is a counted coverage gap"
+
+
+def test_a_worker_joins_only_the_remainder_of_a_capped_backoff(monkeypatch, no_sleep):
+    now = 1_800_000_000.0
+    monkeypatch.setattr(collect_runs.time, "time", lambda: now)
+    client = GhClient()
+    client._record_block(collect_runs._GH_MAX_BACKOFF_S)
+    now += 20.0
+
+    client._sleep_until_unblocked()
+
+    assert no_sleep == [collect_runs._GH_MAX_BACKOFF_S - 20.0]
 
 
 def test_rate_limit_without_headers_waits_githubs_documented_one_minute_floor(monkeypatch, no_sleep):
