@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
-"""Build the path-fingerprint inventory for installed copies.
+"""Build the file inventory shipped with ci-speedup (install-manifest.json).
 
-The inventory records path identities without publishing a list of fixture names
-or hashing file contents. Each digest is base16 with nibble values 0–15 encoded
-by the letters a–p, most significant nibble first. Use --check to detect drift
+The inventory is a sorted JSON list of the skill's repo-relative POSIX paths:
+tracked and untracked-but-not-ignored files under skills/ci-speedup/, minus what
+the skills CLI never copies (.git, __pycache__, __pypackages__) and OS folder
+metadata. It is scoped to where a stale file can be run or read as guidance:
+the skill's top-level files (SKILL.md, ARCHITECTURE.md, CHANGELOG.md, ...) and
+scripts/, references/ and evals/. tests/ and its fixtures are left out of the
+inventory and of run.py's comparison by design: a stale test file is inert in
+an install, while #7's risk is stale code and docs (scripts/billing.py,
+references/runner-rates.json). run.py compares an installed copy against the
+list to spot files left behind by an older version. Use --check to detect drift
 without writing.
 """
 
@@ -19,7 +26,7 @@ _ROOT = Path(__file__).resolve().parents[3]
 _SKILL = _ROOT / "skills" / "ci-speedup"
 sys.path.insert(0, str(_SKILL / "scripts"))
 from installed_skill import (  # noqa: E402
-    MANIFEST_FINGERPRINTS, MANIFEST_NAME, inventory_fingerprint, inventory_path,
+    MANIFEST_FILES, MANIFEST_NAME, inventory_path,
 )
 
 
@@ -36,8 +43,7 @@ def _generated_inventory() -> str:
         relative = PurePosixPath(path.relative_to(_SKILL).as_posix())
         if inventory_path(relative) and (path.is_symlink() or path.is_file()):
             names.add(relative.as_posix())
-    fingerprints = sorted(inventory_fingerprint(PurePosixPath(name)) for name in names)
-    return json.dumps({MANIFEST_FINGERPRINTS: fingerprints}, indent=2) + "\n"
+    return json.dumps({MANIFEST_FILES: sorted(names)}, indent=2) + "\n"
 
 
 def main() -> int:

@@ -13,7 +13,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import subprocess
-from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -262,7 +261,7 @@ def test_run_explicit_skill_sha_still_wins_over_the_lockfile(monkeypatch, tmp_pa
     assert _arg_value(scan, "--skill-commit-sha") == "deadbee"
 
 
-@pytest.mark.parametrize("old_files", [None, "old modules", "old fixture"])
+@pytest.mark.parametrize("old_files", [None, "old modules", "old reference", "old fixture"])
 def test_installed_skill_checks_file_names_and_reports_release(
         monkeypatch, tmp_path, capsys, old_files):
     captured = _stub_steps(monkeypatch)
@@ -282,12 +281,10 @@ def test_installed_skill_checks_file_names_and_reports_release(
     fixtures = skill / "tests" / "fixtures"
     fixtures.mkdir(parents=True)
     (fixtures / "current.yml").touch()
-    known_files = ["CHANGELOG.md", "SKILL.md", "install-manifest.json",
-                   "scripts/run.py", "tests/fixtures/current.yml"]
-    digits = str.maketrans("".join(format(n, "x") for n in range(16)), "abcdefghijklmnop")
-    (skill / "install-manifest.json").write_text(json.dumps({"path_sha256_ap": [
-        sha256(name.encode("utf-8")).hexdigest().translate(digits) for name in known_files
-    ]}), encoding="utf-8")
+    # tests/ is outside the inventory by design, so current.yml is not listed.
+    known_files = ["CHANGELOG.md", "SKILL.md", "install-manifest.json", "scripts/run.py"]
+    (skill / "install-manifest.json").write_text(json.dumps({"files": known_files}),
+                                                 encoding="utf-8")
     _write_lock(skill.parent / ".skill-lock.json",
                 {"ci-speedup": {"skillFolderHash": _REAL_HASH}})
     (scripts / "__pycache__").mkdir()
@@ -297,6 +294,7 @@ def test_installed_skill_checks_file_names_and_reports_release(
     if old_files == "old modules":
         (scripts / "billing.py").write_text("raise AssertionError('stale file ran')\n",
                                            encoding="utf-8")
+    elif old_files == "old reference":
         (skill / "references").mkdir()
         (skill / "references" / "runner-rates.json").touch()
     elif old_files == "old fixture":
@@ -316,7 +314,7 @@ def test_installed_skill_checks_file_names_and_reports_release(
     assert capsys.readouterr().err.count(
         "files from an older version of the skill are present; "
         "remove and re-add the skill to upgrade"
-    ) == int(old_files is not None)
+    ) == int(old_files in {"old modules", "old reference"})  # a stale test file is inert
     assert _arg_value(_scan_cmd(captured), "--skill-commit-sha") == "installed:23f31c573ee0"
     findings = json.loads(out.read_text(encoding="utf-8"))
     # The pending changelog.d fragment means this copy is newer than that release.
@@ -484,15 +482,32 @@ def test_operating_system_metadata_files_are_not_reported_as_old_skill_files(tmp
     files from an older version of the skill, so the upgrade warning stays quiet."""
     import installed_skill
 
-    digits = str.maketrans("".join(format(n, "x") for n in range(16)), "abcdefghijklmnop")
     names = ["install-manifest.json", "scripts/run.py"]
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "run.py").touch()
-    (tmp_path / "install-manifest.json").write_text(json.dumps({"path_sha256_ap": [
-        sha256(n.encode()).hexdigest().translate(digits) for n in names]}), encoding="utf-8")
+    (tmp_path / "install-manifest.json").write_text(json.dumps({"files": names}),
+                                                    encoding="utf-8")
     assert not installed_skill.has_extra_files(tmp_path)
     (tmp_path / "scripts" / junk).touch()
     (tmp_path / junk).touch()
     assert not installed_skill.has_extra_files(tmp_path)
     (tmp_path / "scripts" / "billing.py").touch()
     assert installed_skill.has_extra_files(tmp_path)
+
+
+@pytest.mark.parametrize("path, listed", [
+    ("SKILL.md", True), ("CHANGELOG.md", True), ("install-manifest.json", True),
+    ("scripts/billing.py", True), ("references/runner-rates.json", True),
+    ("evals/evals.json", True),
+    ("tests/test_x.py", False), ("tests/fixtures/old.yml", False),
+    ("changelog.d/x.fixed.md", False), ("scripts/__pycache__/run.cpython-312.pyc", False),
+    ("references/.DS_Store", False),
+])
+def test_inventory_scope_is_runnable_code_and_guidance_only(path, listed):
+    """#7's risk is stale code and docs. tests/ (fixtures included) is inert in an
+    install, so it is outside both the shipped inventory and the extra-file check."""
+    from pathlib import PurePosixPath
+
+    import installed_skill
+
+    assert installed_skill.inventory_path(PurePosixPath(path)) is listed

@@ -407,7 +407,9 @@ def main(argv: list[str] | None = None) -> int:
     # in the shipped inventory; warning there would be noise, and its provenance is
     # the commit sha anyway. An install vendored inside a user's own git repository
     # is still an installed copy (its run.py is not tracked at the skill's source
-    # path), so it is checked.
+    # path), so it is checked. The comparison covers the skill's top-level files and
+    # scripts/, references/ and evals/ only, where a stale file can be run or read as
+    # guidance; a stale file under tests/ is inert and is not reported.
     if skill_checkout_sha is None and has_extra_files(skill_root):
         print("WARNING: files from an older version of the skill are present; "
               "remove and re-add the skill to upgrade", file=sys.stderr)
