@@ -16137,7 +16137,11 @@ def _finding_seed_workflow_paths(
     for finding in findings:
         if not isinstance(finding, dict):
             continue
-        path = str(finding.get("workflow_file") or "").replace("\\", "/")
+        path = str(finding.get("workflow_file") or "")
+        if path not in workflow_paths:
+            # Findings from a Windows scan may still carry `\` separators; an
+            # API path that literally contains `\` (legal on POSIX) wins above.
+            path = path.replace("\\", "/")
         if path in workflow_paths or (
             path.startswith(".github/workflows/") and _wf_is_file_backed(path)
         ):
