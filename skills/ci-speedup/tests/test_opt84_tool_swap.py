@@ -442,6 +442,81 @@ def test_tsc_project_child_can_override_no_emit_to_false(tmp_path):
     assert cr.project_no_emit(tmp_path, "", None) is False
 
 
+def test_opt84_collects_a_child_no_emit_over_an_uninstalled_package_base(monkeypatch, tmp_path):
+    # The child's own option wins over every base, so a package base that is
+    # not installed in the checkout does not make the result unknown.
+    doc, report = _collect_configured_typecheck(monkeypatch, tmp_path, "tsc", {
+        "tsconfig.json": '{"extends": "@tsconfig/node20/tsconfig.json",'
+                         ' "compilerOptions": {"noEmit": true}}',
+    })
+    swaps = [f for f in doc["findings"] if f.get("pattern") == "OPT84"]
+    assert len(swaps) == 1, doc["opt84_withheld_by_gate"]
+    assert "TypeScript 7" in report
+
+
+def test_opt84_reads_no_emit_from_an_installed_package_base(monkeypatch, tmp_path):
+    doc, _report = _collect_configured_typecheck(monkeypatch, tmp_path, "tsc", {
+        "tsconfig.json": '{"extends": "@acme/tsconfig"}',
+        "node_modules/@acme/tsconfig/package.json": '{"name": "@acme/tsconfig"}',
+        "node_modules/@acme/tsconfig/tsconfig.json": '{"compilerOptions": {"noEmit": true}}',
+    })
+    assert len([f for f in doc["findings"] if f.get("pattern") == "OPT84"]) == 1, \
+        doc["opt84_withheld_by_gate"]
+
+
+@pytest.mark.parametrize(("extends", "files", "want"), [
+    # A bare package: its package.json `tsconfig` field, else tsconfig.json.
+    ("cfg", {"package.json": '{"name": "cfg", "tsconfig": "base.json"}',
+             "base.json": '{"compilerOptions": {"noEmit": false}}',
+             "tsconfig.json": '{"compilerOptions": {"noEmit": true}}'}, False),
+    ("cfg", {"package.json": '{"name": "cfg"}',
+             "tsconfig.json": '{"compilerOptions": {"noEmit": true}}'}, True),
+    ("@scope/cfg", {"package.json": '{"name": "@scope/cfg"}',
+                    "tsconfig.json": '{"compilerOptions": {"noEmit": true}}'}, True),
+    # A subpath, with `.json` added when the bare file is absent.
+    ("cfg/strict", {"strict.json": '{"compilerOptions": {"noEmit": true}}'}, True),
+    # `exports` takes precedence over both and is not modeled: unknown.
+    ("cfg", {"package.json": '{"name": "cfg", "exports": {".": "./tsconfig.json"}}',
+             "tsconfig.json": '{"compilerOptions": {"noEmit": true}}'}, None),
+    # Not installed, or installed without the named file: unknown.
+    ("other", {"tsconfig.json": '{"compilerOptions": {"noEmit": true}}'}, None),
+    ("cfg/missing", {"tsconfig.json": '{"compilerOptions": {"noEmit": true}}'}, None),
+    # A base that sets nothing leaves the default (emit).
+    ("cfg", {"tsconfig.json": '{"compilerOptions": {"strict": true}}'}, False),
+])
+def test_tsc_project_resolves_package_bases_from_node_modules(tmp_path, extends, files, want):
+    pkg = "@scope/cfg" if extends.startswith("@scope/") else "cfg"
+    _repo(tmp_path, {}, {"tsconfig.json": json.dumps({"extends": extends}),
+                         **{f"node_modules/{pkg}/{k}": v for k, v in files.items()}})
+    assert cr.project_no_emit(tmp_path, "", None) is want
+
+
+def test_tsc_project_climbs_to_an_ancestor_node_modules(tmp_path):
+    _repo(tmp_path, {}, {
+        "packages/app/tsconfig.json": '{"extends": "cfg/base.json"}',
+        "node_modules/cfg/base.json": '{"compilerOptions": {"noEmit": true}}',
+    })
+    assert cr.project_no_emit(tmp_path, "packages/app", None) is True
+
+
+def test_tsc_project_later_relative_base_overrides_an_unknown_package_base(tmp_path):
+    _repo(tmp_path, {}, {
+        "tsconfig.json": '{"extends": ["missing-pkg", "./local.json"]}',
+        "local.json": '{"compilerOptions": {"noEmit": true}}',
+    })
+    assert cr.project_no_emit(tmp_path, "", None) is True
+    (tmp_path / "local.json").write_text('{"compilerOptions": {}}')
+    assert cr.project_no_emit(tmp_path, "", None) is None
+
+
+def test_tsc_project_malformed_installed_base_fails_closed(tmp_path):
+    _repo(tmp_path, {}, {
+        "tsconfig.json": '{"extends": "cfg", "compilerOptions": {"noEmit": true}}',
+        "node_modules/cfg/tsconfig.json": '{"compilerOptions": ',
+    })
+    assert cr.project_no_emit(tmp_path, "", None) is None
+
+
 def test_tsc_project_cannot_follow_a_symlink_out_of_the_checkout(tmp_path):
     root = tmp_path / "checkout"
     root.mkdir()

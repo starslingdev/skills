@@ -74,19 +74,68 @@ def _project_path(root: Path, directory: Path, project: str | None) -> Path:
     raise FileNotFoundError("tsconfig.json")
 
 
+# A base whose value this offline read cannot know (a package not installed
+# in the checkout, or one resolved through `exports`).
+_UNKNOWN = object()
+
+
+def _package_config(root: Path, directory: Path, spec: str) -> Path | None:
+    """The installed config file a package `extends` entry names, or None.
+
+    Mirrors tsc's lookup: climb `node_modules` from the config's directory;
+    for a subpath, the file itself or the file with `.json` added; for a bare
+    package, the package.json `tsconfig` field, else `tsconfig.json`. A
+    package that declares `exports` is resolved by tsc through them, which
+    this read does not model."""
+    if spec.startswith("/") or "\\" in spec or ":" in spec:
+        raise ValueError("TypeScript extends is not a relative or package path")
+    parts = spec.split("/")
+    size = 2 if spec.startswith("@") else 1
+    if len(parts) < size or any(p in ("", ".", "..") for p in parts):
+        raise ValueError("TypeScript extends is not a package name")
+    name, sub = "/".join(parts[:size]), "/".join(parts[size:])
+    for parent in (directory, *directory.parents):
+        package = parent / "node_modules" / name
+        if package.is_dir():
+            try:
+                _in_checkout(root, package)
+                manifest = package / "package.json"
+                meta = _read_config(root, manifest) if manifest.exists() else {}
+                if "exports" in meta:
+                    return None
+                if sub:
+                    found = package / sub
+                    if not found.exists() and not sub.endswith(".json"):
+                        found = package / (sub + ".json")
+                else:
+                    field = meta.get("tsconfig")
+                    found = package / (field if isinstance(field, str) and field
+                                       else "tsconfig.json")
+                return found if _in_checkout(root, found).is_file() else None
+            except ValueError:
+                # Outside the checkout (a store link) or an unreadable
+                # manifest: what tsc would read is unknown here.
+                return None
+        if parent == root:
+            break
+    return None
+
+
 def project_no_emit(root: Path | None, wd: str, project: str | None) -> bool | None:
     """True/False for a resolved project's option, None if it cannot be read.
 
-    Follow repository-local relative `extends` entries in order, then apply
-    the child, preserving the difference between unset and explicitly false
-    across multiple bases. Package-based inheritance requires installed
-    dependency resolution, so this offline read leaves it unknown.
+    Follow `extends` entries in order, then apply the child, preserving the
+    difference between unset and explicitly false across multiple bases. A
+    relative entry must resolve inside the checkout. A package entry is read
+    from an installed `node_modules` package inside the checkout; one that is
+    not installed, or that declares `exports`, leaves the value unknown unless
+    a later base or the child itself sets `noEmit`.
     """
     if root is None:
         return None
     reads = 0
 
-    def visit(path: Path, stack: frozenset[Path]) -> bool | None:
+    def visit(path: Path, stack: frozenset[Path]) -> object:
         nonlocal reads
         real_path = _in_checkout(root, path)
         if real_path in stack or reads >= _MAX_CONFIG_FILES:
@@ -98,14 +147,19 @@ def project_no_emit(root: Path | None, wd: str, project: str | None) -> bool | N
             parents = [parents]
         if not isinstance(parents, list):
             raise ValueError("TypeScript project extends must be a path or list")
-        effective = None
+        effective: object = None
         for base in parents:
-            if not isinstance(base, str) or not base.startswith(("./", "../")):
-                raise ValueError("TypeScript extends is not a relative project file")
-            inherited = path.parent / base
-            if not _in_checkout(root, inherited).exists() and not base.endswith(".json"):
-                inherited = inherited.with_name(inherited.name + ".json")
-            value = visit(inherited, stack | {real_path})
+            if not isinstance(base, str) or not base:
+                raise ValueError("TypeScript extends entry is not a path")
+            if base.startswith(("./", "../")):
+                inherited = path.parent / base
+                if not _in_checkout(root, inherited).exists() and not base.endswith(".json"):
+                    inherited = inherited.with_name(inherited.name + ".json")
+                value = visit(inherited, stack | {real_path})
+            else:
+                package_base = _package_config(root, path.parent, base)
+                value = (_UNKNOWN if package_base is None
+                         else visit(package_base, stack | {real_path}))
             if value is not None:
                 effective = value
         options = doc.get("compilerOptions", {})
@@ -122,6 +176,7 @@ def project_no_emit(root: Path | None, wd: str, project: str | None) -> bool | N
         directory = _in_checkout(root, root / wd)
         if not directory.is_dir():
             return None
-        return visit(_project_path(root, directory, project), frozenset()) is True
+        value = visit(_project_path(root, directory, project), frozenset())
+        return None if value is _UNKNOWN else value is True
     except (OSError, ValueError, RuntimeError):
         return None
